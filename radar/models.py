@@ -67,6 +67,23 @@ class Signal:
 
 
 @dataclass
+class MarketState:
+    inst_id: str
+    regime: str
+    direction: str
+    preferred_strategy: str
+    readiness_score: float
+    status: str
+    missing_conditions: list[str]
+    spread_pct: float
+    quote_volume_24h: float
+    closed_candle_ts: int
+
+    def to_dict(self) -> dict[str, Any]:
+        return asdict(self)
+
+
+@dataclass
 class RadarReport:
     status: str
     generated_at: str
@@ -81,10 +98,15 @@ class RadarReport:
     exclusion_counts: dict[str, int]
     duration_seconds: float
     message: str
+    market_regime_counts: dict[str, int] = field(default_factory=dict)
+    watchlist: list[MarketState] = field(default_factory=list)
+    market_map: list[MarketState] = field(default_factory=list)
 
     def to_dict(self) -> dict[str, Any]:
         payload = asdict(self)
         payload["signals"] = [item.to_dict() for item in self.signals]
+        payload["watchlist"] = [item.to_dict() for item in self.watchlist]
+        payload["market_map"] = [item.to_dict() for item in self.market_map]
         payload["safety"] = {
             "mode": "analysis_only",
             "auto_ordering": False,
@@ -92,4 +114,3 @@ class RadarReport:
             "note": "訊號是條件式分析，不是保證獲利；實際下單前需自行確認。",
         }
         return payload
-

@@ -17,6 +17,9 @@ class PagesExportTests(unittest.TestCase):
             "coverage_pct": 100.0,
             "failed_instruments": {},
             "signals": [],
+            "market_regime_counts": {"TREND": 80, "RANGE": 60},
+            "watchlist": [{"inst_id": "BTC-USDT-SWAP", "readiness_score": 85.7}],
+            "market_map": [{"inst_id": "BTC-USDT-SWAP", "regime": "TREND"}],
             "message": "完整掃描完成，本輪沒有合格訊號。",
         }
         with tempfile.TemporaryDirectory() as directory:
@@ -32,6 +35,8 @@ class PagesExportTests(unittest.TestCase):
             self.assertEqual(index_path.read_text(encoding="utf-8"), "<html>radar</html>")
             exported = json.loads(latest_path.read_text(encoding="utf-8"))
             self.assertEqual(exported["coverage_pct"], 100.0)
+            self.assertEqual(exported["watchlist"][0]["inst_id"], "BTC-USDT-SWAP")
+            self.assertEqual(exported["market_map"][0]["regime"], "TREND")
             self.assertTrue((output / ".nojekyll").exists())
 
     def test_rejects_report_with_missing_required_fields(self):

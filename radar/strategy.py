@@ -1,11 +1,11 @@
 from __future__ import annotations
 
 import math
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from decimal import Decimal, ROUND_HALF_UP
 
 from .indicators import TimeframeFeatures, features
-from .models import Candle, Instrument, Signal, Ticker
+from .models import Candle, Instrument, MarketState, Signal, Ticker
 
 
 @dataclass(frozen=True)
@@ -19,6 +19,7 @@ class StrategyConfig:
 class AnalysisResult:
     signal: Signal | None
     reason: str
+    market_state: MarketState | None = None
 
 
 @dataclass
@@ -55,20 +56,53 @@ class AdaptiveStrategyEngine:
             return AnalysisResult(None, "insufficient_history")
         if ticker.last <= 0 or ticker.bid <= 0 or ticker.ask <= 0:
             return AnalysisResult(None, "invalid_ticker")
-        if ticker.spread_pct > self.config.max_spread_pct:
-            return AnalysisResult(None, "spread_too_wide")
         quote_volume_24h = sum(item.quote_volume for item in candles_1h[-24:])
-        if quote_volume_24h < self.config.min_quote_volume_24h:
-            return AnalysisResult(None, "liquidity_too_low")
 
         tf4 = features(candles_4h)
         tf1 = features(candles_1h)
         tf15 = features(candles_15m)
+        indicator_values = (tf4.atr14, tf1.atr14, tf15.atr14, tf1.adx14, tf15.rsi14)
         if not all(
             math.isfinite(value)
-            for value in (tf4.atr14, tf1.atr14, tf15.atr14, tf1.adx14, tf15.rsi14)
-        ):
+            for value in indicator_values
+        ) or min(tf4.atr14, tf1.atr14, tf15.atr14) <= 0:
             return AnalysisResult(None, "indicator_unavailable")
+
+        market_state = self._market_state(
+            instrument,
+            ticker,
+            quote_volume_24h,
+            candles_15m[-1].ts,
+            tf4,
+            tf1,
+            tf15,
+        )
+        if ticker.spread_pct > self.config.max_spread_pct:
+            return AnalysisResult(
+                None,
+                "spread_too_wide",
+                replace(
+                    market_state,
+                    status="FILTERED",
+                    missing_conditions=[
+                        f"買賣價差需低於 {self.config.max_spread_pct:.2f}%",
+                        *market_state.missing_conditions,
+                    ][:4],
+                ),
+            )
+        if quote_volume_24h < self.config.min_quote_volume_24h:
+            return AnalysisResult(
+                None,
+                "liquidity_too_low",
+                replace(
+                    market_state,
+                    status="FILTERED",
+                    missing_conditions=[
+                        f"24H 成交額需達 {self.config.min_quote_volume_24h:,.0f} USDT",
+                        *market_state.missing_conditions,
+                    ][:4],
+                ),
+            )
 
         plans = [
             self._breakout_plan("LONG", tf4, tf1, tf15),
@@ -80,15 +114,48 @@ class AdaptiveStrategyEngine:
         ]
         valid = [item for item in plans if item is not None]
         if not valid:
-            return AnalysisResult(None, "no_confirmed_setup")
+            missing = list(market_state.missing_conditions)
+            if market_state.readiness_score >= 99.0:
+                missing.append("止損距離或前方空間需通過最低 1.8R")
+            return AnalysisResult(
+                None,
+                "no_confirmed_setup",
+                replace(
+                    market_state,
+                    status=(
+                        "NEAR_TRIGGER"
+                        if market_state.regime != "DISORDER"
+                        and market_state.direction != "NEUTRAL"
+                        and market_state.readiness_score >= 65.0
+                        else "WATCH"
+                    ),
+                    missing_conditions=missing[:4],
+                ),
+            )
         plan = max(valid, key=lambda item: item.score)
         if plan.rr < self.config.minimum_rr:
-            return AnalysisResult(None, "rr_below_minimum")
+            return AnalysisResult(
+                None,
+                "rr_below_minimum",
+                replace(
+                    market_state,
+                    status="WATCH",
+                    missing_conditions=[f"風報比需達 {self.config.minimum_rr:.1f}R"],
+                ),
+            )
         risk_pct = abs(plan.entry - plan.stop) / plan.entry * 100.0
         if risk_pct <= 0 or risk_pct > 5.0:
-            return AnalysisResult(None, "stop_distance_unacceptable")
+            return AnalysisResult(
+                None,
+                "stop_distance_unacceptable",
+                replace(market_state, status="WATCH", missing_conditions=["止損距離需低於價格的 5%"]),
+            )
         if len(plan.evidence) < 2:
-            return AnalysisResult(None, "insufficient_independent_evidence")
+            return AnalysisResult(
+                None,
+                "insufficient_independent_evidence",
+                replace(market_state, status="WATCH", missing_conditions=["至少需要兩類獨立證據"]),
+            )
 
         zone_offset = tf15.atr14 * 0.12
         if plan.direction == "LONG":
@@ -116,7 +183,147 @@ class AdaptiveStrategyEngine:
             regime=plan.regime,
             notes=plan.notes,
         )
-        return AnalysisResult(signal, "qualified")
+        return AnalysisResult(
+            signal,
+            "qualified",
+            replace(
+                market_state,
+                regime=plan.regime,
+                direction=plan.direction,
+                preferred_strategy=plan.strategy,
+                readiness_score=100.0,
+                status="CONFIRMED",
+                missing_conditions=[],
+            ),
+        )
+
+    def _market_state(
+        self,
+        instrument: Instrument,
+        ticker: Ticker,
+        quote_volume_24h: float,
+        closed_candle_ts: int,
+        tf4: TimeframeFeatures,
+        tf1: TimeframeFeatures,
+        tf15: TimeframeFeatures,
+    ) -> MarketState:
+        bias4 = self._bias(tf4)
+        trend1 = self._aligned_direction(tf1)
+        width = tf1.prior_high20 - tf1.prior_low20
+        range_position = (
+            (tf1.close - tf1.prior_low20) / width
+            if width > 0
+            else 0.5
+        )
+        broke_high = tf1.close > tf1.prior_high20
+        broke_low = tf1.close < tf1.prior_low20
+        near_high = (tf1.prior_high20 - tf1.close) / tf1.atr14 <= 0.45
+        near_low = (tf1.close - tf1.prior_low20) / tf1.atr14 <= 0.45
+        compressed_at_edge = tf1.compression_ratio <= 0.90 and (near_high or near_low)
+
+        if bias4 != "NEUTRAL" and trend1 == bias4:
+            regime = "TREND"
+            direction = bias4
+            strategy = "趨勢回踩續行"
+        elif broke_high or broke_low or compressed_at_edge:
+            regime = "BREAKOUT_READY"
+            if broke_high:
+                direction = "LONG"
+            elif broke_low:
+                direction = "SHORT"
+            elif bias4 != "NEUTRAL":
+                direction = bias4
+            else:
+                direction = "LONG" if near_high and not near_low else "SHORT"
+            strategy = "放量突破"
+        elif tf1.adx14 <= 20.0 and width > 0:
+            regime = "RANGE"
+            if range_position <= 0.45:
+                direction = "LONG"
+            elif range_position >= 0.55:
+                direction = "SHORT"
+            else:
+                direction = "NEUTRAL"
+            strategy = "區間邊緣反轉"
+        else:
+            regime = "DISORDER"
+            direction = bias4 if bias4 != "NEUTRAL" else trend1
+            strategy = "等待型態清楚"
+
+        score, missing = self._readiness(tf4, tf1, tf15, regime, direction)
+        return MarketState(
+            inst_id=instrument.inst_id,
+            regime=regime,
+            direction=direction,
+            preferred_strategy=strategy,
+            readiness_score=score,
+            status="WATCH",
+            missing_conditions=missing[:4],
+            spread_pct=round(ticker.spread_pct, 4),
+            quote_volume_24h=round(quote_volume_24h, 2),
+            closed_candle_ts=closed_candle_ts,
+        )
+
+    @staticmethod
+    def _aligned_direction(tf: TimeframeFeatures) -> str:
+        if tf.close > tf.ema21 > tf.ema55 and tf.sma5 > tf.sma10 > tf.sma20:
+            return "LONG"
+        if tf.close < tf.ema21 < tf.ema55 and tf.sma5 < tf.sma10 < tf.sma20:
+            return "SHORT"
+        return "NEUTRAL"
+
+    def _readiness(
+        self,
+        tf4: TimeframeFeatures,
+        tf1: TimeframeFeatures,
+        tf15: TimeframeFeatures,
+        regime: str,
+        direction: str,
+    ) -> tuple[float, list[str]]:
+        if regime == "DISORDER" or direction == "NEUTRAL":
+            return 0.0, ["等待 4H、1H 方向或區間位置清楚"]
+
+        is_long = direction == "LONG"
+        if regime == "TREND":
+            conditions = [
+                (self._bias(tf4) == direction, "4H 趨勢需同向"),
+                (self._aligned_direction(tf1) == direction, "1H EMA21/55 與 MA5/10/20 需同向排列"),
+                (tf1.adx14 >= 21.0, "1H ADX 需達 21"),
+                (abs(tf15.close - tf15.ema21) <= 0.65 * tf15.atr14, "15m 需回到 EMA21 附近"),
+                ((tf15.close > tf15.ema21) if is_long else (tf15.close < tf15.ema21), "15m 收盤需回到趨勢側"),
+                ((tf15.macd_hist > tf15.macd_prev_hist) if is_long else (tf15.macd_hist < tf15.macd_prev_hist), "15m MACD 動能需重新同向"),
+                (tf15.extension_atr <= 0.75, "15m 不可離 EMA21 超過 0.75 ATR"),
+            ]
+        elif regime == "BREAKOUT_READY":
+            conditions = [
+                ((tf1.close > tf1.prior_high20) if is_long else (tf1.close < tf1.prior_low20), "1H 收盤需突破近 20 根結構邊界"),
+                (self._bias(tf4) in (direction, "NEUTRAL"), "4H 不可與突破方向相反"),
+                (tf1.volume_ratio >= 1.25, "1H 成交量需達基準 1.25 倍"),
+                ((tf1.macd_hist > 0) if is_long else (tf1.macd_hist < 0), "1H MACD 需與突破同向"),
+                ((tf15.close > tf15.ema21) if is_long else (tf15.close < tf15.ema21), "15m 收盤需站在 EMA21 趨勢側"),
+                ((tf15.macd_hist > 0) if is_long else (tf15.macd_hist < 0), "15m MACD 需同向確認"),
+                (tf1.extension_atr <= 1.45, "1H 不可過度追價"),
+            ]
+        else:
+            width = tf1.prior_high20 - tf1.prior_low20
+            position = (tf1.close - tf1.prior_low20) / width if width > 0 else 0.5
+            conditions = [
+                (tf1.adx14 <= 20.0, "1H ADX 需低於 20"),
+                ((position <= 0.22) if is_long else (position >= 0.78), "價格需到達區間外側 22%"),
+                ((tf1.rsi14 <= 40.0) if is_long else (tf1.rsi14 >= 60.0), "1H RSI 需進入反轉區"),
+                (
+                    (tf15.macd_prev_hist <= 0 < tf15.macd_hist)
+                    if is_long
+                    else (tf15.macd_prev_hist >= 0 > tf15.macd_hist),
+                    "15m MACD 需完成反向交叉",
+                ),
+                ((tf15.close > tf15.ema21) if is_long else (tf15.close < tf15.ema21), "15m 收盤需穿回 EMA21"),
+                (tf15.volume_ratio >= 1.05, "15m 成交量需達基準 1.05 倍"),
+            ]
+
+        passed = sum(1 for ok, _ in conditions if ok)
+        score = round(passed / len(conditions) * 100.0, 1)
+        return score, [label for ok, label in conditions if not ok]
 
     @staticmethod
     def _bias(tf: TimeframeFeatures) -> str:

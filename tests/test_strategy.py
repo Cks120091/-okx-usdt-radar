@@ -44,12 +44,18 @@ class StrategyTests(unittest.TestCase):
         self.assertEqual(result.signal.direction, "LONG")
         self.assertGreaterEqual(result.signal.risk_reward, 1.8)
         self.assertGreaterEqual(len(result.signal.evidence), 2)
+        self.assertIsNotNone(result.market_state)
+        self.assertEqual(result.market_state.status, "CONFIRMED")
+        self.assertEqual(result.market_state.readiness_score, 100.0)
 
     def test_low_liquidity_is_rejected(self):
         data = trend_candles(100, 0.1, quote_volume=100)
         ticker = Ticker("TEST-USDT-SWAP", 110, 109.99, 110.01, 1)
         result = AdaptiveStrategyEngine().analyze(self.instrument, ticker, data, data, data)
         self.assertEqual(result.reason, "liquidity_too_low")
+        self.assertIsNotNone(result.market_state)
+        self.assertEqual(result.market_state.status, "FILTERED")
+        self.assertTrue(result.market_state.missing_conditions)
 
     def test_unconfirmed_or_short_history_is_rejected(self):
         data = trend_candles(100, 0.1, count=59)

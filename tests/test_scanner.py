@@ -84,6 +84,10 @@ class ScannerTests(unittest.TestCase):
         self.assertEqual(report.target_count, 2)
         self.assertEqual(report.fetched_count, 2)
         self.assertNotEqual(report.status, "DATA_INCOMPLETE")
+        self.assertEqual(len(report.market_map), 2)
+        self.assertEqual(sum(report.market_regime_counts.values()), 2)
+        self.assertTrue(report.watchlist)
+        self.assertTrue(report.watchlist[0].missing_conditions)
 
     def test_output_has_hard_limit_of_ten_and_is_quality_sorted(self):
         scanner = MarketScanner(ManyFakeClient(), ScannerConfig(workers=3, max_signals=99))

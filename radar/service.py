@@ -123,8 +123,12 @@ class RadarRuntime:
 
 
 def serve(runtime: RadarRuntime, host: str, port: int) -> None:
-    dashboard_path = Path(__file__).parent / "static" / "index.html"
-    dashboard = dashboard_path.read_bytes()
+    dashboard_path = Path(__file__).parent / "static" / "pages.html"
+    dashboard = dashboard_path.read_text(encoding="utf-8").replace(
+        "</head>",
+        "<script>window.RADAR_DATA_URL='/api/report/latest';</script></head>",
+        1,
+    ).encode("utf-8")
 
     class Handler(BaseHTTPRequestHandler):
         server_version = "OKXRadar/0.1"
@@ -188,4 +192,3 @@ def serve(runtime: RadarRuntime, host: str, port: int) -> None:
     finally:
         runtime.stop()
         server.server_close()
-

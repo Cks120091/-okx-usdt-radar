@@ -7,7 +7,7 @@ from dataclasses import dataclass
 from datetime import datetime, timezone
 from typing import Protocol
 
-from .models import Candle, Instrument, RadarReport, Ticker
+from .models import Candle, Instrument, MarketState, RadarReport, Ticker
 from .strategy import AdaptiveStrategyEngine, StrategyConfig
 
 
@@ -121,6 +121,7 @@ class MarketScanner:
 
         exclusion_counts: Counter[str] = Counter()
         signals = []
+        market_states: list[MarketState] = []
         analysis_failures: dict[str, str] = {}
         instrument_map = {item.inst_id: item for item in instruments}
         for inst_id in target_ids:
@@ -136,6 +137,8 @@ class MarketScanner:
             except Exception as exc:
                 analysis_failures[inst_id] = f"分析引擎錯誤：{exc}"
                 continue
+            if result.market_state is not None:
+                market_states.append(result.market_state)
             if result.signal is None:
                 exclusion_counts[result.reason] += 1
             else:
@@ -160,11 +163,26 @@ class MarketScanner:
 
         signals.sort(key=lambda item: (item.score, item.quote_volume_24h), reverse=True)
         signals = signals[: min(max(self.config.max_signals, 0), 10)]
+        watchlist = [
+            item
+            for item in market_states
+            if item.status in ("NEAR_TRIGGER", "WATCH")
+            and item.regime != "DISORDER"
+            and item.direction != "NEUTRAL"
+            and item.readiness_score >= 50.0
+        ]
+        watchlist.sort(
+            key=lambda item: (item.readiness_score, item.quote_volume_24h),
+            reverse=True,
+        )
+        watchlist = watchlist[:10]
+        market_states.sort(key=lambda item: item.inst_id)
+        regime_counts = Counter(item.regime for item in market_states)
         status = "SIGNALS_FOUND" if signals else "NO_QUALIFIED_SIGNAL"
         message = (
-            f"完整掃描完成，選出 {len(signals)} 個合格候選（最多 10 個，不湊數）。"
+            f"完整掃描完成：{len(signals)} 個正式訊號，另列出 {len(watchlist)} 個接近觸發的觀察候選。"
             if signals
-            else "完整掃描完成，但本輪沒有同時通過證據、流動性、追價與風報比條件的合約。"
+            else f"完整掃描完成：本輪 0 個正式訊號；另列出 {len(watchlist)} 個接近觸發的觀察候選，不代表可以直接進場。"
         )
         return RadarReport(
             status=status,
@@ -172,7 +190,7 @@ class MarketScanner:
             scope=scope,
             target_count=len(instruments),
             fetched_count=fetched_count,
-            analyzable_count=analyzable_count,
+            analyzable_count=len(market_states),
             coverage_pct=100.0,
             target_instruments=target_ids,
             failed_instruments={},
@@ -180,6 +198,9 @@ class MarketScanner:
             exclusion_counts=dict(exclusion_counts.most_common()),
             duration_seconds=round(time.monotonic() - started, 3),
             message=message,
+            market_regime_counts=dict(regime_counts.most_common()),
+            watchlist=watchlist,
+            market_map=market_states,
         )
 
     def _fetch_bundle(self, inst_id: str) -> dict[str, list[Candle]]:
@@ -208,4 +229,3 @@ class MarketScanner:
             duration_seconds=round(time.monotonic() - started, 3),
             message=f"雷達資料不完整：{message}",
         )
-
