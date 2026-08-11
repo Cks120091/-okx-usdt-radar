@@ -1,0 +1,53 @@
+<!doctype html>
+<html lang="zh-Hant">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
+  <meta name="color-scheme" content="dark">
+  <title>OKX 全 USDT 永續雷達</title>
+  <style>
+    :root{--bg:#07110f;--panel:#101c19;--line:#21342f;--text:#eef8f4;--muted:#91aaa3;--green:#5ce6a3;--red:#ff7185;--amber:#ffc65c;--blue:#72b8ff}
+    *{box-sizing:border-box}body{margin:0;background:radial-gradient(circle at 85% -10%,#174c3b 0,transparent 34%),var(--bg);color:var(--text);font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif;min-height:100vh}
+    main{width:min(1180px,calc(100% - 28px));margin:28px auto 64px}header{display:flex;justify-content:space-between;align-items:flex-end;gap:18px;margin-bottom:18px}h1{font-size:clamp(27px,5vw,44px);letter-spacing:-.04em;margin:0 0 6px}.muted,.subtitle{color:var(--muted)}
+    button{border:1px solid #39745f;background:#12342a;color:var(--green);padding:11px 15px;border-radius:12px;font-weight:800;cursor:pointer}.grid{display:grid;grid-template-columns:repeat(5,1fr);gap:11px;margin:16px 0}.card,.signal{background:#101c19e8;border:1px solid var(--line);border-radius:16px;padding:16px;box-shadow:0 14px 38px #0004}.metric{font-size:24px;font-weight:850;margin-top:8px}.statusline{display:flex;gap:9px;align-items:center}.dot{width:10px;height:10px;border-radius:50%;background:var(--muted)}.good .dot{background:var(--green);box-shadow:0 0 14px var(--green)}.bad .dot{background:var(--red);box-shadow:0 0 14px var(--red)}.wait .dot{background:var(--amber);box-shadow:0 0 14px var(--amber)}
+    #message{padding:14px 16px;margin:14px 0 18px;border-left:3px solid var(--amber);border-radius:9px;background:#ffc65c12}.section-head{display:flex;justify-content:space-between;align-items:center;margin:12px 0}.section-head h2{font-size:20px;margin:0}#signals{display:grid;grid-template-columns:repeat(2,1fr);gap:13px}.signal-head{display:flex;justify-content:space-between;align-items:center;gap:10px}.signal h3{margin:0;font-size:21px}.badge{padding:5px 10px;border-radius:999px;font-weight:900;font-size:12px}.LONG{color:var(--green);background:#5ce6a319}.SHORT{color:var(--red);background:#ff718519}.WAIT{color:var(--amber);background:#ffc65c19}dl{display:grid;grid-template-columns:105px 1fr;gap:7px 10px;font-size:14px;margin:14px 0}dt{color:var(--muted)}dd{margin:0;overflow-wrap:anywhere}ul{margin:8px 0 0;padding-left:20px;color:#c9dad5}.empty{grid-column:1/-1;text-align:center;padding:42px;color:var(--muted)}.failed{margin-top:14px;color:var(--red);font-size:13px}.stamp{font-size:13px;color:var(--muted)}footer{margin-top:22px;color:var(--muted);font-size:13px;line-height:1.6}
+    @media(max-width:900px){.grid{grid-template-columns:repeat(2,1fr)}#signals{grid-template-columns:1fr}}@media(max-width:640px){main{width:min(100% - 20px,1180px);margin-top:18px}header{align-items:flex-start;flex-direction:column}.grid{grid-template-columns:repeat(2,1fr)}.grid .card:first-child{grid-column:1/-1}.metric{font-size:21px}}
+  </style>
+</head>
+<body>
+<main>
+  <header>
+    <div><h1>OKX 全 USDT 永續雷達</h1><div class="subtitle">逐幣辨識市場型態 · 自適應選擇策略 · 4H / 1H / 15m · 最多 10 個</div></div>
+    <button id="reload" type="button">重新載入結果</button>
+  </header>
+  <section class="grid">
+    <div class="card"><div class="muted">雷達狀態</div><div id="status" class="metric statusline"><span class="dot"></span><span>讀取中</span></div></div>
+    <div class="card"><div class="muted">資料覆蓋</div><div id="coverage" class="metric">—</div></div>
+    <div class="card"><div class="muted">目標／成功</div><div id="targets" class="metric">—</div></div>
+    <div class="card"><div class="muted">可分析</div><div id="analyzable" class="metric">—</div></div>
+    <div class="card"><div class="muted">合格候選</div><div id="count" class="metric">—</div></div>
+  </section>
+  <div id="message">正在取得最新一輪報告。</div>
+  <div class="section-head"><h2>目前訊號</h2><div id="stamp" class="stamp"></div></div>
+  <section id="signals"><div class="card empty">讀取中…</div></section>
+  <div id="failures" class="failed"></div>
+  <footer>每小時由 GitHub Actions 重新掃描；排程可能因平台負載稍有延遲。此頁只顯示分析訊號，不會自動下單。進場前仍須確認價格未離開進場區；單筆最大風險建議不超過帳戶 1%。</footer>
+</main>
+<script>
+const $=s=>document.querySelector(s);const esc=v=>String(v??'').replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
+function number(v,d=0){const n=Number(v);return Number.isFinite(n)?n.toLocaleString('zh-TW',{minimumFractionDigits:d,maximumFractionDigits:d}):'—'}
+function localTime(v){const d=new Date(v);return Number.isNaN(d.getTime())?String(v??'—'):d.toLocaleString('zh-TW',{hour12:false,timeZone:'Asia/Taipei'})}
+function render(r){
+  const status=$('#status');const incomplete=r.status==='DATA_INCOMPLETE';const found=r.status==='SIGNALS_FOUND';status.className='metric statusline '+(incomplete?'bad':found?'good':'wait');status.innerHTML=`<span class="dot"></span><span>${esc(r.status)}</span>`;
+  $('#coverage').textContent=`${number(r.coverage_pct,2)}%`;$('#targets').textContent=`${number(r.target_count)} / ${number(r.fetched_count)}`;$('#analyzable').textContent=number(r.analyzable_count);$('#count').textContent=number(r.signals?.length||0);$('#message').textContent=r.message||'—';$('#stamp').textContent=`台灣時間 ${localTime(r.generated_at)}`;
+  const signals=Array.isArray(r.signals)?r.signals:[];const box=$('#signals');
+  if(!signals.length){box.innerHTML=`<div class="card empty">${incomplete?'資料不完整，本輪安全規則禁止輸出多空訊號。':'完整掃描後沒有合格機會；維持 WAIT，不湊數。'}</div>`}else{
+    box.innerHTML=signals.map((s,i)=>`<article class="signal"><div class="signal-head"><h3>${i+1}. ${esc(s.inst_id)}</h3><span class="badge ${esc(s.direction)}">${esc(s.direction)}</span></div><dl><dt>市場型態</dt><dd>${esc(s.regime)}</dd><dt>採用策略</dt><dd>${esc(s.strategy)}</dd><dt>品質分數</dt><dd>${number(s.score,1)}</dd><dt>進場區</dt><dd>${esc(s.entry_low)} ～ ${esc(s.entry_high)}</dd><dt>止損</dt><dd>${esc(s.stop_loss)}</dd><dt>TP1／TP2</dt><dd>${esc(s.take_profit_1)}／${esc(s.take_profit_2)}</dd><dt>風報比</dt><dd>${number(s.risk_reward,2)}R</dd><dt>失效條件</dt><dd>${esc(s.invalidation)}</dd><dt>價差</dt><dd>${number(s.spread_pct,4)}%</dd></dl><ul>${(s.evidence||[]).map(e=>`<li>${esc(e)}</li>`).join('')}</ul></article>`).join('')
+  }
+  const failures=r.failed_instruments&&typeof r.failed_instruments==='object'?Object.entries(r.failed_instruments):[];$('#failures').textContent=failures.length?`失敗合約 ${failures.length} 個：${failures.slice(0,8).map(([k,v])=>`${k}（${v}）`).join('、')}${failures.length>8?'…':''}`:'';
+}
+async function load(){try{const res=await fetch(`./data/latest.json?t=${Date.now()}`,{cache:'no-store'});if(!res.ok)throw new Error(`HTTP ${res.status}`);render(await res.json())}catch(e){const s=$('#status');s.className='metric statusline bad';s.innerHTML='<span class="dot"></span><span>讀取失敗</span>';$('#message').textContent=`無法取得最新報告：${e.message}`;$('#signals').innerHTML='<div class="card empty">尚未成功發布第一輪掃描資料。</div>'}}
+$('#reload').addEventListener('click',load);load();
+</script>
+</body>
+</html>

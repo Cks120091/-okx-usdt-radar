@@ -1,0 +1,40 @@
+import math
+import unittest
+
+from radar.indicators import adx, atr, ema_series, macd, rsi
+from radar.models import Candle
+
+
+def rising_candles(count: int = 100) -> list[Candle]:
+    output = []
+    for index in range(count):
+        close = 100 + (index * 0.4)
+        output.append(Candle(index, close - 0.2, close + 0.8, close - 0.8, close, 10, 1000, True))
+    return output
+
+
+class IndicatorTests(unittest.TestCase):
+    def test_ema_tracks_rising_prices(self):
+        values = [float(item) for item in range(1, 101)]
+        line = ema_series(values, 21)
+        self.assertEqual(len(line), len(values))
+        self.assertGreater(line[-1], line[-10])
+        self.assertLess(line[-1], values[-1])
+
+    def test_rsi_adx_and_atr_are_finite(self):
+        candles = rising_candles()
+        closes = [item.close for item in candles]
+        self.assertGreater(rsi(closes), 70)
+        self.assertTrue(math.isfinite(adx(candles)))
+        self.assertGreater(adx(candles), 20)
+        self.assertGreater(atr(candles), 0)
+
+    def test_macd_returns_histogram(self):
+        values = [100 + index * 0.1 + (index / 100) ** 3 for index in range(100)]
+        line, signal, hist, previous = macd(values)
+        self.assertTrue(all(math.isfinite(item) for item in (line, signal, hist, previous)))
+
+
+if __name__ == "__main__":
+    unittest.main()
+

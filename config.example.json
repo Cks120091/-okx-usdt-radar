@@ -1,0 +1,19 @@
+{
+  "okx_base_url": "https://www.okx.com",
+  "host": "0.0.0.0",
+  "port": 8000,
+  "data_dir": "data",
+  "max_signals": 10,
+  "workers": 8,
+  "candle_limit": 100,
+  "request_timeout_seconds": 12.0,
+  "request_retries": 3,
+  "rate_limit_requests_per_2s": 18,
+  "min_quote_volume_24h": 1000000,
+  "max_spread_pct": 0.25,
+  "minimum_rr": 1.8,
+  "scan_at_start": true,
+  "align_to_hour": true,
+  "interval_seconds": 3600
+}
+
