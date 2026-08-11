@@ -12,6 +12,9 @@ class Instrument:
     ct_type: str
     tick_size: float
     list_time: int = 0
+    contract_value: float = 1.0
+    contract_multiplier: float = 1.0
+    contract_value_ccy: str = ""
 
 
 @dataclass(frozen=True)
@@ -51,6 +54,11 @@ class MarketContext:
     taker_buy_ratio: float | None
     sampled_at: int
     failures: list[str] = field(default_factory=list)
+    bid_depth_usd: float | None = None
+    ask_depth_usd: float | None = None
+    buy_slippage_pct: float | None = None
+    sell_slippage_pct: float | None = None
+    execution_notional_usdt: float = 0.0
 
     @property
     def complete(self) -> bool:
@@ -60,6 +68,20 @@ class MarketContext:
                 self.funding_rate,
                 self.order_book_imbalance,
                 self.taker_buy_ratio,
+            )
+        )
+
+    @property
+    def execution_quality_complete(self) -> bool:
+        if self.execution_notional_usdt <= 0:
+            return True
+        return all(
+            value is not None
+            for value in (
+                self.bid_depth_usd,
+                self.ask_depth_usd,
+                self.buy_slippage_pct,
+                self.sell_slippage_pct,
             )
         )
 
@@ -85,6 +107,10 @@ class Signal:
     notes: list[str] = field(default_factory=list)
     factor_scores: dict[str, float] = field(default_factory=dict)
     market_metrics: dict[str, Any] = field(default_factory=dict)
+    signal_stage: str = "CONFIRMED"
+    trend_strength_label: str = "中等"
+    trend_strength_score: float = 50.0
+    management_plan: dict[str, Any] = field(default_factory=dict)
 
     def to_dict(self) -> dict[str, Any]:
         return asdict(self)

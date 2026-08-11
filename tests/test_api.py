@@ -55,6 +55,8 @@ class APITests(unittest.TestCase):
 
     def test_public_market_context_is_normalized(self):
         client = RouteFixtureClient()
+        client.execution_notional_usdt = 1_000
+        client._instrument_meta = {}
         oi = client.get_open_interest_usd()
         self.assertEqual(oi, {"BTC-USDT-SWAP": 25_000_000.0})
         context = client.get_market_context("BTC-USDT-SWAP", oi["BTC-USDT-SWAP"])
@@ -62,6 +64,9 @@ class APITests(unittest.TestCase):
         self.assertEqual(context.funding_rate, 0.0001)
         self.assertAlmostEqual(context.taker_buy_ratio, 0.7)
         self.assertGreater(context.order_book_imbalance, 0)
+        self.assertTrue(context.execution_quality_complete)
+        self.assertGreater(context.bid_depth_usd, 1_000)
+        self.assertGreaterEqual(context.buy_slippage_pct, 0)
 
 
 if __name__ == "__main__":

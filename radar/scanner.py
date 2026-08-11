@@ -38,6 +38,9 @@ class ScannerConfig:
     require_micro_volume_anomaly: bool = True
     minimum_rr: float = 1.8
     context_candidates: int = 30
+    estimated_taker_fee_pct: float = 0.05
+    max_execution_cost_to_risk_pct: float = 12.0
+    max_entry_extension_atr: float = 0.80
 
 
 class MarketScanner:
@@ -53,6 +56,9 @@ class MarketScanner:
                 min_open_interest_usd=self.config.min_open_interest_usd,
                 require_micro_volume_anomaly=self.config.require_micro_volume_anomaly,
                 minimum_rr=self.config.minimum_rr,
+                estimated_taker_fee_pct=self.config.estimated_taker_fee_pct,
+                max_execution_cost_to_risk_pct=self.config.max_execution_cost_to_risk_pct,
+                max_entry_extension_atr=self.config.max_entry_extension_atr,
             )
         )
 
@@ -226,7 +232,7 @@ class MarketScanner:
                         context, candles_5m, micro_error = future.result()
                         contexts[inst_id] = context
                         micro_candles[inst_id] = candles_5m
-                        if context.complete and not micro_error:
+                        if context.complete and context.execution_quality_complete and not micro_error:
                             context_enriched_count += 1
                         candidate_failures = list(context.failures)
                         if micro_error:
@@ -273,6 +279,8 @@ class MarketScanner:
 
         signals.sort(key=lambda item: (item.score, item.quote_volume_24h), reverse=True)
         signals = signals[: min(max(self.config.max_signals, 0), 10)]
+        early_count = sum(item.signal_stage == "EARLY" for item in signals)
+        confirmed_count = len(signals) - early_count
         watchlist = [
             item
             for item in market_states
@@ -291,9 +299,9 @@ class MarketScanner:
         regime_counts = Counter(item.regime for item in market_states)
         status = "SIGNALS_FOUND" if signals else "NO_QUALIFIED_SIGNAL"
         message = (
-            f"完整掃描完成：{len(signals)} 個正式訊號，另列出 {len(watchlist)} 個接近觸發的觀察候選。"
+            f"完整掃描完成：{early_count} 個提早訊號、{confirmed_count} 個完整確認，另列出 {len(watchlist)} 個接近觸發候選。"
             if signals
-            else f"完整掃描完成：本輪 0 個正式訊號；另列出 {len(watchlist)} 個接近觸發的觀察候選，不代表可以直接進場。"
+            else f"完整掃描完成：本輪 0 個進場訊號；另列出 {len(watchlist)} 個接近觸發候選，不代表可以直接進場。"
         )
         return RadarReport(
             status=status,

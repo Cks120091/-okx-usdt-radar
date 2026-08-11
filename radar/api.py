@@ -49,11 +49,14 @@ class OKXPublicClient:
         timeout_seconds: float = 12.0,
         retries: int = 3,
         rate_limit_requests: int = 18,
+        execution_notional_usdt: float = 1_000.0,
     ):
         self.base_url = base_url.rstrip("/")
         self.timeout_seconds = timeout_seconds
         self.retries = retries
         self.rate_limiter = SlidingWindowRateLimiter(rate_limit_requests, 2.0)
+        self.execution_notional_usdt = max(0.0, execution_notional_usdt)
+        self._instrument_meta: dict[str, Instrument] = {}
 
     def _get(self, path: str, params: dict[str, Any]) -> list[Any]:
         query = urlencode({key: str(value) for key, value in params.items()})
@@ -101,17 +104,21 @@ class OKXPublicClient:
                 and inst_id.endswith("-USDT-SWAP")
                 and ct_type in {"linear", ""}
             ):
-                instruments.append(
-                    Instrument(
-                        inst_id=inst_id,
-                        state=state,
-                        settle_ccy=settle_ccy,
-                        ct_type=ct_type,
-                        tick_size=_float(row.get("tickSz")),
-                        list_time=_int(row.get("listTime")),
-                    )
+                instrument = Instrument(
+                    inst_id=inst_id,
+                    state=state,
+                    settle_ccy=settle_ccy,
+                    ct_type=ct_type,
+                    tick_size=_float(row.get("tickSz")),
+                    list_time=_int(row.get("listTime")),
+                    contract_value=max(_float(row.get("ctVal"), 1.0), 0.0),
+                    contract_multiplier=max(_float(row.get("ctMult"), 1.0), 0.0),
+                    contract_value_ccy=str(row.get("ctValCcy", "")),
                 )
-        return sorted(instruments, key=lambda item: item.inst_id)
+                instruments.append(instrument)
+        ordered = sorted(instruments, key=lambda item: item.inst_id)
+        self._instrument_meta = {item.inst_id: item for item in ordered}
+        return ordered
 
     def get_swap_tickers(self) -> dict[str, Ticker]:
         data = self._get("/api/v5/market/tickers", {"instType": "SWAP"})
@@ -172,6 +179,11 @@ class OKXPublicClient:
         funding_rate: float | None = None
         order_book_imbalance: float | None = None
         taker_buy_ratio: float | None = None
+        bid_depth_usd: float | None = None
+        ask_depth_usd: float | None = None
+        buy_slippage_pct: float | None = None
+        sell_slippage_pct: float | None = None
+        execution_notional = max(0.0, getattr(self, "execution_notional_usdt", 0.0))
 
         try:
             rows = self._get("/api/v5/public/funding-rate", {"instId": inst_id})
@@ -196,6 +208,26 @@ class OKXPublicClient:
             if total_depth <= 0:
                 raise OKXAPIError("order-book depth is zero")
             order_book_imbalance = (bid_depth - ask_depth) / total_depth
+            instrument = getattr(self, "_instrument_meta", {}).get(inst_id)
+            bid_depth_usd = _book_depth_usd(bids, instrument)
+            ask_depth_usd = _book_depth_usd(asks, instrument)
+            if execution_notional > 0:
+                buy_slippage_pct = _estimated_slippage_pct(
+                    asks,
+                    execution_notional,
+                    instrument,
+                    is_buy=True,
+                )
+                sell_slippage_pct = _estimated_slippage_pct(
+                    bids,
+                    execution_notional,
+                    instrument,
+                    is_buy=False,
+                )
+                if buy_slippage_pct is None or sell_slippage_pct is None:
+                    raise OKXAPIError(
+                        f"top-20 depth cannot fill {execution_notional:,.0f} USDT"
+                    )
             sampled_at = max(sampled_at, _int(rows[0].get("ts")))
         except Exception as exc:
             failures.append(f"order_book: {exc}")
@@ -220,6 +252,11 @@ class OKXPublicClient:
             taker_buy_ratio=taker_buy_ratio,
             sampled_at=sampled_at,
             failures=failures,
+            bid_depth_usd=bid_depth_usd,
+            ask_depth_usd=ask_depth_usd,
+            buy_slippage_pct=buy_slippage_pct,
+            sell_slippage_pct=sell_slippage_pct,
+            execution_notional_usdt=execution_notional,
         )
 
 
@@ -251,3 +288,69 @@ def _weighted_depth(levels: list[Any]) -> float:
             continue
         total += _float(level[1]) / (1.0 + (index * 0.12))
     return total
+
+
+def _level_quote_notional(
+    level: list[Any],
+    instrument: Instrument | None,
+) -> tuple[float, float]:
+    if not isinstance(level, list) or len(level) < 2:
+        return 0.0, 0.0
+    price = _float(level[0])
+    contracts = _float(level[1])
+    if price <= 0 or contracts <= 0:
+        return 0.0, 0.0
+    if instrument is None:
+        base_amount = contracts
+        return price, base_amount * price
+    contract_size = instrument.contract_value * instrument.contract_multiplier
+    if contract_size <= 0:
+        contract_size = 1.0
+    if instrument.contract_value_ccy in {instrument.settle_ccy, "USDT", "USDC"}:
+        quote_notional = contracts * contract_size
+    else:
+        quote_notional = contracts * contract_size * price
+    return price, quote_notional
+
+
+def _book_depth_usd(levels: list[Any], instrument: Instrument | None) -> float:
+    return round(
+        sum(_level_quote_notional(level, instrument)[1] for level in levels),
+        2,
+    )
+
+
+def _estimated_slippage_pct(
+    levels: list[Any],
+    target_notional: float,
+    instrument: Instrument | None,
+    *,
+    is_buy: bool,
+) -> float | None:
+    if target_notional <= 0 or not levels:
+        return 0.0
+    best_price, _ = _level_quote_notional(levels[0], instrument)
+    if best_price <= 0:
+        return None
+    remaining = target_notional
+    filled_quote = 0.0
+    filled_base = 0.0
+    for level in levels:
+        price, available_quote = _level_quote_notional(level, instrument)
+        if price <= 0 or available_quote <= 0:
+            continue
+        take_quote = min(remaining, available_quote)
+        filled_quote += take_quote
+        filled_base += take_quote / price
+        remaining -= take_quote
+        if remaining <= max(target_notional * 1e-9, 1e-9):
+            break
+    if remaining > max(target_notional * 1e-6, 0.01) or filled_base <= 0:
+        return None
+    average_price = filled_quote / filled_base
+    impact = (
+        (average_price / best_price - 1.0)
+        if is_buy
+        else (1.0 - average_price / best_price)
+    ) * 100.0
+    return round(max(impact, 0.0), 5)

@@ -41,15 +41,17 @@ def report_markdown(report: RadarReport) -> str:
         lines.append("本輪依規則不提供多空或進場訊號。")
         return "\n".join(lines)
     if not report.signals:
-        lines.extend(["本輪沒有正式訊號，不為了湊滿 10 個而列入。", ""])
+        lines.extend(["本輪沒有符合位置、證據與成交成本的進場訊號。", ""])
     else:
-        lines.extend(["## 正式訊號", ""])
+        lines.extend(["## 進場訊號", ""])
         for index, signal in enumerate(report.signals, 1):
             lines.extend(
                 [
                     f"### {index}. {signal.inst_id} — {signal.direction}",
                     "",
                     f"- 策略：{signal.strategy}（{signal.regime}）",
+                    f"- 階段：{signal.signal_stage}",
+                    f"- 趨勢力度：{signal.trend_strength_label}（{signal.trend_strength_score}）",
                     f"- 分數：{signal.score}",
                     f"- 進場區：{signal.entry_low} ～ {signal.entry_high}",
                     f"- 止損：{signal.stop_loss}",

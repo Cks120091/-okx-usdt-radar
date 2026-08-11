@@ -24,6 +24,10 @@ class AppConfig:
     require_micro_volume_anomaly: bool = True
     minimum_rr: float = 1.8
     context_candidates: int = 30
+    execution_notional_usdt: float = 1_000.0
+    estimated_taker_fee_pct: float = 0.05
+    max_execution_cost_to_risk_pct: float = 12.0
+    max_entry_extension_atr: float = 0.80
     scan_at_start: bool = True
     align_to_hour: bool = True
     interval_seconds: int = 3600
@@ -48,6 +52,10 @@ class AppConfig:
             "RADAR_REQUIRE_MICRO_VOLUME_ANOMALY": ("require_micro_volume_anomaly", _bool),
             "RADAR_MIN_RR": ("minimum_rr", float),
             "RADAR_CONTEXT_CANDIDATES": ("context_candidates", int),
+            "RADAR_EXECUTION_NOTIONAL_USDT": ("execution_notional_usdt", float),
+            "RADAR_ESTIMATED_TAKER_FEE_PCT": ("estimated_taker_fee_pct", float),
+            "RADAR_MAX_EXECUTION_COST_TO_RISK_PCT": ("max_execution_cost_to_risk_pct", float),
+            "RADAR_MAX_ENTRY_EXTENSION_ATR": ("max_entry_extension_atr", float),
             "RADAR_SCAN_AT_START": ("scan_at_start", _bool),
             "RADAR_ALIGN_TO_HOUR": ("align_to_hour", _bool),
             "RADAR_INTERVAL_SECONDS": ("interval_seconds", int),
@@ -68,6 +76,10 @@ class AppConfig:
             raise ValueError("liquidity thresholds must not be negative")
         if config.max_spread_pct < 0:
             raise ValueError("max_spread_pct must not be negative")
+        if config.execution_notional_usdt < 0 or config.estimated_taker_fee_pct < 0:
+            raise ValueError("execution-cost assumptions must not be negative")
+        if config.max_execution_cost_to_risk_pct <= 0 or config.max_entry_extension_atr <= 0:
+            raise ValueError("execution and entry-risk limits must be positive")
         return config
 
 

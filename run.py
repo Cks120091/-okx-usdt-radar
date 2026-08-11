@@ -18,6 +18,7 @@ def build_runtime(config: AppConfig) -> RadarRuntime:
         timeout_seconds=config.request_timeout_seconds,
         retries=config.request_retries,
         rate_limit_requests=config.rate_limit_requests_per_2s,
+        execution_notional_usdt=config.execution_notional_usdt,
     )
     scanner = MarketScanner(
         client,
@@ -31,6 +32,9 @@ def build_runtime(config: AppConfig) -> RadarRuntime:
             require_micro_volume_anomaly=config.require_micro_volume_anomaly,
             minimum_rr=config.minimum_rr,
             context_candidates=config.context_candidates,
+            estimated_taker_fee_pct=config.estimated_taker_fee_pct,
+            max_execution_cost_to_risk_pct=config.max_execution_cost_to_risk_pct,
+            max_entry_extension_atr=config.max_entry_extension_atr,
         ),
     )
     return RadarRuntime(scanner, config)

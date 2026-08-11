@@ -15,6 +15,10 @@
   "require_micro_volume_anomaly": true,
   "minimum_rr": 1.8,
   "context_candidates": 30,
+  "execution_notional_usdt": 1000,
+  "estimated_taker_fee_pct": 0.05,
+  "max_execution_cost_to_risk_pct": 12,
+  "max_entry_extension_atr": 0.8,
   "scan_at_start": true,
   "align_to_hour": true,
   "interval_seconds": 3600

@@ -1,6 +1,8 @@
+import math
 import unittest
 
 from radar.models import Candle, Instrument, MarketContext, Ticker
+from radar.indicators import features
 from radar.strategy import AdaptiveStrategyEngine, StrategyConfig, _format_price
 
 
@@ -29,6 +31,27 @@ def trend_candles(start, step, count=100, quote_volume=120_000, breakout=False, 
     return candles
 
 
+def early_breakout_candles():
+    output = []
+    for index in range(100):
+        close = 110 + (0.02 * index) + (math.sin(index * 0.9) * 0.18)
+        if index == 99:
+            close += 0.50
+        output.append(
+            Candle(
+                ts=1_700_000_000_000 + index * 60_000,
+                open=close - 0.02,
+                high=close + 0.50,
+                low=close - 0.50,
+                close=close,
+                volume=1000,
+                quote_volume=360_000 if index == 99 else 120_000,
+                confirmed=True,
+            )
+        )
+    return output
+
+
 class StrategyTests(unittest.TestCase):
     def setUp(self):
         self.instrument = Instrument("TEST-USDT-SWAP", "live", "USDT", "linear", 0.01)
@@ -47,6 +70,19 @@ class StrategyTests(unittest.TestCase):
         self.assertIsNotNone(result.market_state)
         self.assertEqual(result.market_state.status, "CONFIRMED")
         self.assertEqual(result.market_state.readiness_score, 100.0)
+        self.assertIn(result.signal.trend_strength_label, ("偏弱", "中等", "強"))
+        self.assertIn("tp1_action", result.signal.management_plan)
+
+    def test_early_expansion_does_not_wait_for_one_hour_breakout(self):
+        engine = AdaptiveStrategyEngine(StrategyConfig(max_entry_extension_atr=1.0))
+        tf4 = features(trend_candles(80, 0.4))
+        tf1 = features(trend_candles(100, 0.08))
+        tf15 = features(early_breakout_candles())
+        self.assertLessEqual(tf1.close, tf1.prior_high20)
+        plan = engine._early_expansion_plan("LONG", tf4, tf1, tf15)
+        self.assertIsNotNone(plan)
+        self.assertEqual(plan.signal_stage, "EARLY")
+        self.assertEqual(plan.strategy, "早期動能擴張")
 
     def test_low_liquidity_is_rejected(self):
         data = trend_candles(100, 0.1, quote_volume=100)
@@ -82,7 +118,7 @@ class StrategyTests(unittest.TestCase):
             {"score": 72.0, "label": "偏多"},
         )
         self.assertIsNone(opposed.signal)
-        self.assertEqual(opposed.reason, "market_context_not_confirmed")
+        self.assertEqual(opposed.reason, "evidence_conflict")
 
     def test_quiet_micro_timeframe_downgrades_signal(self):
         candles_4h = trend_candles(80, 0.4)
@@ -102,6 +138,57 @@ class StrategyTests(unittest.TestCase):
         self.assertIsNone(filtered.signal)
         self.assertEqual(filtered.reason, "micro_volume_not_confirmed")
         self.assertFalse(filtered.market_state.market_metrics["micro_volume_anomaly"])
+
+    def test_execution_cost_can_reject_an_otherwise_valid_signal(self):
+        candles_4h = trend_candles(80, 0.4)
+        candles_1h = trend_candles(100, 0.18, breakout=True)
+        candles_15m = trend_candles(110, 0.09, accelerate=True)
+        candles_5m = trend_candles(118, 0.04, breakout=True)
+        ticker = Ticker(
+            "TEST-USDT-SWAP",
+            candles_15m[-1].close,
+            candles_15m[-1].close - 0.03,
+            candles_15m[-1].close + 0.03,
+            1,
+        )
+        engine = AdaptiveStrategyEngine(
+            StrategyConfig(
+                min_quote_volume_24h=1_000_000,
+                max_execution_cost_to_risk_pct=12.0,
+            )
+        )
+        technical = engine.analyze(
+            self.instrument,
+            ticker,
+            candles_4h,
+            candles_1h,
+            candles_15m,
+        )
+        filtered = engine.apply_market_context(
+            technical,
+            MarketContext(
+                "TEST-USDT-SWAP",
+                20_000_000,
+                0.0001,
+                0.20,
+                0.62,
+                2,
+                bid_depth_usd=50_000,
+                ask_depth_usd=50_000,
+                buy_slippage_pct=0.08,
+                sell_slippage_pct=0.08,
+                execution_notional_usdt=1_000,
+            ),
+            "LONG",
+            candles_5m,
+            {"score": 72.0, "label": "偏多"},
+        )
+        self.assertIsNone(filtered.signal)
+        self.assertEqual(filtered.reason, "execution_cost_too_high")
+        self.assertGreater(
+            filtered.market_state.market_metrics["execution_cost_to_risk_pct"],
+            12.0,
+        )
 
     def test_low_open_interest_is_a_hard_filter(self):
         candles_4h = trend_candles(80, 0.4)
