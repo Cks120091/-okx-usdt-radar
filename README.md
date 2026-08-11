@@ -83,15 +83,16 @@ GitHub Pages 版本不需要常駐伺服器，也不接受 OKX API Key。網頁�
 | 設定 | 預設值 | 用途 |
 | --- | ---: | --- |
 | `max_signals` | 10 | 候選上限，程式另有硬上限 10 |
-| `min_quote_volume_24h` | 1,000,000 | 最低近 24 根 1H 報價幣成交額（USDT） |
-| `max_spread_pct` | 0.25 | 最大買賣價差百分比 |
+| `min_quote_volume_24h` | 10,000,000 | 訊號與觀察候選最低近 24 根 1H 報價幣成交額（USDT） |
+| `max_spread_pct` | 0.10 | 訊號與觀察候選最大買賣價差百分比 |
+| `min_open_interest_usd` | 3,000,000 | 訊號與觀察候選最低持倉量（USD）；缺少 OI 也淘汰 |
 | `minimum_rr` | 1.8 | 最低計畫風報比 |
 | `context_candidates` | 30 | 取得 OI／資金費率／訂單流的最高順位候選數 |
 | `workers` | 8 | 同時處理合約數 |
 | `rate_limit_requests_per_2s` | 18 | 保守的公開 API 節流設定 |
 | `align_to_hour` | true | 在每個整點再次掃描 |
 
-亦可使用環境變數覆寫常用設定，例如 `PORT`、`RADAR_MAX_SIGNALS`、`RADAR_MIN_QUOTE_VOLUME`、`RADAR_MAX_SPREAD_PCT`。
+亦可使用環境變數覆寫常用設定，例如 `PORT`、`RADAR_MAX_SIGNALS`、`RADAR_MIN_QUOTE_VOLUME`、`RADAR_MAX_SPREAD_PCT`、`RADAR_MIN_OPEN_INTEREST_USD`。
 
 ## 覆蓋率怎麼算
 
@@ -104,8 +105,8 @@ GitHub Pages 版本不需要常駐伺服器，也不接受 OKX API Key。網頁�
 ## 三層輸出
 
 1. `market_map`：所有可分析合約的型態、方向、適用策略、準備度與狀態。
-2. `watchlist`：通過基本流動性與價差門檻、且最接近觸發的 10 個觀察候選。
-3. `signals`：同時通過型態、觸發、即時訂單流、合約市場、追價、止損及最低 1.8R 的正式訊號。
+2. `watchlist`：同時通過 24H 成交額、價差、持倉量三項硬性流動性門檻，且最接近觸發的 10 個觀察候選。
+3. `signals`：通過三項流動性硬門檻，並同時通過型態、觸發、即時訂單流、合約市場、追價、止損及最低 1.8R 的正式訊號。
 
 準備度是「該型態的進場條件已完成比例」，不是勝率。正式訊號仍不為了湊數而放寬門檻。
 

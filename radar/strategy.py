@@ -10,8 +10,9 @@ from .models import Candle, Instrument, MarketContext, MarketState, Signal, Tick
 
 @dataclass(frozen=True)
 class StrategyConfig:
-    min_quote_volume_24h: float = 1_000_000.0
-    max_spread_pct: float = 0.25
+    min_quote_volume_24h: float = 10_000_000.0
+    max_spread_pct: float = 0.10
+    min_open_interest_usd: float = 3_000_000.0
     minimum_rr: float = 1.8
 
 
@@ -240,6 +241,30 @@ class AdaptiveStrategyEngine:
         is_long = direction == "LONG"
         missing = list(state.missing_conditions)
         passed = list(state.passed_conditions)
+
+        if self.config.min_open_interest_usd > 0 and (
+            context.open_interest_usd is None
+            or context.open_interest_usd < self.config.min_open_interest_usd
+        ):
+            factors["liquidity_risk"] = 0.0
+            condition = (
+                "無法取得持倉量，依流動性安全規則淘汰"
+                if context.open_interest_usd is None
+                else f"持倉量需達 {self.config.min_open_interest_usd:,.0f} USD"
+            )
+            return AnalysisResult(
+                None,
+                "open_interest_too_low",
+                replace(
+                    state,
+                    status="FILTERED",
+                    readiness_score=min(state.readiness_score, 49.0),
+                    passed_conditions=_unique(passed)[:6],
+                    missing_conditions=_unique([condition, *missing])[:6],
+                    factor_scores=factors,
+                    market_metrics=metrics,
+                ),
+            )
 
         if direction in ("LONG", "SHORT"):
             flow_parts: list[float] = []

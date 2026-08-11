@@ -18,8 +18,9 @@ class AppConfig:
     request_timeout_seconds: float = 12.0
     request_retries: int = 3
     rate_limit_requests_per_2s: int = 18
-    min_quote_volume_24h: float = 1_000_000.0
-    max_spread_pct: float = 0.25
+    min_quote_volume_24h: float = 10_000_000.0
+    max_spread_pct: float = 0.10
+    min_open_interest_usd: float = 3_000_000.0
     minimum_rr: float = 1.8
     context_candidates: int = 30
     scan_at_start: bool = True
@@ -42,6 +43,7 @@ class AppConfig:
             "RADAR_WORKERS": ("workers", int),
             "RADAR_MIN_QUOTE_VOLUME": ("min_quote_volume_24h", float),
             "RADAR_MAX_SPREAD_PCT": ("max_spread_pct", float),
+            "RADAR_MIN_OPEN_INTEREST_USD": ("min_open_interest_usd", float),
             "RADAR_MIN_RR": ("minimum_rr", float),
             "RADAR_CONTEXT_CANDIDATES": ("context_candidates", int),
             "RADAR_SCAN_AT_START": ("scan_at_start", _bool),
@@ -60,6 +62,10 @@ class AppConfig:
             raise ValueError("interval_seconds must be at least 60")
         if not 0 <= config.context_candidates <= 100:
             raise ValueError("context_candidates must be between 0 and 100")
+        if config.min_quote_volume_24h < 0 or config.min_open_interest_usd < 0:
+            raise ValueError("liquidity thresholds must not be negative")
+        if config.max_spread_pct < 0:
+            raise ValueError("max_spread_pct must not be negative")
         return config
 
 

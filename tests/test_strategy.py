@@ -79,6 +79,27 @@ class StrategyTests(unittest.TestCase):
         self.assertIsNone(opposed.signal)
         self.assertEqual(opposed.reason, "market_context_not_confirmed")
 
+    def test_low_open_interest_is_a_hard_filter(self):
+        candles_4h = trend_candles(80, 0.4)
+        candles_1h = trend_candles(100, 0.18, breakout=True)
+        candles_15m = trend_candles(110, 0.09, accelerate=True)
+        ticker = Ticker("TEST-USDT-SWAP", candles_15m[-1].close, candles_15m[-1].close - 0.03, candles_15m[-1].close + 0.03, 1)
+        engine = AdaptiveStrategyEngine(
+            StrategyConfig(
+                min_quote_volume_24h=1_000_000,
+                min_open_interest_usd=3_000_000,
+            )
+        )
+        technical = engine.analyze(self.instrument, ticker, candles_4h, candles_1h, candles_15m)
+        filtered = engine.apply_market_context(
+            technical,
+            MarketContext("TEST-USDT-SWAP", 500_000, 0.0001, 0.20, 0.62, 2),
+            "LONG",
+        )
+        self.assertIsNone(filtered.signal)
+        self.assertEqual(filtered.reason, "open_interest_too_low")
+        self.assertEqual(filtered.market_state.status, "FILTERED")
+
     def test_unconfirmed_or_short_history_is_rejected(self):
         data = trend_candles(100, 0.1, count=59)
         ticker = Ticker("TEST-USDT-SWAP", 106, 105.99, 106.01, 1)

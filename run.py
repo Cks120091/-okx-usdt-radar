@@ -27,6 +27,7 @@ def build_runtime(config: AppConfig) -> RadarRuntime:
             candle_limit=config.candle_limit,
             min_quote_volume_24h=config.min_quote_volume_24h,
             max_spread_pct=config.max_spread_pct,
+            min_open_interest_usd=config.min_open_interest_usd,
             minimum_rr=config.minimum_rr,
             context_candidates=config.context_candidates,
         ),

@@ -7,7 +7,7 @@ from radar.strategy import AnalysisResult
 
 def candles(count=100):
     return [
-        Candle(index, 100 + index * 0.1, 101 + index * 0.1, 99 + index * 0.1, 100 + index * 0.1, 10, 100_000, True)
+        Candle(index, 100 + index * 0.1, 101 + index * 0.1, 99 + index * 0.1, 100 + index * 0.1, 10, 1_000_000, True)
         for index in range(count)
     ]
 
@@ -52,6 +52,11 @@ class ContextFakeClient(FakeClient):
         return MarketContext(inst_id, open_interest_usd, 0.0001, 0.12, 0.56, 1)
 
 
+class LowOpenInterestClient(ContextFakeClient):
+    def get_open_interest_usd(self):
+        return {item.inst_id: 500_000 for item in self.instruments}
+
+
 class AlwaysSignalEngine:
     def analyze(self, instrument, ticker, candles_4h, candles_1h, candles_15m):
         score = float(instrument.inst_id[1:3])
@@ -87,7 +92,10 @@ class ScannerTests(unittest.TestCase):
         self.assertIn("BBB-USDT-SWAP", report.failed_instruments)
 
     def test_full_fetch_reports_one_hundred_percent_coverage(self):
-        report = MarketScanner(FakeClient(), ScannerConfig(workers=2)).scan_once()
+        report = MarketScanner(
+            FakeClient(),
+            ScannerConfig(workers=2, min_open_interest_usd=0),
+        ).scan_once()
         self.assertEqual(report.coverage_pct, 100)
         self.assertEqual(report.target_count, 2)
         self.assertEqual(report.fetched_count, 2)
@@ -98,7 +106,16 @@ class ScannerTests(unittest.TestCase):
         self.assertTrue(report.watchlist[0].missing_conditions)
 
     def test_output_has_hard_limit_of_ten_and_is_quality_sorted(self):
-        scanner = MarketScanner(ManyFakeClient(), ScannerConfig(workers=3, max_signals=99))
+        scanner = MarketScanner(
+            ManyFakeClient(),
+            ScannerConfig(
+                workers=3,
+                max_signals=99,
+                min_quote_volume_24h=0,
+                max_spread_pct=1,
+                min_open_interest_usd=0,
+            ),
+        )
         scanner.engine = AlwaysSignalEngine()
         report = scanner.scan_once()
         self.assertEqual(len(report.signals), 10)
@@ -111,6 +128,14 @@ class ScannerTests(unittest.TestCase):
         self.assertEqual(report.context_enriched_count, 2)
         self.assertEqual(report.context_failures, {})
         self.assertTrue(report.watchlist[0].market_metrics["context_complete"])
+
+    def test_low_open_interest_is_excluded_from_watchlist(self):
+        report = MarketScanner(LowOpenInterestClient(), ScannerConfig(workers=2)).scan_once()
+        self.assertEqual(report.context_target_count, 2)
+        self.assertEqual(report.watchlist, [])
+        self.assertTrue(
+            all(item.status == "FILTERED" for item in report.market_map),
+        )
 
 
 if __name__ == "__main__":

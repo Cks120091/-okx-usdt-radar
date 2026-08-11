@@ -7,7 +7,7 @@ from dataclasses import dataclass
 from datetime import datetime, timezone
 from typing import Protocol
 
-from .models import Candle, Instrument, MarketContext, MarketState, RadarReport, Ticker
+from .models import Candle, Instrument, MarketContext, MarketState, RadarReport, Signal, Ticker
 from .strategy import AdaptiveStrategyEngine, StrategyConfig
 
 
@@ -32,8 +32,9 @@ class ScannerConfig:
     max_signals: int = 10
     workers: int = 8
     candle_limit: int = 100
-    min_quote_volume_24h: float = 1_000_000.0
-    max_spread_pct: float = 0.25
+    min_quote_volume_24h: float = 10_000_000.0
+    max_spread_pct: float = 0.10
+    min_open_interest_usd: float = 3_000_000.0
     minimum_rr: float = 1.8
     context_candidates: int = 30
 
@@ -48,6 +49,7 @@ class MarketScanner:
             StrategyConfig(
                 min_quote_volume_24h=self.config.min_quote_volume_24h,
                 max_spread_pct=self.config.max_spread_pct,
+                min_open_interest_usd=self.config.min_open_interest_usd,
                 minimum_rr=self.config.minimum_rr,
             )
         )
@@ -238,8 +240,10 @@ class MarketScanner:
                 market_states.append(result.market_state)
             if result.signal is None:
                 exclusion_counts[result.reason] += 1
-            else:
+            elif self._passes_output_liquidity(result.signal):
                 signals.append(result.signal)
+            else:
+                exclusion_counts["output_liquidity_gate"] += 1
 
         signals.sort(key=lambda item: (item.score, item.quote_volume_24h), reverse=True)
         signals = signals[: min(max(self.config.max_signals, 0), 10)]
@@ -250,6 +254,7 @@ class MarketScanner:
             and item.regime != "DISORDER"
             and item.direction != "NEUTRAL"
             and item.readiness_score >= 50.0
+            and self._passes_output_liquidity(item)
         ]
         watchlist.sort(
             key=lambda item: (item.readiness_score, item.quote_volume_24h),
@@ -284,6 +289,19 @@ class MarketScanner:
             context_target_count=len(context_target_ids),
             context_enriched_count=context_enriched_count,
             context_failures=dict(sorted(context_failures.items())),
+        )
+
+    def _passes_output_liquidity(self, item: Signal | MarketState) -> bool:
+        if item.quote_volume_24h < self.config.min_quote_volume_24h:
+            return False
+        if item.spread_pct > self.config.max_spread_pct:
+            return False
+        if self.config.min_open_interest_usd <= 0:
+            return True
+        open_interest = item.market_metrics.get("open_interest_usd")
+        return (
+            isinstance(open_interest, (int, float))
+            and open_interest >= self.config.min_open_interest_usd
         )
 
     def _fetch_bundle(self, inst_id: str) -> dict[str, list[Candle]]:
