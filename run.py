@@ -28,6 +28,7 @@ def build_runtime(config: AppConfig) -> RadarRuntime:
             min_quote_volume_24h=config.min_quote_volume_24h,
             max_spread_pct=config.max_spread_pct,
             min_open_interest_usd=config.min_open_interest_usd,
+            require_micro_volume_anomaly=config.require_micro_volume_anomaly,
             minimum_rr=config.minimum_rr,
             context_candidates=config.context_candidates,
         ),

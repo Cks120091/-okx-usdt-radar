@@ -61,6 +61,7 @@ class StrategyTests(unittest.TestCase):
         candles_4h = trend_candles(80, 0.4)
         candles_1h = trend_candles(100, 0.18, breakout=True)
         candles_15m = trend_candles(110, 0.09, accelerate=True)
+        candles_5m = trend_candles(118, 0.04, breakout=True)
         ticker = Ticker("TEST-USDT-SWAP", candles_15m[-1].close, candles_15m[-1].close - 0.03, candles_15m[-1].close + 0.03, 1)
         engine = AdaptiveStrategyEngine(StrategyConfig(min_quote_volume_24h=1_000_000))
         technical = engine.analyze(self.instrument, ticker, candles_4h, candles_1h, candles_15m)
@@ -68,6 +69,8 @@ class StrategyTests(unittest.TestCase):
             technical,
             MarketContext("TEST-USDT-SWAP", 20_000_000, 0.0001, 0.20, 0.62, 2),
             "LONG",
+            candles_5m,
+            {"score": 72.0, "label": "偏多"},
         )
         self.assertIsNotNone(confirmed.signal)
         self.assertIn("derivatives", confirmed.signal.factor_scores)
@@ -75,9 +78,30 @@ class StrategyTests(unittest.TestCase):
             technical,
             MarketContext("TEST-USDT-SWAP", 20_000_000, 0.0001, -0.30, 0.30, 2),
             "LONG",
+            candles_5m,
+            {"score": 72.0, "label": "偏多"},
         )
         self.assertIsNone(opposed.signal)
         self.assertEqual(opposed.reason, "market_context_not_confirmed")
+
+    def test_quiet_micro_timeframe_downgrades_signal(self):
+        candles_4h = trend_candles(80, 0.4)
+        candles_1h = trend_candles(100, 0.18, breakout=True)
+        candles_15m = trend_candles(110, 0.09, accelerate=True)
+        quiet_5m = trend_candles(118, 0.04)
+        ticker = Ticker("TEST-USDT-SWAP", candles_15m[-1].close, candles_15m[-1].close - 0.03, candles_15m[-1].close + 0.03, 1)
+        engine = AdaptiveStrategyEngine(StrategyConfig(min_quote_volume_24h=1_000_000))
+        technical = engine.analyze(self.instrument, ticker, candles_4h, candles_1h, candles_15m)
+        filtered = engine.apply_market_context(
+            technical,
+            MarketContext("TEST-USDT-SWAP", 20_000_000, 0.0001, 0.20, 0.62, 2),
+            "LONG",
+            quiet_5m,
+            {"score": 72.0, "label": "偏多"},
+        )
+        self.assertIsNone(filtered.signal)
+        self.assertEqual(filtered.reason, "micro_volume_not_confirmed")
+        self.assertFalse(filtered.market_state.market_metrics["micro_volume_anomaly"])
 
     def test_low_open_interest_is_a_hard_filter(self):
         candles_4h = trend_candles(80, 0.4)

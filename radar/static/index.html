@@ -40,7 +40,7 @@
 <body>
 <main>
   <header>
-    <div><h1>OKX USDT 永續雷達</h1><div class="subtitle">全 live 幣對 · 4H / 1H / 15m · 已收盤 K 線 · 最多 10 個</div></div>
+    <div><h1>OKX USDT 永續雷達</h1><div class="subtitle">全 live 幣對 · 4H／1H／15m 綜合分析 · 候選再確認 5m 成交異動</div></div>
     <button id="scan">立即完整掃描</button>
   </header>
   <section class="grid">
@@ -55,12 +55,13 @@
 </main>
 <script>
 const $=s=>document.querySelector(s); const esc=v=>String(v??'').replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
+const directionName={LONG:'做多',SHORT:'做空',NEUTRAL:'中性'};
 async function json(url,opt){const r=await fetch(url,opt); if(!r.ok) throw new Error((await r.json()).message||r.statusText); return r.json()}
 function render(report){
   $('#coverage').textContent=`${Number(report.coverage_pct).toFixed(2)}%`;
   $('#targets').textContent=report.target_count; $('#count').textContent=report.signals.length; $('#message').textContent=report.message;
   const box=$('#signals'); if(!report.signals.length){box.innerHTML=`<div class="card empty">${esc(report.status==='DATA_INCOMPLETE'?'資料不完整，本輪依法不發訊號。':'完整掃描後沒有合格機會，不湊數。')}</div>`;return}
-  box.innerHTML=report.signals.map((s,i)=>`<article class="signal"><div class="signal-head"><h3>${i+1}. ${esc(s.inst_id)}</h3><span class="badge ${s.direction}">${s.direction}</span></div><dl><dt>策略</dt><dd>${esc(s.strategy)} · ${esc(s.regime)}</dd><dt>分數</dt><dd>${s.score}</dd><dt>進場區</dt><dd>${esc(s.entry_low)} ～ ${esc(s.entry_high)}</dd><dt>止損</dt><dd>${esc(s.stop_loss)}</dd><dt>TP1 / TP2</dt><dd>${esc(s.take_profit_1)} / ${esc(s.take_profit_2)}</dd><dt>風報比</dt><dd>${s.risk_reward}R</dd><dt>失效</dt><dd>${esc(s.invalidation)}</dd></dl><ul>${s.evidence.map(e=>`<li>${esc(e)}</li>`).join('')}</ul></article>`).join('')
+  box.innerHTML=report.signals.map((s,i)=>`<article class="signal"><div class="signal-head"><h3>${i+1}. ${esc(s.inst_id)}</h3><span class="badge ${s.direction}">${esc(directionName[s.direction]||'中性')}</span></div><dl><dt>策略</dt><dd>${esc(s.strategy)}</dd><dt>分數</dt><dd>${s.score}</dd><dt>進場區</dt><dd>${esc(s.entry_low)} ～ ${esc(s.entry_high)}</dd><dt>止損</dt><dd>${esc(s.stop_loss)}</dd><dt>TP1 / TP2</dt><dd>${esc(s.take_profit_1)} / ${esc(s.take_profit_2)}</dd><dt>風報比</dt><dd>${s.risk_reward}R</dd><dt>失效</dt><dd>${esc(s.invalidation)}</dd></dl><ul>${s.evidence.map(e=>`<li>${esc(e)}</li>`).join('')}</ul></article>`).join('')
 }
 async function refresh(){
  try{const s=await json('/api/status'); const r=$('#runtime'); r.className='metric status '+(s.running?'running':s.last_error?'bad':'good'); r.innerHTML=`<span class="dot"></span><span>${s.running?'掃描中':s.last_error?'異常':'待命'}</span>`; $('#scan').disabled=s.running; try{render(await json('/api/report/latest'))}catch(_){} }catch(e){$('#message').textContent=e.message}
@@ -69,4 +70,3 @@ $('#scan').addEventListener('click',async()=>{try{await json('/api/scan',{method
 </script>
 </body>
 </html>
-

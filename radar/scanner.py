@@ -32,9 +32,10 @@ class ScannerConfig:
     max_signals: int = 10
     workers: int = 8
     candle_limit: int = 100
-    min_quote_volume_24h: float = 10_000_000.0
+    min_quote_volume_24h: float = 5_000_000.0
     max_spread_pct: float = 0.10
     min_open_interest_usd: float = 3_000_000.0
+    require_micro_volume_anomaly: bool = True
     minimum_rr: float = 1.8
     context_candidates: int = 30
 
@@ -50,6 +51,7 @@ class MarketScanner:
                 min_quote_volume_24h=self.config.min_quote_volume_24h,
                 max_spread_pct=self.config.max_spread_pct,
                 min_open_interest_usd=self.config.min_open_interest_usd,
+                require_micro_volume_anomaly=self.config.require_micro_volume_anomaly,
                 minimum_rr=self.config.minimum_rr,
             )
         )
@@ -160,11 +162,12 @@ class MarketScanner:
                 target_instruments=target_ids,
                 failed_instruments=dict(sorted(analysis_failures.items())),
                 signals=[],
-                exclusion_counts=dict(exclusion_counts),
+                exclusion_counts={},
                 duration_seconds=round(time.monotonic() - started, 3),
                 message="雷達資料已取得，但部分合約分析失敗；為避免部分市場結果，禁止輸出訊號。",
             )
 
+        market_bias = self._calculate_market_bias(analysis_results)
         context_failures: dict[str, list[str]] = {}
         context_target_ids: list[str] = []
         context_enriched_count = 0
@@ -200,20 +203,36 @@ class MarketScanner:
                 for inst_id, _ in ranked_results[: max(0, self.config.context_candidates)]
             ]
             contexts: dict[str, MarketContext] = {}
+            micro_candles: dict[str, list[Candle]] = {}
+
+            def load_candidate(inst_id: str) -> tuple[MarketContext, list[Candle], str | None]:
+                context = context_loader(inst_id, open_interest.get(inst_id))
+                try:
+                    candles_5m = self.client.get_candles(inst_id, "5m", self.config.candle_limit)
+                    if len(candles_5m) < 60:
+                        return context, candles_5m, "5m K 線不足 60 根"
+                    return context, candles_5m, None
+                except Exception as exc:
+                    return context, [], f"5m K 線取得失敗：{exc}"
+
             with ThreadPoolExecutor(max_workers=max(1, min(self.config.workers, 8))) as executor:
                 future_map = {
-                    executor.submit(context_loader, inst_id, open_interest.get(inst_id)): inst_id
+                    executor.submit(load_candidate, inst_id): inst_id
                     for inst_id in context_target_ids
                 }
                 for future in as_completed(future_map):
                     inst_id = future_map[future]
                     try:
-                        context = future.result()
+                        context, candles_5m, micro_error = future.result()
                         contexts[inst_id] = context
-                        if context.complete:
+                        micro_candles[inst_id] = candles_5m
+                        if context.complete and not micro_error:
                             context_enriched_count += 1
-                        if context.failures:
-                            context_failures[inst_id] = context.failures
+                        candidate_failures = list(context.failures)
+                        if micro_error:
+                            candidate_failures.append(micro_error)
+                        if candidate_failures:
+                            context_failures[inst_id] = candidate_failures
                     except Exception as exc:
                         context_failures[inst_id] = [str(exc)]
 
@@ -226,11 +245,18 @@ class MarketScanner:
                 else "NEUTRAL"
             )
             for inst_id, context in contexts.items():
-                analysis_results[inst_id] = context_applier(
-                    analysis_results[inst_id],
-                    context,
-                    btc_bias,
-                )
+                try:
+                    analysis_results[inst_id] = context_applier(
+                        analysis_results[inst_id],
+                        context,
+                        btc_bias,
+                        micro_candles.get(inst_id),
+                        market_bias,
+                    )
+                except Exception as exc:
+                    context_failures.setdefault(inst_id, []).append(
+                        f"綜合候選判斷失敗：{exc}"
+                    )
 
         exclusion_counts: Counter[str] = Counter()
         signals = []
@@ -289,6 +315,7 @@ class MarketScanner:
             context_target_count=len(context_target_ids),
             context_enriched_count=context_enriched_count,
             context_failures=dict(sorted(context_failures.items())),
+            market_bias=market_bias,
         )
 
     def _passes_output_liquidity(self, item: Signal | MarketState) -> bool:
@@ -297,12 +324,92 @@ class MarketScanner:
         if item.spread_pct > self.config.max_spread_pct:
             return False
         if self.config.min_open_interest_usd <= 0:
-            return True
-        open_interest = item.market_metrics.get("open_interest_usd")
+            open_interest_ok = True
+        else:
+            open_interest = item.market_metrics.get("open_interest_usd")
+            open_interest_ok = (
+                isinstance(open_interest, (int, float))
+                and open_interest >= self.config.min_open_interest_usd
+            )
+        if not open_interest_ok:
+            return False
         return (
-            isinstance(open_interest, (int, float))
-            and open_interest >= self.config.min_open_interest_usd
+            not self.config.require_micro_volume_anomaly
+            or item.market_metrics.get("micro_volume_anomaly") is True
         )
+
+    def _calculate_market_bias(self, results: dict[str, object]) -> dict[str, object]:
+        states = [
+            result.market_state
+            for result in results.values()
+            if getattr(result, "market_state", None) is not None
+        ]
+        directional = [
+            state
+            for state in states
+            if state.status != "FILTERED"
+            and state.regime in ("TREND", "BREAKOUT_READY", "BREAKOUT")
+            and state.direction in ("LONG", "SHORT")
+        ]
+
+        def breadth(items: list[MarketState]) -> tuple[float, int, int]:
+            long_count = sum(item.direction == "LONG" for item in items)
+            short_count = sum(item.direction == "SHORT" for item in items)
+            total = long_count + short_count
+            return (
+                round(long_count / total * 100.0, 1) if total else 50.0,
+                long_count,
+                short_count,
+            )
+
+        breadth_score, long_count, short_count = breadth(directional)
+        liquid = sorted(
+            (
+                state
+                for state in directional
+                if state.quote_volume_24h >= self.config.min_quote_volume_24h
+                and state.spread_pct <= self.config.max_spread_pct
+            ),
+            key=lambda item: item.quote_volume_24h,
+            reverse=True,
+        )[:50]
+        liquid_score, _, _ = breadth(liquid)
+
+        def anchor_score(inst_id: str) -> float:
+            result = results.get(inst_id)
+            state = getattr(result, "market_state", None)
+            if (
+                state is None
+                or state.status == "FILTERED"
+                or state.regime == "DISORDER"
+                or state.direction not in ("LONG", "SHORT")
+            ):
+                return 50.0
+            confidence = max(0.0, min(100.0, state.readiness_score)) / 100.0
+            offset = 25.0 + (confidence * 25.0)
+            return round(50.0 + offset if state.direction == "LONG" else 50.0 - offset, 1)
+
+        btc_score = anchor_score("BTC-USDT-SWAP")
+        eth_score = anchor_score("ETH-USDT-SWAP")
+        score = round(
+            (breadth_score * 0.35)
+            + (liquid_score * 0.25)
+            + (btc_score * 0.25)
+            + (eth_score * 0.15),
+            1,
+        )
+        label = "偏多" if score >= 65.0 else "偏空" if score <= 35.0 else "中性"
+        return {
+            "score": score,
+            "label": label,
+            "market_breadth_long_pct": breadth_score,
+            "liquid_breadth_long_pct": liquid_score,
+            "btc_score": btc_score,
+            "eth_score": eth_score,
+            "long_count": long_count,
+            "short_count": short_count,
+            "sample_count": len(directional),
+        }
 
     def _fetch_bundle(self, inst_id: str) -> dict[str, list[Candle]]:
         output: dict[str, list[Candle]] = {}

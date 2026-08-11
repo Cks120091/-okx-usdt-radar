@@ -131,6 +131,7 @@ class RadarReport:
     context_target_count: int = 0
     context_enriched_count: int = 0
     context_failures: dict[str, list[str]] = field(default_factory=dict)
+    market_bias: dict[str, Any] = field(default_factory=dict)
 
     def to_dict(self) -> dict[str, Any]:
         payload = asdict(self)

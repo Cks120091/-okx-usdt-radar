@@ -18,9 +18,10 @@ class AppConfig:
     request_timeout_seconds: float = 12.0
     request_retries: int = 3
     rate_limit_requests_per_2s: int = 18
-    min_quote_volume_24h: float = 10_000_000.0
+    min_quote_volume_24h: float = 5_000_000.0
     max_spread_pct: float = 0.10
     min_open_interest_usd: float = 3_000_000.0
+    require_micro_volume_anomaly: bool = True
     minimum_rr: float = 1.8
     context_candidates: int = 30
     scan_at_start: bool = True
@@ -44,6 +45,7 @@ class AppConfig:
             "RADAR_MIN_QUOTE_VOLUME": ("min_quote_volume_24h", float),
             "RADAR_MAX_SPREAD_PCT": ("max_spread_pct", float),
             "RADAR_MIN_OPEN_INTEREST_USD": ("min_open_interest_usd", float),
+            "RADAR_REQUIRE_MICRO_VOLUME_ANOMALY": ("require_micro_volume_anomaly", _bool),
             "RADAR_MIN_RR": ("minimum_rr", float),
             "RADAR_CONTEXT_CANDIDATES": ("context_candidates", int),
             "RADAR_SCAN_AT_START": ("scan_at_start", _bool),

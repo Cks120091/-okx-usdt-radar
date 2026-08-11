@@ -1,13 +1,22 @@
 import unittest
 
-from radar.models import Candle, Instrument, MarketContext, Signal, Ticker
+from radar.models import Candle, Instrument, MarketContext, MarketState, Signal, Ticker
 from radar.scanner import MarketScanner, ScannerConfig
 from radar.strategy import AnalysisResult
 
 
-def candles(count=100):
+def candles(count=100, micro_anomaly=False):
     return [
-        Candle(index, 100 + index * 0.1, 101 + index * 0.1, 99 + index * 0.1, 100 + index * 0.1, 10, 1_000_000, True)
+        Candle(
+            index,
+            100 + index * 0.1 - (0.05 if micro_anomaly and index >= count - 12 else 0),
+            101 + index * 0.1,
+            99 + index * 0.1,
+            100 + index * 0.1,
+            10,
+            1_000_000 * (2 if micro_anomaly and index == count - 1 else 1),
+            True,
+        )
         for index in range(count)
     ]
 
@@ -50,6 +59,9 @@ class ContextFakeClient(FakeClient):
 
     def get_market_context(self, inst_id, open_interest_usd=None):
         return MarketContext(inst_id, open_interest_usd, 0.0001, 0.12, 0.56, 1)
+
+    def get_candles(self, inst_id, bar, limit=100):
+        return candles(limit, micro_anomaly=bar == "5m")
 
 
 class LowOpenInterestClient(ContextFakeClient):
@@ -94,7 +106,11 @@ class ScannerTests(unittest.TestCase):
     def test_full_fetch_reports_one_hundred_percent_coverage(self):
         report = MarketScanner(
             FakeClient(),
-            ScannerConfig(workers=2, min_open_interest_usd=0),
+            ScannerConfig(
+                workers=2,
+                min_open_interest_usd=0,
+                require_micro_volume_anomaly=False,
+            ),
         ).scan_once()
         self.assertEqual(report.coverage_pct, 100)
         self.assertEqual(report.target_count, 2)
@@ -114,6 +130,7 @@ class ScannerTests(unittest.TestCase):
                 min_quote_volume_24h=0,
                 max_spread_pct=1,
                 min_open_interest_usd=0,
+                require_micro_volume_anomaly=False,
             ),
         )
         scanner.engine = AlwaysSignalEngine()
@@ -128,6 +145,8 @@ class ScannerTests(unittest.TestCase):
         self.assertEqual(report.context_enriched_count, 2)
         self.assertEqual(report.context_failures, {})
         self.assertTrue(report.watchlist[0].market_metrics["context_complete"])
+        self.assertTrue(report.watchlist[0].market_metrics["micro_volume_anomaly"])
+        self.assertIn(report.market_bias["label"], ("偏多", "中性", "偏空"))
 
     def test_low_open_interest_is_excluded_from_watchlist(self):
         report = MarketScanner(LowOpenInterestClient(), ScannerConfig(workers=2)).scan_once()
@@ -136,6 +155,38 @@ class ScannerTests(unittest.TestCase):
         self.assertTrue(
             all(item.status == "FILTERED" for item in report.market_map),
         )
+
+    def test_market_bias_turns_bullish_when_breadth_and_anchors_align(self):
+        scanner = MarketScanner(FakeClient())
+
+        def bullish(inst_id):
+            return AnalysisResult(
+                None,
+                "fixture",
+                MarketState(
+                    inst_id=inst_id,
+                    regime="TREND",
+                    direction="LONG",
+                    preferred_strategy="趨勢回踩續行",
+                    readiness_score=80.0,
+                    status="WATCH",
+                    missing_conditions=[],
+                    spread_pct=0.01,
+                    quote_volume_24h=20_000_000,
+                    closed_candle_ts=1,
+                ),
+            )
+
+        bias = scanner._calculate_market_bias(
+            {
+                "BTC-USDT-SWAP": bullish("BTC-USDT-SWAP"),
+                "ETH-USDT-SWAP": bullish("ETH-USDT-SWAP"),
+                "AAA-USDT-SWAP": bullish("AAA-USDT-SWAP"),
+            }
+        )
+        self.assertEqual(bias["label"], "偏多")
+        self.assertGreaterEqual(bias["score"], 65.0)
+        self.assertEqual(bias["market_breadth_long_pct"], 100.0)
 
 
 if __name__ == "__main__":

@@ -10,9 +10,10 @@ from .models import Candle, Instrument, MarketContext, MarketState, Signal, Tick
 
 @dataclass(frozen=True)
 class StrategyConfig:
-    min_quote_volume_24h: float = 10_000_000.0
+    min_quote_volume_24h: float = 5_000_000.0
     max_spread_pct: float = 0.10
     min_open_interest_usd: float = 3_000_000.0
+    require_micro_volume_anomaly: bool = True
     minimum_rr: float = 1.8
 
 
@@ -208,6 +209,8 @@ class AdaptiveStrategyEngine:
         result: AnalysisResult,
         context: MarketContext,
         btc_bias: str = "NEUTRAL",
+        candles_5m: list[Candle] | None = None,
+        market_bias: dict[str, object] | None = None,
     ) -> AnalysisResult:
         state = result.market_state
         if state is None:
@@ -241,6 +244,22 @@ class AdaptiveStrategyEngine:
         is_long = direction == "LONG"
         missing = list(state.missing_conditions)
         passed = list(state.passed_conditions)
+        market_bias = market_bias or {"score": 50.0, "label": "中性"}
+        market_bias_score = float(market_bias.get("score", 50.0))
+        directional_market_score = (
+            market_bias_score
+            if is_long
+            else 100.0 - market_bias_score
+            if direction == "SHORT"
+            else 50.0
+        )
+        factors["market_bias"] = round(directional_market_score, 1)
+        metrics.update(
+            {
+                "bull_bear_score": round(market_bias_score, 1),
+                "bull_bear_label": str(market_bias.get("label", "中性")),
+            }
+        )
 
         if self.config.min_open_interest_usd > 0 and (
             context.open_interest_usd is None
@@ -265,6 +284,44 @@ class AdaptiveStrategyEngine:
                     market_metrics=metrics,
                 ),
             )
+
+        micro_confirmed = not self.config.require_micro_volume_anomaly
+        micro_ratio_5m: float | None = None
+        micro_pressure_pct: float | None = None
+        if candles_5m is not None and len(candles_5m) >= 60 and direction in ("LONG", "SHORT"):
+            tf5 = features(candles_5m)
+            micro_ratio_5m = round(tf5.volume_ratio, 2)
+            micro_pressure = tf5.directional_volume_ratio if is_long else 1.0 - tf5.directional_volume_ratio
+            micro_pressure_pct = round(tf5.directional_volume_ratio * 100.0, 1)
+            ratio_15m = float(metrics.get("volume_ratio_15m", 0.0))
+            if state.regime in ("BREAKOUT", "BREAKOUT_READY"):
+                volume_move = tf5.volume_ratio >= 1.50 or ratio_15m >= 1.30
+            elif state.regime == "TREND":
+                volume_move = tf5.volume_ratio >= 1.25 or ratio_15m >= 1.15
+            else:
+                volume_move = tf5.volume_ratio >= 1.20 or ratio_15m >= 1.10
+            micro_confirmed = volume_move and micro_pressure >= 0.52
+            micro_score = _clamp(
+                max(tf5.volume_ratio / 1.50, ratio_15m / 1.30) * 70.0
+                + _clamp((micro_pressure - 0.50) / 0.20 * 30.0, 0.0, 30.0),
+                0.0,
+                100.0,
+            )
+            factors["volume_order_flow"] = round(
+                (factors.get("volume_order_flow", 50.0) * 0.45) + (micro_score * 0.55),
+                1,
+            )
+        metrics.update(
+            {
+                "volume_ratio_5m": micro_ratio_5m,
+                "buy_pressure_5m_pct": micro_pressure_pct,
+                "micro_volume_anomaly": micro_confirmed,
+            }
+        )
+        if micro_confirmed:
+            passed.append("5m／15m 成交額異動與方向一致")
+        else:
+            missing.append("等待 5m／15m 成交額放大並與方向一致")
 
         if direction in ("LONG", "SHORT"):
             flow_parts: list[float] = []
@@ -335,6 +392,13 @@ class AdaptiveStrategyEngine:
             crowded = False
             strong_flow_opposition = False
 
+        macro_opposition = (
+            (market_bias_score >= 65.0 and direction == "SHORT")
+            or (market_bias_score <= 35.0 and direction == "LONG")
+        )
+        if macro_opposition:
+            missing.append("牛熊指標與此方向相反，逆勢訊號需更高強度")
+
         overall = self._weighted_factor_score(factors)
         readiness = round((state.readiness_score * 0.60) + (overall * 0.40), 1)
         updated_state = replace(
@@ -354,7 +418,18 @@ class AdaptiveStrategyEngine:
         if result.signal is None:
             return AnalysisResult(None, result.reason, updated_state)
 
-        if not context.complete or strong_flow_opposition or crowded:
+        high_quality_countertrend = (
+            result.signal.score >= 85.0
+            and micro_confirmed
+            and not strong_flow_opposition
+        )
+        if (
+            not context.complete
+            or not micro_confirmed
+            or strong_flow_opposition
+            or crowded
+            or (macro_opposition and not high_quality_countertrend)
+        ):
             if not context.complete:
                 missing = ["即時資金費率、訂單簿或主動成交資料未完整", *missing]
             updated_state = replace(
@@ -363,7 +438,14 @@ class AdaptiveStrategyEngine:
                 readiness_score=min(updated_state.readiness_score, 89.0),
                 missing_conditions=_unique(missing)[:6],
             )
-            return AnalysisResult(None, "market_context_not_confirmed", updated_state)
+            reason = (
+                "micro_volume_not_confirmed"
+                if not micro_confirmed
+                else "market_bias_opposed"
+                if macro_opposition and not high_quality_countertrend
+                else "market_context_not_confirmed"
+            )
+            return AnalysisResult(None, reason, updated_state)
 
         evidence = list(result.signal.evidence)
         if context.taker_buy_ratio is not None:
@@ -390,12 +472,13 @@ class AdaptiveStrategyEngine:
     @staticmethod
     def _weighted_factor_score(factors: dict[str, float]) -> float:
         weights = {
-            "structure_trend": 0.24,
-            "momentum": 0.14,
-            "volatility": 0.12,
-            "volume_order_flow": 0.20,
-            "derivatives": 0.15,
-            "liquidity_risk": 0.15,
+            "structure_trend": 0.22,
+            "momentum": 0.13,
+            "volatility": 0.10,
+            "volume_order_flow": 0.18,
+            "derivatives": 0.13,
+            "liquidity_risk": 0.10,
+            "market_bias": 0.14,
         }
         available = [(factors[key], weight) for key, weight in weights.items() if key in factors]
         denominator = sum(weight for _, weight in available)
@@ -483,6 +566,7 @@ class AdaptiveStrategyEngine:
                 "adx_1h": round(tf1.adx14, 1),
                 "rsi_15m": round(tf15.rsi14, 1),
                 "volume_ratio_1h": round(tf1.volume_ratio, 2),
+                "volume_ratio_15m": round(tf15.volume_ratio, 2),
                 "atr_pct_15m": round(tf15.atr_pct, 2),
                 "bollinger_width_pct_1h": round(tf1.bollinger_width_pct, 2),
                 "vwap_position_15m": "ABOVE" if tf15.close >= tf15.vwap20 else "BELOW",
