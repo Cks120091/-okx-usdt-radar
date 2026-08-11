@@ -29,6 +29,7 @@ def report_markdown(report: RadarReport) -> str:
         f"- 產生時間：{report.generated_at}",
         f"- 覆蓋：{report.fetched_count}/{report.target_count}（{report.coverage_pct:.2f}%）",
         f"- 可分析：{report.analyzable_count}",
+        f"- 即時市場資料：{report.context_enriched_count}/{report.context_target_count}",
         f"- 訊息：{report.message}",
         "",
     ]

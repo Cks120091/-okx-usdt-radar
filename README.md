@@ -8,6 +8,8 @@
 - 每個合約取得 4H、1H、15m 共三組已確認收盤 K 線。
 - 依市場狀態在「放量突破、趨勢回踩續行、區間邊緣反轉」間選擇，不把同一套規則硬套所有幣。
 - 每個可分析合約都會先分為 `TREND`、`BREAKOUT_READY`、`RANGE` 或 `DISORDER`，並記錄適用策略。
+- 綜合價格結構、MA/EMA、RSI、MACD 快慢線、ADX、ATR、VWAP、布林帶寬度、量能與 K 棒拒絕，不以單一指標決定方向。
+- 對最接近觸發的候選再取得 OKX 公開 OI、資金費率、近期主動買賣與前 20 檔訂單簿；即時資料反向或不完整時，正式訊號會降回觀察。
 - 正式訊號之外，另列最多 10 個接近觸發的觀察候選，顯示準備度與尚缺條件；觀察候選不能直接當進場訊號。
 - 網頁可搜尋、篩選並查看全部合約的市場型態，不會因正式訊號為 0 而只剩空白頁面。
 - 至少兩類相對獨立證據、最低 1.8R、成交量與買賣價差檢查、避免追價。
@@ -62,15 +64,15 @@ python run.py --serve
 
 並公開 `8000` 連接埠。部署環境必須能連線至 `https://www.okx.com`；若所在地區使用 OKX 的其他官方區域網域，可在 `config.json` 調整 `okx_base_url`，但不要使用來路不明的代理站。
 
-## GitHub 免費部署（每小時掃描＋Pages 網頁）
+## GitHub 免費部署（每 15 分鐘掃描＋Pages 網頁）
 
 此專案已內建 `.github/workflows/hourly-radar.yml`，適合用 GitHub Free 的公開儲存庫部署：
 
 1. 將整個專案放入一個 **Public** GitHub repository，預設分支使用 `main`。
 2. 前往 `Settings → Pages → Build and deployment`，將 Source 設為 **GitHub Actions**。
-3. 前往 `Actions → OKX hourly adaptive radar`，按 **Run workflow** 執行第一次掃描。
+3. 前往 `Actions → OKX 15-minute comprehensive radar`，按 **Run workflow** 執行第一次掃描。
 4. 工作流程會跑安全測試、掃描 OKX、產生靜態網站並發布 GitHub Pages。
-5. 之後在每個 UTC 整點自動再跑一次；GitHub 排程可能因平台負載稍有延遲。
+5. 之後每 15 分鐘自動再跑一次；GitHub 排程可能因平台負載稍有延遲。
 
 GitHub Pages 版本不需要常駐伺服器，也不接受 OKX API Key。網頁只讀取工作流程產生的 `latest.json`；按「重新載入結果」只會重新取得最近一次報告，不會從瀏覽器直接掃描 OKX。
 
@@ -84,6 +86,7 @@ GitHub Pages 版本不需要常駐伺服器，也不接受 OKX API Key。網頁�
 | `min_quote_volume_24h` | 1,000,000 | 最低近 24 根 1H 報價幣成交額（USDT） |
 | `max_spread_pct` | 0.25 | 最大買賣價差百分比 |
 | `minimum_rr` | 1.8 | 最低計畫風報比 |
+| `context_candidates` | 30 | 取得 OI／資金費率／訂單流的最高順位候選數 |
 | `workers` | 8 | 同時處理合約數 |
 | `rate_limit_requests_per_2s` | 18 | 保守的公開 API 節流設定 |
 | `align_to_hour` | true | 在每個整點再次掃描 |
@@ -102,15 +105,16 @@ GitHub Pages 版本不需要常駐伺服器，也不接受 OKX API Key。網頁�
 
 1. `market_map`：所有可分析合約的型態、方向、適用策略、準備度與狀態。
 2. `watchlist`：通過基本流動性與價差門檻、且最接近觸發的 10 個觀察候選。
-3. `signals`：同時通過型態、觸發、追價、止損及最低 1.8R 的正式訊號。
+3. `signals`：同時通過型態、觸發、即時訂單流、合約市場、追價、止損及最低 1.8R 的正式訊號。
 
 準備度是「該型態的進場條件已完成比例」，不是勝率。正式訊號仍不為了湊數而放寬門檻。
 
 ## 必須知道的限制
 
 - 這是規則式自適應分析器，不是會自行保證獲利的 AI，也不是經過完整實盤驗證的交易系統。
-- 第一版尚未納入 OI 變化、CVD、逐筆成交、完整深度簿及消息事件；單一 OI 快照也不應被誤當方向證據。
-- 固定 HTTP 每小時全抓適合先驗證。長期版本宜以 WebSocket 持續累積 K 線，再由 REST 補洞與核對母清單。
+- 目前 OI 是單一快照，只用來評估合約市場深度，不會被誤當多空方向；真正的 OI 增減需要跨掃描保存歷史。
+- 主動買賣比例取自近期公開成交，並非長時間累積 CVD；訂單簿也只是瞬時快照，因此只作確認或否決，不能單獨發訊號。
+- 尚未納入消息事件與長時間 CVD。長期版本宜以 WebSocket 持續累積成交與 OI，再由 REST 補洞。
 - 訊號只依已收盤 K 線，實際成交可能有滑價；進場前價格離開進場區就應放棄，不追價。
 - 建議先跑至少數週 Shadow/Paper Mode，記錄訊號後的最大有利／不利變動，再決定是否調整門檻。
 - 即使未來加入下單，也應使用獨立子帳戶、綁定 IP、只開 `Read + Trade`，永不開啟 `Withdraw`。

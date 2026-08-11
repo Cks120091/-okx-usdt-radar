@@ -1,11 +1,11 @@
-name: OKX hourly adaptive radar
+name: OKX 15-minute comprehensive radar
 
 on:
   push:
     branches: [main]
   workflow_dispatch:
   schedule:
-    - cron: "0 * * * *"
+    - cron: "*/15 * * * *"
 
 permissions:
   actions: read

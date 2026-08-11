@@ -12,8 +12,8 @@
   "min_quote_volume_24h": 1000000,
   "max_spread_pct": 0.25,
   "minimum_rr": 1.8,
+  "context_candidates": 30,
   "scan_at_start": true,
   "align_to_hour": true,
   "interval_seconds": 3600
 }
-

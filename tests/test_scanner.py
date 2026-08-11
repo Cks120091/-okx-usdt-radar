@@ -1,6 +1,6 @@
 import unittest
 
-from radar.models import Candle, Instrument, Signal, Ticker
+from radar.models import Candle, Instrument, MarketContext, Signal, Ticker
 from radar.scanner import MarketScanner, ScannerConfig
 from radar.strategy import AnalysisResult
 
@@ -42,6 +42,14 @@ class ManyFakeClient(FakeClient):
             Instrument(f"T{index:02d}-USDT-SWAP", "live", "USDT", "linear", 0.01)
             for index in range(12)
         ]
+
+
+class ContextFakeClient(FakeClient):
+    def get_open_interest_usd(self):
+        return {item.inst_id: 5_000_000 for item in self.instruments}
+
+    def get_market_context(self, inst_id, open_interest_usd=None):
+        return MarketContext(inst_id, open_interest_usd, 0.0001, 0.12, 0.56, 1)
 
 
 class AlwaysSignalEngine:
@@ -96,6 +104,13 @@ class ScannerTests(unittest.TestCase):
         self.assertEqual(len(report.signals), 10)
         self.assertEqual(report.signals[0].inst_id, "T11-USDT-SWAP")
         self.assertEqual(report.signals[-1].inst_id, "T02-USDT-SWAP")
+
+    def test_top_candidates_receive_public_market_context(self):
+        report = MarketScanner(ContextFakeClient(), ScannerConfig(workers=2)).scan_once()
+        self.assertEqual(report.context_target_count, 2)
+        self.assertEqual(report.context_enriched_count, 2)
+        self.assertEqual(report.context_failures, {})
+        self.assertTrue(report.watchlist[0].market_metrics["context_complete"])
 
 
 if __name__ == "__main__":

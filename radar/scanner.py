@@ -7,7 +7,7 @@ from dataclasses import dataclass
 from datetime import datetime, timezone
 from typing import Protocol
 
-from .models import Candle, Instrument, MarketState, RadarReport, Ticker
+from .models import Candle, Instrument, MarketContext, MarketState, RadarReport, Ticker
 from .strategy import AdaptiveStrategyEngine, StrategyConfig
 
 
@@ -18,6 +18,14 @@ class PublicDataClient(Protocol):
 
     def get_candles(self, inst_id: str, bar: str, limit: int = 100) -> list[Candle]: ...
 
+    def get_open_interest_usd(self) -> dict[str, float]: ...
+
+    def get_market_context(
+        self,
+        inst_id: str,
+        open_interest_usd: float | None = None,
+    ) -> MarketContext: ...
+
 
 @dataclass(frozen=True)
 class ScannerConfig:
@@ -27,6 +35,7 @@ class ScannerConfig:
     min_quote_volume_24h: float = 1_000_000.0
     max_spread_pct: float = 0.25
     minimum_rr: float = 1.8
+    context_candidates: int = 30
 
 
 class MarketScanner:
@@ -119,9 +128,7 @@ class MarketScanner:
                 message="雷達資料不完整：覆蓋率未達 100%，依安全規則禁止輸出多空與進場訊號。",
             )
 
-        exclusion_counts: Counter[str] = Counter()
-        signals = []
-        market_states: list[MarketState] = []
+        analysis_results = {}
         analysis_failures: dict[str, str] = {}
         instrument_map = {item.inst_id: item for item in instruments}
         for inst_id in target_ids:
@@ -137,12 +144,7 @@ class MarketScanner:
             except Exception as exc:
                 analysis_failures[inst_id] = f"分析引擎錯誤：{exc}"
                 continue
-            if result.market_state is not None:
-                market_states.append(result.market_state)
-            if result.signal is None:
-                exclusion_counts[result.reason] += 1
-            else:
-                signals.append(result.signal)
+            analysis_results[inst_id] = result
 
         if analysis_failures:
             return RadarReport(
@@ -160,6 +162,84 @@ class MarketScanner:
                 duration_seconds=round(time.monotonic() - started, 3),
                 message="雷達資料已取得，但部分合約分析失敗；為避免部分市場結果，禁止輸出訊號。",
             )
+
+        context_failures: dict[str, list[str]] = {}
+        context_target_ids: list[str] = []
+        context_enriched_count = 0
+        context_loader = getattr(self.client, "get_market_context", None)
+        context_applier = getattr(self.engine, "apply_market_context", None)
+        if callable(context_loader) and callable(context_applier):
+            open_interest: dict[str, float] = {}
+            oi_loader = getattr(self.client, "get_open_interest_usd", None)
+            if callable(oi_loader):
+                try:
+                    open_interest = oi_loader()
+                except Exception as exc:
+                    context_failures["_OPEN_INTEREST_"] = [str(exc)]
+            ranked_results = [
+                (inst_id, result)
+                for inst_id, result in analysis_results.items()
+                if result.market_state is not None
+                and result.market_state.status != "FILTERED"
+                and result.market_state.regime != "DISORDER"
+                and result.market_state.direction != "NEUTRAL"
+                and result.market_state.readiness_score >= 50.0
+            ]
+            ranked_results.sort(
+                key=lambda item: (
+                    item[1].signal is not None,
+                    item[1].market_state.readiness_score,
+                    item[1].market_state.quote_volume_24h,
+                ),
+                reverse=True,
+            )
+            context_target_ids = [
+                inst_id
+                for inst_id, _ in ranked_results[: max(0, self.config.context_candidates)]
+            ]
+            contexts: dict[str, MarketContext] = {}
+            with ThreadPoolExecutor(max_workers=max(1, min(self.config.workers, 8))) as executor:
+                future_map = {
+                    executor.submit(context_loader, inst_id, open_interest.get(inst_id)): inst_id
+                    for inst_id in context_target_ids
+                }
+                for future in as_completed(future_map):
+                    inst_id = future_map[future]
+                    try:
+                        context = future.result()
+                        contexts[inst_id] = context
+                        if context.complete:
+                            context_enriched_count += 1
+                        if context.failures:
+                            context_failures[inst_id] = context.failures
+                    except Exception as exc:
+                        context_failures[inst_id] = [str(exc)]
+
+            btc_result = analysis_results.get("BTC-USDT-SWAP")
+            btc_bias = (
+                btc_result.market_state.direction
+                if btc_result is not None
+                and btc_result.market_state is not None
+                and btc_result.market_state.regime in ("TREND", "BREAKOUT", "BREAKOUT_READY")
+                else "NEUTRAL"
+            )
+            for inst_id, context in contexts.items():
+                analysis_results[inst_id] = context_applier(
+                    analysis_results[inst_id],
+                    context,
+                    btc_bias,
+                )
+
+        exclusion_counts: Counter[str] = Counter()
+        signals = []
+        market_states: list[MarketState] = []
+        for result in analysis_results.values():
+            if result.market_state is not None:
+                market_states.append(result.market_state)
+            if result.signal is None:
+                exclusion_counts[result.reason] += 1
+            else:
+                signals.append(result.signal)
 
         signals.sort(key=lambda item: (item.score, item.quote_volume_24h), reverse=True)
         signals = signals[: min(max(self.config.max_signals, 0), 10)]
@@ -201,6 +281,9 @@ class MarketScanner:
             market_regime_counts=dict(regime_counts.most_common()),
             watchlist=watchlist,
             market_map=market_states,
+            context_target_count=len(context_target_ids),
+            context_enriched_count=context_enriched_count,
+            context_failures=dict(sorted(context_failures.items())),
         )
 
     def _fetch_bundle(self, inst_id: str) -> dict[str, list[Candle]]:

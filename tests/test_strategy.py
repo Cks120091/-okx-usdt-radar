@@ -1,6 +1,6 @@
 import unittest
 
-from radar.models import Candle, Instrument, Ticker
+from radar.models import Candle, Instrument, MarketContext, Ticker
 from radar.strategy import AdaptiveStrategyEngine, StrategyConfig, _format_price
 
 
@@ -56,6 +56,28 @@ class StrategyTests(unittest.TestCase):
         self.assertIsNotNone(result.market_state)
         self.assertEqual(result.market_state.status, "FILTERED")
         self.assertTrue(result.market_state.missing_conditions)
+
+    def test_live_market_context_can_confirm_or_downgrade_signal(self):
+        candles_4h = trend_candles(80, 0.4)
+        candles_1h = trend_candles(100, 0.18, breakout=True)
+        candles_15m = trend_candles(110, 0.09, accelerate=True)
+        ticker = Ticker("TEST-USDT-SWAP", candles_15m[-1].close, candles_15m[-1].close - 0.03, candles_15m[-1].close + 0.03, 1)
+        engine = AdaptiveStrategyEngine(StrategyConfig(min_quote_volume_24h=1_000_000))
+        technical = engine.analyze(self.instrument, ticker, candles_4h, candles_1h, candles_15m)
+        confirmed = engine.apply_market_context(
+            technical,
+            MarketContext("TEST-USDT-SWAP", 20_000_000, 0.0001, 0.20, 0.62, 2),
+            "LONG",
+        )
+        self.assertIsNotNone(confirmed.signal)
+        self.assertIn("derivatives", confirmed.signal.factor_scores)
+        opposed = engine.apply_market_context(
+            technical,
+            MarketContext("TEST-USDT-SWAP", 20_000_000, 0.0001, -0.30, 0.30, 2),
+            "LONG",
+        )
+        self.assertIsNone(opposed.signal)
+        self.assertEqual(opposed.reason, "market_context_not_confirmed")
 
     def test_unconfirmed_or_short_history_is_rejected(self):
         data = trend_candles(100, 0.1, count=59)

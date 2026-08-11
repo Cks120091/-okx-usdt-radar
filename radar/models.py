@@ -42,6 +42,28 @@ class Ticker:
         return (self.ask - self.bid) / mid * 100.0
 
 
+@dataclass(frozen=True)
+class MarketContext:
+    inst_id: str
+    open_interest_usd: float | None
+    funding_rate: float | None
+    order_book_imbalance: float | None
+    taker_buy_ratio: float | None
+    sampled_at: int
+    failures: list[str] = field(default_factory=list)
+
+    @property
+    def complete(self) -> bool:
+        return all(
+            value is not None
+            for value in (
+                self.funding_rate,
+                self.order_book_imbalance,
+                self.taker_buy_ratio,
+            )
+        )
+
+
 @dataclass
 class Signal:
     inst_id: str
@@ -61,6 +83,8 @@ class Signal:
     closed_candle_ts: int
     regime: str
     notes: list[str] = field(default_factory=list)
+    factor_scores: dict[str, float] = field(default_factory=dict)
+    market_metrics: dict[str, Any] = field(default_factory=dict)
 
     def to_dict(self) -> dict[str, Any]:
         return asdict(self)
@@ -78,6 +102,9 @@ class MarketState:
     spread_pct: float
     quote_volume_24h: float
     closed_candle_ts: int
+    passed_conditions: list[str] = field(default_factory=list)
+    factor_scores: dict[str, float] = field(default_factory=dict)
+    market_metrics: dict[str, Any] = field(default_factory=dict)
 
     def to_dict(self) -> dict[str, Any]:
         return asdict(self)
@@ -101,6 +128,9 @@ class RadarReport:
     market_regime_counts: dict[str, int] = field(default_factory=dict)
     watchlist: list[MarketState] = field(default_factory=list)
     market_map: list[MarketState] = field(default_factory=list)
+    context_target_count: int = 0
+    context_enriched_count: int = 0
+    context_failures: dict[str, list[str]] = field(default_factory=dict)
 
     def to_dict(self) -> dict[str, Any]:
         payload = asdict(self)

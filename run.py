@@ -28,6 +28,7 @@ def build_runtime(config: AppConfig) -> RadarRuntime:
             min_quote_volume_24h=config.min_quote_volume_24h,
             max_spread_pct=config.max_spread_pct,
             minimum_rr=config.minimum_rr,
+            context_candidates=config.context_candidates,
         ),
     )
     return RadarRuntime(scanner, config)
@@ -59,4 +60,3 @@ def main() -> int:
 
 if __name__ == "__main__":
     raise SystemExit(main())
-

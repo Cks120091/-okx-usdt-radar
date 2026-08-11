@@ -21,6 +21,7 @@ class AppConfig:
     min_quote_volume_24h: float = 1_000_000.0
     max_spread_pct: float = 0.25
     minimum_rr: float = 1.8
+    context_candidates: int = 30
     scan_at_start: bool = True
     align_to_hour: bool = True
     interval_seconds: int = 3600
@@ -42,6 +43,7 @@ class AppConfig:
             "RADAR_MIN_QUOTE_VOLUME": ("min_quote_volume_24h", float),
             "RADAR_MAX_SPREAD_PCT": ("max_spread_pct", float),
             "RADAR_MIN_RR": ("minimum_rr", float),
+            "RADAR_CONTEXT_CANDIDATES": ("context_candidates", int),
             "RADAR_SCAN_AT_START": ("scan_at_start", _bool),
             "RADAR_ALIGN_TO_HOUR": ("align_to_hour", _bool),
             "RADAR_INTERVAL_SECONDS": ("interval_seconds", int),
@@ -56,6 +58,8 @@ class AppConfig:
             raise ValueError("max_signals must be between 0 and 10")
         if config.interval_seconds < 60:
             raise ValueError("interval_seconds must be at least 60")
+        if not 0 <= config.context_candidates <= 100:
+            raise ValueError("context_candidates must be between 0 and 100")
         return config
 
 
@@ -68,4 +72,3 @@ def _bool(value: str | bool) -> bool:
     if normalized in {"0", "false", "no", "off"}:
         return False
     raise ValueError(f"invalid boolean: {value}")
-

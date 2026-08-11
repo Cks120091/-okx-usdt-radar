@@ -1,7 +1,7 @@
 import math
 import unittest
 
-from radar.indicators import adx, atr, ema_series, macd, rsi
+from radar.indicators import adx, atr, ema_series, features, macd, rsi
 from radar.models import Candle
 
 
@@ -34,7 +34,14 @@ class IndicatorTests(unittest.TestCase):
         line, signal, hist, previous = macd(values)
         self.assertTrue(all(math.isfinite(item) for item in (line, signal, hist, previous)))
 
+    def test_comprehensive_features_are_finite(self):
+        values = features(rising_candles())
+        self.assertTrue(math.isfinite(values.vwap20))
+        self.assertTrue(math.isfinite(values.bollinger_width_pct))
+        self.assertGreaterEqual(values.directional_volume_ratio, 0)
+        self.assertLessEqual(values.directional_volume_ratio, 1)
+        self.assertGreater(values.atr_pct, 0)
+
 
 if __name__ == "__main__":
     unittest.main()
-

@@ -10,7 +10,7 @@ from urllib.error import HTTPError, URLError
 from urllib.parse import urlencode
 from urllib.request import Request, urlopen
 
-from .models import Candle, Instrument, Ticker
+from .models import Candle, Instrument, MarketContext, Ticker
 
 
 class OKXAPIError(RuntimeError):
@@ -154,6 +154,74 @@ class OKXPublicClient:
         candles.sort(key=lambda item: item.ts)
         return candles
 
+    def get_open_interest_usd(self) -> dict[str, float]:
+        data = self._get("/api/v5/public/open-interest", {"instType": "SWAP"})
+        return {
+            str(row.get("instId")): _float(row.get("oiUsd"))
+            for row in data
+            if str(row.get("instId", "")).endswith("-USDT-SWAP")
+        }
+
+    def get_market_context(
+        self,
+        inst_id: str,
+        open_interest_usd: float | None = None,
+    ) -> MarketContext:
+        failures: list[str] = []
+        sampled_at = 0
+        funding_rate: float | None = None
+        order_book_imbalance: float | None = None
+        taker_buy_ratio: float | None = None
+
+        try:
+            rows = self._get("/api/v5/public/funding-rate", {"instId": inst_id})
+            if not rows:
+                raise OKXAPIError("empty funding-rate response")
+            funding_rate = _float_or_none(rows[0].get("fundingRate"))
+            sampled_at = max(sampled_at, _int(rows[0].get("ts")))
+            if funding_rate is None:
+                raise OKXAPIError("missing fundingRate")
+        except Exception as exc:
+            failures.append(f"funding_rate: {exc}")
+
+        try:
+            rows = self._get("/api/v5/market/books", {"instId": inst_id, "sz": 20})
+            if not rows:
+                raise OKXAPIError("empty order-book response")
+            bids = rows[0].get("bids", [])
+            asks = rows[0].get("asks", [])
+            bid_depth = _weighted_depth(bids)
+            ask_depth = _weighted_depth(asks)
+            total_depth = bid_depth + ask_depth
+            if total_depth <= 0:
+                raise OKXAPIError("order-book depth is zero")
+            order_book_imbalance = (bid_depth - ask_depth) / total_depth
+            sampled_at = max(sampled_at, _int(rows[0].get("ts")))
+        except Exception as exc:
+            failures.append(f"order_book: {exc}")
+
+        try:
+            rows = self._get("/api/v5/market/trades", {"instId": inst_id, "limit": 100})
+            buy_size = sum(_float(row.get("sz")) for row in rows if row.get("side") == "buy")
+            sell_size = sum(_float(row.get("sz")) for row in rows if row.get("side") == "sell")
+            total_size = buy_size + sell_size
+            if total_size <= 0:
+                raise OKXAPIError("recent taker volume is zero")
+            taker_buy_ratio = buy_size / total_size
+            sampled_at = max(sampled_at, max((_int(row.get("ts")) for row in rows), default=0))
+        except Exception as exc:
+            failures.append(f"taker_trades: {exc}")
+
+        return MarketContext(
+            inst_id=inst_id,
+            open_interest_usd=open_interest_usd,
+            funding_rate=funding_rate,
+            order_book_imbalance=order_book_imbalance,
+            taker_buy_ratio=taker_buy_ratio,
+            sampled_at=sampled_at,
+            failures=failures,
+        )
+
 
 def _float(value: Any, default: float = 0.0) -> float:
     try:
@@ -168,3 +236,18 @@ def _int(value: Any, default: int = 0) -> int:
     except (TypeError, ValueError):
         return default
 
+
+def _float_or_none(value: Any) -> float | None:
+    try:
+        return float(value)
+    except (TypeError, ValueError):
+        return None
+
+
+def _weighted_depth(levels: list[Any]) -> float:
+    total = 0.0
+    for index, level in enumerate(levels):
+        if not isinstance(level, list) or len(level) < 2:
+            continue
+        total += _float(level[1]) / (1.0 + (index * 0.12))
+    return total

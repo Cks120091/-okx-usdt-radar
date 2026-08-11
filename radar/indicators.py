@@ -127,6 +127,8 @@ class TimeframeFeatures:
     sma10: float
     sma20: float
     rsi14: float
+    macd_line: float
+    macd_signal: float
     macd_hist: float
     macd_prev_hist: float
     atr14: float
@@ -138,6 +140,12 @@ class TimeframeFeatures:
     recent_low: float
     extension_atr: float
     compression_ratio: float
+    vwap20: float
+    bollinger_width_pct: float
+    directional_volume_ratio: float
+    lower_wick_ratio: float
+    upper_wick_ratio: float
+    atr_pct: float
 
 
 def features(candles: list[Candle]) -> TimeframeFeatures:
@@ -148,7 +156,7 @@ def features(candles: list[Candle]) -> TimeframeFeatures:
     ema21_values = ema_series(closes, 21)
     ema55_values = ema_series(closes, 55)
     current_atr = atr(candles, 14)
-    _, _, histogram, previous_histogram = macd(closes)
+    macd_line, macd_signal, histogram, previous_histogram = macd(closes)
     prior_high20 = max(item.high for item in candles[-21:-1])
     prior_low20 = min(item.low for item in candles[-21:-1])
     recent_high = max(item.high for item in candles[-7:-1])
@@ -161,6 +169,39 @@ def features(candles: list[Candle]) -> TimeframeFeatures:
     compression = recent_range / baseline_range if baseline_range > 0 else 1.0
     slope = (ema21_values[-1] - ema21_values[-6]) / current_atr if current_atr > 0 else 0.0
     extension = abs(closes[-1] - ema21_values[-1]) / current_atr if current_atr > 0 else float("inf")
+    recent = candles[-20:]
+    recent_volumes = volumes[-20:]
+    typical_prices = [(item.high + item.low + item.close) / 3.0 for item in recent]
+    volume_sum = sum(recent_volumes)
+    vwap20 = (
+        sum(price * volume for price, volume in zip(typical_prices, recent_volumes)) / volume_sum
+        if volume_sum > 0
+        else closes[-1]
+    )
+    mean20 = sma(closes, 20)
+    variance20 = sum((value - mean20) ** 2 for value in closes[-20:]) / 20.0
+    bollinger_width = (4.0 * math.sqrt(variance20) / mean20 * 100.0) if mean20 > 0 else 0.0
+    signed_buy_volume = 0.0
+    signed_total_volume = 0.0
+    for candle, volume in zip(candles[-12:], volumes[-12:]):
+        signed_total_volume += volume
+        if candle.close > candle.open:
+            signed_buy_volume += volume
+        elif candle.close == candle.open:
+            signed_buy_volume += volume * 0.5
+    directional_volume_ratio = signed_buy_volume / signed_total_volume if signed_total_volume > 0 else 0.5
+    latest = candles[-1]
+    latest_range = max(latest.high - latest.low, 0.0)
+    lower_wick_ratio = (
+        (min(latest.open, latest.close) - latest.low) / latest_range
+        if latest_range > 0
+        else 0.0
+    )
+    upper_wick_ratio = (
+        (latest.high - max(latest.open, latest.close)) / latest_range
+        if latest_range > 0
+        else 0.0
+    )
     return TimeframeFeatures(
         close=closes[-1],
         ema21=ema21_values[-1],
@@ -170,6 +211,8 @@ def features(candles: list[Candle]) -> TimeframeFeatures:
         sma10=sma(closes, 10),
         sma20=sma(closes, 20),
         rsi14=rsi(closes, 14),
+        macd_line=macd_line,
+        macd_signal=macd_signal,
         macd_hist=histogram,
         macd_prev_hist=previous_histogram,
         atr14=current_atr,
@@ -181,4 +224,10 @@ def features(candles: list[Candle]) -> TimeframeFeatures:
         recent_low=recent_low,
         extension_atr=extension,
         compression_ratio=compression,
+        vwap20=vwap20,
+        bollinger_width_pct=bollinger_width,
+        directional_volume_ratio=directional_volume_ratio,
+        lower_wick_ratio=lower_wick_ratio,
+        upper_wick_ratio=upper_wick_ratio,
+        atr_pct=(current_atr / closes[-1] * 100.0) if closes[-1] > 0 else float("inf"),
     )
