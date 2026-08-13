@@ -1,14 +1,15 @@
 from __future__ import annotations
 
 import time
+import uuid
 from collections import Counter
 from concurrent.futures import ThreadPoolExecutor, as_completed
-from dataclasses import dataclass
+from dataclasses import dataclass, field, replace
 from datetime import datetime, timezone
-from typing import Protocol
+from typing import Callable, Protocol
 
 from .models import Candle, Instrument, MarketContext, MarketState, RadarReport, Signal, Ticker
-from .strategy import AdaptiveStrategyEngine, StrategyConfig
+from .strategy import AdaptiveStrategyEngine, AnalysisResult, StrategyConfig
 
 
 class PublicDataClient(Protocol):
@@ -29,18 +30,29 @@ class PublicDataClient(Protocol):
 
 @dataclass(frozen=True)
 class ScannerConfig:
-    max_signals: int = 10
+    max_signals: int = 20
+    max_watchlist: int = 20
     workers: int = 8
     candle_limit: int = 100
+    candle_limit_4h: int = 200
+    candle_limit_1h: int = 240
+    candle_limit_15m: int = 200
+    candle_limit_5m: int = 120
     min_quote_volume_24h: float = 5_000_000.0
     max_spread_pct: float = 0.10
     min_open_interest_usd: float = 3_000_000.0
-    require_micro_volume_anomaly: bool = True
+    require_micro_volume_anomaly: bool = False
     minimum_rr: float = 1.8
-    context_candidates: int = 30
+    context_candidates: int = 100
     estimated_taker_fee_pct: float = 0.05
     max_execution_cost_to_risk_pct: float = 12.0
     max_entry_extension_atr: float = 0.80
+    severe_entry_extension_atr: float = 1.80
+    max_slippage_pct: float = 0.15
+    previous_open_interest_usd: dict[str, float] = field(default_factory=dict)
+
+
+ProgressCallback = Callable[[str, int | None, int | None, str], None]
 
 
 class MarketScanner:
@@ -49,6 +61,8 @@ class MarketScanner:
     def __init__(self, client: PublicDataClient, config: ScannerConfig | None = None):
         self.client = client
         self.config = config or ScannerConfig()
+        self._previous_open_interest_usd = dict(self.config.previous_open_interest_usd)
+        self._signal_history: dict[tuple[str, str], dict[str, str]] = {}
         self.engine = AdaptiveStrategyEngine(
             StrategyConfig(
                 min_quote_volume_24h=self.config.min_quote_volume_24h,
@@ -59,19 +73,30 @@ class MarketScanner:
                 estimated_taker_fee_pct=self.config.estimated_taker_fee_pct,
                 max_execution_cost_to_risk_pct=self.config.max_execution_cost_to_risk_pct,
                 max_entry_extension_atr=self.config.max_entry_extension_atr,
+                severe_entry_extension_atr=self.config.severe_entry_extension_atr,
+                max_slippage_pct=self.config.max_slippage_pct,
             )
         )
 
-    def scan_once(self) -> RadarReport:
+    def scan_once(
+        self,
+        progress: ProgressCallback | None = None,
+        scan_id: str | None = None,
+    ) -> RadarReport:
         started = time.monotonic()
         now = datetime.now(timezone.utc).isoformat()
+        scan_id = scan_id or str(uuid.uuid4())
+        metrics_reset = getattr(self.client, "reset_metrics", None)
+        if callable(metrics_reset):
+            metrics_reset()
+        self._progress(progress, "INSTRUMENTS", 0, None, "正在取得 OKX live USDT 永續合約")
         scope = "OKX state=live、USDT 結算、線性永續合約"
         try:
             instruments = self.client.get_usdt_swap_instruments()
         except Exception as exc:
-            return self._fatal_report(now, scope, started, f"無法取得合約母清單：{exc}")
+            return self._fatal_report(now, scope, started, f"無法取得合約母清單：{exc}", scan_id)
         if not instruments:
-            return self._fatal_report(now, scope, started, "OKX 回傳的 live USDT 永續母清單為空。")
+            return self._fatal_report(now, scope, started, "OKX 回傳的 live USDT 永續母清單為空。", scan_id)
 
         target_ids = [item.inst_id for item in instruments]
         try:
@@ -91,6 +116,12 @@ class MarketScanner:
                 exclusion_counts={},
                 duration_seconds=round(time.monotonic() - started, 3),
                 message="雷達資料不完整：無法取得全市場 ticker，因此禁止輸出交易訊號。",
+                scan_id=scan_id,
+                scan_started_at=now,
+                completed_at=datetime.now(timezone.utc).isoformat(),
+                runtime_status="ERROR",
+                actionable=False,
+                max_signals=self.config.max_signals,
             )
 
         failures: dict[str, str] = {}
@@ -102,6 +133,14 @@ class MarketScanner:
             else:
                 eligible.append(instrument)
 
+        self._progress(
+            progress,
+            "CANDLES",
+            0,
+            len(eligible),
+            "正在取得 4H／1H／15m 已收盤 K 線",
+        )
+        completed_bundles = 0
         with ThreadPoolExecutor(max_workers=max(1, self.config.workers)) as executor:
             future_map = {
                 executor.submit(self._fetch_bundle, instrument.inst_id): instrument.inst_id
@@ -113,6 +152,14 @@ class MarketScanner:
                     bundles[inst_id] = future.result()
                 except Exception as exc:
                     failures[inst_id] = str(exc)
+                completed_bundles += 1
+                self._progress(
+                    progress,
+                    "CANDLES",
+                    completed_bundles,
+                    len(eligible),
+                    "正在取得全市場多時間框架資料",
+                )
 
         fetched_count = len(instruments) - len(failures)
         coverage = round((fetched_count / len(instruments)) * 100.0, 4)
@@ -136,12 +183,19 @@ class MarketScanner:
                 exclusion_counts={},
                 duration_seconds=round(time.monotonic() - started, 3),
                 message="雷達資料不完整：覆蓋率未達 100%，依安全規則禁止輸出多空與進場訊號。",
+                scan_id=scan_id,
+                scan_started_at=now,
+                completed_at=datetime.now(timezone.utc).isoformat(),
+                runtime_status="ERROR",
+                actionable=False,
+                max_signals=self.config.max_signals,
             )
 
         analysis_results = {}
         analysis_failures: dict[str, str] = {}
         instrument_map = {item.inst_id: item for item in instruments}
-        for inst_id in target_ids:
+        self._progress(progress, "ANALYSIS", 0, len(target_ids), "正在融合市場證據")
+        for index, inst_id in enumerate(target_ids, 1):
             bundle = bundles[inst_id]
             try:
                 result = self.engine.analyze(
@@ -155,6 +209,13 @@ class MarketScanner:
                 analysis_failures[inst_id] = f"分析引擎錯誤：{exc}"
                 continue
             analysis_results[inst_id] = result
+            self._progress(
+                progress,
+                "ANALYSIS",
+                index,
+                len(target_ids),
+                "正在建立 4H Bias、1H Setup 與 15m Trigger",
+            )
 
         if analysis_failures:
             return RadarReport(
@@ -171,6 +232,12 @@ class MarketScanner:
                 exclusion_counts={},
                 duration_seconds=round(time.monotonic() - started, 3),
                 message="雷達資料已取得，但部分合約分析失敗；為避免部分市場結果，禁止輸出訊號。",
+                scan_id=scan_id,
+                scan_started_at=now,
+                completed_at=datetime.now(timezone.utc).isoformat(),
+                runtime_status="ERROR",
+                actionable=False,
+                max_signals=self.config.max_signals,
             )
 
         market_bias = self._calculate_market_bias(analysis_results)
@@ -181,12 +248,109 @@ class MarketScanner:
         context_applier = getattr(self.engine, "apply_market_context", None)
         if callable(context_loader) and callable(context_applier):
             open_interest: dict[str, float] = {}
+            open_interest_error: str | None = None
             oi_loader = getattr(self.client, "get_open_interest_usd", None)
             if callable(oi_loader):
                 try:
                     open_interest = oi_loader()
                 except Exception as exc:
-                    context_failures["_OPEN_INTEREST_"] = [str(exc)]
+                    open_interest_error = str(exc)
+            else:
+                open_interest_error = "client does not provide the bulk open-interest endpoint"
+            if not open_interest:
+                open_interest_error = open_interest_error or "OKX 回傳的 Open Interest 清單為空"
+                context_failures["_OPEN_INTEREST_"] = [open_interest_error]
+                completed_at = datetime.now(timezone.utc).isoformat()
+                states = [
+                    result.market_state
+                    for result in analysis_results.values()
+                    if result.market_state is not None
+                ]
+                states.sort(key=lambda item: item.inst_id)
+                metrics_loader = getattr(self.client, "metrics_snapshot", None)
+                api_metrics = metrics_loader() if callable(metrics_loader) else {}
+                return RadarReport(
+                    status="DATA_INCOMPLETE",
+                    generated_at=completed_at,
+                    scope=scope,
+                    target_count=len(instruments),
+                    fetched_count=fetched_count,
+                    analyzable_count=len(states),
+                    coverage_pct=100.0,
+                    target_instruments=target_ids,
+                    failed_instruments={"_OPEN_INTEREST_": open_interest_error},
+                    signals=[],
+                    exclusion_counts={},
+                    duration_seconds=round(time.monotonic() - started, 3),
+                    message=(
+                        "雷達深度資料不完整：無法可靠取得 Open Interest，"
+                        "依安全規則禁止輸出進場訊號。"
+                    ),
+                    market_regime_counts=dict(Counter(item.regime for item in states)),
+                    market_map=states,
+                    context_failures=context_failures,
+                    market_bias=market_bias,
+                    scan_id=scan_id,
+                    scan_started_at=now,
+                    completed_at=completed_at,
+                    runtime_status="ERROR",
+                    actionable=False,
+                    max_signals=min(max(self.config.max_signals, 0), 20),
+                    api_metrics=api_metrics,
+                )
+            if open_interest:
+                for inst_id, result in list(analysis_results.items()):
+                    state = result.market_state
+                    if state is None:
+                        continue
+                    current_oi = open_interest.get(inst_id)
+                    oi_change_pct = self._open_interest_change(inst_id, current_oi)
+                    metrics = dict(state.market_metrics)
+                    metrics.update(
+                        {
+                            "open_interest_usd": current_oi,
+                            "open_interest_change_pct": oi_change_pct,
+                        }
+                    )
+                    filtered = (
+                        self.config.min_open_interest_usd > 0
+                        and (
+                            current_oi is None
+                            or current_oi < self.config.min_open_interest_usd
+                        )
+                    )
+                    updated_state = replace(
+                        state,
+                        status="FILTERED" if filtered else state.status,
+                        readiness_score=min(state.readiness_score, 49.0) if filtered else state.readiness_score,
+                        missing_conditions=(
+                            [
+                                "無法取得持倉量，依流動性安全規則淘汰"
+                                if current_oi is None
+                                else f"持倉量需達 {self.config.min_open_interest_usd:,.0f} USD",
+                                *state.missing_conditions,
+                            ][:6]
+                            if filtered
+                            else state.missing_conditions
+                        ),
+                        market_metrics=metrics,
+                    )
+                    updated_signal = (
+                        replace(result.signal, market_metrics=metrics)
+                        if result.signal is not None
+                        else None
+                    )
+                    analysis_results[inst_id] = replace(
+                        result,
+                        signal=updated_signal,
+                        reason="open_interest_too_low" if filtered else result.reason,
+                        market_state=updated_state,
+                        candidate_signal=(
+                            replace(result.candidate_signal, market_metrics=metrics)
+                            if result.candidate_signal is not None
+                            else None
+                        ),
+                    )
             ranked_results = [
                 (inst_id, result)
                 for inst_id, result in analysis_results.items()
@@ -211,16 +375,34 @@ class MarketScanner:
             contexts: dict[str, MarketContext] = {}
             micro_candles: dict[str, list[Candle]] = {}
 
-            def load_candidate(inst_id: str) -> tuple[MarketContext, list[Candle], str | None]:
+            def load_candidate(inst_id: str) -> tuple[MarketContext, list[Candle]]:
+                candles_5m = self.client.get_candles(
+                    inst_id,
+                    "5m",
+                    self.config.candle_limit_5m,
+                )
+                if len(candles_5m) < 60:
+                    raise RuntimeError("5m 已收盤 K 線不足 60 根")
                 context = context_loader(inst_id, open_interest.get(inst_id))
-                try:
-                    candles_5m = self.client.get_candles(inst_id, "5m", self.config.candle_limit)
-                    if len(candles_5m) < 60:
-                        return context, candles_5m, "5m K 線不足 60 根"
-                    return context, candles_5m, None
-                except Exception as exc:
-                    return context, [], f"5m K 線取得失敗：{exc}"
+                return (
+                    replace(
+                        context,
+                        open_interest_change_pct=self._open_interest_change(
+                            inst_id,
+                            context.open_interest_usd,
+                        ),
+                    ),
+                    candles_5m,
+                )
 
+            self._progress(
+                progress,
+                "CONTEXT",
+                0,
+                len(context_target_ids),
+                "正在取得 5m、Funding、Taker Flow 與 Order Book",
+            )
+            completed_context = 0
             with ThreadPoolExecutor(max_workers=max(1, min(self.config.workers, 8))) as executor:
                 future_map = {
                     executor.submit(load_candidate, inst_id): inst_id
@@ -229,18 +411,24 @@ class MarketScanner:
                 for future in as_completed(future_map):
                     inst_id = future_map[future]
                     try:
-                        context, candles_5m, micro_error = future.result()
+                        context, candles_5m = future.result()
                         contexts[inst_id] = context
                         micro_candles[inst_id] = candles_5m
-                        if context.complete and context.execution_quality_complete and not micro_error:
+                        if context.complete and context.execution_quality_complete:
                             context_enriched_count += 1
                         candidate_failures = list(context.failures)
-                        if micro_error:
-                            candidate_failures.append(micro_error)
                         if candidate_failures:
                             context_failures[inst_id] = candidate_failures
                     except Exception as exc:
                         context_failures[inst_id] = [str(exc)]
+                    completed_context += 1
+                    self._progress(
+                        progress,
+                        "CONTEXT",
+                        completed_context,
+                        len(context_target_ids),
+                        "正在取得深度即時市場資料",
+                    )
 
             btc_result = analysis_results.get("BTC-USDT-SWAP")
             btc_bias = (
@@ -264,22 +452,53 @@ class MarketScanner:
                         f"綜合候選判斷失敗：{exc}"
                     )
 
+            for inst_id in context_target_ids:
+                if inst_id in contexts and inst_id in micro_candles:
+                    continue
+                failed_result = analysis_results[inst_id]
+                state = failed_result.market_state
+                analysis_results[inst_id] = replace(
+                    failed_result,
+                    signal=None,
+                    reason="market_context_unavailable",
+                    market_state=(
+                        replace(
+                            state,
+                            status="FILTERED",
+                            missing_conditions=_unique_strings(
+                                [
+                                    "5m／Funding／Order Book／Taker Flow 未完整取得",
+                                    *state.missing_conditions,
+                                ]
+                            )[:8],
+                        )
+                        if state is not None
+                        else None
+                    ),
+                )
+
+            if open_interest:
+                self._previous_open_interest_usd = dict(open_interest)
+
         exclusion_counts: Counter[str] = Counter()
         signals = []
         market_states: list[MarketState] = []
+        context_required = callable(context_loader) and callable(context_applier)
         for result in analysis_results.values():
             if result.market_state is not None:
                 market_states.append(result.market_state)
             if result.signal is None:
                 exclusion_counts[result.reason] += 1
-            elif self._passes_output_liquidity(result.signal):
+            elif self._passes_output_liquidity(result.signal, context_required):
                 signals.append(result.signal)
             else:
                 exclusion_counts["output_liquidity_gate"] += 1
 
         signals.sort(key=lambda item: (item.score, item.quote_volume_24h), reverse=True)
-        signals = signals[: min(max(self.config.max_signals, 0), 10)]
-        early_count = sum(item.signal_stage == "EARLY" for item in signals)
+        signals = signals[: min(max(self.config.max_signals, 0), 20)]
+        completed_at = datetime.now(timezone.utc).isoformat()
+        signals = self._apply_lifecycle(signals, completed_at)
+        early_count = sum(item.signal_stage == "EARLY_SIGNAL" for item in signals)
         confirmed_count = len(signals) - early_count
         watchlist = [
             item
@@ -288,24 +507,27 @@ class MarketScanner:
             and item.regime != "DISORDER"
             and item.direction != "NEUTRAL"
             and item.readiness_score >= 50.0
-            and self._passes_output_liquidity(item)
+            and self._passes_output_liquidity(item, False)
         ]
         watchlist.sort(
             key=lambda item: (item.readiness_score, item.quote_volume_24h),
             reverse=True,
         )
-        watchlist = watchlist[:10]
+        watchlist = watchlist[: max(0, self.config.max_watchlist)]
         market_states.sort(key=lambda item: item.inst_id)
         regime_counts = Counter(item.regime for item in market_states)
         status = "SIGNALS_FOUND" if signals else "NO_QUALIFIED_SIGNAL"
         message = (
-            f"完整掃描完成：{early_count} 個提早訊號、{confirmed_count} 個完整確認，另列出 {len(watchlist)} 個接近觸發候選。"
+            f"完整掃描完成：{early_count} 個早期訊號、{confirmed_count} 個完整確認，另列出 {len(watchlist)} 個接近觸發候選。"
             if signals
             else f"完整掃描完成：本輪 0 個進場訊號；另列出 {len(watchlist)} 個接近觸發候選，不代表可以直接進場。"
         )
+        self._progress(progress, "FINALIZING", 1, 1, "正在建立最新雷達結果")
+        metrics_loader = getattr(self.client, "metrics_snapshot", None)
+        api_metrics = metrics_loader() if callable(metrics_loader) else {}
         return RadarReport(
             status=status,
-            generated_at=now,
+            generated_at=completed_at,
             scope=scope,
             target_count=len(instruments),
             fetched_count=fetched_count,
@@ -324,9 +546,20 @@ class MarketScanner:
             context_enriched_count=context_enriched_count,
             context_failures=dict(sorted(context_failures.items())),
             market_bias=market_bias,
+            scan_id=scan_id,
+            scan_started_at=now,
+            completed_at=completed_at,
+            runtime_status="FRESH",
+            actionable=True,
+            max_signals=min(max(self.config.max_signals, 0), 20),
+            api_metrics=api_metrics,
         )
 
-    def _passes_output_liquidity(self, item: Signal | MarketState) -> bool:
+    def _passes_output_liquidity(
+        self,
+        item: Signal | MarketState,
+        require_context: bool = False,
+    ) -> bool:
         if item.quote_volume_24h < self.config.min_quote_volume_24h:
             return False
         if item.spread_pct > self.config.max_spread_pct:
@@ -341,10 +574,17 @@ class MarketScanner:
             )
         if not open_interest_ok:
             return False
-        return (
-            not self.config.require_micro_volume_anomaly
-            or item.market_metrics.get("micro_volume_anomaly") is True
-        )
+        if require_context and item.market_metrics.get("context_complete") is not True:
+            return False
+        if isinstance(item, Signal):
+            if not item.actionable:
+                return False
+            if any(
+                check.get("hard", True) and not check.get("passed", False)
+                for check in item.safety_checks
+            ):
+                return False
+        return True
 
     def _calculate_market_bias(self, results: dict[str, object]) -> dict[str, object]:
         states = [
@@ -423,16 +663,103 @@ class MarketScanner:
         output: dict[str, list[Candle]] = {}
         for bar in self.bars:
             try:
-                output[bar] = self.client.get_candles(inst_id, bar, self.config.candle_limit)
+                output[bar] = self.client.get_candles(inst_id, bar, self._bar_limit(bar))
             except Exception as exc:
                 raise RuntimeError(f"{bar} K 線取得失敗：{exc}") from exc
         return output
 
+    def _bar_limit(self, bar: str) -> int:
+        return {
+            "4H": self.config.candle_limit_4h,
+            "1H": self.config.candle_limit_1h,
+            "15m": self.config.candle_limit_15m,
+            "5m": self.config.candle_limit_5m,
+        }.get(bar, self.config.candle_limit)
+
+    def _open_interest_change(
+        self,
+        inst_id: str,
+        current_open_interest_usd: float | None,
+    ) -> float | None:
+        previous = self._previous_open_interest_usd.get(inst_id)
+        if (
+            current_open_interest_usd is None
+            or previous is None
+            or previous <= 0
+        ):
+            return None
+        return round(
+            (current_open_interest_usd - previous) / previous * 100.0,
+            3,
+        )
+
+    def _apply_lifecycle(
+        self,
+        signals: list[Signal],
+        completed_at: str,
+    ) -> list[Signal]:
+        stage_order = {"EARLY_SIGNAL": 1, "CONFIRMED": 2}
+        output: list[Signal] = []
+        for signal in signals:
+            key = (signal.inst_id, signal.direction)
+            previous = self._signal_history.get(key)
+            previous_stage = previous.get("stage") if previous else None
+            if previous_stage is None:
+                transition = "NEW"
+                first_seen = completed_at
+            else:
+                prior_rank = stage_order.get(previous_stage, 0)
+                current_rank = stage_order.get(signal.signal_stage, 0)
+                transition = (
+                    "UPGRADED"
+                    if current_rank > prior_rank
+                    else "DOWNGRADED"
+                    if current_rank < prior_rank
+                    else "UNCHANGED"
+                )
+                first_seen = previous.get("first_seen_at", completed_at)
+            lifecycle = {
+                "first_seen_at": first_seen,
+                "last_seen_at": completed_at,
+                "previous_stage": previous_stage,
+                "current_stage": signal.signal_stage,
+                "transition": transition,
+            }
+            self._signal_history[key] = {
+                "stage": signal.signal_stage,
+                "first_seen_at": first_seen,
+                "last_seen_at": completed_at,
+            }
+            output.append(replace(signal, lifecycle=lifecycle))
+        return output
+
     @staticmethod
-    def _fatal_report(now: str, scope: str, started: float, message: str) -> RadarReport:
+    def _progress(
+        callback: ProgressCallback | None,
+        phase: str,
+        completed: int | None,
+        total: int | None,
+        message: str,
+    ) -> None:
+        if callback is None:
+            return
+        try:
+            callback(phase, completed, total, message)
+        except Exception:
+            return
+
+    def _fatal_report(
+        self,
+        now: str,
+        scope: str,
+        started: float,
+        message: str,
+        scan_id: str,
+    ) -> RadarReport:
+        completed_at = datetime.now(timezone.utc).isoformat()
         return RadarReport(
             status="DATA_INCOMPLETE",
-            generated_at=now,
+            generated_at=completed_at,
             scope=scope,
             target_count=0,
             fetched_count=0,
@@ -444,4 +771,14 @@ class MarketScanner:
             exclusion_counts={},
             duration_seconds=round(time.monotonic() - started, 3),
             message=f"雷達資料不完整：{message}",
+            scan_id=scan_id,
+            scan_started_at=now,
+            completed_at=completed_at,
+            runtime_status="ERROR",
+            actionable=False,
+            max_signals=min(max(self.config.max_signals, 0), 20),
         )
+
+
+def _unique_strings(values: list[str]) -> list[str]:
+    return list(dict.fromkeys(value for value in values if value))

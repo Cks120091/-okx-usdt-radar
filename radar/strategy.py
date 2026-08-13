@@ -4,6 +4,7 @@ import math
 from dataclasses import dataclass, replace
 from decimal import Decimal, ROUND_HALF_UP
 
+from .evidence import EvidenceAssessment, assess_evidence, infer_regime_direction
 from .indicators import TimeframeFeatures, features
 from .models import Candle, Instrument, MarketContext, MarketState, Signal, Ticker
 
@@ -18,6 +19,8 @@ class StrategyConfig:
     estimated_taker_fee_pct: float = 0.05
     max_execution_cost_to_risk_pct: float = 12.0
     max_entry_extension_atr: float = 0.80
+    severe_entry_extension_atr: float = 1.80
+    max_slippage_pct: float = 0.15
 
 
 @dataclass
@@ -25,6 +28,9 @@ class AnalysisResult:
     signal: Signal | None
     reason: str
     market_state: MarketState | None = None
+    assessment: EvidenceAssessment | None = None
+    candidate_plan: _Plan | None = None
+    candidate_signal: Signal | None = None
 
 
 @dataclass
@@ -60,8 +66,11 @@ class AdaptiveStrategyEngine:
         candles_4h: list[Candle],
         candles_1h: list[Candle],
         candles_15m: list[Candle],
+        candles_5m: list[Candle] | None = None,
     ) -> AnalysisResult:
         if min(len(candles_4h), len(candles_1h), len(candles_15m)) < 60:
+            return AnalysisResult(None, "insufficient_history")
+        if candles_5m is not None and len(candles_5m) < 60:
             return AnalysisResult(None, "insufficient_history")
         if ticker.last <= 0 or ticker.bid <= 0 or ticker.ask <= 0:
             return AnalysisResult(None, "invalid_ticker")
@@ -70,6 +79,7 @@ class AdaptiveStrategyEngine:
         tf4 = features(candles_4h)
         tf1 = features(candles_1h)
         tf15 = features(candles_15m)
+        tf5 = features(candles_5m) if candles_5m is not None else None
         indicator_values = (tf4.atr14, tf1.atr14, tf15.atr14, tf1.adx14, tf15.rsi14)
         if not all(
             math.isfinite(value)
@@ -77,7 +87,18 @@ class AdaptiveStrategyEngine:
         ) or min(tf4.atr14, tf1.atr14, tf15.atr14) <= 0:
             return AnalysisResult(None, "indicator_unavailable")
 
-        market_state = self._market_state(
+        regime, direction = infer_regime_direction(tf4, tf1, tf15)
+        assessment = assess_evidence(
+            tf4,
+            tf1,
+            tf15,
+            regime,
+            direction,
+            tf5,
+            self.config.max_entry_extension_atr,
+            self.config.severe_entry_extension_atr,
+        )
+        market_state = self._state_from_assessment(
             instrument,
             ticker,
             quote_volume_24h,
@@ -85,148 +106,126 @@ class AdaptiveStrategyEngine:
             tf4,
             tf1,
             tf15,
+            tf5,
+            assessment,
         )
         if ticker.spread_pct > self.config.max_spread_pct:
             return AnalysisResult(
                 None,
                 "spread_too_wide",
-                replace(
+                self._fail_safety(
                     market_state,
-                    status="FILTERED",
-                    missing_conditions=[
-                        f"買賣價差需低於 {self.config.max_spread_pct:.2f}%",
-                        *market_state.missing_conditions,
-                    ][:4],
+                    "spread",
+                    f"買賣價差需低於 {self.config.max_spread_pct:.2f}%",
                 ),
+                assessment,
             )
         if quote_volume_24h < self.config.min_quote_volume_24h:
             return AnalysisResult(
                 None,
                 "liquidity_too_low",
-                replace(
+                self._fail_safety(
                     market_state,
-                    status="FILTERED",
-                    missing_conditions=[
-                        f"24H 成交額需達 {self.config.min_quote_volume_24h:,.0f} USDT",
-                        *market_state.missing_conditions,
-                    ][:4],
+                    "liquidity",
+                    f"24H 成交額需達 {self.config.min_quote_volume_24h:,.0f} USDT",
                 ),
+                assessment,
             )
 
-        plans = [
-            self._early_expansion_plan("LONG", tf4, tf1, tf15),
-            self._early_expansion_plan("SHORT", tf4, tf1, tf15),
-            self._breakout_plan("LONG", tf4, tf1, tf15),
-            self._breakout_plan("SHORT", tf4, tf1, tf15),
-            self._trend_pullback_plan("LONG", tf4, tf1, tf15),
-            self._trend_pullback_plan("SHORT", tf4, tf1, tf15),
-            self._range_reversal_plan("LONG", tf4, tf1, tf15),
-            self._range_reversal_plan("SHORT", tf4, tf1, tf15),
-        ]
-        valid = [item for item in plans if item is not None]
-        if not valid:
-            missing = list(market_state.missing_conditions)
-            readiness_score = market_state.readiness_score
-            if market_state.readiness_score >= 99.0 or not missing:
-                missing.append("止損距離或前方空間需通過最低 1.8R")
-                readiness_score = min(readiness_score, 92.0)
+        if assessment.entry_quality["key"] == "SEVERE_CHASE":
             return AnalysisResult(
                 None,
-                "no_confirmed_setup",
+                "severe_chase",
+                self._fail_safety(
+                    market_state,
+                    "chase",
+                    f"距離 15m EMA21 已達 {tf15.extension_atr:.2f} ATR，屬嚴重追價",
+                ),
+                assessment,
+            )
+
+        plan = self._v2_plan(assessment, tf4, tf1, tf15)
+        if plan is None:
+            return AnalysisResult(
+                None,
+                "no_trade_plan",
                 replace(
                     market_state,
                     status=(
                         "NEAR_TRIGGER"
-                        if market_state.regime != "DISORDER"
-                        and market_state.direction != "NEUTRAL"
-                        and market_state.readiness_score >= 65.0
+                        if assessment.stage == "NEAR_TRIGGER"
                         else "WATCH"
                     ),
-                    readiness_score=readiness_score,
-                    missing_conditions=missing[:4],
                 ),
+                assessment,
             )
-        plan = max(valid, key=lambda item: item.score)
         plan = self._adapt_trade_management(plan, tf4, tf1, tf15)
         if plan.rr < self.config.minimum_rr:
             return AnalysisResult(
                 None,
                 "rr_below_minimum",
-                replace(
+                self._fail_safety(
                     market_state,
-                    status="WATCH",
-                    missing_conditions=[f"風報比需達 {self.config.minimum_rr:.1f}R"],
+                    "risk_reward",
+                    f"風報比需達 {self.config.minimum_rr:.1f}R",
                 ),
+                assessment,
+                plan,
             )
         risk_pct = abs(plan.entry - plan.stop) / plan.entry * 100.0
         if risk_pct <= 0 or risk_pct > 5.0:
             return AnalysisResult(
                 None,
                 "stop_distance_unacceptable",
-                replace(market_state, status="WATCH", missing_conditions=["止損距離需低於價格的 5%"]),
-            )
-        if len(plan.evidence) < 3:
-            return AnalysisResult(
-                None,
-                "insufficient_independent_evidence",
-                replace(market_state, status="WATCH", missing_conditions=["至少需要三組獨立證據"]),
+                self._fail_safety(
+                    market_state,
+                    "stop_loss",
+                    "無法建立價格 5% 以內的合理止損",
+                ),
+                assessment,
+                plan,
             )
 
-        zone_offset = tf15.atr14 * 0.12
-        if plan.direction == "LONG":
-            entry_low = plan.entry - zone_offset
-            entry_high = plan.entry + (zone_offset * 0.45)
-        else:
-            entry_low = plan.entry - (zone_offset * 0.45)
-            entry_high = plan.entry + zone_offset
         signal_metrics = dict(market_state.market_metrics)
         signal_metrics.update(
             {
-                "signal_stage": plan.signal_stage,
+                "signal_stage": assessment.stage,
                 "trend_strength_score": round(plan.trend_strength_score, 1),
                 "trend_strength_label": plan.trend_strength_label,
                 "technical_stop_pct": round(risk_pct, 4),
                 "entry_extension_atr": round(tf15.extension_atr, 2),
             }
         )
-        signal = Signal(
-            inst_id=instrument.inst_id,
-            direction=plan.direction,
-            strategy=plan.strategy,
-            score=round(min(plan.score, 99.0), 1),
-            evidence=plan.evidence,
-            entry_low=_format_price(entry_low, instrument.tick_size),
-            entry_high=_format_price(entry_high, instrument.tick_size),
-            stop_loss=_format_price(plan.stop, instrument.tick_size),
-            take_profit_1=_format_price(plan.tp1, instrument.tick_size),
-            take_profit_2=_format_price(plan.tp2, instrument.tick_size),
-            risk_reward=round(plan.rr, 2),
-            invalidation=plan.invalidation,
-            spread_pct=round(ticker.spread_pct, 4),
-            quote_volume_24h=round(quote_volume_24h, 2),
-            closed_candle_ts=candles_15m[-1].ts,
-            regime=plan.regime,
-            notes=plan.notes,
-            factor_scores=dict(market_state.factor_scores),
-            market_metrics=signal_metrics,
-            signal_stage=plan.signal_stage,
-            trend_strength_label=plan.trend_strength_label,
-            trend_strength_score=round(plan.trend_strength_score, 1),
-            management_plan=dict(plan.management_plan or {}),
+        safe_state = self._pass_safety(
+            self._pass_safety(market_state, "risk_reward"),
+            "stop_loss",
         )
+        candidate_signal = self._signal_from_plan(
+            instrument,
+            ticker,
+            quote_volume_24h,
+            candles_15m[-1].ts,
+            tf15,
+            plan,
+            assessment,
+            replace(safe_state, market_metrics=signal_metrics),
+        )
+        formal = assessment.stage in ("EARLY_SIGNAL", "CONFIRMED")
         return AnalysisResult(
-            signal,
-            "qualified",
+            candidate_signal if formal else None,
+            "qualified" if formal else "evidence_not_aligned",
             replace(
-                market_state,
+                safe_state,
                 regime=plan.regime,
                 direction=plan.direction,
                 preferred_strategy=plan.strategy,
-                readiness_score=100.0,
-                status="CONFIRMED",
-                missing_conditions=[],
+                readiness_score=assessment.readiness,
+                status=assessment.stage,
                 market_metrics=signal_metrics,
             ),
+            assessment,
+            plan,
+            candidate_signal,
         )
 
     def apply_market_context(
@@ -237,6 +236,13 @@ class AdaptiveStrategyEngine:
         candles_5m: list[Candle] | None = None,
         market_bias: dict[str, object] | None = None,
     ) -> AnalysisResult:
+        if result.assessment is not None:
+            return self._apply_v2_market_context(
+                result,
+                context,
+                candles_5m,
+                market_bias,
+            )
         state = result.market_state
         if state is None:
             return result
@@ -245,6 +251,7 @@ class AdaptiveStrategyEngine:
         metrics.update(
             {
                 "open_interest_usd": context.open_interest_usd,
+                "open_interest_change_pct": context.open_interest_change_pct,
                 "funding_rate_pct": (
                     round(context.funding_rate * 100.0, 5)
                     if context.funding_rate is not None
@@ -513,6 +520,23 @@ class AdaptiveStrategyEngine:
                 oi = context.open_interest_usd
                 oi_score = 100.0 if oi >= 100_000_000 else 85.0 if oi >= 20_000_000 else 70.0 if oi >= 5_000_000 else 55.0 if oi >= 1_000_000 else 35.0
                 derivative_parts.append(oi_score)
+            if context.open_interest_change_pct is not None:
+                oi_change = context.open_interest_change_pct
+                if oi_change >= 0.5:
+                    derivative_parts.append(85.0)
+                    passed.append(
+                        f"持倉量較上一輪增加 {oi_change:.2f}%，顯示有新增部位參與"
+                    )
+                elif oi_change <= -0.8:
+                    derivative_parts.append(35.0)
+                    missing.append(
+                        f"持倉量較上一輪下降 {abs(oi_change):.2f}%，行情可能由平倉或回補推動"
+                    )
+                else:
+                    derivative_parts.append(65.0)
+                    passed.append(
+                        f"持倉量較上一輪變化 {oi_change:+.2f}%，未見明顯去槓桿"
+                    )
             if derivative_parts:
                 factors["derivatives"] = round(sum(derivative_parts) / len(derivative_parts), 1)
 
@@ -634,6 +658,630 @@ class AdaptiveStrategyEngine:
         )
         return AnalysisResult(updated_signal, "qualified", updated_state)
 
+    def _apply_v2_market_context(
+        self,
+        result: AnalysisResult,
+        context: MarketContext,
+        candles_5m: list[Candle] | None,
+        market_bias: dict[str, object] | None,
+    ) -> AnalysisResult:
+        state = result.market_state
+        assessment = result.assessment
+        if state is None or assessment is None:
+            return result
+
+        tf5 = (
+            features(candles_5m)
+            if candles_5m is not None and len(candles_5m) >= 60
+            else None
+        )
+        live = assessment.with_live_context(context, tf5, market_bias)
+        metrics = dict(state.market_metrics)
+        raw = dict(metrics.get("raw_indicators", {}))
+        if tf5 is not None:
+            raw["5m"] = self._feature_metrics(tf5)
+        metrics.update(
+            {
+                "raw_indicators": raw,
+                "open_interest_usd": context.open_interest_usd,
+                "open_interest_change_pct": context.open_interest_change_pct,
+                "funding_rate_pct": (
+                    round(context.funding_rate * 100.0, 5)
+                    if context.funding_rate is not None
+                    else None
+                ),
+                "order_book_imbalance_pct": (
+                    round(context.order_book_imbalance * 100.0, 1)
+                    if context.order_book_imbalance is not None
+                    else None
+                ),
+                "taker_buy_pct": (
+                    round(context.taker_buy_ratio * 100.0, 1)
+                    if context.taker_buy_ratio is not None
+                    else None
+                ),
+                "context_sampled_at": context.sampled_at,
+                "context_complete": context.complete,
+                "context_available_count": live.context_available_count,
+                "context_required_count": live.context_required_count,
+                "execution_notional_usdt": context.execution_notional_usdt,
+                "bid_depth_usd": context.bid_depth_usd,
+                "ask_depth_usd": context.ask_depth_usd,
+                "buy_slippage_pct": context.buy_slippage_pct,
+                "sell_slippage_pct": context.sell_slippage_pct,
+                "execution_quality_complete": context.execution_quality_complete,
+                "volume_ratio_5m": round(tf5.volume_ratio, 2) if tf5 is not None else None,
+                "buy_pressure_5m_pct": (
+                    round(tf5.directional_volume_ratio * 100.0, 1)
+                    if tf5 is not None
+                    else None
+                ),
+                "evidence_alignment_score": live.alignment_score,
+                "conflict_severity": live.conflict_severity,
+                "setup_maturity_1h": live.setup_maturity,
+                "trigger_maturity_15m": live.trigger_maturity,
+                "micro_acceleration_5m": live.micro_acceleration,
+            }
+        )
+
+        updated = replace(
+            state,
+            readiness_score=live.readiness,
+            status=live.stage,
+            passed_conditions=live.supporting[:8],
+            missing_conditions=_unique([*live.conflicts, *live.neutral])[:8],
+            factor_scores={
+                key: group.score for key, group in live.groups.items()
+            },
+            market_metrics=metrics,
+            evidence_groups=live.group_dicts(),
+            timeframe_states=live.timeframe_states,
+            supporting_evidence=live.supporting,
+            conflicts=live.conflicts,
+            neutral_evidence=live.neutral,
+            entry_quality=dict(live.entry_quality),
+            summary=live.summary,
+        )
+
+        updated = self._set_safety(
+            updated,
+            "context_data",
+            context.complete,
+            "即時 Funding／Order Book／Taker 資料完整",
+            f"{live.context_available_count}/{live.context_required_count}",
+        )
+        oi_ok = (
+            self.config.min_open_interest_usd <= 0
+            or (
+                context.open_interest_usd is not None
+                and context.open_interest_usd >= self.config.min_open_interest_usd
+            )
+        )
+        updated = self._set_safety(
+            updated,
+            "open_interest",
+            oi_ok,
+            "持倉量符合基本流動性",
+            context.open_interest_usd,
+        )
+
+        formal_candidate = (
+            result.candidate_plan is not None
+            and live.stage in ("EARLY_SIGNAL", "CONFIRMED")
+        )
+        requires_execution = (
+            formal_candidate
+            and context.execution_notional_usdt > 0
+        )
+        depth_ok = context.execution_quality_complete
+        updated = self._set_safety(
+            updated,
+            "execution_depth",
+            depth_ok or not requires_execution,
+            "Order Book 深度足以估算成交",
+            context.execution_notional_usdt,
+        )
+
+        direction = live.direction
+        entry_slippage = (
+            context.buy_slippage_pct
+            if direction == "LONG"
+            else context.sell_slippage_pct
+        )
+        exit_slippage = (
+            context.sell_slippage_pct
+            if direction == "LONG"
+            else context.buy_slippage_pct
+        )
+        slippage_ok = (
+            not requires_execution
+            or (
+                entry_slippage is not None
+                and exit_slippage is not None
+                and entry_slippage <= self.config.max_slippage_pct
+                and exit_slippage <= self.config.max_slippage_pct
+            )
+        )
+        updated = self._set_safety(
+            updated,
+            "slippage",
+            slippage_ok,
+            "預估滑價在安全範圍",
+            max(
+                float(entry_slippage or 0.0),
+                float(exit_slippage or 0.0),
+            ),
+        )
+
+        execution_cost_pct: float | None = None
+        execution_cost_to_risk_pct: float | None = None
+        if depth_ok and direction in ("LONG", "SHORT"):
+            execution_cost_pct = round(
+                state.spread_pct
+                + float(entry_slippage or 0.0)
+                + float(exit_slippage or 0.0)
+                + self.config.estimated_taker_fee_pct * 2.0,
+                4,
+            )
+            technical_stop_pct = float(metrics.get("technical_stop_pct", 0.0) or 0.0)
+            if technical_stop_pct > 0:
+                execution_cost_to_risk_pct = round(
+                    execution_cost_pct / technical_stop_pct * 100.0,
+                    1,
+                )
+        execution_ok = (
+            not requires_execution
+            or (
+                execution_cost_to_risk_pct is not None
+                and execution_cost_to_risk_pct
+                <= self.config.max_execution_cost_to_risk_pct
+            )
+        )
+        metrics.update(
+            {
+                "estimated_round_trip_cost_pct": execution_cost_pct,
+                "execution_cost_to_risk_pct": execution_cost_to_risk_pct,
+                "estimated_taker_fee_pct_each_side": self.config.estimated_taker_fee_pct,
+                "execution_quality_label": (
+                    "良好"
+                    if execution_cost_to_risk_pct is not None
+                    and execution_cost_to_risk_pct <= 8.0
+                    else "正常"
+                    if execution_cost_to_risk_pct is not None
+                    and execution_cost_to_risk_pct
+                    <= self.config.max_execution_cost_to_risk_pct
+                    else "成本偏高"
+                ),
+            }
+        )
+        updated = replace(updated, market_metrics=metrics)
+        updated = self._set_safety(
+            updated,
+            "execution_cost",
+            execution_ok,
+            "Execution Cost 在風險上限內",
+            execution_cost_to_risk_pct,
+        )
+        major_conflict_ok = (
+            live.conflict_severity < 55.0
+            and sum(group.score < 35.0 for group in live.groups.values()) < 2
+        )
+        updated = self._set_safety(
+            updated,
+            "major_conflict",
+            major_conflict_ok,
+            "沒有重大跨群反向證據",
+            live.conflict_severity,
+        )
+
+        failed_hard = [
+            check
+            for check in updated.safety_checks
+            if check.get("hard", True) and not check.get("passed", False)
+        ]
+        if not major_conflict_ok and result.candidate_plan is not None:
+            return AnalysisResult(
+                None,
+                "major_evidence_conflict",
+                replace(updated, status="FILTERED"),
+                live,
+                result.candidate_plan,
+                result.candidate_signal,
+            )
+        if failed_hard and formal_candidate:
+            first = str(failed_hard[0].get("key", "safety"))
+            reasons = {
+                "context_data": "market_context_incomplete",
+                "open_interest": "open_interest_too_low",
+                "execution_depth": "execution_quality_unavailable",
+                "slippage": "slippage_too_high",
+                "execution_cost": "execution_cost_too_high",
+                "major_conflict": "major_evidence_conflict",
+            }
+            return AnalysisResult(
+                None,
+                reasons.get(first, "safety_gate_failed"),
+                replace(updated, status="FILTERED"),
+                live,
+                result.candidate_plan,
+                result.candidate_signal,
+            )
+
+        if (
+            live.stage not in ("EARLY_SIGNAL", "CONFIRMED")
+            or result.candidate_plan is None
+            or result.candidate_signal is None
+        ):
+            return AnalysisResult(
+                None,
+                "evidence_not_aligned",
+                replace(
+                    updated,
+                    status=(
+                        "NEAR_TRIGGER"
+                        if live.stage == "NEAR_TRIGGER"
+                        else "WATCH"
+                    ),
+                ),
+                live,
+                result.candidate_plan,
+                result.candidate_signal,
+            )
+
+        plan = replace(
+            result.candidate_plan,
+            score=live.readiness,
+            signal_stage=live.stage,
+            evidence=live.supporting,
+        )
+        management = dict(plan.management_plan or {})
+        management["review"] = "只在重新打開雷達或按下立即掃描時，以最新公開市場資料重新計算。"
+        plan = replace(plan, management_plan=management)
+        factor_scores = {key: group.score for key, group in live.groups.items()}
+        signal = replace(
+            result.candidate_signal,
+            score=live.readiness,
+            evidence=live.supporting,
+            notes=_unique([*plan.notes, *live.neutral]),
+            factor_scores=factor_scores,
+            market_metrics=metrics,
+            signal_stage=live.stage,
+            readiness_score=live.readiness,
+            evidence_groups=live.group_dicts(),
+            timeframe_states=live.timeframe_states,
+            supporting_evidence=live.supporting,
+            conflicts=live.conflicts,
+            neutral_evidence=live.neutral,
+            safety_checks=list(updated.safety_checks),
+            entry_quality=dict(live.entry_quality),
+            summary=live.summary,
+            management_plan=management,
+            actionable=True,
+            lifecycle={
+                "previous_stage": None,
+                "current_stage": live.stage,
+                "transition": "NEW",
+            },
+        )
+        return AnalysisResult(
+            signal,
+            "qualified",
+            replace(updated, status=live.stage),
+            live,
+            plan,
+            signal,
+        )
+
+    def _state_from_assessment(
+        self,
+        instrument: Instrument,
+        ticker: Ticker,
+        quote_volume_24h: float,
+        closed_candle_ts: int,
+        tf4: TimeframeFeatures,
+        tf1: TimeframeFeatures,
+        tf15: TimeframeFeatures,
+        tf5: TimeframeFeatures | None,
+        assessment: EvidenceAssessment,
+    ) -> MarketState:
+        checks = [
+            self._safety_check("data_complete", "核心 K 線與 Ticker 完整", True),
+            self._safety_check(
+                "liquidity",
+                "24H 成交額符合基本流動性",
+                quote_volume_24h >= self.config.min_quote_volume_24h,
+                quote_volume_24h,
+            ),
+            self._safety_check(
+                "spread",
+                "Spread 在安全上限內",
+                ticker.spread_pct <= self.config.max_spread_pct,
+                round(ticker.spread_pct, 4),
+            ),
+            self._safety_check(
+                "chase",
+                "未嚴重追價",
+                assessment.entry_quality["key"] != "SEVERE_CHASE",
+                assessment.entry_quality["extension_atr"],
+            ),
+        ]
+        metrics = {
+            "adx_1h": round(tf1.adx14, 1),
+            "rsi_15m": round(tf15.rsi14, 1),
+            "volume_ratio_1h": round(tf1.volume_ratio, 2),
+            "volume_ratio_15m": round(tf15.volume_ratio, 2),
+            "volume_ratio_5m": round(tf5.volume_ratio, 2) if tf5 else None,
+            "atr_pct_15m": round(tf15.atr_pct, 2),
+            "bollinger_width_pct_1h": round(tf1.bollinger_width_pct, 2),
+            "vwap_position_15m": "ABOVE" if tf15.close >= tf15.vwap20 else "BELOW",
+            "candle_buy_pressure_pct": round(tf15.directional_volume_ratio * 100.0, 1),
+            "setup_maturity_1h": assessment.setup_maturity,
+            "trigger_maturity_15m": assessment.trigger_maturity,
+            "micro_acceleration_5m": assessment.micro_acceleration,
+            "evidence_alignment_score": assessment.alignment_score,
+            "conflict_severity": assessment.conflict_severity,
+            "raw_indicators": {
+                "4H": self._feature_metrics(tf4),
+                "1H": self._feature_metrics(tf1),
+                "15m": self._feature_metrics(tf15),
+                **({"5m": self._feature_metrics(tf5)} if tf5 is not None else {}),
+            },
+        }
+        return MarketState(
+            inst_id=instrument.inst_id,
+            regime=assessment.regime,
+            direction=assessment.direction,
+            preferred_strategy=self._strategy_name(assessment.regime),
+            readiness_score=assessment.readiness,
+            status=assessment.stage,
+            missing_conditions=_unique([*assessment.conflicts, *assessment.neutral])[:8],
+            spread_pct=round(ticker.spread_pct, 4),
+            quote_volume_24h=round(quote_volume_24h, 2),
+            closed_candle_ts=closed_candle_ts,
+            passed_conditions=assessment.supporting[:8],
+            factor_scores={key: group.score for key, group in assessment.groups.items()},
+            market_metrics=metrics,
+            evidence_groups=assessment.group_dicts(),
+            timeframe_states=assessment.timeframe_states,
+            supporting_evidence=assessment.supporting,
+            conflicts=assessment.conflicts,
+            neutral_evidence=assessment.neutral,
+            safety_checks=checks,
+            entry_quality=dict(assessment.entry_quality),
+            summary=assessment.summary,
+        )
+
+    def _v2_plan(
+        self,
+        assessment: EvidenceAssessment,
+        tf4: TimeframeFeatures,
+        tf1: TimeframeFeatures,
+        tf15: TimeframeFeatures,
+    ) -> _Plan | None:
+        if (
+            assessment.direction not in ("LONG", "SHORT")
+            or assessment.regime == "DISORDER"
+            or assessment.setup_maturity < 48.0
+            or assessment.trigger_maturity < 58.0
+            or assessment.entry_quality["key"] == "SEVERE_CHASE"
+            or assessment.conflict_severity >= 70.0
+        ):
+            return None
+        direction = assessment.direction
+        is_long = direction == "LONG"
+        entry = tf15.close
+        if assessment.regime == "RANGE":
+            if is_long:
+                stop = tf1.prior_low20 - 0.25 * tf1.atr14
+                target = tf1.prior_low20 + (tf1.prior_high20 - tf1.prior_low20) * 0.55
+                risk = entry - stop
+                rr = (target - entry) / risk if risk > 0 else 0.0
+                tp1 = target
+                tp2 = tf1.prior_low20 + (tf1.prior_high20 - tf1.prior_low20) * 0.85
+                invalidation = "1H 收盤有效跌破區間下緣，或觸及止損。"
+            else:
+                stop = tf1.prior_high20 + 0.25 * tf1.atr14
+                target = tf1.prior_low20 + (tf1.prior_high20 - tf1.prior_low20) * 0.45
+                risk = stop - entry
+                rr = (entry - target) / risk if risk > 0 else 0.0
+                tp1 = target
+                tp2 = tf1.prior_low20 + (tf1.prior_high20 - tf1.prior_low20) * 0.15
+                invalidation = "1H 收盤有效突破區間上緣，或觸及止損。"
+        else:
+            if is_long:
+                stop = min(tf15.recent_low - 0.20 * tf15.atr14, entry - 1.15 * tf15.atr14)
+                risk = entry - stop
+                tp1 = entry + risk * self.config.minimum_rr
+                tp2 = entry + risk * 2.7
+                invalidation = "15m 收盤跌回觸發區並跌破最近結構低點，或觸及止損。"
+            else:
+                stop = max(tf15.recent_high + 0.20 * tf15.atr14, entry + 1.15 * tf15.atr14)
+                risk = stop - entry
+                tp1 = entry - risk * self.config.minimum_rr
+                tp2 = entry - risk * 2.7
+                invalidation = "15m 收盤站回觸發區並突破最近結構高點，或觸及止損。"
+            rr = self.config.minimum_rr
+            obstacle = self._nearest_obstacle(direction, entry, tf4, tf1)
+            if obstacle is not None and risk > 0:
+                headroom = (
+                    (obstacle - entry) / risk
+                    if is_long
+                    else (entry - obstacle) / risk
+                )
+                if headroom < self.config.minimum_rr:
+                    return None
+        if risk <= 0 or rr < self.config.minimum_rr:
+            return None
+        stage = (
+            assessment.stage
+            if assessment.stage in ("EARLY_SIGNAL", "CONFIRMED")
+            else "EARLY_SIGNAL"
+        )
+        return _Plan(
+            direction=direction,
+            strategy=self._strategy_name(assessment.regime),
+            regime=assessment.regime,
+            score=assessment.readiness,
+            evidence=assessment.supporting,
+            entry=entry,
+            stop=stop,
+            tp1=tp1,
+            tp2=tp2,
+            rr=rr,
+            invalidation=invalidation,
+            notes=[
+                f"進場品質：{assessment.entry_quality['label']}（{assessment.entry_quality['extension_atr']:.2f} ATR）。",
+                "只使用已收盤 K 線；5m 僅作加速與精細 Timing。",
+            ],
+            signal_stage=stage,
+        )
+
+    def _signal_from_plan(
+        self,
+        instrument: Instrument,
+        ticker: Ticker,
+        quote_volume_24h: float,
+        closed_candle_ts: int,
+        tf15: TimeframeFeatures,
+        plan: _Plan,
+        assessment: EvidenceAssessment,
+        state: MarketState,
+    ) -> Signal:
+        zone_offset = tf15.atr14 * 0.12
+        if plan.direction == "LONG":
+            entry_low = plan.entry - zone_offset
+            entry_high = plan.entry + zone_offset * 0.45
+        else:
+            entry_low = plan.entry - zone_offset * 0.45
+            entry_high = plan.entry + zone_offset
+        return Signal(
+            inst_id=instrument.inst_id,
+            direction=plan.direction,
+            strategy=plan.strategy,
+            score=round(assessment.readiness, 1),
+            evidence=assessment.supporting,
+            entry_low=_format_price(entry_low, instrument.tick_size),
+            entry_high=_format_price(entry_high, instrument.tick_size),
+            stop_loss=_format_price(plan.stop, instrument.tick_size),
+            take_profit_1=_format_price(plan.tp1, instrument.tick_size),
+            take_profit_2=_format_price(plan.tp2, instrument.tick_size),
+            risk_reward=round(plan.rr, 2),
+            invalidation=plan.invalidation,
+            spread_pct=round(ticker.spread_pct, 4),
+            quote_volume_24h=round(quote_volume_24h, 2),
+            closed_candle_ts=closed_candle_ts,
+            regime=plan.regime,
+            notes=plan.notes,
+            factor_scores=dict(state.factor_scores),
+            market_metrics=dict(state.market_metrics),
+            signal_stage=assessment.stage,
+            trend_strength_label=plan.trend_strength_label,
+            trend_strength_score=round(plan.trend_strength_score, 1),
+            management_plan=dict(plan.management_plan or {}),
+            readiness_score=assessment.readiness,
+            evidence_groups=assessment.group_dicts(),
+            timeframe_states=assessment.timeframe_states,
+            supporting_evidence=assessment.supporting,
+            conflicts=assessment.conflicts,
+            neutral_evidence=assessment.neutral,
+            safety_checks=list(state.safety_checks),
+            entry_quality=dict(assessment.entry_quality),
+            summary=assessment.summary,
+            actionable=assessment.stage in ("EARLY_SIGNAL", "CONFIRMED"),
+            lifecycle={
+                "previous_stage": None,
+                "current_stage": assessment.stage,
+                "transition": "NEW",
+            },
+        )
+
+    @staticmethod
+    def _feature_metrics(tf: TimeframeFeatures) -> dict[str, float]:
+        return {
+            "close": round(tf.close, 10),
+            "ma5": round(tf.sma5, 10),
+            "ma10": round(tf.sma10, 10),
+            "ma20": round(tf.sma20, 10),
+            "ema21": round(tf.ema21, 10),
+            "ema55": round(tf.ema55, 10),
+            "ema21_slope_atr": round(tf.ema21_slope_atr, 4),
+            "macd_line": round(tf.macd_line, 10),
+            "macd_signal": round(tf.macd_signal, 10),
+            "macd_hist": round(tf.macd_hist, 10),
+            "macd_prev_hist": round(tf.macd_prev_hist, 10),
+            "rsi14": round(tf.rsi14, 2),
+            "adx14": round(tf.adx14, 2),
+            "atr14": round(tf.atr14, 10),
+            "atr_pct": round(tf.atr_pct, 4),
+            "vwap20": round(tf.vwap20, 10),
+            "bollinger_width_pct": round(tf.bollinger_width_pct, 4),
+            "volume_ratio": round(tf.volume_ratio, 4),
+            "directional_volume_ratio": round(tf.directional_volume_ratio, 4),
+            "compression_ratio": round(tf.compression_ratio, 4),
+            "extension_atr": round(tf.extension_atr, 4),
+            "prior_high20": round(tf.prior_high20, 10),
+            "prior_low20": round(tf.prior_low20, 10),
+            "prior_high50": round(tf.prior_high50, 10),
+            "prior_low50": round(tf.prior_low50, 10),
+            "prior_high100": round(tf.prior_high100, 10),
+            "prior_low100": round(tf.prior_low100, 10),
+            "lower_wick_ratio": round(tf.lower_wick_ratio, 4),
+            "upper_wick_ratio": round(tf.upper_wick_ratio, 4),
+        }
+
+    @staticmethod
+    def _strategy_name(regime: str) -> str:
+        return {
+            "TREND": "趨勢回踩續行",
+            "BREAKOUT_READY": "結構突破／續行",
+            "RANGE": "區間邊緣反轉",
+            "DISORDER": "等待型態清楚",
+        }.get(regime, "等待型態清楚")
+
+    @staticmethod
+    def _safety_check(
+        key: str,
+        label: str,
+        passed: bool,
+        value: object | None = None,
+        hard: bool = True,
+    ) -> dict[str, object]:
+        return {
+            "key": key,
+            "label": label,
+            "passed": bool(passed),
+            "hard": hard,
+            "value": value,
+        }
+
+    def _set_safety(
+        self,
+        state: MarketState,
+        key: str,
+        passed: bool,
+        label: str,
+        value: object | None = None,
+    ) -> MarketState:
+        checks = [item for item in state.safety_checks if item.get("key") != key]
+        checks.append(self._safety_check(key, label, passed, value))
+        missing = list(state.missing_conditions)
+        if not passed:
+            missing = _unique([label, *missing])
+        return replace(state, safety_checks=checks, missing_conditions=missing[:8])
+
+    def _pass_safety(self, state: MarketState, key: str) -> MarketState:
+        labels = {
+            "risk_reward": "Minimum R:R 符合安全下限",
+            "stop_loss": "可以建立合理 Stop Loss",
+        }
+        return self._set_safety(state, key, True, labels.get(key, key))
+
+    def _fail_safety(self, state: MarketState, key: str, label: str) -> MarketState:
+        return replace(
+            self._set_safety(state, key, False, label),
+            status="FILTERED",
+        )
+
     @staticmethod
     def _weighted_factor_score(factors: dict[str, float]) -> float:
         weights = {
@@ -649,6 +1297,69 @@ class AdaptiveStrategyEngine:
         available = [(factors[key], weight) for key, weight in weights.items() if key in factors]
         denominator = sum(weight for _, weight in available)
         return round(sum(score * weight for score, weight in available) / denominator, 1) if denominator > 0 else 0.0
+
+    def _apply_micro_preview(
+        self,
+        state: MarketState,
+        tf5: TimeframeFeatures,
+    ) -> MarketState:
+        metrics = dict(state.market_metrics)
+        factors = dict(state.factor_scores)
+        passed = list(state.passed_conditions)
+        missing = list(state.missing_conditions)
+        direction = state.direction
+        is_long = direction == "LONG"
+        directional_pressure = (
+            tf5.directional_volume_ratio
+            if is_long
+            else 1.0 - tf5.directional_volume_ratio
+            if direction == "SHORT"
+            else 0.5
+        )
+        threshold = (
+            1.25
+            if state.regime in ("TREND", "BREAKOUT_READY", "BREAKOUT")
+            else 1.15
+        )
+        micro_support = (
+            direction in ("LONG", "SHORT")
+            and tf5.volume_ratio >= threshold
+            and directional_pressure >= 0.52
+        )
+        micro_score = _clamp(
+            (tf5.volume_ratio / max(threshold, 0.01) * 65.0)
+            + _clamp((directional_pressure - 0.50) / 0.20 * 35.0, 0.0, 35.0),
+            0.0,
+            100.0,
+        )
+        metrics.update(
+            {
+                "volume_ratio_5m": round(tf5.volume_ratio, 2),
+                "buy_pressure_5m_pct": round(tf5.directional_volume_ratio * 100.0, 1),
+                "micro_preview_confirmed": micro_support,
+                "micro_preview_score": round(micro_score, 1),
+            }
+        )
+        if direction in ("LONG", "SHORT"):
+            factors["volume_order_flow"] = round(
+                (factors.get("volume_order_flow", 50.0) * 0.70) + (micro_score * 0.30),
+                1,
+            )
+            if micro_support:
+                passed.append("全市場 5m 成交異動預檢支持方向")
+            else:
+                missing.append("全市場 5m 成交異動預檢尚未支持方向")
+        return replace(
+            state,
+            readiness_score=round(
+                (state.readiness_score * 0.85) + (micro_score * 0.15),
+                1,
+            ),
+            passed_conditions=_unique(passed)[:6],
+            missing_conditions=_unique(missing)[:6],
+            factor_scores=factors,
+            market_metrics=metrics,
+        )
 
     def _market_state(
         self,
@@ -715,6 +1426,18 @@ class AdaptiveStrategyEngine:
         )
         factor_score = self._weighted_factor_score(factor_scores)
         score = round((condition_score * 0.70) + (factor_score * 0.30), 1)
+        if direction == "LONG":
+            room_1h_50 = (tf1.prior_high50 - tf1.close) / tf1.atr14
+            room_1h_100 = (tf1.prior_high100 - tf1.close) / tf1.atr14
+            room_4h_50 = (tf4.prior_high50 - tf4.close) / tf4.atr14
+            room_4h_100 = (tf4.prior_high100 - tf4.close) / tf4.atr14
+        elif direction == "SHORT":
+            room_1h_50 = (tf1.close - tf1.prior_low50) / tf1.atr14
+            room_1h_100 = (tf1.close - tf1.prior_low100) / tf1.atr14
+            room_4h_50 = (tf4.close - tf4.prior_low50) / tf4.atr14
+            room_4h_100 = (tf4.close - tf4.prior_low100) / tf4.atr14
+        else:
+            room_1h_50 = room_1h_100 = room_4h_50 = room_4h_100 = None
         return MarketState(
             inst_id=instrument.inst_id,
             regime=regime,
@@ -737,6 +1460,11 @@ class AdaptiveStrategyEngine:
                 "bollinger_width_pct_1h": round(tf1.bollinger_width_pct, 2),
                 "vwap_position_15m": "ABOVE" if tf15.close >= tf15.vwap20 else "BELOW",
                 "candle_buy_pressure_pct": round(tf15.directional_volume_ratio * 100.0, 1),
+                "structure_room_1h_50_atr": round(room_1h_50, 2) if room_1h_50 is not None else None,
+                "structure_room_1h_100_atr": round(room_1h_100, 2) if room_1h_100 is not None else None,
+                "structure_room_4h_50_atr": round(room_4h_50, 2) if room_4h_50 is not None else None,
+                "structure_room_4h_100_atr": round(room_4h_100, 2) if room_4h_100 is not None else None,
+                "structure_windows": "20／50／100",
             },
         )
 
@@ -892,12 +1620,42 @@ class AdaptiveStrategyEngine:
             return "SHORT"
         return "NEUTRAL"
 
+    @staticmethod
+    def _nearest_obstacle(
+        direction: str,
+        entry: float,
+        tf4: TimeframeFeatures,
+        tf1: TimeframeFeatures,
+    ) -> float | None:
+        if direction == "LONG":
+            levels = (
+                tf1.prior_high20,
+                tf1.prior_high50,
+                tf1.prior_high100,
+                tf4.prior_high20,
+                tf4.prior_high50,
+                tf4.prior_high100,
+            )
+            candidates = [level for level in levels if level > entry]
+            return min(candidates, default=None)
+        levels = (
+            tf1.prior_low20,
+            tf1.prior_low50,
+            tf1.prior_low100,
+            tf4.prior_low20,
+            tf4.prior_low50,
+            tf4.prior_low100,
+        )
+        candidates = [level for level in levels if level < entry]
+        return max(candidates, default=None)
+
     def _early_expansion_plan(
         self,
         direction: str,
         tf4: TimeframeFeatures,
         tf1: TimeframeFeatures,
         tf15: TimeframeFeatures,
+        tf5: TimeframeFeatures | None = None,
     ) -> _Plan | None:
         """Detects the first closed 15m expansion without waiting for a 1H breakout close."""
         is_long = direction == "LONG"
@@ -950,13 +1708,21 @@ class AdaptiveStrategyEngine:
             if is_long
             else 1.0 - tf15.directional_volume_ratio
         )
-        participation_votes = sum(
-            (
-                tf15.volume_ratio >= 1.10,
-                tf1.volume_ratio >= 1.05,
-                pressure >= 0.54,
+        participation_conditions = [
+            tf15.volume_ratio >= 1.10,
+            tf1.volume_ratio >= 1.05,
+            pressure >= 0.54,
+        ]
+        if tf5 is not None:
+            micro_pressure = (
+                tf5.directional_volume_ratio
+                if is_long
+                else 1.0 - tf5.directional_volume_ratio
             )
-        )
+            participation_conditions.extend(
+                (tf5.volume_ratio >= 1.25, micro_pressure >= 0.54)
+            )
+        participation_votes = sum(participation_conditions)
         timing_ok = (
             tf15.extension_atr <= self.config.max_entry_extension_atr
             and (tf15.rsi14 <= 76.0 if is_long else tf15.rsi14 >= 24.0)
@@ -993,6 +1759,14 @@ class AdaptiveStrategyEngine:
             invalidation = "15m 收盤重新站回跌破區並突破最近降低高點，或觸及止損。"
         if risk <= 0:
             return None
+        obstacle = self._nearest_obstacle(direction, entry, tf4, tf1)
+        headroom_r = (
+            ((obstacle - entry) if is_long else (entry - obstacle)) / risk
+            if obstacle is not None
+            else float("inf")
+        )
+        if headroom_r < self.config.minimum_rr:
+            return None
 
         score = (
             58.0
@@ -1010,7 +1784,12 @@ class AdaptiveStrategyEngine:
                 "15m 已收盤突破近 20 根整理邊界，不等待 1H 大 K 棒完成",
                 f"4H／1H 背景支持票 {background_votes + emerging_trend_votes}／7",
                 f"15m 動能支持票 {momentum_votes}／5",
-                f"早期成交參與支持票 {participation_votes}／3",
+                f"早期成交參與支持票 {participation_votes}／{len(participation_conditions)}",
+                (
+                    f"中長結構前方空間 {headroom_r:.2f}R"
+                    if math.isfinite(headroom_r)
+                    else "20／50／100 根中長結構前方沒有近距離障礙"
+                ),
             ],
             entry=entry,
             stop=stop,
@@ -1022,7 +1801,7 @@ class AdaptiveStrategyEngine:
                 "這是提早訊號，必須再由 5m／15m 成交異動與即時資金流驗證。",
                 f"距離 15m EMA21 已達 {tf15.extension_atr:.2f} ATR；超過 {self.config.max_entry_extension_atr:.2f} ATR 不追價。",
             ],
-            signal_stage="EARLY",
+            signal_stage="EARLY_SIGNAL",
         )
 
     def _adapt_trade_management(
@@ -1184,6 +1963,14 @@ class AdaptiveStrategyEngine:
             tp1 = entry - (risk * 2.0)
             tp2 = entry - (risk * 2.7)
             invalidation = "15m 收盤重新站回跌破位上方，或觸及止損。"
+        obstacle = self._nearest_obstacle(direction, entry, tf4, tf1)
+        headroom_r = (
+            ((obstacle - entry) if direction == "LONG" else (entry - obstacle)) / risk
+            if obstacle is not None
+            else float("inf")
+        )
+        if headroom_r < self.config.minimum_rr:
+            return None
         score = (
             68.0
             + (participation_votes * 3.5)
@@ -1201,6 +1988,11 @@ class AdaptiveStrategyEngine:
                 "1H 收盤突破近 20 根結構邊界",
                 f"成交參與支持票 {participation_votes}／3（1H 量比 {tf1.volume_ratio:.2f}）",
                 "RSI、MACD 快慢線、VWAP 與量能至少三項同向",
+                (
+                    f"20／50／100 根結構前方空間 {headroom_r:.2f}R"
+                    if math.isfinite(headroom_r)
+                    else "20／50／100 根結構前方沒有近距離障礙"
+                ),
             ],
             entry=entry,
             stop=stop,
@@ -1251,11 +2043,9 @@ class AdaptiveStrategyEngine:
             risk = entry - stop
             if risk <= 0:
                 return None
-            obstacle = min(
-                [level for level in (tf1.prior_high20, tf4.prior_high20) if level > entry],
-                default=float("inf"),
-            )
-            if math.isfinite(obstacle) and (obstacle - entry) / risk < self.config.minimum_rr:
+            obstacle = self._nearest_obstacle(direction, entry, tf4, tf1)
+            headroom_r = (obstacle - entry) / risk if obstacle is not None else float("inf")
+            if headroom_r < self.config.minimum_rr:
                 return None
             tp1 = entry + (risk * 1.9)
             tp2 = entry + (risk * 2.6)
@@ -1287,11 +2077,9 @@ class AdaptiveStrategyEngine:
             risk = stop - entry
             if risk <= 0:
                 return None
-            obstacle = max(
-                [level for level in (tf1.prior_low20, tf4.prior_low20) if level < entry],
-                default=-float("inf"),
-            )
-            if math.isfinite(obstacle) and (entry - obstacle) / risk < self.config.minimum_rr:
+            obstacle = self._nearest_obstacle(direction, entry, tf4, tf1)
+            headroom_r = (entry - obstacle) / risk if obstacle is not None else float("inf")
+            if headroom_r < self.config.minimum_rr:
                 return None
             tp1 = entry - (risk * 1.9)
             tp2 = entry - (risk * 2.6)
@@ -1311,6 +2099,11 @@ class AdaptiveStrategyEngine:
                 f"4H／1H 趨勢背景支持票 {background_votes}／5",
                 "15m 回到 EMA21 附近，沒有過度延伸",
                 "15m RSI、MACD、VWAP、K 棒與量能至少三項同向",
+                (
+                    f"20／50／100 根結構前方空間 {headroom_r:.2f}R"
+                    if math.isfinite(headroom_r)
+                    else "20／50／100 根結構前方沒有近距離障礙"
+                ),
             ],
             entry=entry,
             stop=stop,

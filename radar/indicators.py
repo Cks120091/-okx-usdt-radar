@@ -136,6 +136,10 @@ class TimeframeFeatures:
     volume_ratio: float
     prior_high20: float
     prior_low20: float
+    prior_high50: float
+    prior_low50: float
+    prior_high100: float
+    prior_low100: float
     recent_high: float
     recent_low: float
     extension_atr: float
@@ -157,8 +161,15 @@ def features(candles: list[Candle]) -> TimeframeFeatures:
     ema55_values = ema_series(closes, 55)
     current_atr = atr(candles, 14)
     macd_line, macd_signal, histogram, previous_histogram = macd(closes)
-    prior_high20 = max(item.high for item in candles[-21:-1])
-    prior_low20 = min(item.low for item in candles[-21:-1])
+    history = candles[:-1]
+
+    def prior_bounds(lookback: int) -> tuple[float, float]:
+        window = history[-min(lookback, len(history)):]
+        return max(item.high for item in window), min(item.low for item in window)
+
+    prior_high20, prior_low20 = prior_bounds(20)
+    prior_high50, prior_low50 = prior_bounds(50)
+    prior_high100, prior_low100 = prior_bounds(100)
     recent_high = max(item.high for item in candles[-7:-1])
     recent_low = min(item.low for item in candles[-7:-1])
     previous_volume = sma(volumes[:-1], 20)
@@ -220,6 +231,10 @@ def features(candles: list[Candle]) -> TimeframeFeatures:
         volume_ratio=volume_ratio,
         prior_high20=prior_high20,
         prior_low20=prior_low20,
+        prior_high50=prior_high50,
+        prior_low50=prior_low50,
+        prior_high100=prior_high100,
+        prior_low100=prior_low100,
         recent_high=recent_high,
         recent_low=recent_low,
         extension_atr=extension,

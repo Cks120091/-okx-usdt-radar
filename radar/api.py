@@ -57,6 +57,35 @@ class OKXPublicClient:
         self.rate_limiter = SlidingWindowRateLimiter(rate_limit_requests, 2.0)
         self.execution_notional_usdt = max(0.0, execution_notional_usdt)
         self._instrument_meta: dict[str, Instrument] = {}
+        self._metrics_lock = threading.Lock()
+        self._metrics: dict[str, Any] = {}
+        self.reset_metrics()
+
+    def reset_metrics(self) -> None:
+        with self._metrics_lock:
+            self._metrics = {
+                "requests": 0,
+                "successful_requests": 0,
+                "retries": 0,
+                "errors": 0,
+                "rate_limit_errors": 0,
+                "endpoint_requests": {},
+                "request_seconds": 0.0,
+            }
+
+    def metrics_snapshot(self) -> dict[str, Any]:
+        with self._metrics_lock:
+            payload = dict(self._metrics)
+            payload["endpoint_requests"] = dict(self._metrics["endpoint_requests"])
+        payload["request_seconds"] = round(float(payload["request_seconds"]), 3)
+        return payload
+
+    def _metric(self, key: str, amount: float = 1.0, endpoint: str | None = None) -> None:
+        with self._metrics_lock:
+            self._metrics[key] = self._metrics.get(key, 0) + amount
+            if endpoint is not None:
+                counts = self._metrics["endpoint_requests"]
+                counts[endpoint] = counts.get(endpoint, 0) + 1
 
     def _get(self, path: str, params: dict[str, Any]) -> list[Any]:
         query = urlencode({key: str(value) for key, value in params.items()})
@@ -64,6 +93,8 @@ class OKXPublicClient:
         last_error: Exception | None = None
         for attempt in range(self.retries + 1):
             self.rate_limiter.acquire()
+            request_started = time.monotonic()
+            self._metric("requests", endpoint=path)
             request = Request(
                 url,
                 headers={
@@ -81,11 +112,23 @@ class OKXPublicClient:
                 data = payload.get("data")
                 if not isinstance(data, list):
                     raise OKXAPIError("OKX response did not contain a data list")
+                self._metric("successful_requests")
+                self._metric("request_seconds", time.monotonic() - request_started)
                 return data
             except (HTTPError, URLError, TimeoutError, json.JSONDecodeError, OKXAPIError) as exc:
+                self._metric("request_seconds", time.monotonic() - request_started)
+                self._metric("errors")
+                if (
+                    isinstance(exc, HTTPError)
+                    and exc.code == 429
+                    or "code=50011" in str(exc)
+                    or "rate limit" in str(exc).lower()
+                ):
+                    self._metric("rate_limit_errors")
                 last_error = exc
                 if attempt >= self.retries:
                     break
+                self._metric("retries")
                 delay = (0.45 * (2**attempt)) + random.uniform(0.0, 0.15)
                 time.sleep(delay)
         raise OKXAPIError(f"GET {path} failed after retries: {last_error}")

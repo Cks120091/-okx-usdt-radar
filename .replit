@@ -1,0 +1,9 @@
+entrypoint = "run.py"
+run = ["python3", "run.py", "--serve"]
+
+[deployment]
+run = ["python3", "run.py", "--serve"]
+
+[[ports]]
+localPort = 8000
+externalPort = 80

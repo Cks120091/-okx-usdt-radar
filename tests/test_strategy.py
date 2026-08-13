@@ -57,7 +57,7 @@ class StrategyTests(unittest.TestCase):
         self.instrument = Instrument("TEST-USDT-SWAP", "live", "USDT", "linear", 0.01)
 
     def test_clear_breakout_can_qualify(self):
-        candles_4h = trend_candles(80, 0.4)
+        candles_4h = trend_candles(70, 0.4)
         candles_1h = trend_candles(100, 0.18, breakout=True)
         candles_15m = trend_candles(110, 0.09, accelerate=True)
         ticker = Ticker("TEST-USDT-SWAP", candles_15m[-1].close, candles_15m[-1].close - 0.03, candles_15m[-1].close + 0.03, 1)
@@ -68,8 +68,12 @@ class StrategyTests(unittest.TestCase):
         self.assertGreaterEqual(result.signal.risk_reward, 1.8)
         self.assertGreaterEqual(len(result.signal.evidence), 2)
         self.assertIsNotNone(result.market_state)
-        self.assertEqual(result.market_state.status, "CONFIRMED")
-        self.assertEqual(result.market_state.readiness_score, 100.0)
+        self.assertEqual(result.market_state.status, "EARLY_SIGNAL")
+        self.assertLess(result.market_state.readiness_score, 100.0)
+        self.assertEqual(
+            set(result.signal.evidence_groups),
+            {"position_structure", "trend_momentum", "participation_flow"},
+        )
         self.assertIn(result.signal.trend_strength_label, ("偏弱", "中等", "強"))
         self.assertIn("tp1_action", result.signal.management_plan)
 
@@ -81,8 +85,31 @@ class StrategyTests(unittest.TestCase):
         self.assertLessEqual(tf1.close, tf1.prior_high20)
         plan = engine._early_expansion_plan("LONG", tf4, tf1, tf15)
         self.assertIsNotNone(plan)
-        self.assertEqual(plan.signal_stage, "EARLY")
+        self.assertEqual(plan.signal_stage, "EARLY_SIGNAL")
         self.assertEqual(plan.strategy, "早期動能擴張")
+
+    def test_near_higher_timeframe_obstacle_blocks_late_breakout(self):
+        candles_4h = trend_candles(80, 0.4)
+        candles_1h = trend_candles(100, 0.18, breakout=True)
+        candles_15m = trend_candles(110, 0.09, accelerate=True)
+        ticker = Ticker(
+            "TEST-USDT-SWAP",
+            candles_15m[-1].close,
+            candles_15m[-1].close - 0.03,
+            candles_15m[-1].close + 0.03,
+            1,
+        )
+        result = AdaptiveStrategyEngine(
+            StrategyConfig(min_quote_volume_24h=1_000_000)
+        ).analyze(
+            self.instrument,
+            ticker,
+            candles_4h,
+            candles_1h,
+            candles_15m,
+        )
+        self.assertIsNone(result.signal)
+        self.assertEqual(result.reason, "no_trade_plan")
 
     def test_low_liquidity_is_rejected(self):
         data = trend_candles(100, 0.1, quote_volume=100)
@@ -94,7 +121,7 @@ class StrategyTests(unittest.TestCase):
         self.assertTrue(result.market_state.missing_conditions)
 
     def test_live_market_context_can_confirm_or_downgrade_signal(self):
-        candles_4h = trend_candles(80, 0.4)
+        candles_4h = trend_candles(70, 0.4)
         candles_1h = trend_candles(100, 0.18, breakout=True)
         candles_15m = trend_candles(110, 0.09, accelerate=True)
         candles_5m = trend_candles(118, 0.04, breakout=True)
@@ -109,7 +136,7 @@ class StrategyTests(unittest.TestCase):
             {"score": 72.0, "label": "偏多"},
         )
         self.assertIsNotNone(confirmed.signal)
-        self.assertIn("derivatives", confirmed.signal.factor_scores)
+        self.assertIn("participation_flow", confirmed.signal.factor_scores)
         opposed = engine.apply_market_context(
             technical,
             MarketContext("TEST-USDT-SWAP", 20_000_000, 0.0001, -0.30, 0.30, 2),
@@ -118,29 +145,32 @@ class StrategyTests(unittest.TestCase):
             {"score": 72.0, "label": "偏多"},
         )
         self.assertIsNone(opposed.signal)
-        self.assertEqual(opposed.reason, "evidence_conflict")
+        self.assertEqual(opposed.reason, "major_evidence_conflict")
 
-    def test_quiet_micro_timeframe_downgrades_signal(self):
-        candles_4h = trend_candles(80, 0.4)
+    def test_quiet_micro_timeframe_does_not_veto_complete_setup(self):
+        candles_4h = trend_candles(70, 0.4)
         candles_1h = trend_candles(100, 0.18, breakout=True)
         candles_15m = trend_candles(110, 0.09, accelerate=True)
         quiet_5m = trend_candles(118, 0.04)
         ticker = Ticker("TEST-USDT-SWAP", candles_15m[-1].close, candles_15m[-1].close - 0.03, candles_15m[-1].close + 0.03, 1)
         engine = AdaptiveStrategyEngine(StrategyConfig(min_quote_volume_24h=1_000_000))
         technical = engine.analyze(self.instrument, ticker, candles_4h, candles_1h, candles_15m)
-        filtered = engine.apply_market_context(
+        evaluated = engine.apply_market_context(
             technical,
             MarketContext("TEST-USDT-SWAP", 20_000_000, 0.0001, 0.20, 0.62, 2),
             "LONG",
             quiet_5m,
             {"score": 72.0, "label": "偏多"},
         )
-        self.assertIsNone(filtered.signal)
-        self.assertEqual(filtered.reason, "micro_volume_not_confirmed")
-        self.assertFalse(filtered.market_state.market_metrics["micro_volume_anomaly"])
+        self.assertIsNotNone(evaluated.signal)
+        self.assertEqual(evaluated.reason, "qualified")
+        self.assertIn(
+            evaluated.signal.timeframe_states["5m"]["label"],
+            ("中性", "做多方加速"),
+        )
 
     def test_execution_cost_can_reject_an_otherwise_valid_signal(self):
-        candles_4h = trend_candles(80, 0.4)
+        candles_4h = trend_candles(70, 0.4)
         candles_1h = trend_candles(100, 0.18, breakout=True)
         candles_15m = trend_candles(110, 0.09, accelerate=True)
         candles_5m = trend_candles(118, 0.04, breakout=True)
@@ -191,7 +221,7 @@ class StrategyTests(unittest.TestCase):
         )
 
     def test_low_open_interest_is_a_hard_filter(self):
-        candles_4h = trend_candles(80, 0.4)
+        candles_4h = trend_candles(70, 0.4)
         candles_1h = trend_candles(100, 0.18, breakout=True)
         candles_15m = trend_candles(110, 0.09, accelerate=True)
         ticker = Ticker("TEST-USDT-SWAP", candles_15m[-1].close, candles_15m[-1].close - 0.03, candles_15m[-1].close + 0.03, 1)

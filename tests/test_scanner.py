@@ -24,6 +24,7 @@ def candles(count=100, micro_anomaly=False):
 class FakeClient:
     def __init__(self, fail_id=None):
         self.fail_id = fail_id
+        self.candle_requests = []
         self.instruments = [
             Instrument("AAA-USDT-SWAP", "live", "USDT", "linear", 0.01),
             Instrument("BBB-USDT-SWAP", "live", "USDT", "linear", 0.01),
@@ -39,6 +40,7 @@ class FakeClient:
         }
 
     def get_candles(self, inst_id, bar, limit=100):
+        self.candle_requests.append((inst_id, bar, limit))
         if inst_id == self.fail_id and bar == "1H":
             raise RuntimeError("fixture failure")
         return candles(limit)
@@ -49,7 +51,7 @@ class ManyFakeClient(FakeClient):
         super().__init__()
         self.instruments = [
             Instrument(f"T{index:02d}-USDT-SWAP", "live", "USDT", "linear", 0.01)
-            for index in range(12)
+            for index in range(25)
         ]
 
 
@@ -61,6 +63,7 @@ class ContextFakeClient(FakeClient):
         return MarketContext(inst_id, open_interest_usd, 0.0001, 0.12, 0.56, 1)
 
     def get_candles(self, inst_id, bar, limit=100):
+        self.candle_requests.append((inst_id, bar, limit))
         return candles(limit, micro_anomaly=bar == "5m")
 
 
@@ -69,8 +72,13 @@ class LowOpenInterestClient(ContextFakeClient):
         return {item.inst_id: 500_000 for item in self.instruments}
 
 
+class FailedOpenInterestClient(ContextFakeClient):
+    def get_open_interest_usd(self):
+        raise RuntimeError("fixture OI failure")
+
+
 class AlwaysSignalEngine:
-    def analyze(self, instrument, ticker, candles_4h, candles_1h, candles_15m):
+    def analyze(self, instrument, ticker, candles_4h, candles_1h, candles_15m, candles_5m=None):
         score = float(instrument.inst_id[1:3])
         return AnalysisResult(
             Signal(
@@ -104,8 +112,9 @@ class ScannerTests(unittest.TestCase):
         self.assertIn("BBB-USDT-SWAP", report.failed_instruments)
 
     def test_full_fetch_reports_one_hundred_percent_coverage(self):
+        client = FakeClient()
         report = MarketScanner(
-            FakeClient(),
+            client,
             ScannerConfig(
                 workers=2,
                 min_open_interest_usd=0,
@@ -120,8 +129,13 @@ class ScannerTests(unittest.TestCase):
         self.assertEqual(sum(report.market_regime_counts.values()), 2)
         self.assertTrue(report.watchlist)
         self.assertTrue(report.watchlist[0].missing_conditions)
+        requested = {(bar, limit) for _, bar, limit in client.candle_requests}
+        self.assertEqual(
+            requested,
+            {("4H", 200), ("1H", 240), ("15m", 200)},
+        )
 
-    def test_output_has_hard_limit_of_ten_and_is_quality_sorted(self):
+    def test_output_has_hard_limit_of_twenty_and_is_quality_sorted(self):
         scanner = MarketScanner(
             ManyFakeClient(),
             ScannerConfig(
@@ -135,26 +149,55 @@ class ScannerTests(unittest.TestCase):
         )
         scanner.engine = AlwaysSignalEngine()
         report = scanner.scan_once()
-        self.assertEqual(len(report.signals), 10)
-        self.assertEqual(report.signals[0].inst_id, "T11-USDT-SWAP")
-        self.assertEqual(report.signals[-1].inst_id, "T02-USDT-SWAP")
+        self.assertEqual(len(report.signals), 20)
+        self.assertEqual(report.signals[0].inst_id, "T24-USDT-SWAP")
+        self.assertEqual(report.signals[-1].inst_id, "T05-USDT-SWAP")
 
     def test_top_candidates_receive_public_market_context(self):
-        report = MarketScanner(ContextFakeClient(), ScannerConfig(workers=2)).scan_once()
+        client = ContextFakeClient()
+        report = MarketScanner(
+            client,
+            ScannerConfig(
+                workers=2,
+                previous_open_interest_usd={
+                    "AAA-USDT-SWAP": 4_000_000,
+                    "BBB-USDT-SWAP": 4_000_000,
+                },
+            ),
+        ).scan_once()
         self.assertEqual(report.context_target_count, 2)
         self.assertEqual(report.context_enriched_count, 2)
         self.assertEqual(report.context_failures, {})
         self.assertTrue(report.watchlist[0].market_metrics["context_complete"])
-        self.assertTrue(report.watchlist[0].market_metrics["micro_volume_anomaly"])
+        self.assertGreaterEqual(
+            report.watchlist[0].market_metrics["micro_acceleration_5m"],
+            0,
+        )
+        self.assertEqual(
+            report.watchlist[0].market_metrics["open_interest_change_pct"],
+            25.0,
+        )
         self.assertIn(report.market_bias["label"], ("偏多", "中性", "偏空"))
+        self.assertIn(("AAA-USDT-SWAP", "5m", 120), client.candle_requests)
+        self.assertIn(("BBB-USDT-SWAP", "5m", 120), client.candle_requests)
 
     def test_low_open_interest_is_excluded_from_watchlist(self):
         report = MarketScanner(LowOpenInterestClient(), ScannerConfig(workers=2)).scan_once()
-        self.assertEqual(report.context_target_count, 2)
+        self.assertEqual(report.context_target_count, 0)
         self.assertEqual(report.watchlist, [])
         self.assertTrue(
             all(item.status == "FILTERED" for item in report.market_map),
         )
+
+    def test_open_interest_endpoint_failure_marks_scan_incomplete(self):
+        report = MarketScanner(
+            FailedOpenInterestClient(),
+            ScannerConfig(workers=2),
+        ).scan_once()
+        self.assertEqual(report.status, "DATA_INCOMPLETE")
+        self.assertFalse(report.actionable)
+        self.assertEqual(report.signals, [])
+        self.assertIn("_OPEN_INTEREST_", report.failed_instruments)
 
     def test_market_bias_turns_bullish_when_breadth_and_anchors_align(self):
         scanner = MarketScanner(FakeClient())
