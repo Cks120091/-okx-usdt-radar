@@ -103,6 +103,36 @@ class AlwaysSignalEngine:
         )
 
 
+class LowReadinessContextEngine:
+    def analyze(self, instrument, ticker, candles_4h, candles_1h, candles_15m, candles_5m=None):
+        return AnalysisResult(
+            None,
+            "fixture",
+            MarketState(
+                inst_id=instrument.inst_id,
+                regime="DISORDER",
+                direction="NEUTRAL",
+                preferred_strategy="等待",
+                readiness_score=0.0,
+                status="WATCH",
+                missing_conditions=["等待方向清楚"],
+                spread_pct=0.01,
+                quote_volume_24h=20_000_000,
+                closed_candle_ts=1,
+            ),
+        )
+
+    def apply_market_context(
+        self,
+        result,
+        context,
+        btc_bias="NEUTRAL",
+        candles_5m=None,
+        market_bias=None,
+    ):
+        return result
+
+
 class ScannerTests(unittest.TestCase):
     def test_any_request_failure_clears_all_signals(self):
         report = MarketScanner(FakeClient("BBB-USDT-SWAP"), ScannerConfig(workers=2)).scan_once()
@@ -178,6 +208,19 @@ class ScannerTests(unittest.TestCase):
             25.0,
         )
         self.assertIn(report.market_bias["label"], ("偏多", "中性", "偏空"))
+        self.assertIn(("AAA-USDT-SWAP", "5m", 120), client.candle_requests)
+        self.assertIn(("BBB-USDT-SWAP", "5m", 120), client.candle_requests)
+
+    def test_context_coverage_is_not_limited_to_near_trigger_candidates(self):
+        client = ContextFakeClient()
+        scanner = MarketScanner(
+            client,
+            ScannerConfig(workers=2, context_candidates=100),
+        )
+        scanner.engine = LowReadinessContextEngine()
+        report = scanner.scan_once()
+        self.assertEqual(report.context_target_count, 2)
+        self.assertEqual(report.context_enriched_count, 2)
         self.assertIn(("AAA-USDT-SWAP", "5m", 120), client.candle_requests)
         self.assertIn(("BBB-USDT-SWAP", "5m", 120), client.candle_requests)
 

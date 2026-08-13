@@ -356,13 +356,21 @@ class MarketScanner:
                 for inst_id, result in analysis_results.items()
                 if result.market_state is not None
                 and result.market_state.status != "FILTERED"
-                and result.market_state.regime != "DISORDER"
-                and result.market_state.direction != "NEUTRAL"
-                and result.market_state.readiness_score >= 50.0
             ]
+            stage_priority = {
+                "CONFIRMED": 4,
+                "EARLY_SIGNAL": 3,
+                "NEAR_TRIGGER": 2,
+                "WATCH": 1,
+            }
             ranked_results.sort(
                 key=lambda item: (
                     item[1].signal is not None,
+                    item[1].candidate_plan is not None
+                    or item[1].candidate_signal is not None,
+                    stage_priority.get(item[1].market_state.status, 0),
+                    item[1].market_state.regime != "DISORDER",
+                    item[1].market_state.direction != "NEUTRAL",
                     item[1].market_state.readiness_score,
                     item[1].market_state.quote_volume_24h,
                 ),
