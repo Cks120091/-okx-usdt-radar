@@ -42,6 +42,23 @@ class IndicatorTests(unittest.TestCase):
         self.assertLessEqual(values.directional_volume_ratio, 1)
         self.assertGreater(values.atr_pct, 0)
 
+    def test_structure_windows_keep_older_obstacles(self):
+        candles = rising_candles(120)
+        older = candles[30]
+        candles[30] = Candle(
+            older.ts,
+            older.open,
+            250.0,
+            older.low,
+            older.close,
+            older.volume,
+            older.quote_volume,
+            True,
+        )
+        values = features(candles)
+        self.assertGreater(values.prior_high100, values.prior_high50)
+        self.assertGreaterEqual(values.prior_high50, values.prior_high20)
+
 
 if __name__ == "__main__":
     unittest.main()

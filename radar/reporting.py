@@ -22,10 +22,21 @@ def save_report(report: RadarReport, data_dir: str | Path) -> tuple[Path, Path]:
 
 
 def report_markdown(report: RadarReport) -> str:
+    status_names = {
+        "SIGNALS_FOUND": "資料最新",
+        "NO_QUALIFIED_SIGNAL": "資料最新／沒有合格訊號",
+        "DATA_INCOMPLETE": "掃描異常／資料不完整",
+    }
+    direction_names = {"LONG": "做多", "SHORT": "做空", "NEUTRAL": "中性"}
+    stage_names = {
+        "EARLY": "早期訊號",
+        "EARLY_SIGNAL": "早期訊號",
+        "CONFIRMED": "完整確認",
+    }
     lines = [
         "# OKX USDT 永續雷達",
         "",
-        f"- 狀態：`{report.status}`",
+        f"- 狀態：{status_names.get(report.status, report.status)}",
         f"- 產生時間：{report.generated_at}",
         f"- 覆蓋：{report.fetched_count}/{report.target_count}（{report.coverage_pct:.2f}%）",
         f"- 可分析：{report.analyzable_count}",
@@ -47,10 +58,12 @@ def report_markdown(report: RadarReport) -> str:
         for index, signal in enumerate(report.signals, 1):
             lines.extend(
                 [
-                    f"### {index}. {signal.inst_id} — {signal.direction}",
+                    f"### {index}. {signal.inst_id} — {direction_names.get(signal.direction, '中性')}",
                     "",
                     f"- 策略：{signal.strategy}（{signal.regime}）",
-                    f"- 階段：{signal.signal_stage}",
+                    f"- 階段：{stage_names.get(signal.signal_stage, signal.signal_stage)}",
+                    f"- 準備度：{signal.readiness_score}%",
+                    f"- 說明：{signal.summary}",
                     f"- 趨勢力度：{signal.trend_strength_label}（{signal.trend_strength_score}）",
                     f"- 分數：{signal.score}",
                     f"- 進場區：{signal.entry_low} ～ {signal.entry_high}",
@@ -67,12 +80,12 @@ def report_markdown(report: RadarReport) -> str:
         for index, item in enumerate(report.watchlist, 1):
             lines.extend(
                 [
-                    f"### {index}. {item.inst_id} — {item.direction}",
+                    f"### {index}. {item.inst_id} — {direction_names.get(item.direction, '中性')}",
                     "",
                     f"- 市場型態：{item.regime}",
                     f"- 適用策略：{item.preferred_strategy}",
                     f"- 準備度：{item.readiness_score}%",
-                    "- 尚缺條件：" + "；".join(item.missing_conditions),
+                    f"- 說明：{item.summary}",
                     "",
                 ]
             )

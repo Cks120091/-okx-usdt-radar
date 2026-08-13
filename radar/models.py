@@ -59,6 +59,7 @@ class MarketContext:
     buy_slippage_pct: float | None = None
     sell_slippage_pct: float | None = None
     execution_notional_usdt: float = 0.0
+    open_interest_change_pct: float | None = None
 
     @property
     def complete(self) -> bool:
@@ -111,6 +112,17 @@ class Signal:
     trend_strength_label: str = "中等"
     trend_strength_score: float = 50.0
     management_plan: dict[str, Any] = field(default_factory=dict)
+    readiness_score: float = 0.0
+    evidence_groups: dict[str, Any] = field(default_factory=dict)
+    timeframe_states: dict[str, Any] = field(default_factory=dict)
+    supporting_evidence: list[str] = field(default_factory=list)
+    conflicts: list[str] = field(default_factory=list)
+    neutral_evidence: list[str] = field(default_factory=list)
+    safety_checks: list[dict[str, Any]] = field(default_factory=list)
+    entry_quality: dict[str, Any] = field(default_factory=dict)
+    summary: str = ""
+    lifecycle: dict[str, Any] = field(default_factory=dict)
+    actionable: bool = True
 
     def to_dict(self) -> dict[str, Any]:
         return asdict(self)
@@ -131,6 +143,14 @@ class MarketState:
     passed_conditions: list[str] = field(default_factory=list)
     factor_scores: dict[str, float] = field(default_factory=dict)
     market_metrics: dict[str, Any] = field(default_factory=dict)
+    evidence_groups: dict[str, Any] = field(default_factory=dict)
+    timeframe_states: dict[str, Any] = field(default_factory=dict)
+    supporting_evidence: list[str] = field(default_factory=list)
+    conflicts: list[str] = field(default_factory=list)
+    neutral_evidence: list[str] = field(default_factory=list)
+    safety_checks: list[dict[str, Any]] = field(default_factory=list)
+    entry_quality: dict[str, Any] = field(default_factory=dict)
+    summary: str = ""
 
     def to_dict(self) -> dict[str, Any]:
         return asdict(self)
@@ -158,6 +178,15 @@ class RadarReport:
     context_enriched_count: int = 0
     context_failures: dict[str, list[str]] = field(default_factory=dict)
     market_bias: dict[str, Any] = field(default_factory=dict)
+    scan_id: str = ""
+    scan_started_at: str = ""
+    completed_at: str = ""
+    runtime_status: str = "FRESH"
+    actionable: bool = True
+    signals_suppressed_reason: str | None = None
+    max_signals: int = 20
+    api_metrics: dict[str, Any] = field(default_factory=dict)
+    version: str = "2.0"
 
     def to_dict(self) -> dict[str, Any]:
         payload = asdict(self)
@@ -167,6 +196,7 @@ class RadarReport:
         payload["safety"] = {
             "mode": "analysis_only",
             "auto_ordering": False,
+            "actionable": self.actionable,
             "max_risk_per_trade_pct": 1.0,
             "note": "訊號是條件式分析，不是保證獲利；實際下單前需自行確認。",
         }

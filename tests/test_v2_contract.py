@@ -1,0 +1,51 @@
+import tempfile
+import unittest
+from pathlib import Path
+
+from radar.config import AppConfig
+
+
+class V2ContractTests(unittest.TestCase):
+    def test_v2_defaults_and_limits(self):
+        config = AppConfig.load()
+        self.assertEqual(config.max_signals, 20)
+        self.assertEqual(config.context_candidates, 100)
+        self.assertEqual(config.stale_after_seconds, 1800)
+        self.assertFalse(config.require_micro_volume_anomaly)
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "bad.json"
+            path.write_text('{"max_signals": 21}', encoding="utf-8")
+            with self.assertRaises(ValueError):
+                AppConfig.load(str(path))
+
+    def test_mobile_ui_triggers_real_scan_and_uses_chinese_lifecycle(self):
+        html = (Path(__file__).parents[1] / "radar" / "static" / "pages.html").read_text(
+            encoding="utf-8"
+        )
+        self.assertIn("/api/scan", html)
+        self.assertIn("method:'POST'", html)
+        self.assertIn("bootstrap()", html)
+        self.assertIn("立即掃描現在市場", html)
+        self.assertIn("早期訊號", html)
+        self.assertIn("完整確認", html)
+        self.assertIn("資料已過期，禁止依此進場", html)
+        self.assertIn("overflow-x:hidden", html)
+        self.assertIn("env(safe-area-inset-bottom)", html)
+        self.assertIn("<details>", html)
+        self.assertNotIn("重新載入結果", html)
+        self.assertNotIn("每 15 分鐘", html)
+        self.assertNotIn("setInterval", html)
+
+    def test_github_actions_contains_no_market_schedule_or_scan(self):
+        root = Path(__file__).parents[1]
+        workflows = "\n".join(
+            path.read_text(encoding="utf-8")
+            for path in (root / ".github" / "workflows").glob("*.yml")
+        )
+        self.assertNotIn("schedule:", workflows)
+        self.assertNotIn("run.py --once", workflows)
+        self.assertNotIn("cron:", workflows)
+
+
+if __name__ == "__main__":
+    unittest.main()
