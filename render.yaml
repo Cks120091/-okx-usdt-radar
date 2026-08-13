@@ -1,0 +1,10 @@
+services:
+  - type: web
+    name: okx-radar-v2-live
+    runtime: docker
+    plan: free
+    region: singapore
+    branch: main
+    numInstances: 1
+    healthCheckPath: /health
+    autoDeployTrigger: commit
