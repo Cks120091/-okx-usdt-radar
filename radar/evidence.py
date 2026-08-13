@@ -891,6 +891,16 @@ def _summary(
     )
 
 
+def summary_for_stage(assessment: EvidenceAssessment, stage: str) -> str:
+    """Rebuild the human summary when a later safety decision changes the UI stage."""
+    return _summary(
+        assessment.direction,
+        assessment.timeframe_states,
+        assessment.groups["participation_flow"].score,
+        stage,
+    )
+
+
 def _timeframe_state(role: str, score: float, direction: str, label: str) -> dict[str, Any]:
     return {"role": role, "score": score, "direction": direction, "label": label}
 

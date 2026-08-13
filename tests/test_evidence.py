@@ -98,6 +98,28 @@ class EvidenceV2Tests(unittest.TestCase):
         self.assertEqual(result.reason, "major_evidence_conflict")
         self.assertGreaterEqual(result.assessment.conflict_severity, 55.0)
 
+    def test_watch_summary_matches_stage_when_no_safe_entry_plan_exists(self):
+        engine = AdaptiveStrategyEngine(StrategyConfig(min_quote_volume_24h=1_000_000))
+        technical = engine.analyze(
+            self.instrument,
+            self.ticker,
+            self.candles_4h,
+            self.candles_1h,
+            self.candles_15m,
+        )
+        technical = replace(technical, candidate_plan=None, candidate_signal=None)
+        result = engine.apply_market_context(
+            technical,
+            MarketContext(self.instrument.inst_id, 20_000_000, 0.0, 0.0, 0.50, 2),
+            "LONG",
+            self.candles_5m,
+            {"score": 50.0, "label": "中性"},
+        )
+        self.assertIsNone(result.signal)
+        self.assertEqual(result.market_state.status, "WATCH")
+        self.assertIn("目前列為觀望", result.market_state.summary)
+        self.assertNotIn("目前列為早期", result.market_state.summary)
+
 
 if __name__ == "__main__":
     unittest.main()
