@@ -35,6 +35,7 @@ class V2ContractTests(unittest.TestCase):
         self.assertNotIn("重新載入結果", html)
         self.assertNotIn("每 15 分鐘", html)
         self.assertNotIn("setInterval", html)
+        self.assertIn("status.scan_id!==state.report.scan_id", html)
 
     def test_github_actions_contains_no_market_schedule_or_scan(self):
         root = Path(__file__).parents[1]
