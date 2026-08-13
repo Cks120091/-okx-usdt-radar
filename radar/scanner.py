@@ -310,6 +310,10 @@ class MarketScanner:
                         {
                             "open_interest_usd": current_oi,
                             "open_interest_change_pct": oi_change_pct,
+                            "oi_flow_state": self._classify_oi_flow(
+                                oi_change_pct,
+                                metrics.get("price_change_1h_pct"),
+                            ),
                         }
                     )
                     filtered = (
@@ -700,6 +704,22 @@ class MarketScanner:
             (current_open_interest_usd - previous) / previous * 100.0,
             3,
         )
+
+    @staticmethod
+    def _classify_oi_flow(
+        open_interest_change_pct: float | None,
+        price_change_pct: object,
+    ) -> str | None:
+        if open_interest_change_pct is None or not isinstance(
+            price_change_pct,
+            (int, float),
+        ):
+            return None
+        if open_interest_change_pct >= 0.5:
+            return "LONG_BUILD" if price_change_pct >= 0 else "SHORT_BUILD"
+        if open_interest_change_pct <= -0.8:
+            return "SHORT_COVER" if price_change_pct >= 0 else "LONG_EXIT"
+        return "STABLE"
 
     def _apply_lifecycle(
         self,

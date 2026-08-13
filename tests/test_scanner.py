@@ -46,6 +46,17 @@ class FakeClient:
         return candles(limit)
 
 
+class ScannerMarketPulseTests(unittest.TestCase):
+    def test_oi_and_price_are_classified_by_participation_type(self):
+        classify = MarketScanner._classify_oi_flow
+        self.assertEqual(classify(1.2, 0.8), "LONG_BUILD")
+        self.assertEqual(classify(1.2, -0.8), "SHORT_BUILD")
+        self.assertEqual(classify(-1.2, 0.8), "SHORT_COVER")
+        self.assertEqual(classify(-1.2, -0.8), "LONG_EXIT")
+        self.assertEqual(classify(0.1, 0.8), "STABLE")
+        self.assertIsNone(classify(None, 0.8))
+
+
 class ManyFakeClient(FakeClient):
     def __init__(self):
         super().__init__()

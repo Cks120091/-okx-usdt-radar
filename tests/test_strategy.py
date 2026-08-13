@@ -76,6 +76,11 @@ class StrategyTests(unittest.TestCase):
         )
         self.assertIn(result.signal.trend_strength_label, ("偏弱", "中等", "強"))
         self.assertIn("tp1_action", result.signal.management_plan)
+        metrics = result.market_state.market_metrics
+        self.assertEqual(metrics["last_price"], ticker.last)
+        self.assertIsInstance(metrics["price_change_15m_pct"], float)
+        self.assertIsInstance(metrics["price_change_1h_pct"], float)
+        self.assertIsInstance(metrics["price_change_24h_pct"], float)
 
     def test_early_expansion_does_not_wait_for_one_hour_breakout(self):
         engine = AdaptiveStrategyEngine(StrategyConfig(max_entry_extension_atr=1.0))

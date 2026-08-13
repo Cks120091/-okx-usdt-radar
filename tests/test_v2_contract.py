@@ -36,6 +36,13 @@ class V2ContractTests(unittest.TestCase):
         self.assertNotIn("每 15 分鐘", html)
         self.assertNotIn("setInterval", html)
         self.assertIn("status.scan_id!==state.report.scan_id", html)
+        self.assertIn("多空候選排行", html)
+        self.assertIn("OI 異動雷達", html)
+        self.assertIn("市場平均 RSI", html)
+        self.assertIn("localStorage", html)
+        self.assertIn("TradingView 圖表", html)
+        self.assertIn("搜尋幣種，例如 BTC、SNDK", html)
+        self.assertIn("renderOverviewUnavailable", html)
 
     def test_github_actions_contains_no_market_schedule_or_scan(self):
         root = Path(__file__).parents[1]

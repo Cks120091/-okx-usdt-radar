@@ -34,22 +34,27 @@
     .metric .k{color:var(--muted);font-size:11px;margin-bottom:5px}.metric .v{font-size:19px;font-weight:850;overflow-wrap:anywhere}.metric.wide{grid-column:1/-1}.metric.wide .v{font-size:14px}
     .notice{display:none;border-radius:15px;padding:13px 14px;margin:0 0 12px;font-size:14px;font-weight:700;line-height:1.55;border:1px solid}
     .notice.show{display:block}.notice.scan{color:#d9ebff;background:#0c2949;border-color:#295d91}.notice.danger{color:#ffe5e8;background:#39151e;border-color:#7a2b3b}
+    .market-strip{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:10px;margin-bottom:10px}.pulse-card{background:#091827;border:1px solid var(--line);border-radius:14px;padding:11px 12px;min-width:0}.pulse-head{display:flex;align-items:center;justify-content:space-between;gap:7px;font-size:11px;color:var(--muted)}.pulse-head strong{font-size:13px;color:#fff}.pulse-price{font-size:17px;font-weight:900;margin:5px 0 3px}.change{font-size:11px;font-weight:800}.up{color:var(--green)}.down{color:var(--red)}.flat{color:var(--gray)}
+    .search-tools{display:flex;gap:8px;margin-bottom:12px}.global-search{width:100%;min-width:0;min-height:46px;border:1px solid var(--line);border-radius:13px;background:var(--panel);color:#fff;padding:10px 12px;font-size:16px}.search-button{min-width:68px;border:1px solid #426e9f;border-radius:13px;background:#16304e;color:#fff;font-weight:850}
     .progress{height:7px;margin-top:10px;border-radius:999px;background:#081422;overflow:hidden}.progress>i{display:block;height:100%;width:18%;background:linear-gradient(90deg,var(--blue),var(--yellow));border-radius:inherit;transition:width .25s}.progress.indeterminate>i{animation:slide 1.3s infinite;width:35%}@keyframes slide{from{transform:translateX(-110%)}to{transform:translateX(310%)}}
     .tabs{display:flex;gap:8px;overflow:auto;padding:2px 0 12px;scrollbar-width:none}.tabs::-webkit-scrollbar{display:none}.tab{min-height:42px;border:1px solid var(--line);background:var(--panel);color:var(--muted);border-radius:12px;padding:9px 13px;font-weight:750;white-space:nowrap}.tab.active{color:#fff;border-color:#426e9f;background:#16304e}
     .section{display:none}.section.active{display:block}.section-title{display:flex;align-items:flex-end;justify-content:space-between;gap:12px;margin:11px 2px}.section-title h2{font-size:17px;margin:0}.section-title span{font-size:12px;color:var(--muted)}
     .empty{border:1px dashed #38506d;background:rgba(15,31,51,.62);border-radius:16px;padding:28px 18px;text-align:center;color:var(--muted);line-height:1.6}
+    .overview-grid{display:grid;gap:12px}.overview-card{background:linear-gradient(155deg,var(--panel2),var(--panel));border:1px solid var(--line);border-radius:17px;padding:14px;box-shadow:var(--shadow);min-width:0}.overview-card h3{font-size:14px;margin:0}.overview-sub{color:var(--muted);font-size:11px;margin-top:4px;line-height:1.5}.heat-grid{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:8px;margin-top:12px}.heat-item{background:#081625;border:1px solid #203a57;border-radius:11px;padding:10px 8px;text-align:center}.heat-item b{display:block;font-size:19px}.heat-item span{display:block;color:var(--muted);font-size:10px;margin-top:3px}.breadth{display:flex;height:9px;border-radius:999px;overflow:hidden;background:#172536;margin-top:12px}.breadth i{display:block;height:100%}.breadth .long{background:var(--green)}.breadth .neutral{background:var(--gray)}.breadth .short{background:var(--red)}.breadth-legend{display:flex;justify-content:space-between;gap:8px;color:var(--muted);font-size:10px;margin-top:6px}
+    .ranking-grid{display:grid;gap:12px}.ranking-panel{background:#091726;border:1px solid #20344e;border-radius:14px;padding:11px}.ranking-panel.long-r{border-top:3px solid var(--green)}.ranking-panel.short-r{border-top:3px solid var(--red)}.ranking-panel h3{display:flex;justify-content:space-between;align-items:center;font-size:13px;margin:0 0 8px}.rank-row{display:grid;grid-template-columns:minmax(0,1fr) auto;gap:8px;align-items:center;border-top:1px solid #1e324a;padding:9px 0}.rank-row:first-of-type{border-top:0}.rank-symbol{font-size:13px;font-weight:900}.rank-meta{font-size:10px;color:var(--muted);margin-top:3px}.rank-score{text-align:right;font-size:16px;font-weight:900}.rank-score small{display:block;font-size:9px;color:var(--muted)}
+    .anomaly-list{display:grid;gap:8px;margin-top:12px}.anomaly-card{display:grid;grid-template-columns:minmax(0,1fr) auto;gap:9px;align-items:center;background:#081625;border:1px solid #203a57;border-radius:12px;padding:10px}.oi-state{font-size:11px;font-weight:900;margin-bottom:4px}.oi-meta{font-size:10px;color:var(--muted);line-height:1.45}.oi-change{text-align:right;font-size:14px;font-weight:900}.oi-change small{display:block;font-size:9px;color:var(--muted)}
     .signal-card,.watch-card,.map-card{background:linear-gradient(155deg,var(--panel2),var(--panel));border:1px solid var(--line);border-radius:18px;padding:15px;margin:0 0 12px;box-shadow:var(--shadow);min-width:0;overflow:hidden}
     .signal-card.long{border-left:4px solid var(--green)}.signal-card.short{border-left:4px solid var(--red)}
-    .card-head{display:flex;justify-content:space-between;align-items:flex-start;gap:10px}.symbol{font-size:17px;font-weight:900;overflow-wrap:anywhere}.score{font-size:24px;font-weight:900;white-space:nowrap}.score small{font-size:11px;color:var(--muted)}
+    .card-head{display:flex;justify-content:space-between;align-items:flex-start;gap:10px}.card-actions{display:flex;align-items:flex-start;gap:6px}.symbol{font-size:17px;font-weight:900;overflow-wrap:anywhere}.score{font-size:24px;font-weight:900;white-space:nowrap}.score small{font-size:11px;color:var(--muted)}.favorite{width:38px;height:38px;border:1px solid var(--line);border-radius:11px;background:#081625;color:var(--gray);font-size:19px}.favorite.on{color:var(--yellow);border-color:rgba(246,211,101,.5);background:rgba(246,211,101,.1)}.quick-links{display:flex;flex-wrap:wrap;gap:7px;margin-top:10px}.quick-link{display:inline-flex;align-items:center;min-height:34px;padding:6px 9px;border:1px solid #294764;border-radius:10px;color:#bcd9f7;text-decoration:none;font-size:11px;font-weight:800;background:#09192a}
     .badges{display:flex;flex-wrap:wrap;gap:6px;margin-top:8px}.badge{padding:5px 9px;font-size:11px}.long-b{color:var(--green);background:rgba(43,217,143,.10);border-color:rgba(43,217,143,.34)}.short-b{color:var(--red);background:rgba(255,100,117,.10);border-color:rgba(255,100,117,.34)}.early-b{color:var(--orange);background:rgba(255,184,77,.11);border-color:rgba(255,184,77,.36)}.confirmed-long{color:#031b11;background:var(--green);border-color:var(--green)}.confirmed-short{color:#26030a;background:var(--red);border-color:var(--red)}.near-b{color:var(--yellow);background:rgba(246,211,101,.10);border-color:rgba(246,211,101,.34)}.watch-b{color:#d5dbe4;background:rgba(130,145,165,.13);border-color:rgba(130,145,165,.35)}
     .tf-grid{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:8px;margin:14px 0}.tf{background:#081625;border:1px solid #203a57;border-radius:12px;padding:9px;min-width:0}.tf b{display:block;font-size:11px;color:var(--blue);margin-bottom:4px}.tf span{font-size:12px;font-weight:750;line-height:1.35;overflow-wrap:anywhere}
     .human{background:#0a1727;border-left:3px solid var(--blue);border-radius:9px;padding:11px 12px;line-height:1.6;font-size:13px;color:#dbe8f6;margin:10px 0 13px}
     .groups{display:grid;gap:8px}.group-row{display:grid;grid-template-columns:92px 1fr 38px;gap:8px;align-items:center;font-size:12px}.bar{height:8px;background:#08131f;border-radius:999px;overflow:hidden}.bar i{display:block;height:100%;border-radius:inherit;background:var(--blue)}.bar i.support{background:var(--green)}.bar i.conflict{background:var(--red)}
     .triage{display:grid;gap:9px;margin-top:14px}.bucket{border-radius:12px;padding:10px 11px;background:#091726;border:1px solid #20344e}.bucket h3{font-size:12px;margin:0 0 7px}.bucket h4{font-size:11px;color:var(--gray);margin:9px 0 5px;border-top:1px solid #20344e;padding-top:7px}.bucket ul{margin:0;padding-left:18px;color:#d2deeb;font-size:12px;line-height:1.55}.bucket ul.neutral{color:var(--gray)}.bucket.support h3{color:var(--green)}.bucket.conflict h3{color:var(--orange)}.bucket.safety h3{color:var(--blue)}
     details{border-top:1px solid var(--line);margin-top:13px;padding-top:3px}summary{min-height:44px;display:flex;align-items:center;color:#cbd8e7;font-weight:800;font-size:13px;cursor:pointer;list-style:none}summary::-webkit-details-marker{display:none}summary::after{content:"＋";margin-left:auto;color:var(--blue);font-size:18px}details[open] summary::after{content:"－"}.detail-grid{display:grid;grid-template-columns:1fr;gap:8px;padding:3px 0 8px}.detail{background:#081522;border-radius:10px;padding:9px 10px;font-size:12px;line-height:1.5;overflow-wrap:anywhere}.detail b{display:block;color:var(--muted);font-size:10px;margin-bottom:3px}.raw{white-space:pre-wrap;word-break:break-word;font:11px/1.5 ui-monospace,SFMono-Regular,Menlo,monospace;color:#bfd0e3;margin:0}
-    .watch-card .card-head,.map-card{font-size:13px}.watch-card .human{margin-bottom:0}.map-card{display:grid;grid-template-columns:minmax(0,1fr) auto;align-items:center;gap:8px;padding:12px}.map-meta{color:var(--muted);font-size:11px;margin-top:4px}.search{width:100%;min-height:44px;border:1px solid var(--line);border-radius:12px;background:var(--panel);color:#fff;padding:10px 12px;font-size:16px;margin-bottom:10px}
+    .watch-card .card-head,.map-card{font-size:13px}.watch-card .human{margin-bottom:0}.map-card{display:grid;grid-template-columns:minmax(0,1fr) auto;align-items:center;gap:8px;padding:12px}.map-meta{color:var(--muted);font-size:11px;margin-top:4px}.map-side{display:flex;align-items:center;justify-content:flex-end;flex-wrap:wrap;gap:6px}.search{width:100%;min-height:44px;border:1px solid var(--line);border-radius:12px;background:var(--panel);color:#fff;padding:10px 12px;font-size:16px;margin-bottom:10px}.result-note{color:var(--muted);font-size:11px;text-align:center;margin:10px 0}
     .action-wrap{position:fixed;z-index:30;left:0;right:0;bottom:0;padding:10px 14px calc(10px + env(safe-area-inset-bottom));background:linear-gradient(180deg,rgba(7,17,31,0),rgba(7,17,31,.96) 25%)}.action{display:block;width:min(100%,680px);min-height:54px;margin:0 auto;border:0;border-radius:16px;background:linear-gradient(135deg,#2e7de0,#4ca9ff);color:#fff;font-weight:900;font-size:16px;box-shadow:0 10px 28px rgba(38,126,224,.38)}.action:disabled{background:#29435f;color:#9eb3c8;box-shadow:none}.foot{color:var(--muted);font-size:11px;line-height:1.6;text-align:center;margin:22px 8px 0}
-    @media(min-width:720px){.summary{grid-template-columns:repeat(4,minmax(0,1fr))}.metric.wide{grid-column:span 2}.tf-grid{grid-template-columns:repeat(4,minmax(0,1fr))}.triage{grid-template-columns:repeat(3,minmax(0,1fr))}.detail-grid{grid-template-columns:repeat(2,minmax(0,1fr))}.shell{padding:22px}.top{margin:-22px -22px 16px;padding-left:22px;padding-right:22px}}
+    @media(min-width:720px){.summary{grid-template-columns:repeat(4,minmax(0,1fr))}.metric.wide{grid-column:span 2}.market-strip{grid-template-columns:repeat(2,minmax(0,1fr))}.overview-grid{grid-template-columns:repeat(2,minmax(0,1fr))}.overview-card.wide{grid-column:1/-1}.ranking-grid{grid-template-columns:repeat(2,minmax(0,1fr))}.tf-grid{grid-template-columns:repeat(4,minmax(0,1fr))}.triage{grid-template-columns:repeat(3,minmax(0,1fr))}.detail-grid{grid-template-columns:repeat(2,minmax(0,1fr))}.shell{padding:22px}.top{margin:-22px -22px 16px;padding-left:22px;padding-right:22px}}
     @media(prefers-reduced-motion:reduce){*{animation:none!important;transition:none!important}}
   </style>
 </head>
@@ -70,6 +75,16 @@
       <div class="metric"><div class="k">深度資料覆蓋</div><div class="v" id="contextCount">—</div></div>
     </section>
 
+    <section id="marketStrip" class="market-strip" aria-label="BTC 與 ETH 市場脈搏">
+      <div class="pulse-card"><div class="pulse-head"><strong>BTC</strong><span>等待掃描</span></div><div class="pulse-price">—</div><div class="change flat">1H — · 24H —</div></div>
+      <div class="pulse-card"><div class="pulse-head"><strong>ETH</strong><span>等待掃描</span></div><div class="pulse-price">—</div><div class="change flat">1H — · 24H —</div></div>
+    </section>
+
+    <form id="globalSearchForm" class="search-tools" role="search">
+      <input id="globalSearch" class="global-search" type="search" placeholder="搜尋幣種，例如 BTC、SNDK" autocomplete="off" aria-label="搜尋幣種">
+      <button class="search-button" type="submit">搜尋</button>
+    </form>
+
     <div id="scanNotice" class="notice scan" role="status">
       <div id="scanMessage">正在掃描 OKX 最新市場</div>
       <div id="scanProgress" class="progress indeterminate"><i></i></div>
@@ -77,18 +92,48 @@
     <div id="dangerNotice" class="notice danger" role="alert"></div>
 
     <nav class="tabs" aria-label="雷達內容">
-      <button class="tab active" data-tab="signals">進場訊號</button>
+      <button class="tab active" data-tab="overview">雷達總覽</button>
+      <button class="tab" data-tab="signals">進場訊號</button>
       <button class="tab" data-tab="watchlist">接近觸發</button>
+      <button class="tab" data-tab="anomalies">OI 異動</button>
       <button class="tab" data-tab="map">市場地圖</button>
     </nav>
 
-    <section id="signals" class="section active">
+    <section id="overview" class="section active">
+      <div class="section-title"><h2>現在市場一眼看懂</h2><span>同一輪 OKX 掃描結果</span></div>
+      <div class="overview-grid">
+        <article class="overview-card">
+          <h3>市場溫度</h3><div class="overview-sub">方向廣度與 15m RSI，只作市場背景，不單獨發訊號。</div>
+          <div id="marketHeat"><div class="empty">等待最新掃描。</div></div>
+        </article>
+        <article class="overview-card">
+          <h3>我的收藏</h3><div class="overview-sub">收藏只存在這支手機，不需要登入，也不會上傳。</div>
+          <div id="favoritesBox"><div class="empty">尚未收藏幣種。</div></div>
+        </article>
+        <article class="overview-card wide">
+          <h3>多空候選排行</h3><div class="overview-sub">正式訊號優先，其次是接近觸發；仍須通過卡片內安全底線。</div>
+          <div id="rankingBox" class="ranking-grid"><div class="empty">等待最新掃描。</div></div>
+        </article>
+        <article class="overview-card wide">
+          <h3>最新 OI／價格異動</h3><div class="overview-sub">區分新增多空部位與平倉推動；不是直接買賣訊號。</div>
+          <div id="overviewAnomalies"><div class="empty">需要至少兩輪掃描才能比較 OI 變化。</div></div>
+        </article>
+      </div>
+    </section>
+    <section id="signals" class="section">
       <div class="section-title"><h2>正式進場訊號</h2><span>最多 20 個，不為湊數降標</span></div>
       <div id="signalsBox"><div class="empty">雷達啟動中，正在準備最新市場掃描。</div></div>
     </section>
     <section id="watchlist" class="section">
       <div class="section-title"><h2>接近觸發</h2><span>不是目前進場訊號</span></div>
       <div id="watchBox"><div class="empty">等待最新掃描。</div></div>
+    </section>
+    <section id="anomalies" class="section">
+      <div class="section-title"><h2>OI 異動雷達</h2><span>新增部位與平倉分開解讀</span></div>
+      <div id="anomalyGuide" class="overview-card">
+        <div class="overview-sub"><strong class="up">多頭建倉</strong>＝OI 增＋價格漲；<strong class="down">空頭建倉</strong>＝OI 增＋價格跌；空頭回補／多頭平倉屬被動推動，可靠度低於新增部位。</div>
+      </div>
+      <div id="anomalyBox"><div class="empty">需要至少兩輪掃描才能比較 OI 變化。</div></div>
     </section>
     <section id="map" class="section">
       <div class="section-title"><h2>市場地圖</h2><span>全 live USDT 永續</span></div>
@@ -104,14 +149,22 @@
   <script>
     const $=selector=>document.querySelector(selector);
     const $$=selector=>[...document.querySelectorAll(selector)];
-    const state={status:null,report:null,polling:false,autoStarted:false};
+    const savedFavorites=(()=>{try{return JSON.parse(localStorage.getItem('okx-radar-favorites')||'[]')}catch(_){return []}})();
+    const state={status:null,report:null,polling:false,autoStarted:false,favorites:new Set(Array.isArray(savedFavorites)?savedFavorites:[])};
     const directionName={LONG:'做多',SHORT:'做空',NEUTRAL:'中性'};
     const stageName={WATCH:'觀望',NEAR_TRIGGER:'接近觸發',EARLY:'早期訊號',EARLY_SIGNAL:'早期訊號',CONFIRMED:'完整確認'};
     const regimeName={TREND:'趨勢',BREAKOUT_READY:'突破準備',BREAKOUT:'突破準備',RANGE:'區間震盪',DISORDER:'混亂／等待'};
     const statusName={BOOTING:'雷達啟動中',SCANNING:'掃描中',FRESH:'資料最新',STALE:'資料過期',ERROR:'掃描異常'};
 
     function esc(value){return String(value??'—').replace(/[&<>'"]/g,ch=>({'&':'&amp;','<':'&lt;','>':'&gt;',"'":'&#39;','"':'&quot;'}[ch]))}
-    function num(value,digits=1){const n=Number(value);return Number.isFinite(n)?n.toLocaleString('zh-TW',{maximumFractionDigits:digits}):'—'}
+    function metricNumber(value){if(value===null||value===undefined||value==='')return null;const n=Number(value);return Number.isFinite(n)?n:null}
+    function num(value,digits=1){const n=metricNumber(value);return n===null?'—':n.toLocaleString('zh-TW',{maximumFractionDigits:digits})}
+    function signed(value,digits=2){const n=metricNumber(value);return n===null?'—':`${n>0?'+':''}${n.toLocaleString('zh-TW',{maximumFractionDigits:digits,minimumFractionDigits:digits})}%`}
+    function price(value){const n=metricNumber(value);if(n===null)return '—';const digits=n>=1000?0:n>=1?3:n>=.01?5:8;return `$${n.toLocaleString('zh-TW',{maximumFractionDigits:digits})}`}
+    function changeClass(value){const n=metricNumber(value);return n===null||Math.abs(n)<.01?'flat':n>0?'up':'down'}
+    function tvUrl(instId){const symbol=String(instId||'').replace('-USDT-SWAP','').replace(/[^A-Z0-9]/g,'');return `https://www.tradingview.com/chart/?symbol=OKX:${encodeURIComponent(symbol+'USDTPERP')}`}
+    function favoriteButton(instId){const on=state.favorites.has(instId);return `<button class="favorite ${on?'on':''}" type="button" data-favorite="${esc(instId)}" aria-label="${on?'取消收藏':'收藏'} ${esc(instId)}">${on?'★':'☆'}</button>`}
+    function quickLinks(item){return `<div class="quick-links"><a class="quick-link" href="${tvUrl(item.inst_id)}" target="_blank" rel="noopener noreferrer">TradingView 圖表 ↗</a></div>`}
     function taiwanTime(value){if(!value)return '尚未完成掃描';const d=new Date(value);return Number.isNaN(d.getTime())?'時間未知':new Intl.DateTimeFormat('zh-TW',{timeZone:'Asia/Taipei',month:'2-digit',day:'2-digit',hour:'2-digit',minute:'2-digit',second:'2-digit',hour12:false}).format(d)}
     async function api(path,options={}){const response=await fetch(path,{cache:'no-store',headers:{'Accept':'application/json',...(options.headers||{})},...options});let payload={};try{payload=await response.json()}catch(_){payload={error:'服務回應格式錯誤'}}if(!response.ok)throw Object.assign(new Error(payload.error||`HTTP ${response.status}`),{status:response.status,payload});return payload}
 
@@ -125,14 +178,21 @@
       if(key==='STALE'||status.data_status==='STALE')warning=`資料已超過 30 分鐘，禁止依此進場。請立即重新掃描。${status.last_error?' 最新掃描失敗：'+status.last_error:''}`;
       if(key==='ERROR')warning=`最新掃描失敗，舊正式訊號已停用。${status.last_error?' '+status.last_error:''}`;
       danger.textContent=warning;danger.classList.toggle('show',Boolean(warning));
-      if(scanning||key==='BOOTING'){renderUnavailable(scanning?'正在掃描最新市場，舊正式訊號已暫停使用。':'雷達啟動中，正在準備最新市場。')}
-      else if(key==='STALE'){renderUnavailable('資料已過期，禁止依此進場。')}
-      else if(key==='ERROR'){renderUnavailable('最新掃描異常，目前沒有可使用的正式訊號。')}
+      if(scanning||key==='BOOTING'){const message=scanning?'正在掃描最新市場，舊正式訊號已暫停使用。':'雷達啟動中，正在準備最新市場。';renderUnavailable(message);renderOverviewUnavailable(message)}
+      else if(key==='STALE'){renderUnavailable('資料已過期，禁止依此進場。');renderOverviewUnavailable('資料已過期，候選排行已停用。')}
+      else if(key==='ERROR'){renderUnavailable('最新掃描異常，目前沒有可使用的正式訊號。');renderOverviewUnavailable('最新掃描異常，候選排行已停用。')}
     }
 
     function renderUnavailable(message){
       $('#signalsBox').innerHTML=`<div class="empty">${esc(message)}</div>`;
       $('#signalCount').textContent='— / 20';
+    }
+
+    function renderOverviewUnavailable(message){
+      $('#rankingBox').innerHTML=`<div class="empty">${esc(message)}</div>`;
+      $('#overviewAnomalies').innerHTML='<div class="empty">等待本輪掃描完成。</div>';
+      $('#anomalyBox').innerHTML='<div class="empty">等待本輪掃描完成。</div>';
+      $('#marketStrip').innerHTML=['BTC','ETH'].map(symbol=>`<div class="pulse-card"><div class="pulse-head"><strong>${symbol}</strong><span>掃描中</span></div><div class="pulse-price">—</div><div class="change flat">最新資料取得中</div></div>`).join('');
     }
 
     function renderReport(report){
@@ -143,8 +203,57 @@
       const bias=report.market_bias||{};$('#marketBias').textContent=`${esc(bias.label||'中性')} ${num(bias.score,0)}`;
       $('#contextCount').textContent=`${num(report.context_enriched_count,0)} / ${num(report.context_target_count,0)}`;
       if(!actionable){renderUnavailable(report.runtime_status==='SCANNING'?'正在掃描最新市場，舊正式訊號已暫停使用。':report.runtime_status==='STALE'?'資料已過期，禁止依此進場。':'最新掃描異常，目前沒有可使用的正式訊號。')}
-      else renderSignals(report.signals||[]);
-      renderWatchlist(report.watchlist||[]);renderMap(report.market_map||[],$('#mapSearch').value);
+      else{renderSignals(report.signals||[]);renderOverview(report)}
+      renderWatchlist(report.watchlist||[]);renderMap(report.market_map||[],$('#mapSearch').value);renderFavorites();
+    }
+
+    function renderOverview(report){
+      const markets=(report.market_map||[]).filter(item=>item.status!=='FILTERED');
+      renderMarketStrip(markets);
+      renderMarketHeat(markets);
+      renderRankings(report.signals||[],report.watchlist||[]);
+      renderAnomalies(markets);
+    }
+
+    function renderMarketStrip(markets){
+      $('#marketStrip').innerHTML=['BTC','ETH'].map(symbol=>{
+        const item=markets.find(x=>x.inst_id===`${symbol}-USDT-SWAP`);const m=item?.market_metrics||{};
+        if(!item)return `<div class="pulse-card"><div class="pulse-head"><strong>${symbol}</strong><span>資料不足</span></div><div class="pulse-price">—</div><div class="change flat">本輪無法判讀</div></div>`;
+        const c1=m.price_change_1h_pct,c24=m.price_change_24h_pct;const direction=directionName[item.direction]||'中性';
+        return `<div class="pulse-card"><div class="pulse-head"><strong>${symbol}</strong><span>${esc(direction)} · ${esc(regimeName[item.regime]||item.regime)}</span></div><div class="pulse-price">${price(m.last_price)}</div><div class="change ${changeClass(c1)}">1H ${signed(c1)} · 24H ${signed(c24)}</div></div>`;
+      }).join('');
+    }
+
+    function renderMarketHeat(markets){
+      const long=markets.filter(x=>x.direction==='LONG').length,short=markets.filter(x=>x.direction==='SHORT').length,neutral=Math.max(0,markets.length-long-short);
+      const rsiValues=markets.map(x=>metricNumber(x.market_metrics?.rsi_15m)).filter(x=>x!==null);const avgRsi=rsiValues.length?rsiValues.reduce((a,b)=>a+b,0)/rsiValues.length:null;
+      const changes=markets.map(x=>metricNumber(x.market_metrics?.price_change_24h_pct)).filter(x=>x!==null);const rising=changes.filter(x=>x>.1).length,falling=changes.filter(x=>x<-.1).length;
+      const total=Math.max(markets.length,1);$('#marketHeat').innerHTML=`<div class="heat-grid"><div class="heat-item"><b>${num(avgRsi,1)}</b><span>市場平均 RSI</span></div><div class="heat-item"><b class="up">${rising}</b><span>24H 上漲</span></div><div class="heat-item"><b class="down">${falling}</b><span>24H 下跌</span></div></div><div class="breadth" aria-label="市場方向分布"><i class="long" style="width:${long/total*100}%"></i><i class="neutral" style="width:${neutral/total*100}%"></i><i class="short" style="width:${short/total*100}%"></i></div><div class="breadth-legend"><span>做多 ${long}</span><span>中性 ${neutral}</span><span>做空 ${short}</span></div>`;
+    }
+
+    function renderRankings(signals,watchlist){
+      const seen=new Set();const pool=[...signals,...watchlist].filter(item=>item.direction!=='NEUTRAL'&&!seen.has(item.inst_id)&&(seen.add(item.inst_id),true));
+      function panel(direction,title,cls){const rows=pool.filter(x=>x.direction===direction).sort((a,b)=>Number(b.readiness_score??b.score)-Number(a.readiness_score??a.score)).slice(0,3);return `<div class="ranking-panel ${cls}"><h3><span>${title}</span><span>${rows.length} 個</span></h3>${rows.length?rows.map((item,index)=>{const m=item.market_metrics||{};return `<div class="rank-row"><div><div class="rank-symbol">${index+1}. ${esc(item.inst_id)}</div><div class="rank-meta">${esc(stageName[item.signal_stage||item.status]||'觀望')} · ${price(m.last_price)} · 1H ${signed(m.price_change_1h_pct)}</div></div><div class="card-actions">${favoriteButton(item.inst_id)}<div class="rank-score">${num(item.readiness_score??item.score,0)}<small>準備度</small></div></div></div>`}).join(''):'<div class="empty">本輪沒有同方向候選。</div>'}</div>`}
+      $('#rankingBox').innerHTML=panel('LONG','🟢 做多候選','long-r')+panel('SHORT','🔴 做空候選','short-r');
+    }
+
+    function oiInterpretation(item){
+      const m=item.market_metrics||{};const oi=metricNumber(m.open_interest_change_pct),move=metricNumber(m.price_change_1h_pct);let key=m.oi_flow_state;
+      if(!key&&oi!==null&&move!==null){if(oi>=.5)key=move>=0?'LONG_BUILD':'SHORT_BUILD';else if(oi<=-.8)key=move>=0?'SHORT_COVER':'LONG_EXIT';else key='STABLE'}
+      return ({LONG_BUILD:['多頭建倉','新增買方部位，偏多參與','up'],SHORT_BUILD:['空頭建倉','新增賣方部位，偏空參與','down'],SHORT_COVER:['空頭回補','被動上漲，需等新買盤接力','up'],LONG_EXIT:['多頭平倉','被動下跌，注意延續風險','down'],STABLE:['持倉小幅變動','未達顯著異動門檻','flat']}[key]||['持倉資料待比較','至少需要連續兩輪掃描','flat']);
+    }
+
+    function anomalyCards(markets,limit){
+      const rows=markets.filter(item=>{const oi=metricNumber(item.market_metrics?.open_interest_change_pct);return oi!==null&&Math.abs(oi)>=.35}).sort((a,b)=>Math.abs(metricNumber(b.market_metrics.open_interest_change_pct)||0)-Math.abs(metricNumber(a.market_metrics.open_interest_change_pct)||0)).slice(0,limit);
+      if(!rows.length)return '<div class="empty">目前沒有達到異動門檻的 OI 變化；至少需要連續兩輪掃描才能比較。</div>';
+      return `<div class="anomaly-list">${rows.map(item=>{const m=item.market_metrics||{},info=oiInterpretation(item);return `<article class="anomaly-card"><div><div class="oi-state ${info[2]}">${esc(info[0])} · ${esc(item.inst_id)}</div><div class="oi-meta">${esc(info[1])}<br>價格 1H ${signed(m.price_change_1h_pct)} · 24H ${signed(m.price_change_24h_pct)}</div></div><div class="oi-change ${changeClass(m.open_interest_change_pct)}">OI ${signed(m.open_interest_change_pct)}<small>${price(m.last_price)}</small></div></article>`}).join('')}</div>`;
+    }
+
+    function renderAnomalies(markets){$('#overviewAnomalies').innerHTML=anomalyCards(markets,5);$('#anomalyBox').innerHTML=anomalyCards(markets,20)}
+
+    function renderFavorites(){
+      const markets=state.report?.market_map||[];const items=[...state.favorites].map(id=>markets.find(x=>x.inst_id===id)).filter(Boolean).sort((a,b)=>Number(b.readiness_score)-Number(a.readiness_score));
+      $('#favoritesBox').innerHTML=items.length?items.map(item=>`<div class="rank-row"><div><div class="rank-symbol">${esc(item.inst_id)}</div><div class="rank-meta">${esc(directionName[item.direction]||'中性')} · ${esc(stageName[item.status]||'觀望')} · ${price(item.market_metrics?.last_price)}</div></div><div class="card-actions">${favoriteButton(item.inst_id)}<a class="quick-link" href="${tvUrl(item.inst_id)}" target="_blank" rel="noopener noreferrer">圖表 ↗</a></div></div>`).join(''):'<div class="empty">尚未收藏幣種。點候選卡右上的 ☆ 即可收藏。</div>';
     }
 
     function directionBadge(item){const dir=item.direction||'NEUTRAL';return `<span class="badge ${dir==='LONG'?'long-b':dir==='SHORT'?'short-b':'watch-b'}">${dir==='LONG'?'🟢 ':dir==='SHORT'?'🔴 ':''}${esc(directionName[dir]||'中性')}</span>`}
@@ -153,26 +262,27 @@
     function groupRows(item){const groups=item.evidence_groups||{};const order=['position_structure','trend_momentum','participation_flow'];return `<div class="groups">${order.map(key=>{const g=groups[key]||{};const score=Math.max(0,Math.min(100,Number(g.score)||0));const cls=score>=60?'support':score<40?'conflict':'';return `<div class="group-row"><span>${esc(g.label||({position_structure:'位置／結構',trend_momentum:'趨勢／動能',participation_flow:'市場參與'}[key]))}</span><span class="bar"><i class="${cls}" style="width:${score}%"></i></span><b>${num(score,0)}</b></div>`}).join('')}</div>`}
     function list(items,empty){return `<ul>${(items&&items.length?items:[empty]).slice(0,6).map(x=>`<li>${esc(x)}</li>`).join('')}</ul>`}
     function safetyItems(item){return (item.safety_checks||[]).map(x=>`${x.passed?'✓':'✕'} ${x.label}${x.value!==null&&x.value!==undefined?`：${num(x.value,2)}`:''}`)}
-    function details(item){const m=item.market_metrics||{};return `<details><summary>查看詳細分析</summary><div class="detail-grid">
+    function details(item){const m=item.market_metrics||{},oi=oiInterpretation(item);return `<details><summary>查看詳細分析</summary><div class="detail-grid">
+      <div class="detail"><b>即時價格</b>${price(m.last_price)} · 15m ${signed(m.price_change_15m_pct)} · 1H ${signed(m.price_change_1h_pct)} · 24H ${signed(m.price_change_24h_pct)}</div>
       <div class="detail"><b>策略／市場型態</b>${esc(item.strategy||item.preferred_strategy)} · ${esc(regimeName[item.regime]||item.regime)}</div>
       <div class="detail"><b>進場品質</b>${esc(item.entry_quality?.label)} · ${num(item.entry_quality?.extension_atr,2)} ATR</div>
       ${item.entry_low?`<div class="detail"><b>進場區</b>${esc(item.entry_low)} ～ ${esc(item.entry_high)}</div><div class="detail"><b>止損／風報</b>${esc(item.stop_loss)} · ${num(item.risk_reward,2)}R</div><div class="detail"><b>TP1／TP2</b>${esc(item.take_profit_1)}／${esc(item.take_profit_2)}</div><div class="detail"><b>失效條件</b>${esc(item.invalidation)}</div>`:''}
       <div class="detail"><b>成交／資金流</b>15m 量比 ${num(m.volume_ratio_15m,2)} · 5m 量比 ${num(m.volume_ratio_5m,2)} · Taker Buy ${num(m.taker_buy_pct,1)}%</div>
-      <div class="detail"><b>OI／Funding</b>OI ${num(m.open_interest_usd,0)} USD · 變化 ${num(m.open_interest_change_pct,2)}% · Funding ${num(m.funding_rate_pct,5)}%</div>
+      <div class="detail"><b>OI／Funding</b>${esc(oi[0])} · OI ${num(m.open_interest_usd,0)} USD · 變化 ${signed(m.open_interest_change_pct)} · Funding ${signed(m.funding_rate_pct,5)}</div>
       <div class="detail"><b>Order Book</b>失衡 ${num(m.order_book_imbalance_pct,1)}% · Bid 深度 ${num(m.bid_depth_usd,0)} · Ask 深度 ${num(m.ask_depth_usd,0)}</div>
       <div class="detail"><b>Execution Cost</b>來回 ${num(m.estimated_round_trip_cost_pct,4)}% · 占原始風險 ${num(m.execution_cost_to_risk_pct,1)}%</div>
       <div class="detail" style="grid-column:1/-1"><b>原始指標</b><pre class="raw">${esc(JSON.stringify(m.raw_indicators||{},null,2))}</pre></div>
     </div></details>`}
 
-    function renderSignals(items){const box=$('#signalsBox');if(!items.length){box.innerHTML='<div class="empty">本輪沒有通過證據融合與全部安全底線的正式進場訊號。系統不會為湊滿 20 個而放寬品質。</div>';return}box.innerHTML=items.map((item,index)=>`<article class="signal-card ${item.direction==='LONG'?'long':'short'}"><div class="card-head"><div><div class="symbol">${index+1}. ${esc(item.inst_id)}</div><div class="badges">${directionBadge(item)}${stageBadge(item)}</div></div><div class="score">${num(item.readiness_score??item.score,0)}<small>%</small></div></div>${timeframeGrid(item)}<p class="human">${esc(item.summary||'多時間框架與市場參與證據已完成融合。')}</p>${groupRows(item)}<div class="triage"><div class="bucket support"><h3>支持證據</h3>${list(item.supporting_evidence,'目前沒有額外支持')}</div><div class="bucket conflict"><h3>衝突／風險</h3>${list(item.conflicts,'沒有重大反向證據')}${item.neutral_evidence?.length?`<h4>中性／未額外支持（不是反向）</h4><ul class="neutral">${item.neutral_evidence.slice(0,3).map(x=>`<li>${esc(x)}</li>`).join('')}</ul>`:''}</div><div class="bucket safety"><h3>安全底線</h3>${list(safetyItems(item),'安全資料待確認')}</div></div>${details(item)}</article>`).join('')}
-    function renderWatchlist(items){const box=$('#watchBox');const filtered=items.filter(x=>x.direction!=='NEUTRAL');if(!filtered.length){box.innerHTML='<div class="empty">目前沒有接近觸發候選。</div>';return}box.innerHTML=filtered.map(item=>`<article class="watch-card"><div class="card-head"><div><div class="symbol">${esc(item.inst_id)}</div><div class="badges">${directionBadge(item)}${stageBadge(item)}</div></div><div class="score">${num(item.readiness_score,0)}<small>%</small></div></div>${timeframeGrid(item)}<p class="human">${esc(item.summary||'Setup 尚在形成，不能直接當作進場訊號。')}</p>${groupRows(item)}${details(item)}</article>`).join('')}
-    function renderMap(items,query=''){const q=String(query||'').trim().toUpperCase();const rows=items.filter(x=>!q||String(x.inst_id).includes(q));const box=$('#mapBox');if(!rows.length){box.innerHTML='<div class="empty">找不到符合的市場。</div>';return}box.innerHTML=rows.map(item=>`<article class="map-card"><div><strong>${esc(item.inst_id)}</strong><div class="map-meta">${esc(regimeName[item.regime]||item.regime)} · ${esc(stageName[item.status]||'觀望')} · 準備度 ${num(item.readiness_score,0)}%</div></div>${directionBadge(item)}</article>`).join('')}
+    function renderSignals(items){const box=$('#signalsBox');if(!items.length){box.innerHTML='<div class="empty">本輪沒有通過證據融合與全部安全底線的正式進場訊號。系統不會為湊滿 20 個而放寬品質。</div>';return}box.innerHTML=items.map((item,index)=>`<article class="signal-card ${item.direction==='LONG'?'long':'short'}"><div class="card-head"><div><div class="symbol">${index+1}. ${esc(item.inst_id)}</div><div class="badges">${directionBadge(item)}${stageBadge(item)}</div></div><div class="card-actions">${favoriteButton(item.inst_id)}<div class="score">${num(item.readiness_score??item.score,0)}<small>%</small></div></div></div>${timeframeGrid(item)}<p class="human">${esc(item.summary||'多時間框架與市場參與證據已完成融合。')}</p>${groupRows(item)}<div class="triage"><div class="bucket support"><h3>支持證據</h3>${list(item.supporting_evidence,'目前沒有額外支持')}</div><div class="bucket conflict"><h3>衝突／風險</h3>${list(item.conflicts,'沒有重大反向證據')}${item.neutral_evidence?.length?`<h4>中性／未額外支持（不是反向）</h4><ul class="neutral">${item.neutral_evidence.slice(0,3).map(x=>`<li>${esc(x)}</li>`).join('')}</ul>`:''}</div><div class="bucket safety"><h3>安全底線</h3>${list(safetyItems(item),'安全資料待確認')}</div></div>${quickLinks(item)}${details(item)}</article>`).join('')}
+    function renderWatchlist(items){const box=$('#watchBox');const filtered=items.filter(x=>x.direction!=='NEUTRAL');if(!filtered.length){box.innerHTML='<div class="empty">目前沒有接近觸發候選。</div>';return}box.innerHTML=filtered.map(item=>`<article class="watch-card"><div class="card-head"><div><div class="symbol">${esc(item.inst_id)}</div><div class="badges">${directionBadge(item)}${stageBadge(item)}</div></div><div class="card-actions">${favoriteButton(item.inst_id)}<div class="score">${num(item.readiness_score,0)}<small>%</small></div></div></div>${timeframeGrid(item)}<p class="human">${esc(item.summary||'Setup 尚在形成，不能直接當作進場訊號。')}</p>${groupRows(item)}${quickLinks(item)}${details(item)}</article>`).join('')}
+    function renderMap(items,query=''){const q=String(query||'').trim().toUpperCase();const rows=items.filter(x=>!q||String(x.inst_id).includes(q)).sort((a,b)=>(state.favorites.has(b.inst_id)-state.favorites.has(a.inst_id))||(Number(b.readiness_score)-Number(a.readiness_score)));const visible=rows.slice(0,120),box=$('#mapBox');if(!rows.length){box.innerHTML='<div class="empty">找不到符合的市場。</div>';return}box.innerHTML=visible.map(item=>`<article class="map-card"><div><strong>${esc(item.inst_id)}</strong><div class="map-meta">${price(item.market_metrics?.last_price)} · 1H ${signed(item.market_metrics?.price_change_1h_pct)}<br>${esc(regimeName[item.regime]||item.regime)} · ${esc(stageName[item.status]||'觀望')} · 準備度 ${num(item.readiness_score,0)}%</div></div><div class="map-side">${favoriteButton(item.inst_id)}${directionBadge(item)}<a class="quick-link" href="${tvUrl(item.inst_id)}" target="_blank" rel="noopener noreferrer">TV ↗</a></div></article>`).join('')+`<div class="result-note">顯示 ${visible.length} / ${rows.length} 個市場${rows.length>120?'，請用搜尋縮小範圍':''}</div>`}
 
     async function loadReport(){try{const report=await api('/api/report/latest');renderReport(report)}catch(error){if(error.status!==404)throw error}}
     async function refreshStatus(){const status=await api('/api/status');renderStatus(status);return status}
     async function startScan(){
       $('#scanButton').disabled=true;$('#scanButton').textContent='掃描中…';
-      $('#scanNotice').classList.add('show');$('#scanMessage').textContent='正在取得最新市場資料';renderUnavailable('正在掃描最新市場，舊正式訊號已暫停使用。');
+      $('#scanNotice').classList.add('show');$('#scanMessage').textContent='正在取得最新市場資料';renderUnavailable('正在掃描最新市場，舊正式訊號已暫停使用。');renderOverviewUnavailable('正在掃描最新市場，舊候選排行已暫停使用。');
       try{await api('/api/scan',{method:'POST'});await pollUntilComplete()}catch(error){showConnectionError(error)}
     }
     async function pollUntilComplete(){if(state.polling)return;state.polling=true;let failures=0;try{for(let count=0;count<360;count++){try{const status=await refreshStatus();failures=0;if(status.system_status!=='SCANNING'){await loadReport();return}}catch(error){failures++;if(failures>=5)throw error}await new Promise(resolve=>setTimeout(resolve,2000))}throw new Error('掃描等待超過 12 分鐘，已停止輪詢。')}finally{state.polling=false;const s=state.status||{};$('#scanButton').disabled=s.system_status==='SCANNING';$('#scanButton').textContent=s.system_status==='SCANNING'?'掃描中…':'立即掃描現在市場'}}
@@ -180,9 +290,12 @@
     async function bootstrap(){try{await refreshStatus();if(!state.autoStarted){state.autoStarted=true;await startScan()}}catch(error){showConnectionError(error)}}
     async function refreshFreshness(){try{if(!state.polling){const status=await refreshStatus();const reportChanged=status.system_status==='FRESH'&&(!state.report||status.scan_id!==state.report.scan_id);if(reportChanged||status.system_status==='STALE'||status.system_status==='ERROR')await loadReport()}}catch(error){showConnectionError(error)}finally{setTimeout(refreshFreshness,60000)}}
 
-    $$('.tab').forEach(button=>button.addEventListener('click',()=>{$$('.tab').forEach(x=>x.classList.toggle('active',x===button));$$('.section').forEach(x=>x.classList.toggle('active',x.id===button.dataset.tab))}));
+    function activateTab(id){$$('.tab').forEach(x=>x.classList.toggle('active',x.dataset.tab===id));$$('.section').forEach(x=>x.classList.toggle('active',x.id===id))}
+    $$('.tab').forEach(button=>button.addEventListener('click',()=>activateTab(button.dataset.tab)));
     $('#scanButton').addEventListener('click',startScan);
     $('#mapSearch').addEventListener('input',event=>renderMap(state.report?.market_map||[],event.target.value));
+    $('#globalSearchForm').addEventListener('submit',event=>{event.preventDefault();const query=$('#globalSearch').value.trim();$('#mapSearch').value=query;activateTab('map');renderMap(state.report?.market_map||[],query);$('#mapSearch').focus()});
+    document.addEventListener('click',event=>{const button=event.target.closest?.('[data-favorite]');if(!button)return;const id=button.dataset.favorite;if(state.favorites.has(id))state.favorites.delete(id);else state.favorites.add(id);localStorage.setItem('okx-radar-favorites',JSON.stringify([...state.favorites]));$$(`[data-favorite="${id}"]`).forEach(x=>{const on=state.favorites.has(id);x.classList.toggle('on',on);x.textContent=on?'★':'☆';x.setAttribute('aria-label',`${on?'取消收藏':'收藏'} ${id}`)});renderFavorites()});
     bootstrap();setTimeout(refreshFreshness,60000);
   </script>
 </body>
