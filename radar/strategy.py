@@ -114,6 +114,25 @@ class AdaptiveStrategyEngine:
             tf5,
             assessment,
         )
+        snapshot_metrics = dict(market_state.market_metrics)
+        snapshot_metrics.update(
+            {
+                "last_price": ticker.last,
+                "price_change_15m_pct": _price_change_pct(
+                    ticker.last,
+                    candles_15m[-2].close,
+                ),
+                "price_change_1h_pct": _price_change_pct(
+                    ticker.last,
+                    candles_1h[-2].close,
+                ),
+                "price_change_24h_pct": _price_change_pct(
+                    ticker.last,
+                    candles_1h[-25].close,
+                ),
+            }
+        )
+        market_state = replace(market_state, market_metrics=snapshot_metrics)
         if ticker.spread_pct > self.config.max_spread_pct:
             return AnalysisResult(
                 None,
@@ -2213,3 +2232,9 @@ def _format_price(value: float, tick_size: float) -> str:
     rounded = (price / tick).quantize(Decimal("1"), rounding=ROUND_HALF_UP) * tick
     decimal_places = max(0, -tick.as_tuple().exponent)
     return f"{rounded:.{decimal_places}f}"
+
+
+def _price_change_pct(current: float, baseline: float) -> float | None:
+    if not math.isfinite(current) or not math.isfinite(baseline) or baseline <= 0:
+        return None
+    return round((current - baseline) / baseline * 100.0, 3)
