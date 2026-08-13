@@ -4,7 +4,12 @@ import math
 from dataclasses import dataclass, replace
 from decimal import Decimal, ROUND_HALF_UP
 
-from .evidence import EvidenceAssessment, assess_evidence, infer_regime_direction
+from .evidence import (
+    EvidenceAssessment,
+    assess_evidence,
+    infer_regime_direction,
+    summary_for_stage,
+)
 from .indicators import TimeframeFeatures, features
 from .models import Candle, Instrument, MarketContext, MarketState, Signal, Ticker
 
@@ -912,16 +917,18 @@ class AdaptiveStrategyEngine:
             or result.candidate_plan is None
             or result.candidate_signal is None
         ):
+            final_stage = (
+                "NEAR_TRIGGER"
+                if live.stage == "NEAR_TRIGGER"
+                else "WATCH"
+            )
             return AnalysisResult(
                 None,
                 "evidence_not_aligned",
                 replace(
                     updated,
-                    status=(
-                        "NEAR_TRIGGER"
-                        if live.stage == "NEAR_TRIGGER"
-                        else "WATCH"
-                    ),
+                    status=final_stage,
+                    summary=summary_for_stage(live, final_stage),
                 ),
                 live,
                 result.candidate_plan,
