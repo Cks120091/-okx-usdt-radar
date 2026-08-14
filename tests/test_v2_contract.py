@@ -11,6 +11,12 @@ class V2ContractTests(unittest.TestCase):
         self.assertEqual(config.max_signals, 20)
         self.assertEqual(config.context_candidates, 100)
         self.assertEqual(config.stale_after_seconds, 1800)
+        self.assertEqual(config.candle_rate_limit_requests_per_2s, 14)
+        self.assertEqual(config.auto_scan_cooldown_seconds, 120)
+        self.assertEqual(config.manual_scan_cooldown_seconds, 0)
+        self.assertEqual(config.core_recovery_attempts, 1)
+        self.assertEqual(config.context_recovery_attempts, 1)
+        self.assertEqual(config.recovery_workers, 2)
         self.assertFalse(config.require_micro_volume_anomaly)
         with tempfile.TemporaryDirectory() as directory:
             path = Path(directory) / "bad.json"
@@ -43,6 +49,11 @@ class V2ContractTests(unittest.TestCase):
         self.assertIn("TradingView 圖表", html)
         self.assertIn("搜尋幣種，例如 BTC、SNDK", html)
         self.assertIn("renderOverviewUnavailable", html)
+        self.assertIn("JSON.stringify({reason})", html)
+        self.assertIn("startScan('auto')", html)
+        self.assertIn("startScan('manual')", html)
+        self.assertIn("PARTIAL_CONTEXT", html)
+        self.assertIn("部分深度資料缺漏", html)
 
     def test_github_actions_contains_no_market_schedule_or_scan(self):
         root = Path(__file__).parents[1]

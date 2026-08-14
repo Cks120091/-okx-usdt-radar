@@ -176,7 +176,11 @@ class RadarReport:
     market_map: list[MarketState] = field(default_factory=list)
     context_target_count: int = 0
     context_enriched_count: int = 0
+    context_coverage_pct: float = 100.0
     context_failures: dict[str, list[str]] = field(default_factory=dict)
+    data_quality_status: str = "FULL"
+    recovered_instruments: list[str] = field(default_factory=list)
+    context_recovered_instruments: list[str] = field(default_factory=list)
     market_bias: dict[str, Any] = field(default_factory=dict)
     scan_id: str = ""
     scan_started_at: str = ""

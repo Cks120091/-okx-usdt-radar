@@ -8,6 +8,14 @@ from pathlib import Path
 from .models import RadarReport
 
 
+def _quality_name(status: str) -> str:
+    return {
+        "FULL": "完整",
+        "PARTIAL_CONTEXT": "部分深度資料缺漏",
+        "DATA_INCOMPLETE": "資料不完整",
+    }.get(status, status)
+
+
 def save_report(report: RadarReport, data_dir: str | Path) -> tuple[Path, Path]:
     directory = Path(data_dir)
     history = directory / "history"
@@ -40,7 +48,8 @@ def report_markdown(report: RadarReport) -> str:
         f"- 產生時間：{report.generated_at}",
         f"- 覆蓋：{report.fetched_count}/{report.target_count}（{report.coverage_pct:.2f}%）",
         f"- 可分析：{report.analyzable_count}",
-        f"- 即時市場資料：{report.context_enriched_count}/{report.context_target_count}",
+        f"- 即時市場資料：{report.context_enriched_count}/{report.context_target_count}（{report.context_coverage_pct:.2f}%）",
+        f"- 資料品質：{_quality_name(report.data_quality_status)}",
         f"- 訊息：{report.message}",
         "",
     ]
@@ -51,6 +60,15 @@ def report_markdown(report: RadarReport) -> str:
         lines.append("")
         lines.append("本輪依規則不提供多空或進場訊號。")
         return "\n".join(lines)
+    if report.data_quality_status == "PARTIAL_CONTEXT":
+        lines.extend(
+            [
+                "## 深度資料提醒",
+                "",
+                "部分候選的 5m／Funding／Taker Flow／Order Book／成交成本資料未完整取得；這些候選已排除，不會成為正式訊號。",
+                "",
+            ]
+        )
     if not report.signals:
         lines.extend(["本輪沒有符合位置、證據與成交成本的進場訊號。", ""])
     else:

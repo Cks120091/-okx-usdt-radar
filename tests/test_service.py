@@ -53,7 +53,11 @@ def report(completed_at=None):
 
 
 class ImmediateScanner:
+    def __init__(self):
+        self.calls = 0
+
     def scan_once(self, progress=None, scan_id=None):
+        self.calls += 1
         if progress:
             progress("ANALYSIS", 1, 1, "fixture")
         return report()
@@ -73,6 +77,35 @@ class BlockingScanner:
 
 
 class RuntimeSafetyTests(unittest.TestCase):
+    def test_page_open_reuses_recent_complete_report_during_auto_cooldown(self):
+        with tempfile.TemporaryDirectory() as directory:
+            scanner = ImmediateScanner()
+            runtime = RadarRuntime(
+                scanner,
+                AppConfig(data_dir=directory, auto_scan_cooldown_seconds=120),
+            )
+            runtime.scan_blocking()
+            result = runtime.request_scan("auto")
+            self.assertFalse(result["started"])
+            self.assertTrue(result["reused_latest"])
+            self.assertGreater(result["retry_after_seconds"], 0)
+            self.assertEqual(scanner.calls, 1)
+
+    def test_manual_button_starts_a_real_scan_without_completed_scan_cooldown(self):
+        with tempfile.TemporaryDirectory() as directory:
+            scanner = ImmediateScanner()
+            runtime = RadarRuntime(
+                scanner,
+                AppConfig(data_dir=directory, manual_scan_cooldown_seconds=0),
+            )
+            runtime.scan_blocking()
+            result = runtime.request_scan("manual")
+            self.assertTrue(result["started"])
+            deadline = time.time() + 2
+            while runtime.status()["running"] and time.time() < deadline:
+                time.sleep(0.01)
+            self.assertEqual(scanner.calls, 2)
+
     def test_scan_lock_joins_existing_scan(self):
         with tempfile.TemporaryDirectory() as directory:
             scanner = BlockingScanner()

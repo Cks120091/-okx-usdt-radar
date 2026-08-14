@@ -49,12 +49,29 @@ class OKXPublicClient:
         timeout_seconds: float = 12.0,
         retries: int = 3,
         rate_limit_requests: int = 18,
+        candle_rate_limit_requests: int = 14,
+        rate_limit_backoff_seconds: float = 1.0,
+        rate_limit_max_backoff_seconds: float = 4.0,
         execution_notional_usdt: float = 1_000.0,
     ):
         self.base_url = base_url.rstrip("/")
         self.timeout_seconds = timeout_seconds
         self.retries = retries
         self.rate_limiter = SlidingWindowRateLimiter(rate_limit_requests, 2.0)
+        self.endpoint_limiters = {
+            "/api/v5/market/candles": SlidingWindowRateLimiter(
+                min(candle_rate_limit_requests, rate_limit_requests),
+                2.0,
+            )
+        }
+        self.rate_limit_backoff_seconds = max(0.05, rate_limit_backoff_seconds)
+        self.rate_limit_max_backoff_seconds = max(
+            self.rate_limit_backoff_seconds,
+            rate_limit_max_backoff_seconds,
+        )
+        self._adaptive_lock = threading.Lock()
+        self._endpoint_backoff_until: dict[str, float] = {}
+        self._endpoint_backoff_level: dict[str, int] = {}
         self.execution_notional_usdt = max(0.0, execution_notional_usdt)
         self._instrument_meta: dict[str, Instrument] = {}
         self._metrics_lock = threading.Lock()
@@ -62,6 +79,9 @@ class OKXPublicClient:
         self.reset_metrics()
 
     def reset_metrics(self) -> None:
+        with self._adaptive_lock:
+            self._endpoint_backoff_until = {}
+            self._endpoint_backoff_level = {}
         with self._metrics_lock:
             self._metrics = {
                 "requests": 0,
@@ -69,6 +89,9 @@ class OKXPublicClient:
                 "retries": 0,
                 "errors": 0,
                 "rate_limit_errors": 0,
+                "endpoint_rate_limit_errors": {},
+                "rate_limit_backoff_events": 0,
+                "rate_limit_backoff_seconds": 0.0,
                 "endpoint_requests": {},
                 "request_seconds": 0.0,
             }
@@ -77,7 +100,20 @@ class OKXPublicClient:
         with self._metrics_lock:
             payload = dict(self._metrics)
             payload["endpoint_requests"] = dict(self._metrics["endpoint_requests"])
+            payload["endpoint_rate_limit_errors"] = dict(
+                self._metrics["endpoint_rate_limit_errors"]
+            )
         payload["request_seconds"] = round(float(payload["request_seconds"]), 3)
+        payload["rate_limit_backoff_seconds"] = round(
+            float(payload["rate_limit_backoff_seconds"]),
+            3,
+        )
+        payload["configured_rate_limits"] = {
+            "global_per_2s": self.rate_limiter.max_requests,
+            "candles_per_2s": self.endpoint_limiters[
+                "/api/v5/market/candles"
+            ].max_requests,
+        }
         return payload
 
     def _metric(self, key: str, amount: float = 1.0, endpoint: str | None = None) -> None:
@@ -87,12 +123,44 @@ class OKXPublicClient:
                 counts = self._metrics["endpoint_requests"]
                 counts[endpoint] = counts.get(endpoint, 0) + 1
 
+    def _acquire_request_slot(self, path: str) -> None:
+        while True:
+            with self._adaptive_lock:
+                wait_for = self._endpoint_backoff_until.get(path, 0.0) - time.monotonic()
+            if wait_for <= 0:
+                break
+            time.sleep(min(wait_for, self.rate_limit_max_backoff_seconds))
+        endpoint_limiter = self.endpoint_limiters.get(path)
+        if endpoint_limiter is not None:
+            endpoint_limiter.acquire()
+        self.rate_limiter.acquire()
+
+    def _record_rate_limit(self, path: str) -> float:
+        with self._adaptive_lock:
+            level = self._endpoint_backoff_level.get(path, 0)
+            delay = min(
+                self.rate_limit_max_backoff_seconds,
+                self.rate_limit_backoff_seconds * (2**level),
+            )
+            self._endpoint_backoff_level[path] = min(level + 1, 8)
+            self._endpoint_backoff_until[path] = max(
+                self._endpoint_backoff_until.get(path, 0.0),
+                time.monotonic() + delay,
+            )
+        with self._metrics_lock:
+            self._metrics["rate_limit_errors"] += 1
+            self._metrics["rate_limit_backoff_events"] += 1
+            self._metrics["rate_limit_backoff_seconds"] += delay
+            counts = self._metrics["endpoint_rate_limit_errors"]
+            counts[path] = counts.get(path, 0) + 1
+        return delay
+
     def _get(self, path: str, params: dict[str, Any]) -> list[Any]:
         query = urlencode({key: str(value) for key, value in params.items()})
         url = f"{self.base_url}{path}?{query}"
         last_error: Exception | None = None
         for attempt in range(self.retries + 1):
-            self.rate_limiter.acquire()
+            self._acquire_request_slot(path)
             request_started = time.monotonic()
             self._metric("requests", endpoint=path)
             request = Request(
@@ -118,18 +186,25 @@ class OKXPublicClient:
             except (HTTPError, URLError, TimeoutError, json.JSONDecodeError, OKXAPIError) as exc:
                 self._metric("request_seconds", time.monotonic() - request_started)
                 self._metric("errors")
-                if (
-                    isinstance(exc, HTTPError)
-                    and exc.code == 429
+                is_rate_limit = (
+                    (isinstance(exc, HTTPError) and exc.code == 429)
                     or "code=50011" in str(exc)
                     or "rate limit" in str(exc).lower()
-                ):
-                    self._metric("rate_limit_errors")
+                )
+                if is_rate_limit:
+                    self._record_rate_limit(path)
                 last_error = exc
                 if attempt >= self.retries:
                     break
                 self._metric("retries")
-                delay = (0.45 * (2**attempt)) + random.uniform(0.0, 0.15)
+                delay = (
+                    min(
+                        self.rate_limit_max_backoff_seconds,
+                        self.rate_limit_backoff_seconds * (2**attempt),
+                    )
+                    if is_rate_limit
+                    else 0.45 * (2**attempt)
+                ) + random.uniform(0.0, 0.15)
                 time.sleep(delay)
         raise OKXAPIError(f"GET {path} failed after retries: {last_error}")
 

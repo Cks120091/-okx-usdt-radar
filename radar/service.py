@@ -42,9 +42,35 @@ class RadarRuntime:
         return
 
     def trigger_scan(self) -> bool:
+        return bool(self.request_scan("manual")["started"])
+
+    def request_scan(self, reason: str = "manual") -> dict[str, Any]:
+        reason = reason if reason in {"auto", "manual"} else "manual"
         with self._state_lock:
             if self._running:
-                return False
+                return {
+                    "started": False,
+                    "joined_existing_scan": True,
+                    "reused_latest": False,
+                    "reason": reason,
+                    "scan_id": self._scan_id,
+                    "runtime_status": "SCANNING",
+                    "retry_after_seconds": 0,
+                    "message": "掃描正在執行，已加入目前進度",
+                }
+            retry_after = self._cooldown_remaining_locked(reason)
+            if retry_after > 0:
+                system_status, _, _ = self._system_status_locked()
+                return {
+                    "started": False,
+                    "joined_existing_scan": False,
+                    "reused_latest": True,
+                    "reason": reason,
+                    "scan_id": self._latest.scan_id if self._latest else self._scan_id,
+                    "runtime_status": system_status,
+                    "retry_after_seconds": retry_after,
+                    "message": f"剛完成最新掃描，沿用目前結果；{retry_after} 秒後可再掃描",
+                }
             self._begin_scan_locked()
         thread = threading.Thread(
             target=self._scan_worker,
@@ -52,7 +78,16 @@ class RadarRuntime:
             daemon=True,
         )
         thread.start()
-        return True
+        return {
+            "started": True,
+            "joined_existing_scan": False,
+            "reused_latest": False,
+            "reason": reason,
+            "scan_id": self._scan_id,
+            "runtime_status": "SCANNING",
+            "retry_after_seconds": 0,
+            "message": "已開始完整掃描",
+        }
 
     def scan_blocking(self) -> RadarReport:
         with self._state_lock:
@@ -81,6 +116,23 @@ class RadarRuntime:
                 "latest_generated_at": self._latest.generated_at if self._latest else None,
                 "latest_age_seconds": age_seconds,
                 "stale_after_seconds": self.config.stale_after_seconds,
+                "data_quality_status": (
+                    self._latest.data_quality_status if self._latest else "NONE"
+                ),
+                "context_target_count": (
+                    self._latest.context_target_count if self._latest else 0
+                ),
+                "context_enriched_count": (
+                    self._latest.context_enriched_count if self._latest else 0
+                ),
+                "context_coverage_pct": (
+                    self._latest.context_coverage_pct if self._latest else 0.0
+                ),
+                "rate_limit_errors": (
+                    int(self._latest.api_metrics.get("rate_limit_errors", 0))
+                    if self._latest
+                    else 0
+                ),
                 "scan_id": self._scan_id,
                 "scan_started_at": self._scan_started_at,
                 "progress": dict(self._progress),
@@ -264,6 +316,24 @@ class RadarRuntime:
         except (TypeError, ValueError):
             return float("inf")
 
+    def _cooldown_remaining_locked(self, reason: str) -> int:
+        if (
+            self._latest is None
+            or self._latest.status == "DATA_INCOMPLETE"
+            or self._last_attempt_status == "ERROR"
+            or self._last_error
+        ):
+            return 0
+        age_seconds = self._report_age_seconds_locked()
+        if age_seconds is None or age_seconds > self.config.stale_after_seconds:
+            return 0
+        cooldown = (
+            self.config.auto_scan_cooldown_seconds
+            if reason == "auto"
+            else self.config.manual_scan_cooldown_seconds
+        )
+        return max(0, int(cooldown - age_seconds + 0.999))
+
     @staticmethod
     def _idle_progress() -> dict[str, Any]:
         return {
@@ -320,20 +390,29 @@ def serve(runtime: RadarRuntime, host: str, port: int) -> None:
             if path != "/api/scan":
                 self._send_json(HTTPStatus.NOT_FOUND, {"error": "not found"})
                 return
-            started = runtime.trigger_scan()
-            status = runtime.status()
+            try:
+                content_length = int(self.headers.get("Content-Length", "0") or 0)
+            except ValueError:
+                content_length = 0
+            if content_length > 4096:
+                self._send_json(HTTPStatus.REQUEST_ENTITY_TOO_LARGE, {"error": "request too large"})
+                return
+            try:
+                raw_body = self.rfile.read(content_length) if content_length else b""
+                payload = json.loads(raw_body.decode("utf-8")) if raw_body else {}
+            except (UnicodeDecodeError, json.JSONDecodeError):
+                self._send_json(HTTPStatus.BAD_REQUEST, {"error": "invalid JSON"})
+                return
+            reason = payload.get("reason", "manual") if isinstance(payload, dict) else "manual"
+            if reason not in {"auto", "manual"}:
+                self._send_json(HTTPStatus.BAD_REQUEST, {"error": "reason must be auto or manual"})
+                return
+            result = runtime.request_scan(reason)
             self._send_json(
-                HTTPStatus.ACCEPTED,
+                HTTPStatus.OK if result["reused_latest"] else HTTPStatus.ACCEPTED,
                 {
-                    "accepted": started,
-                    "joined_existing_scan": not started,
-                    "scan_id": status["scan_id"],
-                    "runtime_status": "SCANNING",
-                    "message": (
-                        "已開始完整掃描"
-                        if started
-                        else "掃描正在執行，已加入目前進度"
-                    ),
+                    "accepted": result["started"],
+                    **result,
                 },
             )
 

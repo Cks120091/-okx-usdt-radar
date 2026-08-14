@@ -34,6 +34,28 @@ class RouteFixtureClient(OKXPublicClient):
 
 
 class APITests(unittest.TestCase):
+    def test_endpoint_rate_limit_metrics_and_adaptive_backoff(self):
+        client = OKXPublicClient(
+            rate_limit_requests=18,
+            candle_rate_limit_requests=14,
+            rate_limit_backoff_seconds=1.0,
+            rate_limit_max_backoff_seconds=4.0,
+        )
+        self.assertEqual(client._record_rate_limit("/api/v5/market/candles"), 1.0)
+        self.assertEqual(client._record_rate_limit("/api/v5/market/candles"), 2.0)
+        metrics = client.metrics_snapshot()
+        self.assertEqual(metrics["rate_limit_errors"], 2)
+        self.assertEqual(metrics["rate_limit_backoff_events"], 2)
+        self.assertEqual(metrics["rate_limit_backoff_seconds"], 3.0)
+        self.assertEqual(
+            metrics["endpoint_rate_limit_errors"],
+            {"/api/v5/market/candles": 2},
+        )
+        self.assertEqual(
+            metrics["configured_rate_limits"],
+            {"global_per_2s": 18, "candles_per_2s": 14},
+        )
+
     def test_filters_only_live_linear_usdt_swaps(self):
         rows = [
             {"instId": "BTC-USDT-SWAP", "state": "live", "settleCcy": "USDT", "ctType": "linear", "tickSz": "0.1"},

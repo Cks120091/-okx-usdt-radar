@@ -4,8 +4,8 @@
 
 ## 使用方式
 
-- 使用者每次打開／重新載入雷達，前端會真正呼叫 `POST /api/scan`。
-- 「立即掃描現在市場」使用同一個 scanner 與 Scan Lock，不會建立第二套分析流程。
+- 使用者每次打開／重新載入雷達，前端會呼叫 `POST /api/scan`；若 120 秒內已有一份完整且未過期的結果，會沿用該結果，避免同一支手機重複載入造成 API 尖峰，超過冷卻時間才開始新一輪。
+- 「立即掃描現在市場」使用同一個 scanner 與 Scan Lock，且每次都真正啟動新一輪；只有目前已有 scan 在執行時才加入該輪，不會建立第二套分析流程。
 - 掃描完成後前端自動取得最新 report 並重繪畫面，不必手動重新整理。
 - 掃描完成後不再定時執行；沒有人使用時，Autoscale 服務可以休眠。
 - GitHub Actions 只跑離線測試，不會用 cron 或 push event 掃描 OKX。
@@ -21,7 +21,9 @@
 - 最高順位最多 100 個候選：5m、Funding、Recent Trades／Taker Flow、前 20 檔 Order Book、Bid／Ask imbalance、Spread、Slippage、Execution Cost。
 - 保留 Structure、Support／Resistance、MA5／10／20、EMA21／55、MACD、RSI、ADX、ATR、VWAP、Bollinger Band／Width、Volume、Market Bias、Market Regime、R:R 與追價判斷。
 
-Context 的 `100` 是上限，不是必須湊滿的數量。實際候選不足就只取得符合排序條件者；任何正式訊號的深度資料不完整時都會被安全層擋下。
+Context 的 `100` 是上限，不是必須湊滿的數量。實際候選不足就只取得符合排序條件者；任何正式訊號的深度資料不完整時都會被安全層擋下。若少數 Context 在一次低併發補抓後仍不完整，核心全市場結果可維持最新，但 UI 會明確顯示「部分深度資料缺漏」，且缺漏候選不會進入正式訊號或接近觸發名單。
+
+OKX 請求採 process-wide 節流，K 線端點另有較低的獨立節流；遇到 HTTP 429 或 OKX `50011` 時會按端點增加退避時間。核心 4H／1H／15m 若暫時失敗會以低併發補抓一次；補抓後仍有任何核心缺漏，整輪仍維持 `DATA_INCOMPLETE` 並禁止全部訊號。
 
 ## 手機市場指揮中心
 
@@ -117,7 +119,7 @@ Funding、Taker Flow、Order Book 的中性狀態不會單獨否決。主動成�
 
 - `GET /health`：只檢查服務，不觸發市場掃描。
 - `GET /api/status`：狀態、scan id、真實階段進度、最後錯誤。
-- `POST /api/scan`：啟動或加入唯一一輪完整 scan。
+- `POST /api/scan`：啟動或加入唯一一輪完整 scan。JSON body 使用 `{"reason":"auto"}` 或 `{"reason":"manual"}`；開頁自動掃描有 120 秒防重複冷卻，手動掃描沒有完成後冷卻。
 - `GET /api/report/latest`：安全處理後的最新 JSON。
 - `GET /api/report/latest.md`：中文文字報告。
 
@@ -143,6 +145,14 @@ Funding、Taker Flow、Order Book 的中性狀態不會單獨否決。主動成�
 | `severe_entry_extension_atr` | 1.8 | 嚴重追價 Hard Block |
 | `stale_after_seconds` | 1,800 | 資料過期秒數 |
 | `rate_limit_requests_per_2s` | 18 | 保守的 process-wide 公開 API 節流 |
+| `candle_rate_limit_requests_per_2s` | 14 | K 線端點獨立節流，不高於全域限制 |
+| `rate_limit_backoff_seconds` | 1.0 | 首次撞限流的按端點退避秒數 |
+| `rate_limit_max_backoff_seconds` | 4.0 | 按端點退避上限秒數 |
+| `auto_scan_cooldown_seconds` | 120 | 開頁／重載自動掃描的防重複時間 |
+| `manual_scan_cooldown_seconds` | 0 | 手動掃描完成後冷卻；0 代表每次真正重掃 |
+| `core_recovery_attempts` | 1 | 核心多時間框架失敗後的補抓輪數 |
+| `context_recovery_attempts` | 1 | 深度 Context 失敗後的補抓輪數 |
+| `recovery_workers` | 2 | 補抓時的低併發 worker 數 |
 
 `require_micro_volume_anomaly` 保留作舊設定相容，V2 預設為 `false`；5m 中性不再是 Hard Gate。
 
@@ -162,7 +172,7 @@ docker build -t okx-radar-v2 .
 docker run --name okx-radar-v2 -p 8000:8000 okx-radar-v2
 ```
 
-適合部署到可 scale-to-zero 的動態 Web Service，例如 Replit Autoscale。為維持目前 process-wide Scan Lock，Autoscale 初期應限制最大 instance 為 1。GitHub Pages 只能提供靜態檔案，不能作為 V2 即時 scanner 的主要網址。
+適合部署到可 scale-to-zero 的動態 Web Service。現在的正式部署 Blueprint 使用 Render Free Web Service；閒置時會休眠，第一次打開可能需要約 50 秒以上喚醒。為維持目前 process-wide Scan Lock，任何平台初期都應限制最大 instance 為 1。GitHub Pages 只能提供靜態檔案，不能作為 V2 即時 scanner 的主要網址。
 
 專案內的 `.replit` 已設定 Preview 與正式 Deployment 的啟動命令及 port。Replit 發布時使用 **Autoscale**、`Max machines = 1`；不使用 Reserved VM 或 Scheduled Deployment。Replit Starter 免費方案目前可發布 1 個 App，若帳號沒有可用的免費發布名額就停止，不自行啟用付費方案。
 
@@ -176,7 +186,7 @@ python -m unittest discover -s tests -v
 git diff --check
 ```
 
-測試涵蓋全市場失敗安全、最多 20 個、Context 兩階段取得、ADX 連續性、中性不等於反向、強烈跨群衝突、5m 不單獨否決、Scan Lock、STALE、掃描中舊訊號遮蔽、中文 Mobile UI contract，以及 GitHub Actions 無市場排程。
+測試涵蓋全市場失敗安全、核心與 Context 低併發補抓、部分 Context 安全排除、端點限流退避、開頁防重複、手動真實重掃、最多 20 個、ADX 連續性、中性不等於反向、強烈跨群衝突、5m 不單獨否決、Scan Lock、STALE、掃描中舊訊號遮蔽、中文 Mobile UI contract，以及 GitHub Actions 無市場排程。
 
 ## 限制
 
