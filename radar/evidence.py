@@ -37,6 +37,17 @@ REGIME_WEIGHTS = {
     },
 }
 
+# Canonical ownership prevents one raw observation from masquerading as two
+# independent evidence groups.  Structure/price levels belong to position,
+# directional indicators belong to trend, and volume/order-flow belongs to
+# participation.  The 5m price-momentum score is only a small timing input.
+EVIDENCE_OWNERSHIP = {
+    "position_structure": ("support_resistance", "breakout_retest", "price_location"),
+    "trend_momentum": ("ma_ema_state", "macd", "rsi", "adx", "trend_slope"),
+    "participation_flow": ("volume", "directional_volume", "taker", "oi", "funding", "order_book"),
+    "micro_timing": ("5m_price_momentum",),
+}
+
 
 @dataclass(frozen=True)
 class EvidenceGroup:
@@ -160,19 +171,8 @@ class EvidenceAssessment:
         micro_score = 50.0
         timeframe_states = dict(self.timeframe_states)
         if tf5 is not None:
-            pressure = (
-                tf5.directional_volume_ratio
-                if self.direction == "LONG"
-                else 1.0 - tf5.directional_volume_ratio
-            )
-            direction_score = _relative_timeframe_score(tf5, self.direction)
-            volume_score = _volume_score(tf5.volume_ratio)
-            pressure_score = _clamp(50.0 + (pressure - 0.50) * 250.0, 0.0, 100.0)
-            micro_score = round(
-                direction_score * 0.45 + volume_score * 0.30 + pressure_score * 0.25,
-                1,
-            )
-            parts.append((micro_score, 0.10))
+            micro_score = _micro_score(tf5, self.direction)
+            parts.append((_micro_participation_score(tf5, self.direction), 0.10))
             if micro_score >= 62.0:
                 supporting.append(f"5m {_direction_cn(self.direction)}加速")
             elif micro_score < 35.0:
@@ -237,9 +237,6 @@ class EvidenceAssessment:
         alignment = _alignment_score(groups, self.regime)
         conflict = _conflict_severity(groups, macro_conflict)
         readiness = _readiness(
-            self.bias_quality,
-            self.setup_maturity,
-            self.trigger_maturity,
             micro_score,
             alignment,
             float(self.entry_quality["score"]),
@@ -380,17 +377,28 @@ def assess_evidence(
         severe_entry_extension_atr,
     )
 
+    structure_4h = _structure_score(tf4, direction, regime)
     structure_1h = _structure_score(tf1, direction, regime)
     structure_15m = _structure_score(tf15, direction, regime)
-    position_score = bias * 0.35 + structure_1h * 0.40 + structure_15m * 0.25
-    trend_score = setup * 0.45 + trigger * 0.55
-    participation_score = _base_participation_score(tf1, tf15, tf5, direction)
+    position_score = structure_4h * 0.35 + structure_1h * 0.40 + structure_15m * 0.25
+    trend_score = (
+        bias * 0.30
+        + _setup_trend_score(tf1, direction) * 0.32
+        + _trigger_trend_score(tf15, direction) * 0.38
+    )
+    # A strongly opposing 4H state is real conflicting evidence, not merely an
+    # absent confirmation that can be averaged away by faster timeframes.  A
+    # dedicated reversal model may relax this later; the ordinary model must
+    # not publish a formal signal against it.
+    if bias < 25.0:
+        trend_score = min(trend_score, 20.0)
+    participation_score = _base_participation_score(tf1, tf15, direction)
 
     position_support, position_conflicts, position_neutral = _position_reasons(
-        bias, structure_1h, structure_15m, direction
+        structure_4h, structure_1h, structure_15m, direction
     )
     trend_support, trend_conflicts, trend_neutral = _trend_reasons(
-        setup, trigger, tf15.adx14, direction
+        bias, setup, trigger, tf15.adx14, direction
     )
     part_support, part_conflicts, part_neutral = _participation_reasons(
         tf1, tf15, tf5, direction
@@ -471,9 +479,6 @@ def assess_evidence(
     alignment = _alignment_score(groups, regime)
     conflict = _conflict_severity(groups, False)
     readiness = _readiness(
-        bias,
-        setup,
-        trigger,
         micro,
         alignment,
         float(entry["score"]),
@@ -528,17 +533,18 @@ def adx_quality(adx_value: float) -> float:
 
 def _long_timeframe_score(tf: TimeframeFeatures) -> float:
     atr = max(tf.atr14, abs(tf.close) * 0.0001, 1e-9)
-    components = (
-        (_smooth((tf.close - tf.ema21) / atr, 0.9), 0.20),
-        (_smooth((tf.ema21 - tf.ema55) / atr, 1.4), 0.20),
-        (_smooth((tf.sma5 - tf.sma10) / atr, 0.6), 0.10),
-        (_smooth((tf.sma10 - tf.sma20) / atr, 0.8), 0.08),
-        (_smooth(tf.ema21_slope_atr, 0.35), 0.16),
-        (_smooth((tf.macd_line - tf.macd_signal) / atr, 0.20), 0.12),
-        (_smooth((tf.macd_hist - tf.macd_prev_hist) / atr, 0.12), 0.07),
-        (_clamp((tf.rsi14 - 50.0) / 25.0, -1.0, 1.0), 0.07),
+    price_position = _smooth((tf.close - tf.ema21) / atr, 0.9)
+    moving_average_state = (
+        _smooth((tf.ema21 - tf.ema55) / atr, 1.4) * 0.42
+        + _smooth((tf.sma5 - tf.sma10) / atr, 0.6) * 0.20
+        + _smooth((tf.sma10 - tf.sma20) / atr, 0.8) * 0.16
+        + _smooth(tf.ema21_slope_atr, 0.35) * 0.22
     )
-    signed = sum(value * weight for value, weight in components)
+    momentum_state = (
+        _smooth((tf.macd_line - tf.macd_signal) / atr, 0.20) * 0.65
+        + _clamp((tf.rsi14 - 50.0) / 25.0, -1.0, 1.0) * 0.35
+    )
+    signed = price_position * 0.25 + moving_average_state * 0.45 + momentum_state * 0.30
     return round(_clamp(50.0 + signed * 50.0, 0.0, 100.0), 1)
 
 
@@ -548,60 +554,47 @@ def _relative_timeframe_score(tf: TimeframeFeatures, direction: str) -> float:
 
 
 def _setup_score(tf: TimeframeFeatures, direction: str, regime: str) -> float:
-    relative = _relative_timeframe_score(tf, direction)
-    sign = 1.0 if direction == "LONG" else -1.0
-    improving_hist = (tf.macd_hist - tf.macd_prev_hist) * sign
-    atr = max(tf.atr14, 1e-9)
-    turn_score = _clamp(50.0 + _smooth(improving_hist / atr, 0.12) * 50.0, 0.0, 100.0)
-    price_side = 100.0 if (tf.close - tf.ema21) * sign > 0 else 35.0
+    trend = _setup_trend_score(tf, direction)
     structure = _structure_score(tf, direction, regime)
-    strength = adx_quality(tf.adx14)
-    strength_weight = 0.08 if regime == "RANGE" else 0.12
-    return round(
-        relative * 0.38
-        + turn_score * 0.22
-        + price_side * 0.13
-        + structure * (0.27 - strength_weight)
-        + strength * strength_weight,
-        1,
-    )
+    structure_weight = 0.35 if regime == "RANGE" else 0.25
+    return round(trend * (1.0 - structure_weight) + structure * structure_weight, 1)
 
 
 def _trigger_score(tf: TimeframeFeatures, direction: str, regime: str) -> float:
     sign = 1.0 if direction == "LONG" else -1.0
-    boundary = tf.prior_high20 if direction == "LONG" else tf.prior_low20
-    distance = (tf.close - boundary) * sign / max(tf.atr14, 1e-9)
-    structure = _clamp(55.0 + distance * 45.0, 0.0, 100.0)
-    if distance > 0:
-        structure = max(structure, 82.0)
-    ema_side = _clamp(50.0 + (tf.close - tf.ema21) * sign / max(tf.atr14, 1e-9) * 35.0, 0.0, 100.0)
-    macd = _clamp(
-        50.0 + _smooth((tf.macd_line - tf.macd_signal) * sign / max(tf.atr14, 1e-9), 0.18) * 50.0,
-        0.0,
-        100.0,
-    )
-    impulse = _clamp(
-        50.0 + _smooth((tf.macd_hist - tf.macd_prev_hist) * sign / max(tf.atr14, 1e-9), 0.10) * 50.0,
-        0.0,
-        100.0,
-    )
+    structure = _structure_score(tf, direction, regime)
+    trend = _trigger_trend_score(tf, direction)
     vwap = 75.0 if (tf.close - tf.vwap20) * sign > 0 else 30.0
-    rsi = _clamp(50.0 + (tf.rsi14 - 50.0) * sign * 2.0, 0.0, 100.0)
-    pressure = tf.directional_volume_ratio if direction == "LONG" else 1.0 - tf.directional_volume_ratio
-    participation = _clamp(
-        _volume_score(tf.volume_ratio) * 0.55 + (50.0 + (pressure - 0.5) * 250.0) * 0.45,
-        0.0,
-        100.0,
-    )
-    structure_weight = 0.30 if regime == "BREAKOUT_READY" else 0.22
+    structure_weight = 0.38 if regime == "BREAKOUT_READY" else 0.25
     return round(
         structure * structure_weight
-        + ema_side * 0.16
-        + macd * 0.16
-        + impulse * 0.14
-        + vwap * 0.10
-        + rsi * 0.08
-        + participation * (0.36 - structure_weight),
+        + trend * (0.85 - structure_weight)
+        + vwap * 0.15,
+        1,
+    )
+
+
+def _momentum_turn_score(tf: TimeframeFeatures, direction: str) -> float:
+    sign = 1.0 if direction == "LONG" else -1.0
+    improving_hist = (tf.macd_hist - tf.macd_prev_hist) * sign
+    atr = max(tf.atr14, 1e-9)
+    return _clamp(50.0 + _smooth(improving_hist / atr, 0.12) * 50.0, 0.0, 100.0)
+
+
+def _setup_trend_score(tf: TimeframeFeatures, direction: str) -> float:
+    return round(
+        _relative_timeframe_score(tf, direction) * 0.58
+        + _momentum_turn_score(tf, direction) * 0.27
+        + adx_quality(tf.adx14) * 0.15,
+        1,
+    )
+
+
+def _trigger_trend_score(tf: TimeframeFeatures, direction: str) -> float:
+    return round(
+        _relative_timeframe_score(tf, direction) * 0.60
+        + _momentum_turn_score(tf, direction) * 0.30
+        + adx_quality(tf.adx14) * 0.10,
         1,
     )
 
@@ -617,15 +610,45 @@ def _structure_score(tf: TimeframeFeatures, direction: str, regime: str) -> floa
         edge = 1.0 - position if direction == "SHORT" else position
         return round(_clamp((0.45 - edge) / 0.45 * 100.0, 0.0, 100.0), 1)
     boundary = tf.prior_high20 if direction == "LONG" else tf.prior_low20
-    boundary_score = _clamp(55.0 + (tf.close - boundary) * sign / atr * 35.0, 0.0, 100.0)
-    trend_position = _clamp(50.0 + (tf.close - tf.ema21) * sign / atr * 30.0, 0.0, 100.0)
-    return round(boundary_score * 0.55 + trend_position * 0.45, 1)
+    opposite_boundary = tf.prior_low20 if direction == "LONG" else tf.prior_high20
+    opposite_distance = (tf.close - opposite_boundary) * sign / atr
+    if opposite_distance < -0.15:
+        # Closing through the opposite side of the structure is a true
+        # conflict.  Merely being far from the desired breakout is neutral.
+        return round(_clamp(25.0 + opposite_distance * 45.0, 0.0, 25.0), 1)
+
+    breakout_distance = (tf.close - boundary) * sign / atr
+    if breakout_distance >= 0.0:
+        boundary_score = _clamp(82.0 + breakout_distance * 18.0, 82.0, 100.0)
+    elif breakout_distance >= -0.60:
+        boundary_score = 60.0 + (breakout_distance + 0.60) / 0.60 * 15.0
+    else:
+        boundary_score = 50.0
+
+    retest_level = tf.recent_low if direction == "LONG" else tf.recent_high
+    retest_distance = (tf.close - retest_level) * sign / atr
+    if retest_distance < -0.20:
+        return round(
+            _clamp(30.0 + (retest_distance + 0.20) * 40.0, 0.0, 30.0),
+            1,
+        )
+    if retest_distance < 0.0:
+        retest_score = 40.0 + (retest_distance + 0.20) / 0.20 * 10.0
+    elif retest_distance <= 1.25:
+        retest_score = 85.0 - retest_distance / 1.25 * 25.0
+    else:
+        retest_score = 50.0
+
+    if regime == "BREAKOUT_READY":
+        return round(boundary_score * 0.65 + retest_score * 0.35, 1)
+    primary = max(boundary_score, retest_score)
+    secondary = min(boundary_score, retest_score)
+    return round(primary * 0.80 + secondary * 0.20, 1)
 
 
 def _base_participation_score(
     tf1: TimeframeFeatures,
     tf15: TimeframeFeatures,
-    tf5: TimeframeFeatures | None,
     direction: str,
 ) -> float:
     pressure15 = tf15.directional_volume_ratio if direction == "LONG" else 1.0 - tf15.directional_volume_ratio
@@ -634,18 +657,23 @@ def _base_participation_score(
         (_volume_score(tf15.volume_ratio), 0.40),
         (_clamp(50.0 + (pressure15 - 0.50) * 250.0, 0.0, 100.0), 0.25),
     ]
-    if tf5 is not None:
-        parts.append((_micro_score(tf5, direction), 0.10))
     denominator = sum(weight for _, weight in parts)
     return round(sum(score * weight for score, weight in parts) / denominator, 1)
 
 
 def _micro_score(tf: TimeframeFeatures, direction: str) -> float:
+    return round(
+        _relative_timeframe_score(tf, direction) * 0.65
+        + _momentum_turn_score(tf, direction) * 0.35,
+        1,
+    )
+
+
+def _micro_participation_score(tf: TimeframeFeatures, direction: str) -> float:
     pressure = tf.directional_volume_ratio if direction == "LONG" else 1.0 - tf.directional_volume_ratio
     return round(
-        _relative_timeframe_score(tf, direction) * 0.45
-        + _volume_score(tf.volume_ratio) * 0.30
-        + _clamp(50.0 + (pressure - 0.50) * 250.0, 0.0, 100.0) * 0.25,
+        _volume_score(tf.volume_ratio) * 0.55
+        + _clamp(50.0 + (pressure - 0.50) * 250.0, 0.0, 100.0) * 0.45,
         1,
     )
 
@@ -720,21 +748,15 @@ def _conflict_severity(groups: dict[str, EvidenceGroup], macro_conflict: bool) -
 
 
 def _readiness(
-    bias: float,
-    setup: float,
-    trigger: float,
     micro: float,
     alignment: float,
     entry: float,
     conflict: float,
 ) -> float:
     score = (
-        bias * 0.15
-        + setup * 0.25
-        + trigger * 0.25
-        + micro * 0.05
-        + alignment * 0.20
+        alignment * 0.85
         + entry * 0.10
+        + micro * 0.05
         - min(conflict, 25.0)
     )
     return round(_clamp(score, 0.0, 100.0), 1)
@@ -782,7 +804,7 @@ def _classify_stage(
 
 
 def _position_reasons(
-    bias: float,
+    structure_4h: float,
     structure_1h: float,
     structure_15m: float,
     direction: str,
@@ -790,12 +812,12 @@ def _position_reasons(
     support: list[str] = []
     conflicts: list[str] = []
     neutral: list[str] = []
-    if bias >= 60.0:
-        support.append(f"4H 背景支持{_direction_cn(direction)}")
-    elif bias < 30.0:
-        conflicts.append("4H 背景明顯反向")
+    if structure_4h >= 60.0:
+        support.append(f"4H 結構位置支持{_direction_cn(direction)}")
+    elif structure_4h < 30.0:
+        conflicts.append("4H 結構位置與候選方向明顯衝突")
     else:
-        neutral.append("4H 背景中性／未確認")
+        neutral.append("4H 結構位置中性／未確認")
     if structure_1h >= 60.0:
         support.append("1H 結構位置具交易價值")
     elif structure_1h < 35.0:
@@ -812,6 +834,7 @@ def _position_reasons(
 
 
 def _trend_reasons(
+    bias: float,
     setup: float,
     trigger: float,
     adx_value: float,
@@ -820,6 +843,12 @@ def _trend_reasons(
     support: list[str] = []
     conflicts: list[str] = []
     neutral: list[str] = []
+    if bias >= 60.0:
+        support.append(f"4H 大方向支持{_direction_cn(direction)}")
+    elif bias < 25.0:
+        conflicts.append("4H 大方向與候選方向強烈相反")
+    else:
+        neutral.append("4H 大方向中性／未支持")
     if setup >= 60.0:
         support.append(f"1H {_direction_cn(direction)}方 Setup 形成")
     elif setup < 35.0:
