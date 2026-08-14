@@ -21,6 +21,9 @@ def build_runtime(config: AppConfig) -> RadarRuntime:
         timeout_seconds=config.request_timeout_seconds,
         retries=config.request_retries,
         rate_limit_requests=config.rate_limit_requests_per_2s,
+        candle_rate_limit_requests=config.candle_rate_limit_requests_per_2s,
+        rate_limit_backoff_seconds=config.rate_limit_backoff_seconds,
+        rate_limit_max_backoff_seconds=config.rate_limit_max_backoff_seconds,
         execution_notional_usdt=config.execution_notional_usdt,
     )
     scanner = MarketScanner(
@@ -46,6 +49,9 @@ def build_runtime(config: AppConfig) -> RadarRuntime:
             max_entry_extension_atr=config.max_entry_extension_atr,
             severe_entry_extension_atr=config.severe_entry_extension_atr,
             previous_open_interest_usd=previous_open_interest,
+            core_recovery_attempts=config.core_recovery_attempts,
+            context_recovery_attempts=config.context_recovery_attempts,
+            recovery_workers=config.recovery_workers,
         ),
     )
     return RadarRuntime(scanner, config)

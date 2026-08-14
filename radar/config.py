@@ -23,6 +23,9 @@ class AppConfig:
     request_timeout_seconds: float = 12.0
     request_retries: int = 3
     rate_limit_requests_per_2s: int = 18
+    candle_rate_limit_requests_per_2s: int = 14
+    rate_limit_backoff_seconds: float = 1.0
+    rate_limit_max_backoff_seconds: float = 4.0
     min_quote_volume_24h: float = 5_000_000.0
     max_spread_pct: float = 0.10
     min_open_interest_usd: float = 3_000_000.0
@@ -37,6 +40,11 @@ class AppConfig:
     severe_entry_extension_atr: float = 1.80
     previous_report_url: str = ""
     stale_after_seconds: int = 1800
+    auto_scan_cooldown_seconds: int = 120
+    manual_scan_cooldown_seconds: int = 0
+    core_recovery_attempts: int = 1
+    context_recovery_attempts: int = 1
+    recovery_workers: int = 2
 
     @classmethod
     def load(cls, path: str | None = None) -> "AppConfig":
@@ -57,6 +65,18 @@ class AppConfig:
             "RADAR_CANDLE_LIMIT_1H": ("candle_limit_1h", int),
             "RADAR_CANDLE_LIMIT_15M": ("candle_limit_15m", int),
             "RADAR_CANDLE_LIMIT_5M": ("candle_limit_5m", int),
+            "RADAR_REQUEST_TIMEOUT_SECONDS": ("request_timeout_seconds", float),
+            "RADAR_REQUEST_RETRIES": ("request_retries", int),
+            "RADAR_RATE_LIMIT_REQUESTS_PER_2S": ("rate_limit_requests_per_2s", int),
+            "RADAR_CANDLE_RATE_LIMIT_REQUESTS_PER_2S": (
+                "candle_rate_limit_requests_per_2s",
+                int,
+            ),
+            "RADAR_RATE_LIMIT_BACKOFF_SECONDS": ("rate_limit_backoff_seconds", float),
+            "RADAR_RATE_LIMIT_MAX_BACKOFF_SECONDS": (
+                "rate_limit_max_backoff_seconds",
+                float,
+            ),
             "RADAR_MIN_QUOTE_VOLUME": ("min_quote_volume_24h", float),
             "RADAR_MAX_SPREAD_PCT": ("max_spread_pct", float),
             "RADAR_MIN_OPEN_INTEREST_USD": ("min_open_interest_usd", float),
@@ -71,6 +91,11 @@ class AppConfig:
             "RADAR_SEVERE_ENTRY_EXTENSION_ATR": ("severe_entry_extension_atr", float),
             "RADAR_PREVIOUS_REPORT_URL": ("previous_report_url", str),
             "RADAR_STALE_AFTER_SECONDS": ("stale_after_seconds", int),
+            "RADAR_AUTO_SCAN_COOLDOWN_SECONDS": ("auto_scan_cooldown_seconds", int),
+            "RADAR_MANUAL_SCAN_COOLDOWN_SECONDS": ("manual_scan_cooldown_seconds", int),
+            "RADAR_CORE_RECOVERY_ATTEMPTS": ("core_recovery_attempts", int),
+            "RADAR_CONTEXT_RECOVERY_ATTEMPTS": ("context_recovery_attempts", int),
+            "RADAR_RECOVERY_WORKERS": ("recovery_workers", int),
         }
         for env_name, (field_name, converter) in env_map.items():
             if env_name in os.environ:
@@ -99,6 +124,28 @@ class AppConfig:
             raise ValueError("execution and entry-risk limits must be positive")
         if config.stale_after_seconds < 60:
             raise ValueError("stale_after_seconds must be at least 60")
+        if config.request_timeout_seconds <= 0 or config.request_retries < 0:
+            raise ValueError("request timeout must be positive and retries must not be negative")
+        if (
+            config.rate_limit_requests_per_2s < 1
+            or config.candle_rate_limit_requests_per_2s < 1
+            or config.candle_rate_limit_requests_per_2s
+            > config.rate_limit_requests_per_2s
+        ):
+            raise ValueError("endpoint rate limit must be positive and no higher than global limit")
+        if (
+            config.rate_limit_backoff_seconds <= 0
+            or config.rate_limit_max_backoff_seconds < config.rate_limit_backoff_seconds
+        ):
+            raise ValueError("rate-limit backoff values are invalid")
+        if config.auto_scan_cooldown_seconds < 0 or config.manual_scan_cooldown_seconds < 0:
+            raise ValueError("scan cooldowns must not be negative")
+        if config.core_recovery_attempts < 0 or config.context_recovery_attempts < 0:
+            raise ValueError("recovery attempts must not be negative")
+        if config.workers < 1:
+            raise ValueError("workers must be at least 1")
+        if config.recovery_workers < 1 or config.recovery_workers > 32:
+            raise ValueError("recovery_workers must be between 1 and 32")
         candle_limits = (
             config.candle_limit_4h,
             config.candle_limit_1h,

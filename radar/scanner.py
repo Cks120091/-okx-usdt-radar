@@ -50,6 +50,9 @@ class ScannerConfig:
     severe_entry_extension_atr: float = 1.80
     max_slippage_pct: float = 0.15
     previous_open_interest_usd: dict[str, float] = field(default_factory=dict)
+    core_recovery_attempts: int = 1
+    context_recovery_attempts: int = 1
+    recovery_workers: int = 2
 
 
 ProgressCallback = Callable[[str, int | None, int | None, str], None]
@@ -122,9 +125,13 @@ class MarketScanner:
                 runtime_status="ERROR",
                 actionable=False,
                 max_signals=self.config.max_signals,
+                context_coverage_pct=0.0,
+                data_quality_status="DATA_INCOMPLETE",
             )
 
         failures: dict[str, str] = {}
+        bundle_failures: dict[str, str] = {}
+        recovered_instruments: list[str] = []
         bundles: dict[str, dict[str, list[Candle]]] = {}
         eligible = []
         for instrument in instruments:
@@ -151,7 +158,7 @@ class MarketScanner:
                 try:
                     bundles[inst_id] = future.result()
                 except Exception as exc:
-                    failures[inst_id] = str(exc)
+                    bundle_failures[inst_id] = str(exc)
                 completed_bundles += 1
                 self._progress(
                     progress,
@@ -160,6 +167,45 @@ class MarketScanner:
                     len(eligible),
                     "正在取得全市場多時間框架資料",
                 )
+
+        failures.update(bundle_failures)
+        for attempt in range(max(0, self.config.core_recovery_attempts)):
+            retry_ids = sorted(bundle_failures)
+            if not retry_ids:
+                break
+            self._progress(
+                progress,
+                "RECOVERY",
+                0,
+                len(retry_ids),
+                f"正在補抓核心 K 線資料（第 {attempt + 1} 輪）",
+            )
+            recovered_this_round = 0
+            with ThreadPoolExecutor(
+                max_workers=max(1, min(self.config.recovery_workers, len(retry_ids)))
+            ) as executor:
+                future_map = {
+                    executor.submit(self._fetch_bundle, inst_id): inst_id
+                    for inst_id in retry_ids
+                }
+                for future in as_completed(future_map):
+                    inst_id = future_map[future]
+                    try:
+                        bundles[inst_id] = future.result()
+                        bundle_failures.pop(inst_id, None)
+                        failures.pop(inst_id, None)
+                        recovered_instruments.append(inst_id)
+                    except Exception as exc:
+                        bundle_failures[inst_id] = str(exc)
+                        failures[inst_id] = str(exc)
+                    recovered_this_round += 1
+                    self._progress(
+                        progress,
+                        "RECOVERY",
+                        recovered_this_round,
+                        len(retry_ids),
+                        "正在補抓暫時失敗的核心市場資料",
+                    )
 
         fetched_count = len(instruments) - len(failures)
         coverage = round((fetched_count / len(instruments)) * 100.0, 4)
@@ -189,6 +235,9 @@ class MarketScanner:
                 runtime_status="ERROR",
                 actionable=False,
                 max_signals=self.config.max_signals,
+                context_coverage_pct=0.0,
+                data_quality_status="DATA_INCOMPLETE",
+                recovered_instruments=sorted(set(recovered_instruments)),
             )
 
         analysis_results = {}
@@ -238,12 +287,16 @@ class MarketScanner:
                 runtime_status="ERROR",
                 actionable=False,
                 max_signals=self.config.max_signals,
+                context_coverage_pct=0.0,
+                data_quality_status="DATA_INCOMPLETE",
+                recovered_instruments=sorted(set(recovered_instruments)),
             )
 
         market_bias = self._calculate_market_bias(analysis_results)
         context_failures: dict[str, list[str]] = {}
         context_target_ids: list[str] = []
         context_enriched_count = 0
+        context_recovered_instruments: list[str] = []
         context_loader = getattr(self.client, "get_market_context", None)
         context_applier = getattr(self.engine, "apply_market_context", None)
         if callable(context_loader) and callable(context_applier):
@@ -297,6 +350,9 @@ class MarketScanner:
                     actionable=False,
                     max_signals=min(max(self.config.max_signals, 0), 20),
                     api_metrics=api_metrics,
+                    context_coverage_pct=0.0,
+                    data_quality_status="DATA_INCOMPLETE",
+                    recovered_instruments=sorted(set(recovered_instruments)),
                 )
             if open_interest:
                 for inst_id, result in list(analysis_results.items()):
@@ -415,6 +471,7 @@ class MarketScanner:
                 "正在取得 5m、Funding、Taker Flow 與 Order Book",
             )
             completed_context = 0
+            context_attempt_errors: dict[str, list[str]] = {}
             with ThreadPoolExecutor(max_workers=max(1, min(self.config.workers, 8))) as executor:
                 future_map = {
                     executor.submit(load_candidate, inst_id): inst_id
@@ -426,13 +483,8 @@ class MarketScanner:
                         context, candles_5m = future.result()
                         contexts[inst_id] = context
                         micro_candles[inst_id] = candles_5m
-                        if context.complete and context.execution_quality_complete:
-                            context_enriched_count += 1
-                        candidate_failures = list(context.failures)
-                        if candidate_failures:
-                            context_failures[inst_id] = candidate_failures
                     except Exception as exc:
-                        context_failures[inst_id] = [str(exc)]
+                        context_attempt_errors[inst_id] = [str(exc)]
                     completed_context += 1
                     self._progress(
                         progress,
@@ -442,6 +494,69 @@ class MarketScanner:
                         "正在取得深度即時市場資料",
                     )
 
+            def context_complete(inst_id: str) -> bool:
+                context = contexts.get(inst_id)
+                candles_5m = micro_candles.get(inst_id)
+                return bool(
+                    context is not None
+                    and candles_5m is not None
+                    and len(candles_5m) >= 60
+                    and context.complete
+                    and context.execution_quality_complete
+                )
+
+            initially_incomplete = {
+                inst_id for inst_id in context_target_ids if not context_complete(inst_id)
+            }
+            for attempt in range(max(0, self.config.context_recovery_attempts)):
+                retry_ids = [
+                    inst_id for inst_id in context_target_ids if not context_complete(inst_id)
+                ]
+                if not retry_ids:
+                    break
+                self._progress(
+                    progress,
+                    "CONTEXT_RECOVERY",
+                    0,
+                    len(retry_ids),
+                    f"正在補抓深度即時資料（第 {attempt + 1} 輪）",
+                )
+                recovered_context = 0
+                with ThreadPoolExecutor(
+                    max_workers=max(1, min(self.config.recovery_workers, len(retry_ids)))
+                ) as executor:
+                    future_map = {
+                        executor.submit(load_candidate, inst_id): inst_id
+                        for inst_id in retry_ids
+                    }
+                    for future in as_completed(future_map):
+                        inst_id = future_map[future]
+                        try:
+                            context, candles_5m = future.result()
+                            contexts[inst_id] = context
+                            micro_candles[inst_id] = candles_5m
+                            context_attempt_errors.pop(inst_id, None)
+                        except Exception as exc:
+                            context_attempt_errors[inst_id] = [str(exc)]
+                        recovered_context += 1
+                        self._progress(
+                            progress,
+                            "CONTEXT_RECOVERY",
+                            recovered_context,
+                            len(retry_ids),
+                            "正在補抓暫時失敗的 5m／Funding／Order Book／Taker Flow",
+                        )
+
+            for inst_id in context_target_ids:
+                if context_complete(inst_id):
+                    continue
+                context = contexts.get(inst_id)
+                reasons = list(context.failures) if context is not None else []
+                reasons.extend(context_attempt_errors.get(inst_id, []))
+                if not reasons:
+                    reasons = ["5m／Funding／Order Book／Taker Flow 未完整取得"]
+                context_failures[inst_id] = _unique_strings(reasons)
+
             btc_result = analysis_results.get("BTC-USDT-SWAP")
             btc_bias = (
                 btc_result.market_state.direction
@@ -450,7 +565,11 @@ class MarketScanner:
                 and btc_result.market_state.regime in ("TREND", "BREAKOUT", "BREAKOUT_READY")
                 else "NEUTRAL"
             )
-            for inst_id, context in contexts.items():
+            usable_context_ids: set[str] = set()
+            for inst_id in context_target_ids:
+                if inst_id in context_failures:
+                    continue
+                context = contexts[inst_id]
                 try:
                     analysis_results[inst_id] = context_applier(
                         analysis_results[inst_id],
@@ -459,13 +578,19 @@ class MarketScanner:
                         micro_candles.get(inst_id),
                         market_bias,
                     )
+                    usable_context_ids.add(inst_id)
                 except Exception as exc:
                     context_failures.setdefault(inst_id, []).append(
                         f"綜合候選判斷失敗：{exc}"
                     )
 
+            context_enriched_count = len(usable_context_ids)
+            context_recovered_instruments = sorted(
+                initially_incomplete.intersection(usable_context_ids)
+            )
+
             for inst_id in context_target_ids:
-                if inst_id in contexts and inst_id in micro_candles:
+                if inst_id in usable_context_ids:
                     continue
                 failed_result = analysis_results[inst_id]
                 state = failed_result.market_state
@@ -529,11 +654,22 @@ class MarketScanner:
         market_states.sort(key=lambda item: item.inst_id)
         regime_counts = Counter(item.regime for item in market_states)
         status = "SIGNALS_FOUND" if signals else "NO_QUALIFIED_SIGNAL"
+        context_coverage_pct = (
+            round(context_enriched_count / len(context_target_ids) * 100.0, 4)
+            if context_target_ids
+            else 100.0
+        )
+        data_quality_status = "PARTIAL_CONTEXT" if context_failures else "FULL"
         message = (
             f"完整掃描完成：{early_count} 個早期訊號、{confirmed_count} 個完整確認，另列出 {len(watchlist)} 個接近觸發候選。"
             if signals
             else f"完整掃描完成：本輪 0 個進場訊號；另列出 {len(watchlist)} 個接近觸發候選，不代表可以直接進場。"
         )
+        if context_failures:
+            message += (
+                f" 深度資料取得 {context_enriched_count}/{len(context_target_ids)}；"
+                "未完整候選已排除，不會成為正式訊號。"
+            )
         self._progress(progress, "FINALIZING", 1, 1, "正在建立最新雷達結果")
         metrics_loader = getattr(self.client, "metrics_snapshot", None)
         api_metrics = metrics_loader() if callable(metrics_loader) else {}
@@ -556,7 +692,11 @@ class MarketScanner:
             market_map=market_states,
             context_target_count=len(context_target_ids),
             context_enriched_count=context_enriched_count,
+            context_coverage_pct=context_coverage_pct,
             context_failures=dict(sorted(context_failures.items())),
+            data_quality_status=data_quality_status,
+            recovered_instruments=sorted(set(recovered_instruments)),
+            context_recovered_instruments=context_recovered_instruments,
             market_bias=market_bias,
             scan_id=scan_id,
             scan_started_at=now,
@@ -805,6 +945,8 @@ class MarketScanner:
             runtime_status="ERROR",
             actionable=False,
             max_signals=min(max(self.config.max_signals, 0), 20),
+            context_coverage_pct=0.0,
+            data_quality_status="DATA_INCOMPLETE",
         )
 
 

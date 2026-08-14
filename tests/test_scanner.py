@@ -78,6 +78,39 @@ class ContextFakeClient(FakeClient):
         return candles(limit, micro_anomaly=bar == "5m")
 
 
+class RecoveringCoreClient(FakeClient):
+    def __init__(self):
+        super().__init__()
+        self.failed_once = False
+
+    def get_candles(self, inst_id, bar, limit=100):
+        self.candle_requests.append((inst_id, bar, limit))
+        if inst_id == "BBB-USDT-SWAP" and bar == "1H" and not self.failed_once:
+            self.failed_once = True
+            raise RuntimeError("temporary fixture failure")
+        return candles(limit)
+
+
+class PartialContextClient(ContextFakeClient):
+    def __init__(self):
+        super().__init__()
+        self.context_calls = {}
+
+    def get_market_context(self, inst_id, open_interest_usd=None):
+        self.context_calls[inst_id] = self.context_calls.get(inst_id, 0) + 1
+        if inst_id == "BBB-USDT-SWAP":
+            raise RuntimeError("persistent context fixture failure")
+        return super().get_market_context(inst_id, open_interest_usd)
+
+
+class RecoveringContextClient(PartialContextClient):
+    def get_market_context(self, inst_id, open_interest_usd=None):
+        self.context_calls[inst_id] = self.context_calls.get(inst_id, 0) + 1
+        if inst_id == "BBB-USDT-SWAP" and self.context_calls[inst_id] == 1:
+            raise RuntimeError("temporary context fixture failure")
+        return ContextFakeClient.get_market_context(self, inst_id, open_interest_usd)
+
+
 class LowOpenInterestClient(ContextFakeClient):
     def get_open_interest_usd(self):
         return {item.inst_id: 500_000 for item in self.instruments}
@@ -145,6 +178,15 @@ class LowReadinessContextEngine:
 
 
 class ScannerTests(unittest.TestCase):
+    def test_temporary_core_failure_is_recovered_with_low_concurrency_pass(self):
+        report = MarketScanner(
+            RecoveringCoreClient(),
+            ScannerConfig(workers=2, core_recovery_attempts=1, recovery_workers=1),
+        ).scan_once()
+        self.assertNotEqual(report.status, "DATA_INCOMPLETE")
+        self.assertEqual(report.coverage_pct, 100.0)
+        self.assertEqual(report.recovered_instruments, ["BBB-USDT-SWAP"])
+
     def test_any_request_failure_clears_all_signals(self):
         report = MarketScanner(FakeClient("BBB-USDT-SWAP"), ScannerConfig(workers=2)).scan_once()
         self.assertEqual(report.status, "DATA_INCOMPLETE")
@@ -221,6 +263,37 @@ class ScannerTests(unittest.TestCase):
         self.assertIn(report.market_bias["label"], ("偏多", "中性", "偏空"))
         self.assertIn(("AAA-USDT-SWAP", "5m", 120), client.candle_requests)
         self.assertIn(("BBB-USDT-SWAP", "5m", 120), client.candle_requests)
+
+    def test_persistent_context_failure_is_visible_and_candidate_is_excluded(self):
+        client = PartialContextClient()
+        report = MarketScanner(
+            client,
+            ScannerConfig(workers=2, context_recovery_attempts=1, recovery_workers=1),
+        ).scan_once()
+        self.assertNotEqual(report.status, "DATA_INCOMPLETE")
+        self.assertEqual(report.data_quality_status, "PARTIAL_CONTEXT")
+        self.assertEqual(report.context_target_count, 2)
+        self.assertEqual(report.context_enriched_count, 1)
+        self.assertEqual(report.context_coverage_pct, 50.0)
+        self.assertIn("BBB-USDT-SWAP", report.context_failures)
+        self.assertEqual(client.context_calls["BBB-USDT-SWAP"], 2)
+        bbb = next(item for item in report.market_map if item.inst_id == "BBB-USDT-SWAP")
+        self.assertEqual(bbb.status, "FILTERED")
+        self.assertNotIn("BBB-USDT-SWAP", [item.inst_id for item in report.signals])
+        self.assertNotIn("BBB-USDT-SWAP", [item.inst_id for item in report.watchlist])
+
+    def test_temporary_context_failure_is_recovered(self):
+        client = RecoveringContextClient()
+        report = MarketScanner(
+            client,
+            ScannerConfig(workers=2, context_recovery_attempts=1, recovery_workers=1),
+        ).scan_once()
+        self.assertNotEqual(report.status, "DATA_INCOMPLETE")
+        self.assertEqual(report.data_quality_status, "FULL")
+        self.assertEqual(report.context_enriched_count, 2)
+        self.assertEqual(report.context_failures, {})
+        self.assertEqual(report.context_recovered_instruments, ["BBB-USDT-SWAP"])
+        self.assertEqual(client.context_calls["BBB-USDT-SWAP"], 2)
 
     def test_context_coverage_is_not_limited_to_near_trigger_candidates(self):
         client = ContextFakeClient()
