@@ -8,3 +8,6 @@ services:
     numInstances: 1
     healthCheckPath: /health
     autoDeployTrigger: commit
+    envVars:
+      - key: RADAR_RELEASE
+        value: early-15m-20260820
