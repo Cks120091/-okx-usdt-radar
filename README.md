@@ -66,6 +66,7 @@ Deep Data 可回傳 `SUPPORT`、`NEUTRAL`、`CONFLICT` 或 `DATA_MISSING`。每�
 入場位置、結構 R:R、Stop 距離、Spread、深度、估算滑價與來回成本組成 `execution_quality`。它只回答「現在是否適合執行」，不回答「價格 Trigger 是否存在」。
 
 - 追價、R:R 偏低、成本偏高或深度不足會產生 `CAUTION`／`AVOID_EXECUTION` 與非硬性 Safety Check。
+- 突破追價距離以突破邊界／Entry Zone 計算；從最近防守點累積的整段推進只作警告，避免把剛越過邊界的新 Trigger 誤判為已錯過。
 - Universe 只有兩類硬排除：24H 報價幣成交額不足，以及 Spread 達極端異常門檻。
 - OI 偏低／缺失、5m 反向、Funding 擁擠、Order Book Conflict 或 Execution Cost 都不取消有效的核心 Trigger。
 - Runtime 的 `SCANNING`、`STALE`、`ERROR` 與核心資料全失敗仍會遮蔽訊號，避免舊資料冒充新機會。
@@ -113,7 +114,7 @@ Trigger 是否存在與「現在是否適合進場」分開顯示：
 ## 資料可靠性
 
 - 公開 REST 請求有 process-wide rate limit、有限重試、退避、短 TTL cache 與 endpoint metrics。
-- 單一幣種核心資料失敗只排除該幣種，報告為 `PARTIAL_DATA`；所有核心標的失敗才是 `DATA_INCOMPLETE`。
+- 單一幣種短線核心資料失敗只排除該幣種，報告為 `PARTIAL_DATA`；所有短線核心標的失敗才是 `DATA_INCOMPLETE`。長線 1D 歷史不足獨立計數，不冒充短線核心失敗。
 - OI 或任一 Deep Data endpoint 失敗是可見的 Context 缺失，不會讓全輪掃描失效。
 - 每輪記錄 core coverage、Deep Data completeness、來源成功／缺失、cache hit、retry、timeout 與 duration。
 - 沒有 fallback 數值、placeholder Signal 或用上一輪資料冒充最新 Trigger。
@@ -122,7 +123,7 @@ Trigger 是否存在與「現在是否適合進場」分開顯示：
 
 首頁以手機直式為優先，提供：
 
-- 15m 早期可進、目前可進、等待回踩、已錯過、長線與接近觸發分頁
+- 15m 與 4H 長線皆有全部、早期可進、目前可進、等待回踩、已錯過與接近觸發分頁
 - 新鮮度、Lifecycle、價格位置、攻擊效率、Price Acceptance、控制權、市場參與、執行品質與資料品質
 - 原始指標摺疊區、全市場搜尋、收藏與 TradingView 快捷連結
 - 真實歷史統計分頁
@@ -148,7 +149,7 @@ Trigger 是否存在與「現在是否適合進場」分開顯示：
 | `max_watchlist` | 20 | 每個雷達的 Watchlist 上限 |
 | `context_candidates` | 100 | Deep Data 壓力測試上限 |
 | `workers` | 12 | 全市場 K 線併發工作數 |
-| `rate_limit_requests_per_2s` | 36 | K 線端點限流；其他公開端點仍保持每 2 秒 18 次的保守上限 |
+| `rate_limit_requests_per_2s` | 30 | K 線端點安全限流；429 會觸發所有工作執行緒共用冷卻，其他公開端點仍保持每 2 秒 18 次上限 |
 | `candle_limit_1d` | 200 | 1D 已收盤 K 線 |
 | `candle_limit_4h` | 200 | 4H 已收盤 K 線 |
 | `candle_limit_1h` | 240 | 1H 已收盤 K 線 |

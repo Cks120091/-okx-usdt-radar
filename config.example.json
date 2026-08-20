@@ -14,7 +14,7 @@
   "candle_limit_5m": 120,
   "request_timeout_seconds": 12.0,
   "request_retries": 3,
-  "rate_limit_requests_per_2s": 36,
+  "rate_limit_requests_per_2s": 30,
   "min_quote_volume_24h": 5000000,
   "max_spread_pct": 0.10,
   "universe_max_spread_pct": 1.00,

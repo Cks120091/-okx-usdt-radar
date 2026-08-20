@@ -88,6 +88,14 @@ class FailedOpenInterestClient(ContextFakeClient):
         raise RuntimeError("fixture OI failure")
 
 
+class LongHistoryGapClient(FakeClient):
+    def get_candles(self, inst_id, bar, limit=100):
+        self.candle_requests.append((inst_id, bar, limit))
+        if inst_id == "BBB-USDT-SWAP" and bar == "1D":
+            return candles(59)
+        return candles(limit)
+
+
 class AlwaysSignalEngine:
     def analyze(self, instrument, ticker, candles_4h, candles_1h, candles_15m, candles_5m=None):
         rank = instrument.inst_id[1:3]
@@ -157,6 +165,23 @@ class ScannerTests(unittest.TestCase):
         self.assertLess(report.coverage_pct, 100)
         self.assertEqual([item.inst_id for item in report.signals], ["AAA-USDT-SWAP"])
         self.assertIn("BBB-USDT-SWAP", report.failed_instruments)
+        self.assertEqual(report.data_quality["core_failed_count"], 1)
+        self.assertEqual(report.data_quality["long_failed_count"], 0)
+
+    def test_long_history_gap_does_not_masquerade_as_core_failure(self):
+        report = MarketScanner(
+            LongHistoryGapClient(),
+            ScannerConfig(workers=2, min_quote_volume_24h=0),
+        ).scan_once()
+
+        self.assertEqual(report.status, "PARTIAL_DATA")
+        self.assertEqual(report.coverage_pct, 100.0)
+        self.assertEqual(report.data_quality["core_status"], "AVAILABLE")
+        self.assertEqual(report.data_quality["core_failed_count"], 0)
+        self.assertEqual(report.data_quality["long_status"], "PARTIAL")
+        self.assertEqual(report.data_quality["long_failed_count"], 1)
+        self.assertIn("BBB-USDT-SWAP:LONG", report.failed_instruments)
+        self.assertIn("不影響其短線判定", report.message)
 
     def test_core_preview_is_emitted_before_final_deep_report(self):
         previews = []

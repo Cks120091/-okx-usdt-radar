@@ -26,18 +26,31 @@ class SlidingWindowRateLimiter:
         self.window_seconds = window_seconds
         self._calls: deque[float] = deque()
         self._lock = threading.Lock()
+        self._blocked_until = 0.0
+
+    def penalize(self, seconds: float = 2.05) -> None:
+        """Apply one shared cooldown after OKX reports a rate-limit error."""
+
+        with self._lock:
+            self._blocked_until = max(
+                self._blocked_until,
+                time.monotonic() + max(float(seconds), 0.0),
+            )
 
     def acquire(self) -> None:
         while True:
             wait_for = 0.0
             with self._lock:
                 now = time.monotonic()
-                while self._calls and now - self._calls[0] >= self.window_seconds:
-                    self._calls.popleft()
-                if len(self._calls) < self.max_requests:
-                    self._calls.append(now)
-                    return
-                wait_for = self.window_seconds - (now - self._calls[0]) + 0.01
+                if now < self._blocked_until:
+                    wait_for = self._blocked_until - now
+                else:
+                    while self._calls and now - self._calls[0] >= self.window_seconds:
+                        self._calls.popleft()
+                    if len(self._calls) < self.max_requests:
+                        self._calls.append(now)
+                        return
+                    wait_for = self.window_seconds - (now - self._calls[0]) + 0.01
             time.sleep(max(wait_for, 0.01))
 
 
@@ -49,7 +62,7 @@ class OKXPublicClient:
         base_url: str = "https://www.okx.com",
         timeout_seconds: float = 12.0,
         retries: int = 3,
-        rate_limit_requests: int = 36,
+        rate_limit_requests: int = 30,
         execution_notional_usdt: float = 1_000.0,
     ):
         self.base_url = base_url.rstrip("/")
@@ -163,13 +176,14 @@ class OKXPublicClient:
                 self._metric("errors")
                 if isinstance(exc, (TimeoutError, URLError)) and "timed out" in str(exc).lower():
                     self._metric("timeouts")
-                if (
-                    isinstance(exc, HTTPError)
-                    and exc.code == 429
+                rate_limited = (
+                    (isinstance(exc, HTTPError) and exc.code == 429)
                     or "code=50011" in str(exc)
                     or "rate limit" in str(exc).lower()
-                ):
+                )
+                if rate_limited:
                     self._metric("rate_limit_errors")
+                    limiter.penalize(2.05)
                 last_error = exc
                 if attempt >= self.retries:
                     break

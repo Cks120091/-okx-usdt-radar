@@ -23,7 +23,7 @@ class AppConfig:
     candle_limit_5m: int = 120
     request_timeout_seconds: float = 12.0
     request_retries: int = 3
-    rate_limit_requests_per_2s: int = 36
+    rate_limit_requests_per_2s: int = 30
     min_quote_volume_24h: float = 5_000_000.0
     max_spread_pct: float = 0.10
     universe_max_spread_pct: float = 1.00
@@ -123,6 +123,8 @@ class AppConfig:
             raise ValueError("entry chase thresholds are invalid")
         if config.stale_after_seconds < 60:
             raise ValueError("stale_after_seconds must be at least 60")
+        if not 1 <= config.rate_limit_requests_per_2s <= 40:
+            raise ValueError("rate_limit_requests_per_2s must be between 1 and 40")
         candle_limits = (
             config.candle_limit_1d,
             config.candle_limit_4h,

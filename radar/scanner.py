@@ -272,7 +272,8 @@ class MarketScanner:
             )
 
         long_results: dict[str, AnalysisResult] = {}
-        if callable(getattr(self.engine, "analyze_long", None)):
+        long_radar_enabled = callable(getattr(self.engine, "analyze_long", None))
+        if long_radar_enabled:
             self._progress(
                 progress,
                 "LONG_CANDLES",
@@ -597,8 +598,36 @@ class MarketScanner:
         api_metrics_loader = getattr(self.client, "metrics_snapshot", None)
         api_metrics = api_metrics_loader() if callable(api_metrics_loader) else {}
         duration = round(time.monotonic() - started, 3)
-        all_failures = {**dict(sorted(failures.items())), **dict(sorted(analysis_failures.items()))}
+        short_analysis_failures = {
+            key: value
+            for key, value in analysis_failures.items()
+            if key.endswith(":SHORT")
+        }
+        long_failures = {
+            key: value
+            for key, value in analysis_failures.items()
+            if key.endswith(":LONG")
+        }
+        uncategorized_analysis_failures = {
+            key: value
+            for key, value in analysis_failures.items()
+            if key not in short_analysis_failures and key not in long_failures
+        }
+        core_failures = {
+            **dict(sorted(failures.items())),
+            **dict(sorted(short_analysis_failures.items())),
+            **dict(sorted(uncategorized_analysis_failures.items())),
+        }
+        all_failures = {
+            **core_failures,
+            **dict(sorted(long_failures.items())),
+        }
         coverage = round(len(bundles) / len(instruments) * 100.0, 4)
+        long_coverage = (
+            round(len(long_results) / len(bundles) * 100.0, 4)
+            if bundles and long_radar_enabled
+            else 0.0
+        )
         status = (
             "PARTIAL_DATA"
             if all_failures
@@ -607,9 +636,20 @@ class MarketScanner:
             else "NO_QUALIFIED_SIGNAL"
         )
         data_quality = {
-            "core_status": "PARTIAL" if all_failures else "AVAILABLE",
+            "core_status": "PARTIAL" if core_failures else "AVAILABLE",
             "core_coverage_pct": coverage,
-            "core_failed_count": len(all_failures),
+            "core_failed_count": len(core_failures),
+            "long_status": (
+                "PARTIAL"
+                if long_failures
+                else "AVAILABLE"
+                if long_radar_enabled
+                else "NOT_SUPPORTED"
+            ),
+            "long_coverage_pct": long_coverage,
+            "long_target_count": len(bundles) if long_radar_enabled else 0,
+            "long_analyzable_count": len(long_results),
+            "long_failed_count": len(long_failures),
             "deep_candidate_limit": context_limit,
             "deep_target_count": len(context_target_ids),
             "deep_enriched_count": context_enriched_count,
@@ -668,8 +708,15 @@ class MarketScanner:
             if short_signals or long_signals
             else "掃描完成：目前無新鮮進場訊號；系統未為湊數降低 Trigger 標準。"
         )
-        if all_failures:
-            message += f" 另有 {len(all_failures)} 個核心資料缺失標的已獨立排除。"
+        if core_failures:
+            message += (
+                f" 另有 {len(core_failures)} 個短線核心資料不足標的已獨立排除。"
+            )
+        if long_failures:
+            message += (
+                f" 另有 {len(long_failures)} 個長線資料不足標的；"
+                "不影響其短線判定。"
+            )
 
         report = RadarReport(
             status=status,
@@ -716,7 +763,13 @@ class MarketScanner:
             duration,
             data_quality,
         )
-        self._progress(progress, "FINALIZING", 1, 1, "最新 V3.3 雙雷達已完成")
+        self._progress(
+            progress,
+            "FINALIZING",
+            None,
+            None,
+            "分析完成，正在保存並發布最新雙雷達報告",
+        )
         return report
 
     def _core_preview_report(

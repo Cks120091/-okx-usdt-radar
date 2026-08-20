@@ -1,6 +1,7 @@
 import unittest
+from unittest.mock import patch
 
-from radar.api import OKXPublicClient
+from radar.api import OKXPublicClient, SlidingWindowRateLimiter
 
 
 class FixtureClient(OKXPublicClient):
@@ -34,6 +35,22 @@ class RouteFixtureClient(OKXPublicClient):
 
 
 class APITests(unittest.TestCase):
+    def test_rate_limit_penalty_pauses_all_following_requests(self):
+        clock = [10.0]
+
+        def advance(seconds):
+            clock[0] += seconds
+
+        with patch("radar.api.time.monotonic", side_effect=lambda: clock[0]), patch(
+            "radar.api.time.sleep",
+            side_effect=advance,
+        ):
+            limiter = SlidingWindowRateLimiter(30, 2.0)
+            limiter.penalize(2.05)
+            limiter.acquire()
+
+        self.assertGreaterEqual(clock[0], 12.05)
+
     def test_filters_only_live_linear_usdt_swaps(self):
         rows = [
             {"instId": "BTC-USDT-SWAP", "state": "live", "settleCcy": "USDT", "ctType": "linear", "tickSz": "0.1"},

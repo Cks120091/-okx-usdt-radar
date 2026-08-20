@@ -1130,10 +1130,13 @@ def _trigger_candidate(
         0.0,
         float(control.get("close_push_away_atr", 0.0) or 0.0),
     )
-    entry_extension_atr = max(
-        structural_extension_atr,
-        move_from_defense_atr,
-    )
+    # Chase distance must be measured from the entry reference that belongs to
+    # this setup: breakout boundary, pullback reference, or reversal zone.  The
+    # recent move from local defence is useful context, but for a breakout it
+    # can include the entire approach into resistance.  Treating that approach
+    # as distance travelled *after* the entry incorrectly marks a fresh break
+    # as EXTENDED even while price is still inside its executable entry zone.
+    entry_extension_atr = structural_extension_atr
     if triggered:
         if entry_extension_atr > max_early_entry_extension_atr:
             stage, freshness = "EXTENDED", "EXTENDED"
@@ -1244,6 +1247,9 @@ def _trigger_candidate(
             3,
         ),
         "move_from_defense_atr": round(move_from_defense_atr, 3),
+        "move_from_defense_warning": bool(
+            move_from_defense_atr > max_early_entry_extension_atr
+        ),
         "confirmation_level": "FULL" if full else "EARLY",
         "zone_key": f"{event_zone.tier}:{round(event_zone.center, 10)}" if event_zone else "NO_ZONE",
         "invalidation_price": invalidation,

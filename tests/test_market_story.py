@@ -18,14 +18,14 @@ class MarketStoryV33Tests(unittest.TestCase):
     def setUp(self):
         self.engine = MarketStoryEngine()
 
-    def test_price_acceptance_preserves_breakout_but_blocks_late_entry(self):
+    def test_breakout_chase_uses_entry_boundary_not_the_whole_approach(self):
         candles_4h, candles_1h, candles_15m = valid_breakout_frames()
         story = self.engine.analyze_short(candles_4h, candles_1h, candles_15m)
 
         self.assertTrue(story.triggered)
         self.assertEqual(story.trigger_type, "BREAKOUT")
-        self.assertEqual(story.stage, "EXTENDED")
-        self.assertEqual(story.freshness, "EXTENDED")
+        self.assertEqual(story.stage, "CONFIRMED")
+        self.assertEqual(story.freshness, "ACTIVE")
         self.assertEqual(story.price_acceptance["state"], "ACCEPTED")
         self.assertTrue(story.control_transfer["transferred"])
         self.assertTrue(story.control_transfer["push_away"])
@@ -38,7 +38,13 @@ class MarketStoryV33Tests(unittest.TestCase):
         self.assertTrue(story.attack_waves["BEAR"])
         self.assertTrue(any(value for value in story.zones.values()))
         self.assertTrue(story.data_quality["closed_candle"])
-        self.assertGreater(story.trigger["entry_extension_atr"], 0.50)
+        self.assertLessEqual(story.trigger["entry_extension_atr"], 0.50)
+        self.assertGreater(story.trigger["move_from_defense_atr"], 0.50)
+        self.assertTrue(story.trigger["move_from_defense_warning"])
+        self.assertEqual(
+            story.trigger["entry_extension_atr"],
+            story.trigger["structural_entry_extension_atr"],
+        )
         self.assertGreater(story.event_age_bars, 0)
 
     def test_momentum_event_index_stays_at_onset_instead_of_latest_bar(self):
@@ -61,6 +67,27 @@ class MarketStoryV33Tests(unittest.TestCase):
         self.assertTrue(momentum["confirmed"])
         self.assertEqual(momentum["event_index"], 94)
         self.assertLess(momentum["event_index"], len(candles) - 1)
+
+    def test_breakout_that_really_left_the_entry_boundary_remains_extended(self):
+        candles_4h, candles_1h, candles_15m = valid_breakout_frames()
+        previous = candles_15m[-1]
+        candles_15m[-1] = Candle(
+            ts=previous.ts,
+            open=previous.open,
+            high=101.62,
+            low=previous.low,
+            close=101.50,
+            volume=previous.volume,
+            quote_volume=previous.quote_volume,
+            confirmed=True,
+        )
+
+        story = self.engine.analyze_short(candles_4h, candles_1h, candles_15m)
+
+        self.assertTrue(story.triggered)
+        self.assertEqual(story.trigger_type, "BREAKOUT")
+        self.assertEqual(story.stage, "EXTENDED")
+        self.assertGreater(story.trigger["entry_extension_atr"], 0.50)
 
     def test_gentle_reactivation_can_still_be_an_early_signal(self):
         base = [100 + math.sin(index * 0.55) * 0.10 for index in range(98)]
