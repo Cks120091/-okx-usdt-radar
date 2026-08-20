@@ -145,6 +145,7 @@ class Signal:
     strategy_version: str = "V3.3_MASTER"
     feature_schema_version: str = "3.3.0"
     historical_performance: dict[str, Any] = field(default_factory=dict)
+    entry_eligibility: dict[str, Any] = field(default_factory=dict)
 
     def to_dict(self) -> dict[str, Any]:
         return asdict(self)
@@ -192,6 +193,11 @@ class MarketState:
 
     def to_dict(self) -> dict[str, Any]:
         return asdict(self)
+
+    @classmethod
+    def from_dict(cls, payload: dict[str, Any]) -> "MarketState":
+        known = cls.__dataclass_fields__
+        return cls(**{key: value for key, value in payload.items() if key in known})
 
 
 @dataclass
@@ -251,3 +257,27 @@ class RadarReport:
             "note": "Radar Signal 與是否下單分離；目前只分析，不連接私人交易 API。",
         }
         return payload
+
+    @classmethod
+    def from_dict(cls, payload: dict[str, Any]) -> "RadarReport":
+        known = cls.__dataclass_fields__
+        values = {key: value for key, value in payload.items() if key in known}
+        values["signals"] = [
+            Signal.from_dict(item) for item in values.get("signals", [])
+        ]
+        values["watchlist"] = [
+            MarketState.from_dict(item) for item in values.get("watchlist", [])
+        ]
+        values["market_map"] = [
+            MarketState.from_dict(item) for item in values.get("market_map", [])
+        ]
+        values["long_signals"] = [
+            Signal.from_dict(item) for item in values.get("long_signals", [])
+        ]
+        values["long_watchlist"] = [
+            MarketState.from_dict(item) for item in values.get("long_watchlist", [])
+        ]
+        values["long_market_map"] = [
+            MarketState.from_dict(item) for item in values.get("long_market_map", [])
+        ]
+        return cls(**values)

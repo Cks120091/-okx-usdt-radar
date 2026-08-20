@@ -35,6 +35,9 @@ class StrategyConfig:
     severe_entry_extension_atr: float = 1.80
     max_slippage_pct: float = 0.15
     universe_max_spread_pct: float = 1.00
+    early_signal_max_age_bars: int = 2
+    entry_ready_max_chase_atr: float = 0.15
+    entry_missed_chase_atr: float = 0.50
 
 
 @dataclass
@@ -72,7 +75,7 @@ class AdaptiveStrategyEngine:
 
     def __init__(self, config: StrategyConfig | None = None):
         self.config = config or StrategyConfig()
-        self.story_engine = MarketStoryEngine()
+        self.story_engine = MarketStoryEngine(self.config.early_signal_max_age_bars)
 
     def analyze(
         self,
@@ -305,6 +308,12 @@ class AdaptiveStrategyEngine:
             market_state,
             plan,
         )
+        market_state = replace(
+            market_state,
+            market_metrics=dict(signal.market_metrics),
+            safety_checks=list(signal.safety_checks),
+            actionable=signal.actionable,
+        )
         return AnalysisResult(
             signal,
             "qualified",
@@ -321,7 +330,7 @@ class AdaptiveStrategyEngine:
     ) -> _Plan:
         direction = story.trigger_direction
         is_long = direction == "LONG"
-        entry = tf_core.close
+        entry = float(story.trigger.get("event_price", tf_core.close) or tf_core.close)
         proposed_stop = story.invalidation_price
         if proposed_stop is None or (is_long and proposed_stop >= entry) or (not is_long and proposed_stop <= entry):
             proposed_stop = (
@@ -417,6 +426,19 @@ class AdaptiveStrategyEngine:
             max_slippage_pct=self.config.max_slippage_pct,
             estimated_taker_fee_pct=self.config.estimated_taker_fee_pct,
         )
+        eligibility = _entry_eligibility(
+            direction=plan.direction,
+            current_price=ticker.last,
+            entry_low=entry_low,
+            entry_high=entry_high,
+            stop=plan.stop,
+            target=plan.tp1,
+            atr=tf_atr,
+            stage=story.stage,
+            minimum_rr=self.config.minimum_rr,
+            ready_max_chase_atr=self.config.entry_ready_max_chase_atr,
+            missed_chase_atr=self.config.entry_missed_chase_atr,
+        )
         metrics = dict(state.market_metrics)
         metrics.update(
             {
@@ -424,6 +446,9 @@ class AdaptiveStrategyEngine:
                 "trigger_type": story.trigger_type,
                 "signal_stage": story.stage,
                 "execution_quality_score": initial_quality["score"],
+                "entry_status": eligibility["status"],
+                "entry_chase_atr": eligibility["chase_atr"],
+                "remaining_rr": eligibility["remaining_rr"],
             }
         )
         return Signal(
@@ -456,7 +481,16 @@ class AdaptiveStrategyEngine:
             supporting_evidence=story.supporting,
             conflicts=story.conflicts,
             neutral_evidence=story.neutral,
-            safety_checks=list(state.safety_checks),
+            safety_checks=[
+                *state.safety_checks,
+                self._safety_check(
+                    "entry_eligibility",
+                    eligibility["label"],
+                    bool(eligibility["actionable"]),
+                    eligibility["chase_atr"],
+                    hard=False,
+                ),
+            ],
             entry_quality=story.entry_quality,
             summary=story.summary,
             lifecycle={
@@ -464,7 +498,7 @@ class AdaptiveStrategyEngine:
                 "current_stage": story.stage,
                 "transition": "TECHNICAL_EVENT",
             },
-            actionable=story.stage in ("EARLY_SIGNAL", "CONFIRMED", "REENTRY"),
+            actionable=bool(eligibility["actionable"]),
             radar_horizon=story.horizon,
             trigger_type=story.trigger_type,
             direction_state=story.direction_state,
@@ -476,6 +510,7 @@ class AdaptiveStrategyEngine:
             data_timestamp=closed_candle_ts,
             strategy_version=STRATEGY_VERSION,
             feature_schema_version=FEATURE_SCHEMA_VERSION,
+            entry_eligibility=eligibility,
         )
 
     @staticmethod
@@ -893,7 +928,10 @@ class AdaptiveStrategyEngine:
             safety_checks=checks,
             execution_quality=quality,
             entry_quality=dict(quality.get("entry_location", {})),
-            actionable=live_story.stage in ("EARLY_SIGNAL", "CONFIRMED", "REENTRY"),
+            actionable=(
+                live_story.stage in ("EARLY_SIGNAL", "CONFIRMED", "REENTRY")
+                and bool(result.signal.entry_eligibility.get("actionable"))
+            ),
         )
         signal = replace(
             result.signal,
@@ -908,7 +946,10 @@ class AdaptiveStrategyEngine:
             safety_checks=checks,
             entry_quality=dict(quality.get("entry_location", {})),
             summary=live_story.summary,
-            actionable=live_story.stage in ("EARLY_SIGNAL", "CONFIRMED", "REENTRY"),
+            actionable=(
+                live_story.stage in ("EARLY_SIGNAL", "CONFIRMED", "REENTRY")
+                and bool(result.signal.entry_eligibility.get("actionable"))
+            ),
             market_participation=dict(live_story.market_participation),
             execution_quality=quality,
             data_quality=dict(live_story.data_quality),
@@ -2885,6 +2926,81 @@ class AdaptiveStrategyEngine:
             invalidation=invalidation,
             notes=["逆向反轉風險較高，倉位應低於趨勢訊號。", "只使用已收盤 K 線。"],
         )
+
+
+def _entry_eligibility(
+    *,
+    direction: str,
+    current_price: float,
+    entry_low: float,
+    entry_high: float,
+    stop: float,
+    target: float,
+    atr: float,
+    stage: str,
+    minimum_rr: float,
+    ready_max_chase_atr: float,
+    missed_chase_atr: float,
+) -> dict[str, Any]:
+    is_long = direction == "LONG"
+    safe_atr = max(abs(atr), 1e-9)
+    favorable_distance = (
+        max(0.0, current_price - entry_high)
+        if is_long
+        else max(0.0, entry_low - current_price)
+    )
+    adverse_outside = current_price < entry_low if is_long else current_price > entry_high
+    chase_atr = favorable_distance / safe_atr
+    current_risk = current_price - stop if is_long else stop - current_price
+    current_reward = target - current_price if is_long else current_price - target
+    remaining_rr = current_reward / current_risk if current_risk > 0 else -1.0
+    active_stage = stage in ("EARLY_SIGNAL", "CONFIRMED", "REENTRY")
+
+    if not active_stage:
+        status = "MISSED_ENTRY"
+        label = "已錯過｜生命週期已離開進場階段"
+        reason = "訊號仍保留作追蹤，但目前階段不再提供新進場。"
+    elif current_risk <= 0:
+        status = "MISSED_ENTRY"
+        label = "已失效｜禁止進場"
+        reason = "價格已越過原失效／止損位置。"
+    elif chase_atr > missed_chase_atr or remaining_rr < minimum_rr:
+        status = "MISSED_ENTRY"
+        label = "已錯過｜禁止追價"
+        reason = (
+            f"順向偏離 {chase_atr:.2f} ATR，剩餘風報 {remaining_rr:.2f}R；"
+            f"門檻為 {missed_chase_atr:.2f} ATR 內且至少 {minimum_rr:.2f}R。"
+        )
+    elif adverse_outside or chase_atr > ready_max_chase_atr:
+        status = "WAIT_RETEST"
+        label = "等待回踩／重新確認"
+        reason = (
+            f"目前偏離理想進場區 {chase_atr:.2f} ATR；"
+            "等待價格回到 Entry Zone，不追價。"
+        )
+    else:
+        status = "ENTRY_READY"
+        label = "目前可進｜仍在合理區"
+        reason = (
+            f"順向偏離 {chase_atr:.2f} ATR，剩餘風報 {remaining_rr:.2f}R。"
+        )
+
+    return {
+        "status": status,
+        "label": label,
+        "reason": reason,
+        "actionable": status == "ENTRY_READY",
+        "trigger_price": round((entry_low + entry_high) / 2.0, 12),
+        "current_price": round(current_price, 12),
+        "chase_atr": round(chase_atr, 3),
+        "remaining_rr": round(remaining_rr, 3),
+        "entry_low": round(entry_low, 12),
+        "entry_high": round(entry_high, 12),
+        "ready_max_chase_atr": ready_max_chase_atr,
+        "missed_chase_atr": missed_chase_atr,
+        "minimum_rr": minimum_rr,
+        "time_alone_never_invalidates": True,
+    }
 
 
 def _clamp(value: float, minimum: float, maximum: float) -> float:

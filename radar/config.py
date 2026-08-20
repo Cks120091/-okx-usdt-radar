@@ -37,6 +37,9 @@ class AppConfig:
     max_slippage_pct: float = 0.15
     max_entry_extension_atr: float = 0.80
     severe_entry_extension_atr: float = 1.80
+    early_signal_max_age_bars: int = 2
+    entry_ready_max_chase_atr: float = 0.15
+    entry_missed_chase_atr: float = 0.50
     previous_report_url: str = ""
     stale_after_seconds: int = 1800
     state_db_path: str = ""
@@ -74,6 +77,9 @@ class AppConfig:
             "RADAR_MAX_SLIPPAGE_PCT": ("max_slippage_pct", float),
             "RADAR_MAX_ENTRY_EXTENSION_ATR": ("max_entry_extension_atr", float),
             "RADAR_SEVERE_ENTRY_EXTENSION_ATR": ("severe_entry_extension_atr", float),
+            "RADAR_EARLY_SIGNAL_MAX_AGE_BARS": ("early_signal_max_age_bars", int),
+            "RADAR_ENTRY_READY_MAX_CHASE_ATR": ("entry_ready_max_chase_atr", float),
+            "RADAR_ENTRY_MISSED_CHASE_ATR": ("entry_missed_chase_atr", float),
             "RADAR_PREVIOUS_REPORT_URL": ("previous_report_url", str),
             "RADAR_STALE_AFTER_SECONDS": ("stale_after_seconds", int),
             "RADAR_STATE_DB_PATH": ("state_db_path", str),
@@ -107,6 +113,14 @@ class AppConfig:
             or config.severe_entry_extension_atr <= config.max_entry_extension_atr
         ):
             raise ValueError("execution and entry-risk limits must be positive")
+        if not 1 <= config.early_signal_max_age_bars <= 5:
+            raise ValueError("early_signal_max_age_bars must be between 1 and 5")
+        if (
+            config.entry_ready_max_chase_atr < 0
+            or config.entry_missed_chase_atr <= config.entry_ready_max_chase_atr
+            or config.entry_missed_chase_atr > config.severe_entry_extension_atr
+        ):
+            raise ValueError("entry chase thresholds are invalid")
         if config.stale_after_seconds < 60:
             raise ValueError("stale_after_seconds must be at least 60")
         candle_limits = (

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import inspect
 import json
 import logging
 import threading
@@ -15,7 +16,7 @@ from urllib.parse import urlparse
 
 from .config import AppConfig
 from .models import RadarReport
-from .reporting import report_markdown, save_report
+from .reporting import load_latest_report, report_markdown, save_report
 from .scanner import MarketScanner
 
 
@@ -23,17 +24,18 @@ LOGGER = logging.getLogger("okx_radar")
 
 
 class RadarRuntime:
-    """One on-demand scanner runtime; it never starts a background schedule."""
+    """Single-scan runtime with persisted reports and an optional core preview."""
 
     def __init__(self, scanner: MarketScanner, config: AppConfig):
         self.scanner = scanner
         self.config = config
         self._scan_lock = threading.Lock()
         self._state_lock = threading.Lock()
-        self._latest: RadarReport | None = None
+        self._latest: RadarReport | None = load_latest_report(config.data_dir)
+        self._preview: RadarReport | None = None
         self._running = False
         self._last_error: str | None = None
-        self._last_attempt_status = "IDLE"
+        self._last_attempt_status = "RESTORED" if self._latest is not None else "IDLE"
         self._scan_id: str | None = None
         self._scan_started_at: str | None = None
         self._progress: dict[str, Any] = self._idle_progress()
@@ -77,6 +79,7 @@ class RadarRuntime:
                 "last_error": self._last_error,
                 "last_attempt_status": self._last_attempt_status,
                 "has_report": self._latest is not None,
+                "has_preview": self._preview is not None and self._running,
                 "latest_status": self._latest.status if self._latest else None,
                 "latest_generated_at": self._latest.generated_at if self._latest else None,
                 "latest_age_seconds": age_seconds,
@@ -112,6 +115,19 @@ class RadarRuntime:
                 payload["signals_suppressed_reason"] = None
             return payload
 
+    def preview_dict(self) -> dict[str, Any] | None:
+        with self._state_lock:
+            if not self._running or self._preview is None:
+                return None
+            payload = self._preview.to_dict()
+            payload["runtime_status"] = "CORE_PREVIEW"
+            payload["actionable"] = True
+            payload["preliminary"] = True
+            payload["deep_data_pending"] = True
+            payload["signals_suppressed_reason"] = None
+            payload["safety"]["actionable"] = True
+            return payload
+
     def statistics(self) -> dict[str, Any]:
         repository = getattr(self.scanner, "repository", None)
         if repository is None:
@@ -144,6 +160,7 @@ class RadarRuntime:
         self._last_attempt_status = "SCANNING"
         self._scan_id = str(uuid.uuid4())
         self._scan_started_at = datetime.now(timezone.utc).isoformat()
+        self._preview = None
         self._progress = {
             "phase": "STARTING",
             "completed": 0,
@@ -166,10 +183,14 @@ class RadarRuntime:
                 started_at = self._scan_started_at or datetime.now(timezone.utc).isoformat()
             LOGGER.info("Starting on-demand OKX USDT perpetual scan id=%s", scan_id)
             try:
-                report = self.scanner.scan_once(
-                    progress=self._update_progress,
-                    scan_id=scan_id,
-                )
+                scan_kwargs: dict[str, Any] = {
+                    "progress": self._update_progress,
+                    "scan_id": scan_id,
+                }
+                parameters = inspect.signature(self.scanner.scan_once).parameters
+                if "preview" in parameters:
+                    scan_kwargs["preview"] = self._publish_preview
+                report = self.scanner.scan_once(**scan_kwargs)
                 completed_at = datetime.now(timezone.utc).isoformat()
                 report = replace(
                     report,
@@ -192,6 +213,7 @@ class RadarRuntime:
                 save_report(report, self.config.data_dir)
                 with self._state_lock:
                     self._latest = report
+                    self._preview = None
                     if report.status == "DATA_INCOMPLETE":
                         self._last_error = report.message
                         self._last_attempt_status = "ERROR"
@@ -220,6 +242,7 @@ class RadarRuntime:
             except Exception as exc:
                 LOGGER.exception("Unexpected scanner failure")
                 with self._state_lock:
+                    self._preview = None
                     self._last_error = str(exc)
                     self._last_attempt_status = "ERROR"
                     self._progress = {
@@ -230,6 +253,19 @@ class RadarRuntime:
                         "message": "最新掃描失敗",
                     }
                 raise
+
+    def _publish_preview(self, report: RadarReport) -> None:
+        with self._state_lock:
+            if not self._running or report.scan_id != self._scan_id:
+                return
+            self._preview = report
+            self._progress = {
+                "phase": "CORE_PREVIEW",
+                "completed": 1,
+                "total": 1,
+                "percent": 100.0,
+                "message": "15m 核心結果已發布，正在補深度資料與長線雷達",
+            }
 
     def _update_progress(
         self,
@@ -289,7 +325,7 @@ class RadarRuntime:
             "completed": None,
             "total": None,
             "percent": None,
-            "message": "等待使用者開啟雷達或立即掃描",
+            "message": "等待排程或使用者要求最新市場掃描",
         }
 
 
@@ -336,6 +372,15 @@ def serve(runtime: RadarRuntime, host: str, port: int) -> None:
                             "error": "尚未完成第一輪掃描",
                             "runtime_status": runtime.status()["system_status"],
                         },
+                    )
+                else:
+                    self._send_json(HTTPStatus.OK, payload)
+            elif path == "/api/report/preview":
+                payload = runtime.preview_dict()
+                if payload is None:
+                    self._send_json(
+                        HTTPStatus.NOT_FOUND,
+                        {"error": "本輪 15m 核心結果尚未完成"},
                     )
                 else:
                     self._send_json(HTTPStatus.OK, payload)

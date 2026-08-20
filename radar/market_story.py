@@ -125,6 +125,9 @@ class MarketStoryEngine:
     bounded window, and a closed core candle.
     """
 
+    def __init__(self, early_signal_max_age_bars: int = 2):
+        self.early_signal_max_age_bars = max(1, min(int(early_signal_max_age_bars), 5))
+
     def analyze_short(
         self,
         candles_4h: list[Candle],
@@ -212,6 +215,7 @@ class MarketStoryEngine:
                 compression,
                 regime,
                 confirmation_window,
+                self.early_signal_max_age_bars,
             )
             for candidate_direction in ("LONG", "SHORT")
         }
@@ -224,6 +228,18 @@ class MarketStoryEngine:
 
         prior_active = (previous_story or {}).get("active_trigger_direction")
         prior_invalidated = bool((previous_story or {}).get("invalidated", False))
+        if (
+            bool(selected.get("triggered"))
+            and selected.get("type") == "CONTINUATION"
+            and event_age <= self.early_signal_max_age_bars
+            and prior_active == trigger_direction
+            and not prior_invalidated
+        ):
+            selected = dict(selected)
+            selected["stage"] = "REENTRY"
+            selected["freshness"] = "REACTIVATED"
+            stage = "REENTRY"
+            freshness = "REACTIVATED"
         if (
             prior_active in ("LONG", "SHORT")
             and trigger_direction not in ("NEUTRAL", prior_active)
@@ -983,6 +999,7 @@ def _trigger_candidate(
     compression: dict[str, Any],
     regime: str,
     confirmation_window: int,
+    early_signal_max_age_bars: int,
 ) -> dict[str, Any]:
     is_long = direction == "LONG"
     side_zone = zones.get("support" if is_long else "resistance")
@@ -1047,14 +1064,25 @@ def _trigger_candidate(
         or continuation
     )
     if triggered:
-        if trigger_type == "CONTINUATION" and event_age <= 1:
-            stage, freshness = "REENTRY", "REACTIVATED"
-        elif event_age <= 1:
-            stage, freshness = "CONFIRMED" if full else "EARLY_SIGNAL", "NEW"
-        elif event_age <= 4:
-            stage, freshness = "CONFIRMED" if full else "TRENDING", "ACTIVE"
+        if event_age <= early_signal_max_age_bars:
+            stage = (
+                "EARLY_SIGNAL"
+                if trigger_type == "CONTINUATION" or not full
+                else "CONFIRMED"
+            )
+            freshness = "NEW"
+        elif event_age <= 5:
+            stage, freshness = (
+                ("CONFIRMED", "ACTIVE")
+                if full
+                else ("NO_FOLLOW_THROUGH", "NO_FOLLOW_THROUGH")
+            )
         elif event_age <= 8:
-            stage, freshness = "TRENDING", "ACTIVE"
+            stage, freshness = (
+                ("TRENDING", "ACTIVE")
+                if full
+                else ("NO_FOLLOW_THROUGH", "NO_FOLLOW_THROUGH")
+            )
         else:
             stage, freshness = "EXTENDED", "EXTENDED"
     else:
@@ -1130,6 +1158,8 @@ def _trigger_candidate(
         "stage": stage,
         "freshness": freshness,
         "event_ts": candles[event_index].ts,
+        "event_price": candles[event_index].close,
+        "event_atr": tf.atr14,
         "event_index": event_index,
         "event_age_bars": event_age,
         "zone_key": f"{event_zone.tier}:{round(event_zone.center, 10)}" if event_zone else "NO_ZONE",

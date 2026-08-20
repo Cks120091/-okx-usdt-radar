@@ -6,6 +6,7 @@ from datetime import datetime, timedelta, timezone
 
 from radar.config import AppConfig
 from radar.models import RadarReport, Signal
+from radar.reporting import save_report
 from radar.service import RadarRuntime
 
 
@@ -72,7 +73,54 @@ class BlockingScanner:
         return report()
 
 
+class PreviewScanner:
+    def __init__(self):
+        self.preview_ready = threading.Event()
+        self.release = threading.Event()
+
+    def scan_once(self, progress=None, scan_id=None, preview=None):
+        core = report()
+        core.scan_id = scan_id or ""
+        core.runtime_status = "CORE_PREVIEW"
+        core.message = "15m 核心結果已先發布"
+        if preview:
+            preview(core)
+        self.preview_ready.set()
+        self.release.wait(2)
+        return report()
+
+
 class RuntimeSafetyTests(unittest.TestCase):
+    def test_runtime_restores_latest_report_without_forced_rescan(self):
+        with tempfile.TemporaryDirectory() as directory:
+            saved = report()
+            save_report(saved, directory)
+            runtime = RadarRuntime(ImmediateScanner(), AppConfig(data_dir=directory))
+
+            self.assertEqual(runtime.status()["system_status"], "FRESH")
+            self.assertEqual(runtime.status()["last_attempt_status"], "RESTORED")
+            self.assertEqual(len(runtime.latest_dict()["signals"]), 1)
+
+    def test_core_preview_is_available_while_deep_scan_continues(self):
+        with tempfile.TemporaryDirectory() as directory:
+            scanner = PreviewScanner()
+            runtime = RadarRuntime(scanner, AppConfig(data_dir=directory))
+            self.assertTrue(runtime.trigger_scan())
+            self.assertTrue(scanner.preview_ready.wait(1))
+
+            preview = runtime.preview_dict()
+            self.assertIsNotNone(preview)
+            self.assertEqual(preview["runtime_status"], "CORE_PREVIEW")
+            self.assertTrue(preview["actionable"])
+            self.assertTrue(runtime.status()["has_preview"])
+
+            scanner.release.set()
+            deadline = time.time() + 2
+            while runtime.status()["running"] and time.time() < deadline:
+                time.sleep(0.01)
+            self.assertIsNone(runtime.preview_dict())
+            self.assertEqual(runtime.status()["system_status"], "FRESH")
+
     def test_scan_lock_joins_existing_scan(self):
         with tempfile.TemporaryDirectory() as directory:
             scanner = BlockingScanner()

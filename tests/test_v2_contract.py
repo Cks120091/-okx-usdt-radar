@@ -13,6 +13,9 @@ class V33ContractTests(unittest.TestCase):
         self.assertEqual(config.candle_limit_1d, 200)
         self.assertEqual(config.universe_max_spread_pct, 1.0)
         self.assertEqual(config.stale_after_seconds, 1800)
+        self.assertEqual(config.early_signal_max_age_bars, 2)
+        self.assertEqual(config.entry_ready_max_chase_atr, 0.15)
+        self.assertEqual(config.entry_missed_chase_atr, 0.50)
         self.assertFalse(config.require_micro_volume_anomaly)
         with tempfile.TemporaryDirectory() as directory:
             path = Path(directory) / "bad.json"
@@ -30,7 +33,11 @@ class V33ContractTests(unittest.TestCase):
         self.assertIn("立即掃描現在市場", html)
         self.assertIn("早期訊號", html)
         self.assertIn("完整確認", html)
-        self.assertIn("短線訊號", html)
+        self.assertIn("15m 早期", html)
+        self.assertIn("目前可進", html)
+        self.assertIn("等待回踩", html)
+        self.assertIn("已錯過", html)
+        self.assertIn("entry_eligibility", html)
         self.assertIn("長線訊號", html)
         self.assertIn("真實歷史績效", html)
         self.assertIn("manifest.webmanifest", html)
@@ -40,9 +47,10 @@ class V33ContractTests(unittest.TestCase):
         self.assertIn("env(safe-area-inset-bottom)", html)
         self.assertIn("<details>", html)
         self.assertNotIn("重新載入結果", html)
-        self.assertNotIn("每 15 分鐘", html)
         self.assertNotIn("setInterval", html)
-        self.assertIn("status.scan_id!==state.report.scan_id", html)
+        self.assertIn("status.latest_generated_at!==state.report.generated_at", html)
+        self.assertIn("if(status.has_report)await loadReport()", html)
+        self.assertIn("/api/report/preview", html)
         self.assertIn("多空候選排行", html)
         self.assertIn("OI 異動雷達", html)
         self.assertIn("市場平均 RSI", html)
@@ -61,15 +69,16 @@ class V33ContractTests(unittest.TestCase):
         self.assertNotIn("/api/", shell_assets)
         self.assertIn('"display": "standalone"', manifest)
 
-    def test_github_actions_contains_no_market_schedule_or_scan(self):
+    def test_github_actions_triggers_scan_after_each_15m_close(self):
         root = Path(__file__).parents[1]
         workflows = "\n".join(
             path.read_text(encoding="utf-8")
             for path in (root / ".github" / "workflows").glob("*.yml")
         )
-        self.assertNotIn("schedule:", workflows)
+        self.assertIn("schedule:", workflows)
+        self.assertIn('cron: "2,17,32,47 * * * *"', workflows)
+        self.assertIn("/api/scan", workflows)
         self.assertNotIn("run.py --once", workflows)
-        self.assertNotIn("cron:", workflows)
 
 
 if __name__ == "__main__":

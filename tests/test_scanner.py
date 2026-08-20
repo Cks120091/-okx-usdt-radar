@@ -158,6 +158,21 @@ class ScannerTests(unittest.TestCase):
         self.assertEqual([item.inst_id for item in report.signals], ["AAA-USDT-SWAP"])
         self.assertIn("BBB-USDT-SWAP", report.failed_instruments)
 
+    def test_core_preview_is_emitted_before_final_deep_report(self):
+        previews = []
+        scanner = MarketScanner(
+            ContextFakeClient(),
+            ScannerConfig(workers=2, min_quote_volume_24h=0),
+        )
+        scanner.engine = AlwaysSignalEngine()
+        final = scanner.scan_once(preview=previews.append)
+
+        self.assertEqual(len(previews), 1)
+        self.assertEqual(previews[0].runtime_status, "CORE_PREVIEW")
+        self.assertEqual(previews[0].data_quality["deep_status"], "PENDING")
+        self.assertEqual(previews[0].long_signals, [])
+        self.assertEqual(final.runtime_status, "FRESH")
+
     def test_full_fetch_reports_one_hundred_percent_coverage(self):
         client = FakeClient()
         report = MarketScanner(

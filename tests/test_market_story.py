@@ -1,7 +1,13 @@
 import math
 import unittest
+from unittest.mock import patch
 
-from radar.market_story import DynamicZone, MarketStoryEngine, _price_acceptance
+from radar.market_story import (
+    DynamicZone,
+    MarketStoryEngine,
+    _price_acceptance,
+    _trigger_candidate,
+)
 from radar.models import Candle, Instrument, Ticker
 from radar.strategy import AdaptiveStrategyEngine, StrategyConfig
 from tests.test_strategy import story_candles, trend_candles, valid_breakout_frames
@@ -93,6 +99,47 @@ class MarketStoryV33Tests(unittest.TestCase):
         self.assertEqual(story.freshness, "NONE")
         self.assertTrue(story.trigger["opposite_warning_only"])
         self.assertTrue(any("原方向尚未被價格失效" in item for item in story.conflicts))
+
+    def test_first_continuation_is_early_and_only_active_event_becomes_reentry(self):
+        candles_4h, candles_1h, candles_15m = valid_breakout_frames()
+
+        def continuation_fixture(*args, **kwargs):
+            candidate = dict(_trigger_candidate(*args, **kwargs))
+            if args[0] == "LONG" and candidate.get("triggered"):
+                candidate.update(
+                    {
+                        "type": "CONTINUATION",
+                        "stage": "EARLY_SIGNAL",
+                        "freshness": "NEW",
+                        "event_age_bars": 0,
+                    }
+                )
+            return candidate
+
+        with patch(
+            "radar.market_story._trigger_candidate",
+            side_effect=continuation_fixture,
+        ):
+            first = self.engine.analyze_short(
+                candles_4h,
+                candles_1h,
+                candles_15m,
+            )
+            later = self.engine.analyze_short(
+                candles_4h,
+                candles_1h,
+                candles_15m,
+                previous_story={
+                    "active_trigger_direction": "LONG",
+                    "invalidated": False,
+                },
+            )
+
+        self.assertEqual(first.trigger_type, "CONTINUATION")
+        self.assertEqual(first.stage, "EARLY_SIGNAL")
+        self.assertEqual(first.freshness, "NEW")
+        self.assertEqual(later.stage, "REENTRY")
+        self.assertEqual(later.freshness, "REACTIVATED")
 
     def test_flat_noise_never_becomes_trigger_by_score_alone(self):
         flat = [100 + math.sin(index * 0.4) * 0.05 for index in range(100)]

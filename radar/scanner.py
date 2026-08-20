@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import inspect
+import math
 import time
 import uuid
 from collections import Counter
@@ -11,7 +12,12 @@ from typing import Any, Callable, Protocol
 
 from .models import Candle, Instrument, MarketContext, MarketState, RadarReport, Signal, Ticker
 from .repository import SignalRepository, classify_microstructure
-from .strategy import AdaptiveStrategyEngine, AnalysisResult, StrategyConfig
+from .strategy import (
+    AdaptiveStrategyEngine,
+    AnalysisResult,
+    StrategyConfig,
+    _entry_eligibility,
+)
 
 
 class PublicDataClient(Protocol):
@@ -53,11 +59,15 @@ class ScannerConfig:
     max_entry_extension_atr: float = 0.80
     severe_entry_extension_atr: float = 1.80
     max_slippage_pct: float = 0.15
+    early_signal_max_age_bars: int = 2
+    entry_ready_max_chase_atr: float = 0.15
+    entry_missed_chase_atr: float = 0.50
     previous_open_interest_usd: dict[str, float] = field(default_factory=dict)
     state_db_path: str = ":memory:"
 
 
 ProgressCallback = Callable[[str, int | None, int | None, str], None]
+PreviewCallback = Callable[[RadarReport], None]
 
 
 class MarketScanner:
@@ -68,7 +78,10 @@ class MarketScanner:
         self.config = config or ScannerConfig()
         self._previous_open_interest_usd = dict(self.config.previous_open_interest_usd)
         self._signal_history: dict[tuple[str, str], dict[str, str]] = {}
-        self.repository = SignalRepository(self.config.state_db_path)
+        self.repository = SignalRepository(
+            self.config.state_db_path,
+            self.config.early_signal_max_age_bars,
+        )
         self.engine = AdaptiveStrategyEngine(
             StrategyConfig(
                 min_quote_volume_24h=self.config.min_quote_volume_24h,
@@ -82,6 +95,9 @@ class MarketScanner:
                 max_entry_extension_atr=self.config.max_entry_extension_atr,
                 severe_entry_extension_atr=self.config.severe_entry_extension_atr,
                 max_slippage_pct=self.config.max_slippage_pct,
+                early_signal_max_age_bars=self.config.early_signal_max_age_bars,
+                entry_ready_max_chase_atr=self.config.entry_ready_max_chase_atr,
+                entry_missed_chase_atr=self.config.entry_missed_chase_atr,
             )
         )
 
@@ -89,6 +105,7 @@ class MarketScanner:
         self,
         progress: ProgressCallback | None = None,
         scan_id: str | None = None,
+        preview: PreviewCallback | None = None,
     ) -> RadarReport:
         """Run the V3.3 two-radar pipeline without fake fallback values."""
 
@@ -251,6 +268,22 @@ class MarketScanner:
             )
 
         market_bias = self._calculate_market_bias(short_results)
+        if preview is not None:
+            preview(
+                self._core_preview_report(
+                    scan_id=scan_id,
+                    scan_started_at=scan_started_at,
+                    scope=scope,
+                    started=started,
+                    instruments=instruments,
+                    target_ids=target_ids,
+                    bundles=bundles,
+                    failures=failures,
+                    analysis_failures=analysis_failures,
+                    short_results=short_results,
+                    market_bias=market_bias,
+                )
+            )
         context_failures: dict[str, list[str]] = {}
         open_interest: dict[str, float] = {}
         oi_loader = getattr(self.client, "get_open_interest_usd", None)
@@ -457,6 +490,8 @@ class MarketScanner:
             completed_at,
             "LONG",
         )
+        short_signals = [self._refresh_entry_eligibility(item) for item in short_signals]
+        long_signals = [self._refresh_entry_eligibility(item) for item in long_signals]
         short_signals = [_without_internal_metrics(item) for item in short_signals]
         long_signals = [_without_internal_metrics(item) for item in long_signals]
         short_states = [_without_internal_metrics(item) for item in short_states]
@@ -523,11 +558,22 @@ class MarketScanner:
             "no_fake_fallback": True,
         }
         historical = self.repository.performance()
-        fresh_short = sum(item.freshness in ("NEW", "REACTIVATED") for item in short_signals)
-        fresh_long = sum(item.freshness in ("NEW", "REACTIVATED") for item in long_signals)
+        early_short = sum(item.signal_stage == "EARLY_SIGNAL" for item in short_signals)
+        ready_short = sum(
+            item.entry_eligibility.get("status") == "ENTRY_READY"
+            for item in short_signals
+        )
+        wait_short = sum(
+            item.entry_eligibility.get("status") == "WAIT_RETEST"
+            for item in short_signals
+        )
+        missed_short = sum(
+            item.entry_eligibility.get("status") == "MISSED_ENTRY"
+            for item in short_signals
+        )
         message = (
-            f"掃描完成：短線 {len(short_signals)}、長線 {len(long_signals)}；"
-            f"其中新鮮機會 {fresh_short + fresh_long} 個。"
+            f"掃描完成：15m 早期 {early_short}、目前可進 {ready_short}、"
+            f"等待回踩 {wait_short}、已錯過 {missed_short}；長線 {len(long_signals)}。"
             if short_signals or long_signals
             else "掃描完成：目前無新鮮進場訊號；系統未為湊數降低 Trigger 標準。"
         )
@@ -581,6 +627,102 @@ class MarketScanner:
         )
         self._progress(progress, "FINALIZING", 1, 1, "最新 V3.3 雙雷達已完成")
         return report
+
+    def _core_preview_report(
+        self,
+        *,
+        scan_id: str,
+        scan_started_at: str,
+        scope: str,
+        started: float,
+        instruments: list[Instrument],
+        target_ids: list[str],
+        bundles: dict[str, dict[str, list[Candle]]],
+        failures: dict[str, str],
+        analysis_failures: dict[str, str],
+        short_results: dict[str, AnalysisResult],
+        market_bias: dict[str, Any],
+    ) -> RadarReport:
+        """Publish closed-candle 15m decisions before optional deep enrichment."""
+
+        exclusion_counts: Counter[str] = Counter()
+        short_states, short_signals = self._collect_results(
+            short_results,
+            exclusion_counts,
+        )
+        short_signals = [
+            _without_internal_metrics(self._refresh_entry_eligibility(item))
+            for item in short_signals
+        ]
+        short_states = [_without_internal_metrics(item) for item in short_states]
+        short_signals = sorted(
+            short_signals,
+            key=self._signal_sort_key,
+            reverse=True,
+        )[: min(max(self.config.max_signals, 0), 20)]
+        short_watchlist = self._watchlist(short_states)
+        short_states.sort(key=lambda item: item.inst_id)
+        generated_at = datetime.now(timezone.utc).isoformat()
+        all_failures = {
+            **dict(sorted(failures.items())),
+            **dict(sorted(analysis_failures.items())),
+        }
+        coverage = round(len(bundles) / len(instruments) * 100.0, 4)
+        early_count = sum(
+            item.signal_stage == "EARLY_SIGNAL" for item in short_signals
+        )
+        ready_count = sum(
+            item.entry_eligibility.get("status") == "ENTRY_READY"
+            for item in short_signals
+        )
+        wait_count = sum(
+            item.entry_eligibility.get("status") == "WAIT_RETEST"
+            for item in short_signals
+        )
+        missed_count = sum(
+            item.entry_eligibility.get("status") == "MISSED_ENTRY"
+            for item in short_signals
+        )
+        return RadarReport(
+            status="CORE_PREVIEW",
+            generated_at=generated_at,
+            scope=scope,
+            target_count=len(instruments),
+            fetched_count=len(bundles),
+            analyzable_count=len(short_results),
+            coverage_pct=coverage,
+            target_instruments=target_ids,
+            failed_instruments=all_failures,
+            signals=short_signals,
+            exclusion_counts=dict(exclusion_counts.most_common()),
+            duration_seconds=round(time.monotonic() - started, 3),
+            message=(
+                f"15m 核心結果已先發布：早期 {early_count}、目前可進 {ready_count}、"
+                f"等待回踩 {wait_count}、已錯過 {missed_count}；"
+                "正在補 Funding、OI、Order Book 與長線結果。"
+            ),
+            market_regime_counts=dict(
+                Counter(item.regime for item in short_states)
+            ),
+            watchlist=short_watchlist,
+            market_map=short_states,
+            market_bias=market_bias,
+            scan_id=scan_id,
+            scan_started_at=scan_started_at,
+            completed_at="",
+            runtime_status="CORE_PREVIEW",
+            actionable=True,
+            max_signals=min(max(self.config.max_signals, 0), 20),
+            data_quality={
+                "core_status": "PARTIAL" if all_failures else "AVAILABLE",
+                "core_coverage_pct": coverage,
+                "deep_status": "PENDING",
+                "long_radar_status": "PENDING",
+                "preliminary": True,
+                "no_fake_fallback": True,
+            },
+            historical_performance=self.repository.performance(),
+        )
 
     def _analyze_short_v33(
         self,
@@ -807,6 +949,11 @@ class MarketScanner:
 
     @staticmethod
     def _signal_sort_key(signal: Signal) -> tuple[Any, ...]:
+        entry_priority = {
+            "ENTRY_READY": 3,
+            "WAIT_RETEST": 2,
+            "MISSED_ENTRY": 1,
+        }
         freshness_priority = {
             "NEW": 8,
             "REACTIVATED": 7,
@@ -828,12 +975,81 @@ class MarketScanner:
             "INVALIDATED": 0,
         }
         return (
+            entry_priority.get(signal.entry_eligibility.get("status"), 0),
             freshness_priority.get(signal.freshness, 0),
             stage_priority.get(signal.signal_stage, 0),
             -int(signal.lifecycle.get("age_bars", 0) or 0),
             signal.execution_quality.get("score", 0.0),
             signal.score,
             signal.quote_volume_24h,
+        )
+
+    def _refresh_entry_eligibility(self, signal: Signal) -> Signal:
+        metrics = dict(signal.market_metrics)
+        story_raw = signal.market_story.get("raw", {})
+        story_trigger = signal.market_story.get("trigger", {})
+        values = {
+            "current_price": _finite_number(metrics.get("last_price")),
+            "entry_low": _finite_number(signal.entry_low),
+            "entry_high": _finite_number(signal.entry_high),
+            "stop": _finite_number(signal.stop_loss),
+            "target": _finite_number(signal.take_profit_1),
+            "atr": _finite_number(
+                story_trigger.get("event_atr") or story_raw.get("core_atr")
+            ),
+        }
+        if any(value is None for value in values.values()):
+            fallback = dict(signal.entry_eligibility)
+            if not fallback:
+                fallback = {
+                    "status": "ENTRY_READY" if signal.actionable else "MISSED_ENTRY",
+                    "label": "目前可進" if signal.actionable else "目前不可進",
+                    "reason": "缺少即時 Entry 距離資料，沿用策略狀態。",
+                    "actionable": signal.actionable,
+                    "chase_atr": None,
+                    "remaining_rr": signal.risk_reward,
+                }
+            return replace(signal, entry_eligibility=fallback)
+        eligibility = _entry_eligibility(
+            direction=signal.direction,
+            current_price=float(values["current_price"]),
+            entry_low=float(values["entry_low"]),
+            entry_high=float(values["entry_high"]),
+            stop=float(values["stop"]),
+            target=float(values["target"]),
+            atr=float(values["atr"]),
+            stage=signal.signal_stage,
+            minimum_rr=self.config.minimum_rr,
+            ready_max_chase_atr=self.config.entry_ready_max_chase_atr,
+            missed_chase_atr=self.config.entry_missed_chase_atr,
+        )
+        metrics.update(
+            {
+                "entry_status": eligibility["status"],
+                "entry_chase_atr": eligibility["chase_atr"],
+                "remaining_rr": eligibility["remaining_rr"],
+            }
+        )
+        checks = [
+            item
+            for item in signal.safety_checks
+            if item.get("key") != "entry_eligibility"
+        ]
+        checks.append(
+            {
+                "key": "entry_eligibility",
+                "label": eligibility["label"],
+                "passed": bool(eligibility["actionable"]),
+                "value": eligibility["chase_atr"],
+                "hard": False,
+            }
+        )
+        return replace(
+            signal,
+            market_metrics=metrics,
+            safety_checks=checks,
+            entry_eligibility=eligibility,
+            actionable=bool(eligibility["actionable"]),
         )
 
     def _watchlist(self, states: list[MarketState]) -> list[MarketState]:
@@ -1575,6 +1791,14 @@ def _without_internal_metrics(item: Signal | MarketState) -> Signal | MarketStat
         if not key.startswith("_")
     }
     return replace(item, market_metrics=metrics)
+
+
+def _finite_number(value: object) -> float | None:
+    try:
+        numeric = float(value)
+    except (TypeError, ValueError):
+        return None
+    return numeric if math.isfinite(numeric) else None
 
 
 def _unique_strings(values: list[str]) -> list[str]:

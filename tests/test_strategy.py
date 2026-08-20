@@ -3,7 +3,12 @@ import unittest
 
 from radar.models import Candle, Instrument, MarketContext, Ticker
 from radar.indicators import features
-from radar.strategy import AdaptiveStrategyEngine, StrategyConfig, _format_price
+from radar.strategy import (
+    AdaptiveStrategyEngine,
+    StrategyConfig,
+    _entry_eligibility,
+    _format_price,
+)
 
 
 def trend_candles(start, step, count=100, quote_volume=120_000, breakout=False, accelerate=False):
@@ -102,6 +107,62 @@ def valid_breakout_frames(opposed_context=False):
 class StrategyTests(unittest.TestCase):
     def setUp(self):
         self.instrument = Instrument("TEST-USDT-SWAP", "live", "USDT", "linear", 0.01)
+
+    def test_entry_eligibility_separates_trigger_from_chase_state(self):
+        base = {
+            "direction": "LONG",
+            "entry_low": 100.0,
+            "entry_high": 101.0,
+            "stop": 98.0,
+            "target": 110.0,
+            "atr": 2.0,
+            "stage": "EARLY_SIGNAL",
+            "minimum_rr": 1.8,
+            "ready_max_chase_atr": 0.15,
+            "missed_chase_atr": 0.50,
+        }
+        ready = _entry_eligibility(current_price=100.5, **base)
+        waiting = _entry_eligibility(current_price=101.6, **base)
+        missed = _entry_eligibility(current_price=102.2, **base)
+
+        self.assertEqual(ready["status"], "ENTRY_READY")
+        self.assertTrue(ready["actionable"])
+        self.assertEqual(waiting["status"], "WAIT_RETEST")
+        self.assertFalse(waiting["actionable"])
+        self.assertEqual(missed["status"], "MISSED_ENTRY")
+        self.assertFalse(missed["actionable"])
+
+    def test_low_remaining_rr_and_inactive_stage_are_missed(self):
+        low_rr = _entry_eligibility(
+            direction="LONG",
+            current_price=101.2,
+            entry_low=100.0,
+            entry_high=101.0,
+            stop=98.0,
+            target=106.0,
+            atr=2.0,
+            stage="EARLY_SIGNAL",
+            minimum_rr=1.8,
+            ready_max_chase_atr=0.15,
+            missed_chase_atr=0.50,
+        )
+        inactive = _entry_eligibility(
+            direction="LONG",
+            current_price=100.5,
+            entry_low=100.0,
+            entry_high=101.0,
+            stop=98.0,
+            target=110.0,
+            atr=2.0,
+            stage="TRENDING",
+            minimum_rr=1.8,
+            ready_max_chase_atr=0.15,
+            missed_chase_atr=0.50,
+        )
+
+        self.assertEqual(low_rr["status"], "MISSED_ENTRY")
+        self.assertLess(low_rr["remaining_rr"], 1.8)
+        self.assertEqual(inactive["status"], "MISSED_ENTRY")
 
     def test_clear_breakout_can_qualify(self):
         candles_4h, candles_1h, candles_15m = valid_breakout_frames()

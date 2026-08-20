@@ -9,10 +9,11 @@ V3.3 的核心原則是：**方向、價格觸發、強度、衝突、市場參�
 1. 動態取得所有 `state=live`、USDT 結算、線性 `*-USDT-SWAP`。
 2. 全市場載入 Ticker 與 1D／4H／1H／15m 已收盤 K 線。
 3. 短線與長線雷達各自建立 Market Story，不共用 Trigger。
-4. 依新鮮度、生命週期與故事成熟度，對最高順位最多 100 個標的補 5m、Funding、Taker、CVD、OI 與 Order Book。
-5. Deep Data 只加註 `SUPPORT`、`NEUTRAL`、`CONFLICT`；缺失時明確降級，不填假值、不刪價格 Trigger。
-6. SQLite 保存 Trigger、事件、MFE／MAE、TP／SL 先後與結果，再從真實完成樣本計算績效。
-7. 每個雷達最多顯示 20 個訊號；不足就顯示 0 個，不為湊數放寬標準。
+4. 15m 核心判定完成後先發布 `CORE_PREVIEW`，不用等 Deep Data 才看到早期機會。
+5. 依新鮮度、生命週期與故事成熟度，對最高順位最多 100 個標的補 5m、Funding、Taker、CVD、OI 與 Order Book。
+6. Deep Data 只加註 `SUPPORT`、`NEUTRAL`、`CONFLICT`；缺失時明確降級，不填假值、不刪價格 Trigger。
+7. SQLite 保存 Trigger、事件、MFE／MAE、TP／SL 先後與結果，再從真實完成樣本計算績效。
+8. 每個雷達最多顯示 20 個訊號；不足就顯示 0 個，不為湊數放寬標準。
 
 ## 雙雷達時間框架
 
@@ -83,7 +84,15 @@ SQLite 以 Event Key 鎖定同一個 Trigger，避免每次掃描重發：
 - `NO_FOLLOW_THROUGH`：觸發後沒有跟進
 - `INVALIDATED`：價格已破壞原故事
 
-反向變化在原方向尚未被價格失效前只列警告。排序優先新鮮機會：`NEW` → `REACTIVATED` → `NEAR_TRIGGER` → `CONFIRMED` → `TRENDING` → `EXTENDED`；同一事件保留原 Entry／Stop／Target，不因刷新而漂移。
+第一個 `CONTINUATION` 事件是 `EARLY_SIGNAL`；只有同方向已有未失效的 active event，後續 continuation 才是 `REENTRY`。早期訊號保留 age 0、1、2 共三根已收盤 15m K，不會因頁面重新整理而重發或消失。
+
+Trigger 是否存在與「現在是否適合進場」分開顯示：
+
+- `ENTRY_READY`：仍在 Entry Zone 或只順向偏離最多 0.15 ATR，且剩餘 R:R 至少 1.8。
+- `WAIT_RETEST`：Trigger 仍存在，但已偏離 Entry Zone；等待回踩／重新確認，不追價。
+- `MISSED_ENTRY`：順向偏離超過 0.50 ATR、剩餘 R:R 不足，或生命週期已離開進場階段；保留故事追蹤但禁止新進場。
+
+反向變化在原方向尚未被價格失效前只列警告。排序先看進場狀態，再看新鮮度與故事成熟度；同一事件保留原 Entry／Stop／Target，不因刷新而漂移。
 
 ## 真實歷史績效
 
@@ -113,7 +122,7 @@ SQLite 以 Event Key 鎖定同一個 Trigger，避免每次掃描重發：
 
 首頁以手機直式為優先，提供：
 
-- 短線／長線 Signal 與接近觸發分頁
+- 15m 早期、目前可進、等待回踩、已錯過、長線與接近觸發分頁
 - 新鮮度、Lifecycle、價格位置、攻擊效率、Price Acceptance、控制權、市場參與、執行品質與資料品質
 - 原始指標摺疊區、全市場搜尋、收藏與 TradingView 快捷連結
 - 真實歷史統計分頁
@@ -124,11 +133,12 @@ SQLite 以 Event Key 鎖定同一個 Trigger，避免每次掃描重發：
 - `GET /health`：服務健康與 Runtime 狀態，不觸發掃描
 - `GET /api/status`：Scan Lock、進度、資料年齡與最新錯誤
 - `POST /api/scan`：啟動或加入唯一一輪完整掃描
+- `GET /api/report/preview`：本輪已完成的 15m 核心預覽；Deep Data 與長線仍在補充
 - `GET /api/report/latest`：安全處理後的 V3.3 JSON
 - `GET /api/report/latest.md`：中文文字報告
 - `GET /api/stats`：SQLite 真實樣本統計
 
-`BOOTING`、`SCANNING`、`FRESH`、`STALE`、`ERROR` 為 Runtime 狀態。掃描中、超過 `stale_after_seconds` 或最新完整掃描失敗時，API 會清空短線與長線正式訊號並設 `actionable=false`。
+`BOOTING`、`SCANNING`、`FRESH`、`STALE`、`ERROR` 為 Runtime 狀態。掃描期間舊正式訊號會被遮蔽，但已完成的 closed-candle 15m 核心結果會由 `CORE_PREVIEW` 獨立發布。超過 `stale_after_seconds` 或最新完整掃描失敗時，正式訊號仍會清空並設 `actionable=false`。服務啟動會先還原 `data/latest.json`，首頁有新鮮報告時不強制重掃。
 
 ## 設定
 
@@ -151,6 +161,9 @@ SQLite 以 Event Key 鎖定同一個 Trigger，避免每次掃描重發：
 | `max_execution_cost_to_risk_pct` | 12 | 成本警告分界，非 Trigger 門檻 |
 | `max_entry_extension_atr` | 0.8 | 延伸位置品質分界 |
 | `severe_entry_extension_atr` | 1.8 | 嚴重追價警告分界，非 Trigger 門檻 |
+| `early_signal_max_age_bars` | 2 | age 0～2，共保留三根 15m 已收盤 K |
+| `entry_ready_max_chase_atr` | 0.15 | 仍可進的順向偏離上限 |
+| `entry_missed_chase_atr` | 0.50 | 超過即列已錯過、禁止追價 |
 | `stale_after_seconds` | 1,800 | 過期後遮蔽正式訊號 |
 | `state_db_path` | `data/radar_state.sqlite3` | Story、Lifecycle 與績效資料庫 |
 
@@ -178,7 +191,7 @@ docker build -t okx-radar-v33 .
 docker run --name okx-radar-v33 -p 8000:8000 okx-radar-v33
 ```
 
-GitHub Actions 只執行離線 compile／tests，沒有 cron 或市場掃描。若部署多個 Web instance，SQLite 與 process-wide Scan Lock 必須改成共享儲存與分散式鎖；單機部署建議固定一個 instance。
+GitHub Actions 除了離線 compile／tests，也會在每個 15m 收線後第 2 分鐘（`:02/:17/:32/:47`）呼叫正式站 `/api/scan`。GitHub 排程可能有平台延遲；Runtime Scan Lock 會讓重複請求加入同一輪，不會平行重掃。若部署多個 Web instance，SQLite 與 process-wide Scan Lock 必須改成共享儲存與分散式鎖；單機部署建議固定一個 instance。
 
 ## 驗證
 

@@ -21,6 +21,19 @@ def save_report(report: RadarReport, data_dir: str | Path) -> tuple[Path, Path]:
     return latest_path, history_path
 
 
+def load_latest_report(data_dir: str | Path) -> RadarReport | None:
+    latest_path = Path(data_dir) / "latest.json"
+    if not latest_path.exists():
+        return None
+    try:
+        payload = json.loads(latest_path.read_text(encoding="utf-8"))
+        if not isinstance(payload, dict):
+            return None
+        return RadarReport.from_dict(payload)
+    except (OSError, ValueError, TypeError):
+        return None
+
+
 def report_markdown(report: RadarReport) -> str:
     status_names = {
         "SIGNALS_FOUND": "資料最新",
@@ -68,6 +81,8 @@ def report_markdown(report: RadarReport) -> str:
                     "",
                     f"- 策略：{signal.strategy}（{signal.regime}）",
                     f"- 階段：{stage_names.get(signal.signal_stage, signal.signal_stage)}",
+                    f"- 目前進場狀態：{signal.entry_eligibility.get('label', '待確認')}",
+                    f"- 防追價判定：{signal.entry_eligibility.get('reason', '距離資料不足')}",
                     f"- 新鮮度：{signal.freshness}",
                     f"- Trigger 類型：{signal.trigger_type}",
                     f"- 證據一致度（非勝率）：{signal.readiness_score}%",

@@ -1,0 +1,27 @@
+name: OKX Radar 15m Market Scan
+
+on:
+  schedule:
+    # OKX 15m candle closes at :00/:15/:30/:45. Allow two minutes for
+    # publication, then wake Render and join its single-scan lock.
+    - cron: "2,17,32,47 * * * *"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: okx-radar-market-scan
+  cancel-in-progress: false
+
+jobs:
+  trigger:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Trigger the latest closed-candle scan
+        run: |
+          curl --fail --silent --show-error \
+            --retry 3 --retry-all-errors \
+            --connect-timeout 30 --max-time 90 \
+            -X POST https://okx-radar-v2-live.onrender.com/api/scan

@@ -48,6 +48,9 @@ def build_runtime(config: AppConfig) -> RadarRuntime:
             max_slippage_pct=config.max_slippage_pct,
             max_entry_extension_atr=config.max_entry_extension_atr,
             severe_entry_extension_atr=config.severe_entry_extension_atr,
+            early_signal_max_age_bars=config.early_signal_max_age_bars,
+            entry_ready_max_chase_atr=config.entry_ready_max_chase_atr,
+            entry_missed_chase_atr=config.entry_missed_chase_atr,
             previous_open_interest_usd=previous_open_interest,
             state_db_path=(
                 config.state_db_path

@@ -159,6 +159,31 @@ class SignalRepositoryTests(unittest.TestCase):
         self.assertEqual(later.freshness, "NO_FOLLOW_THROUGH")
         self.assertFalse(later.actionable)
 
+    def test_early_signal_is_retained_for_three_closed_15m_bars(self):
+        raw = replace(signal_fixture(), signal_stage="EARLY_SIGNAL")
+        first = self.repository.reconcile(
+            [raw],
+            [state_fixture(raw, raw.data_timestamp)],
+            "2026-08-20T00:00:00+00:00",
+            "SHORT",
+        )[0]
+        later_ts = raw.data_timestamp + 2 * 900_000
+        state = state_fixture(first, later_ts, core_high=101.0, core_low=99.5)
+        state.market_metrics["_core_path"] = [
+            [raw.data_timestamp + step * 900_000, 101.0, 99.5, 100.5]
+            for step in range(1, 3)
+        ]
+        later = self.repository.reconcile(
+            [],
+            [state],
+            "2026-08-20T00:30:00+00:00",
+            "SHORT",
+        )[0]
+
+        self.assertEqual(later.lifecycle["age_bars"], 2)
+        self.assertEqual(later.signal_stage, "EARLY_SIGNAL")
+        self.assertEqual(later.freshness, "NEW")
+
     def test_missing_core_interval_closes_without_fabricating_performance(self):
         raw = signal_fixture("GAP-USDT-SWAP")
         self.repository.reconcile(

@@ -26,8 +26,16 @@ ACTIVE_STAGES = {
 class SignalRepository:
     """SQLite state memory, duplicate lock, lifecycle and outcome ledger."""
 
-    def __init__(self, path: str | Path = ":memory:"):
+    def __init__(
+        self,
+        path: str | Path = ":memory:",
+        early_signal_max_age_bars: int = 2,
+    ):
         self.path = str(path)
+        self.early_signal_max_age_bars = max(
+            1,
+            min(int(early_signal_max_age_bars), 5),
+        )
         if self.path != ":memory:":
             Path(self.path).parent.mkdir(parents=True, exist_ok=True)
         self._lock = threading.RLock()
@@ -348,11 +356,14 @@ class SignalRepository:
             stage, freshness, status = "NO_FOLLOW_THROUGH", "NO_FOLLOW_THROUGH", "ACTIVE"
         elif age_bars > (8 if signal.radar_horizon == "SHORT" else 6):
             stage, freshness, status = "EXTENDED", "EXTENDED", "ACTIVE"
-        elif signal.signal_stage == "REENTRY" and age_bars <= 1:
+        elif (
+            signal.signal_stage == "REENTRY"
+            and age_bars <= self.early_signal_max_age_bars
+        ):
             stage, freshness, status = "REENTRY", "REACTIVATED", "ACTIVE"
         elif signal.signal_stage == "CONFIRMED" or mfe_r >= 0.35:
             stage, freshness, status = "CONFIRMED", "ACTIVE", "ACTIVE"
-        elif age_bars <= 1:
+        elif age_bars <= self.early_signal_max_age_bars:
             stage, freshness, status = "EARLY_SIGNAL", "NEW", "ACTIVE"
         else:
             stage, freshness, status = "TRENDING", "ACTIVE", "ACTIVE"
@@ -436,7 +447,13 @@ class SignalRepository:
         market_story = dict(raw.market_story)
         refreshed_trigger = dict(market_story.get("trigger", {}))
         original_trigger = existing.market_story.get("trigger", {})
-        for key in ("event_ts", "trigger_event_key", "zone_key"):
+        for key in (
+            "event_ts",
+            "event_price",
+            "event_atr",
+            "trigger_event_key",
+            "zone_key",
+        ):
             if original_trigger.get(key) not in (None, ""):
                 refreshed_trigger[key] = original_trigger[key]
         if refreshed_trigger:
