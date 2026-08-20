@@ -1,0 +1,8 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512" role="img" aria-label="OKX Radar">
+  <rect width="512" height="512" rx="112" fill="#07111f"/>
+  <circle cx="256" cy="256" r="172" fill="none" stroke="#263a54" stroke-width="20"/>
+  <circle cx="256" cy="256" r="102" fill="none" stroke="#263a54" stroke-width="16"/>
+  <path d="M256 256 394 156A172 172 0 0 1 428 256Z" fill="#2bd98f" opacity=".78"/>
+  <path d="M256 256 394 156" stroke="#f4f7fb" stroke-width="18" stroke-linecap="round"/>
+  <circle cx="256" cy="256" r="24" fill="#62a8ff"/>
+</svg>

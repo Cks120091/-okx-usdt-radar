@@ -4,6 +4,7 @@ import json
 import random
 import threading
 import time
+from copy import deepcopy
 from collections import deque
 from typing import Any
 from urllib.error import HTTPError, URLError
@@ -57,6 +58,9 @@ class OKXPublicClient:
         self.rate_limiter = SlidingWindowRateLimiter(rate_limit_requests, 2.0)
         self.execution_notional_usdt = max(0.0, execution_notional_usdt)
         self._instrument_meta: dict[str, Instrument] = {}
+        self._open_interest_timestamps: dict[str, int] = {}
+        self._cache: dict[str, tuple[float, list[Any]]] = {}
+        self._cache_lock = threading.Lock()
         self._metrics_lock = threading.Lock()
         self._metrics: dict[str, Any] = {}
         self.reset_metrics()
@@ -69,6 +73,8 @@ class OKXPublicClient:
                 "retries": 0,
                 "errors": 0,
                 "rate_limit_errors": 0,
+                "timeouts": 0,
+                "cache_hits": 0,
                 "endpoint_requests": {},
                 "request_seconds": 0.0,
             }
@@ -87,9 +93,28 @@ class OKXPublicClient:
                 counts = self._metrics["endpoint_requests"]
                 counts[endpoint] = counts.get(endpoint, 0) + 1
 
-    def _get(self, path: str, params: dict[str, Any]) -> list[Any]:
+    def _get(
+        self,
+        path: str,
+        params: dict[str, Any],
+        cache_ttl_seconds: float | None = None,
+    ) -> list[Any]:
+        if cache_ttl_seconds is None:
+            cache_ttl_seconds = {
+                "/api/v5/public/instruments": 300.0,
+                "/api/v5/market/tickers": 2.0,
+                "/api/v5/market/candles": 3.0,
+                "/api/v5/public/open-interest": 3.0,
+            }.get(path, 0.0)
         query = urlencode({key: str(value) for key, value in params.items()})
         url = f"{self.base_url}{path}?{query}"
+        cache_key = url
+        if cache_ttl_seconds > 0:
+            with self._cache_lock:
+                cached = self._cache.get(cache_key)
+                if cached and cached[0] > time.monotonic():
+                    self._metric("cache_hits")
+                    return deepcopy(cached[1])
         last_error: Exception | None = None
         for attempt in range(self.retries + 1):
             self.rate_limiter.acquire()
@@ -99,7 +124,7 @@ class OKXPublicClient:
                 url,
                 headers={
                     "Accept": "application/json",
-                    "User-Agent": "okx-usdt-perp-radar/0.1 (public-data-only)",
+                    "User-Agent": "okx-usdt-perp-radar/3.3 (public-data-only)",
                 },
             )
             try:
@@ -114,10 +139,18 @@ class OKXPublicClient:
                     raise OKXAPIError("OKX response did not contain a data list")
                 self._metric("successful_requests")
                 self._metric("request_seconds", time.monotonic() - request_started)
+                if cache_ttl_seconds > 0:
+                    with self._cache_lock:
+                        self._cache[cache_key] = (
+                            time.monotonic() + cache_ttl_seconds,
+                            deepcopy(data),
+                        )
                 return data
             except (HTTPError, URLError, TimeoutError, json.JSONDecodeError, OKXAPIError) as exc:
                 self._metric("request_seconds", time.monotonic() - request_started)
                 self._metric("errors")
+                if isinstance(exc, (TimeoutError, URLError)) and "timed out" in str(exc).lower():
+                    self._metric("timeouts")
                 if (
                     isinstance(exc, HTTPError)
                     and exc.code == 429
@@ -206,11 +239,18 @@ class OKXPublicClient:
 
     def get_open_interest_usd(self) -> dict[str, float]:
         data = self._get("/api/v5/public/open-interest", {"instType": "SWAP"})
-        return {
+        output = {
             str(row.get("instId")): _float(row.get("oiUsd"))
             for row in data
             if str(row.get("instId", "")).endswith("-USDT-SWAP")
         }
+        self._open_interest_timestamps = {
+            str(row.get("instId")): _int(row.get("ts"))
+            for row in data
+            if str(row.get("instId", "")).endswith("-USDT-SWAP")
+            and _int(row.get("ts")) > 0
+        }
+        return output
 
     def get_market_context(
         self,
@@ -226,6 +266,15 @@ class OKXPublicClient:
         ask_depth_usd: float | None = None
         buy_slippage_pct: float | None = None
         sell_slippage_pct: float | None = None
+        taker_buy_volume: float | None = None
+        taker_sell_volume: float | None = None
+        cvd: float | None = None
+        best_bid: float | None = None
+        best_ask: float | None = None
+        oi_timestamp = getattr(self, "_open_interest_timestamps", {}).get(inst_id, 0)
+        source_timestamps: dict[str, int] = (
+            {"open_interest": oi_timestamp} if oi_timestamp else {}
+        )
         execution_notional = max(0.0, getattr(self, "execution_notional_usdt", 0.0))
 
         try:
@@ -234,6 +283,7 @@ class OKXPublicClient:
                 raise OKXAPIError("empty funding-rate response")
             funding_rate = _float_or_none(rows[0].get("fundingRate"))
             sampled_at = max(sampled_at, _int(rows[0].get("ts")))
+            source_timestamps["funding"] = _int(rows[0].get("ts"))
             if funding_rate is None:
                 raise OKXAPIError("missing fundingRate")
         except Exception as exc:
@@ -245,6 +295,8 @@ class OKXPublicClient:
                 raise OKXAPIError("empty order-book response")
             bids = rows[0].get("bids", [])
             asks = rows[0].get("asks", [])
+            best_bid = _float_or_none(bids[0][0]) if bids and isinstance(bids[0], list) else None
+            best_ask = _float_or_none(asks[0][0]) if asks and isinstance(asks[0], list) else None
             bid_depth = _weighted_depth(bids)
             ask_depth = _weighted_depth(asks)
             total_depth = bid_depth + ask_depth
@@ -272,6 +324,7 @@ class OKXPublicClient:
                         f"top-20 depth cannot fill {execution_notional:,.0f} USDT"
                     )
             sampled_at = max(sampled_at, _int(rows[0].get("ts")))
+            source_timestamps["order_book"] = _int(rows[0].get("ts"))
         except Exception as exc:
             failures.append(f"order_book: {exc}")
 
@@ -283,7 +336,11 @@ class OKXPublicClient:
             if total_size <= 0:
                 raise OKXAPIError("recent taker volume is zero")
             taker_buy_ratio = buy_size / total_size
+            taker_buy_volume = buy_size
+            taker_sell_volume = sell_size
+            cvd = buy_size - sell_size
             sampled_at = max(sampled_at, max((_int(row.get("ts")) for row in rows), default=0))
+            source_timestamps["trades"] = max((_int(row.get("ts")) for row in rows), default=0)
         except Exception as exc:
             failures.append(f"taker_trades: {exc}")
 
@@ -300,6 +357,17 @@ class OKXPublicClient:
             buy_slippage_pct=buy_slippage_pct,
             sell_slippage_pct=sell_slippage_pct,
             execution_notional_usdt=execution_notional,
+            taker_buy_volume=taker_buy_volume,
+            taker_sell_volume=taker_sell_volume,
+            cvd=cvd,
+            best_bid=best_bid,
+            best_ask=best_ask,
+            source_timestamps=source_timestamps,
+            data_quality={
+                "available": sorted(source_timestamps),
+                "failures": list(failures),
+                "sampled_at": sampled_at,
+            },
         )
 
 

@@ -7,6 +7,7 @@
   "max_watchlist": 20,
   "workers": 8,
   "candle_limit": 100,
+  "candle_limit_1d": 200,
   "candle_limit_4h": 200,
   "candle_limit_1h": 240,
   "candle_limit_15m": 200,
@@ -16,6 +17,7 @@
   "rate_limit_requests_per_2s": 18,
   "min_quote_volume_24h": 5000000,
   "max_spread_pct": 0.10,
+  "universe_max_spread_pct": 1.00,
   "min_open_interest_usd": 3000000,
   "require_micro_volume_anomaly": false,
   "minimum_rr": 1.8,
@@ -27,5 +29,6 @@
   "max_entry_extension_atr": 0.8,
   "severe_entry_extension_atr": 1.8,
   "previous_report_url": "",
-  "stale_after_seconds": 1800
+  "stale_after_seconds": 1800,
+  "state_db_path": "data/radar_state.sqlite3"
 }

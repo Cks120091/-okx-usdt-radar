@@ -4,7 +4,11 @@
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
   <meta name="theme-color" content="#07111f">
-  <title>OKX 雷達 V2</title>
+  <meta name="apple-mobile-web-app-capable" content="yes">
+  <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+  <link rel="manifest" href="/manifest.webmanifest">
+  <link rel="icon" href="/radar-icon.svg" type="image/svg+xml">
+  <title>OKX 雷達 V3.3</title>
   <style>
     :root{
       color-scheme:dark;
@@ -46,7 +50,7 @@
     .signal-card,.watch-card,.map-card{background:linear-gradient(155deg,var(--panel2),var(--panel));border:1px solid var(--line);border-radius:18px;padding:15px;margin:0 0 12px;box-shadow:var(--shadow);min-width:0;overflow:hidden}
     .signal-card.long{border-left:4px solid var(--green)}.signal-card.short{border-left:4px solid var(--red)}
     .card-head{display:flex;justify-content:space-between;align-items:flex-start;gap:10px}.card-actions{display:flex;align-items:flex-start;gap:6px}.symbol{font-size:17px;font-weight:900;overflow-wrap:anywhere}.score{font-size:24px;font-weight:900;white-space:nowrap}.score small{font-size:11px;color:var(--muted)}.favorite{width:38px;height:38px;border:1px solid var(--line);border-radius:11px;background:#081625;color:var(--gray);font-size:19px}.favorite.on{color:var(--yellow);border-color:rgba(246,211,101,.5);background:rgba(246,211,101,.1)}.quick-links{display:flex;flex-wrap:wrap;gap:7px;margin-top:10px}.quick-link{display:inline-flex;align-items:center;min-height:34px;padding:6px 9px;border:1px solid #294764;border-radius:10px;color:#bcd9f7;text-decoration:none;font-size:11px;font-weight:800;background:#09192a}
-    .badges{display:flex;flex-wrap:wrap;gap:6px;margin-top:8px}.badge{padding:5px 9px;font-size:11px}.long-b{color:var(--green);background:rgba(43,217,143,.10);border-color:rgba(43,217,143,.34)}.short-b{color:var(--red);background:rgba(255,100,117,.10);border-color:rgba(255,100,117,.34)}.early-b{color:var(--orange);background:rgba(255,184,77,.11);border-color:rgba(255,184,77,.36)}.confirmed-long{color:#031b11;background:var(--green);border-color:var(--green)}.confirmed-short{color:#26030a;background:var(--red);border-color:var(--red)}.near-b{color:var(--yellow);background:rgba(246,211,101,.10);border-color:rgba(246,211,101,.34)}.watch-b{color:#d5dbe4;background:rgba(130,145,165,.13);border-color:rgba(130,145,165,.35)}
+    .badges{display:flex;flex-wrap:wrap;gap:6px;margin-top:8px}.badge{padding:5px 9px;font-size:11px}.long-b{color:var(--green);background:rgba(43,217,143,.10);border-color:rgba(43,217,143,.34)}.short-b{color:var(--red);background:rgba(255,100,117,.10);border-color:rgba(255,100,117,.34)}.early-b{color:var(--orange);background:rgba(255,184,77,.11);border-color:rgba(255,184,77,.36)}.confirmed-long{color:#031b11;background:var(--green);border-color:var(--green)}.confirmed-short{color:#26030a;background:var(--red);border-color:var(--red)}.near-b{color:var(--yellow);background:rgba(246,211,101,.10);border-color:rgba(246,211,101,.34)}.watch-b{color:#d5dbe4;background:rgba(130,145,165,.13);border-color:rgba(130,145,165,.35)}.fresh-b{color:#07111f;background:var(--yellow);border-color:var(--yellow)}.extended-b{color:#cbd5e1;background:#26384d;border-color:#465c76}.invalid-b{color:#ffe5e8;background:#531824;border-color:#963447}
     .tf-grid{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:8px;margin:14px 0}.tf{background:#081625;border:1px solid #203a57;border-radius:12px;padding:9px;min-width:0}.tf b{display:block;font-size:11px;color:var(--blue);margin-bottom:4px}.tf span{font-size:12px;font-weight:750;line-height:1.35;overflow-wrap:anywhere}
     .human{background:#0a1727;border-left:3px solid var(--blue);border-radius:9px;padding:11px 12px;line-height:1.6;font-size:13px;color:#dbe8f6;margin:10px 0 13px}
     .groups{display:grid;gap:8px}.group-row{display:grid;grid-template-columns:92px 1fr 38px;gap:8px;align-items:center;font-size:12px}.bar{height:8px;background:#08131f;border-radius:999px;overflow:hidden}.bar i{display:block;height:100%;border-radius:inherit;background:var(--blue)}.bar i.support{background:var(--green)}.bar i.conflict{background:var(--red)}
@@ -62,7 +66,7 @@
   <main class="shell">
     <header class="top">
       <div class="brand">
-        <div><h1>OKX 雷達 V2</h1><small>公開市場資料 · 只分析、不下單</small></div>
+        <div><h1>OKX 雷達 V3.3</h1><small>Market Story · 長短線雙雷達 · 只分析、不下單</small></div>
         <span id="statusPill" class="status-pill booting">雷達啟動中</span>
       </div>
     </header>
@@ -70,6 +74,7 @@
     <section class="summary" aria-label="雷達總覽">
       <div class="metric wide"><div class="k">最後更新（台灣時間）</div><div class="v" id="updatedAt">正在喚醒服務…</div></div>
       <div class="metric"><div class="k">正式進場訊號</div><div class="v" id="signalCount">— / 20</div></div>
+      <div class="metric"><div class="k">波段／長線訊號</div><div class="v" id="longSignalCount">— / 20</div></div>
       <div class="metric"><div class="k">接近觸發</div><div class="v" id="nearCount">—</div></div>
       <div class="metric"><div class="k">市場方向</div><div class="v" id="marketBias">—</div></div>
       <div class="metric"><div class="k">深度資料覆蓋</div><div class="v" id="contextCount">—</div></div>
@@ -93,10 +98,13 @@
 
     <nav class="tabs" aria-label="雷達內容">
       <button class="tab active" data-tab="overview">雷達總覽</button>
-      <button class="tab" data-tab="signals">進場訊號</button>
-      <button class="tab" data-tab="watchlist">接近觸發</button>
+      <button class="tab" data-tab="signals">短線訊號</button>
+      <button class="tab" data-tab="longSignals">長線訊號</button>
+      <button class="tab" data-tab="watchlist">短線接近</button>
+      <button class="tab" data-tab="longWatchlist">長線接近</button>
       <button class="tab" data-tab="anomalies">OI 異動</button>
       <button class="tab" data-tab="map">市場地圖</button>
+      <button class="tab" data-tab="stats">歷史績效</button>
     </nav>
 
     <section id="overview" class="section active">
@@ -121,12 +129,20 @@
       </div>
     </section>
     <section id="signals" class="section">
-      <div class="section-title"><h2>正式進場訊號</h2><span>最多 20 個，不為湊數降標</span></div>
+      <div class="section-title"><h2>短線 15m Trigger</h2><span>1H 背景 · 15m 核心 · 5m Timing</span></div>
       <div id="signalsBox"><div class="empty">雷達啟動中，正在準備最新市場掃描。</div></div>
+    </section>
+    <section id="longSignals" class="section">
+      <div class="section-title"><h2>波段／長線 4H Trigger</h2><span>1D Bias · 4H 核心 · 1H Timing</span></div>
+      <div id="longSignalsBox"><div class="empty">等待最新掃描。</div></div>
     </section>
     <section id="watchlist" class="section">
       <div class="section-title"><h2>接近觸發</h2><span>不是目前進場訊號</span></div>
       <div id="watchBox"><div class="empty">等待最新掃描。</div></div>
+    </section>
+    <section id="longWatchlist" class="section">
+      <div class="section-title"><h2>長線接近觸發</h2><span>不是目前進場訊號</span></div>
+      <div id="longWatchBox"><div class="empty">等待最新掃描。</div></div>
     </section>
     <section id="anomalies" class="section">
       <div class="section-title"><h2>OI 異動雷達</h2><span>新增部位與平倉分開解讀</span></div>
@@ -140,6 +156,10 @@
       <input id="mapSearch" class="search" type="search" placeholder="搜尋幣種，例如 BTC" autocomplete="off">
       <div id="mapBox"><div class="empty">等待最新掃描。</div></div>
     </section>
+    <section id="stats" class="section">
+      <div class="section-title"><h2>真實歷史績效</h2><span>交易品質 ≠ 勝率</span></div>
+      <div id="statsBox"><div class="empty">尚未載入歷史樣本。</div></div>
+    </section>
 
     <p class="foot">分析用途，不保證獲利。沒有接入 OKX 私人 API，也不會自動下單、開倉或平倉。</p>
   </main>
@@ -152,8 +172,9 @@
     const savedFavorites=(()=>{try{return JSON.parse(localStorage.getItem('okx-radar-favorites')||'[]')}catch(_){return []}})();
     const state={status:null,report:null,polling:false,autoStarted:false,favorites:new Set(Array.isArray(savedFavorites)?savedFavorites:[])};
     const directionName={LONG:'做多',SHORT:'做空',NEUTRAL:'中性'};
-    const stageName={WATCH:'觀望',NEAR_TRIGGER:'接近觸發',EARLY:'早期訊號',EARLY_SIGNAL:'早期訊號',CONFIRMED:'完整確認'};
-    const regimeName={TREND:'趨勢',BREAKOUT_READY:'突破準備',BREAKOUT:'突破準備',RANGE:'區間震盪',DISORDER:'混亂／等待'};
+    const stageName={WATCH:'觀望',NEAR_TRIGGER:'接近觸發',EARLY:'早期訊號',EARLY_SIGNAL:'早期訊號',CONFIRMED:'完整確認',TRENDING:'趨勢進行中',REENTRY:'回踩再發動',EXTENDED:'已延伸',NO_FOLLOW_THROUGH:'未獲延續',INVALIDATED:'訊號失效'};
+    const freshnessName={NEW:'🆕 剛觸發',REACTIVATED:'↗️ 再發動',ACTIVE:'▶️ 有效中',EXTENDED:'⏳ 已延伸',NO_FOLLOW_THROUGH:'⚠️ 未延續',INVALIDATED:'❌ 已失效',COMPLETED:'✓ 已完成',NONE:'等待新事件'};
+    const regimeName={TREND:'趨勢',TRANSITION:'轉換中',COMPRESSION:'壓縮',BREAKOUT_READY:'突破準備',BREAKOUT:'突破準備',RANGE:'區間震盪',DISORDER:'混亂／等待'};
     const statusName={BOOTING:'雷達啟動中',SCANNING:'掃描中',FRESH:'資料最新',STALE:'資料過期',ERROR:'掃描異常'};
 
     function esc(value){return String(value??'—').replace(/[&<>'"]/g,ch=>({'&':'&amp;','<':'&lt;','>':'&gt;',"'":'&#39;','"':'&quot;'}[ch]))}
@@ -185,7 +206,9 @@
 
     function renderUnavailable(message){
       $('#signalsBox').innerHTML=`<div class="empty">${esc(message)}</div>`;
+      $('#longSignalsBox').innerHTML=`<div class="empty">${esc(message)}</div>`;
       $('#signalCount').textContent='— / 20';
+      $('#longSignalCount').textContent='— / 20';
     }
 
     function renderOverviewUnavailable(message){
@@ -199,12 +222,13 @@
       state.report=report;const actionable=report.actionable===true&&report.runtime_status==='FRESH';
       $('#updatedAt').textContent=taiwanTime(report.completed_at||report.generated_at);
       $('#signalCount').textContent=`${actionable?(report.signals||[]).length:0} / ${num(report.max_signals||20,0)}`;
+      $('#longSignalCount').textContent=`${actionable?(report.long_signals||[]).length:0} / ${num(report.max_signals||20,0)}`;
       $('#nearCount').textContent=num((report.watchlist||[]).filter(x=>x.status==='NEAR_TRIGGER').length,0);
       const bias=report.market_bias||{};$('#marketBias').textContent=`${esc(bias.label||'中性')} ${num(bias.score,0)}`;
       $('#contextCount').textContent=`${num(report.context_enriched_count,0)} / ${num(report.context_target_count,0)}`;
       if(!actionable){renderUnavailable(report.runtime_status==='SCANNING'?'正在掃描最新市場，舊正式訊號已暫停使用。':report.runtime_status==='STALE'?'資料已過期，禁止依此進場。':'最新掃描異常，目前沒有可使用的正式訊號。')}
-      else{renderSignals(report.signals||[]);renderOverview(report)}
-      renderWatchlist(report.watchlist||[]);renderMap(report.market_map||[],$('#mapSearch').value);renderFavorites();
+      else{renderSignals(report.signals||[],'#signalsBox');renderSignals(report.long_signals||[],'#longSignalsBox');renderOverview(report)}
+      renderWatchlist(report.watchlist||[],'#watchBox');renderWatchlist(report.long_watchlist||[],'#longWatchBox');renderMap(report.market_map||[],$('#mapSearch').value);renderFavorites();renderStats(report.historical_performance||{});
     }
 
     function renderOverview(report){
@@ -233,7 +257,8 @@
 
     function renderRankings(signals,watchlist){
       const seen=new Set();const pool=[...signals,...watchlist].filter(item=>item.direction!=='NEUTRAL'&&!seen.has(item.inst_id)&&(seen.add(item.inst_id),true));
-      function panel(direction,title,cls){const rows=pool.filter(x=>x.direction===direction).sort((a,b)=>Number(b.readiness_score??b.score)-Number(a.readiness_score??a.score)).slice(0,3);return `<div class="ranking-panel ${cls}"><h3><span>${title}</span><span>${rows.length} 個</span></h3>${rows.length?rows.map((item,index)=>{const m=item.market_metrics||{};return `<div class="rank-row"><div><div class="rank-symbol">${index+1}. ${esc(item.inst_id)}</div><div class="rank-meta">${esc(stageName[item.signal_stage||item.status]||'觀望')} · ${price(m.last_price)} · 1H ${signed(m.price_change_1h_pct)}</div></div><div class="card-actions">${favoriteButton(item.inst_id)}<div class="rank-score">${num(item.readiness_score??item.score,0)}<small>準備度</small></div></div></div>`}).join(''):'<div class="empty">本輪沒有同方向候選。</div>'}</div>`}
+      function rank(item){const f={NEW:80,REACTIVATED:70,NONE:60,ACTIVE:40,EXTENDED:10}[item.freshness]||0,s={EARLY_SIGNAL:8,REENTRY:7,NEAR_TRIGGER:6,CONFIRMED:5,TRENDING:4,EXTENDED:2,WATCH:1}[item.signal_stage||item.status]||0;return f+s}
+      function panel(direction,title,cls){const rows=pool.filter(x=>x.direction===direction).sort((a,b)=>rank(b)-rank(a)).slice(0,3);return `<div class="ranking-panel ${cls}"><h3><span>${title}</span><span>${rows.length} 個</span></h3>${rows.length?rows.map((item,index)=>{const m=item.market_metrics||{};return `<div class="rank-row"><div><div class="rank-symbol">${index+1}. ${esc(item.inst_id)}</div><div class="rank-meta">${esc(freshnessName[item.freshness]||stageName[item.signal_stage||item.status]||'觀望')} · ${price(m.last_price)} · 1H ${signed(m.price_change_1h_pct)}</div></div><div class="card-actions">${favoriteButton(item.inst_id)}<div class="rank-score">${num(item.execution_quality?.score??item.readiness_score??item.score,0)}<small>${item.execution_quality?'交易品質':'證據一致'}</small></div></div></div>`}).join(''):'<div class="empty">本輪沒有同方向候選。</div>'}</div>`}
       $('#rankingBox').innerHTML=panel('LONG','🟢 做多候選','long-r')+panel('SHORT','🔴 做空候選','short-r');
     }
 
@@ -257,25 +282,32 @@
     }
 
     function directionBadge(item){const dir=item.direction||'NEUTRAL';return `<span class="badge ${dir==='LONG'?'long-b':dir==='SHORT'?'short-b':'watch-b'}">${dir==='LONG'?'🟢 ':dir==='SHORT'?'🔴 ':''}${esc(directionName[dir]||'中性')}</span>`}
-    function stageBadge(item){const stage=item.signal_stage||item.status||'WATCH';let cls='watch-b';if(stage==='EARLY'||stage==='EARLY_SIGNAL')cls='early-b';else if(stage==='CONFIRMED')cls=item.direction==='LONG'?'confirmed-long':'confirmed-short';else if(stage==='NEAR_TRIGGER')cls='near-b';return `<span class="badge ${cls}">${esc(stageName[stage]||'觀望')}</span>`}
-    function timeframeGrid(item){const frames=item.timeframe_states||{};return `<div class="tf-grid">${['4H','1H','15m','5m'].map(tf=>{const d=frames[tf]||{};return `<div class="tf"><b>${tf}</b><span>${esc(d.label||'資料未知')}</span></div>`}).join('')}</div>`}
+    function stageBadge(item){const stage=item.signal_stage||item.status||'WATCH';let cls='watch-b';if(stage==='EARLY'||stage==='EARLY_SIGNAL'||stage==='REENTRY')cls='early-b';else if(stage==='CONFIRMED')cls=item.direction==='LONG'?'confirmed-long':'confirmed-short';else if(stage==='NEAR_TRIGGER')cls='near-b';else if(stage==='EXTENDED'||stage==='TRENDING')cls='extended-b';else if(stage==='INVALIDATED'||stage==='NO_FOLLOW_THROUGH')cls='invalid-b';return `<span class="badge ${cls}">${esc(stageName[stage]||'觀望')}</span>`}
+    function freshnessBadge(item){const fresh=item.freshness||'NONE';const cls=fresh==='NEW'||fresh==='REACTIVATED'?'fresh-b':fresh==='INVALIDATED'||fresh==='NO_FOLLOW_THROUGH'?'invalid-b':'extended-b';return `<span class="badge ${cls}">${esc(freshnessName[fresh]||fresh)}</span>`}
+    function timeframeGrid(item){const frames=item.timeframe_states||{};const order=item.radar_horizon==='LONG'?['1D','4H','1H']:['4H','1H','15m','5m'];return `<div class="tf-grid">${order.map(tf=>{const d=frames[tf]||{};return `<div class="tf"><b>${tf}</b><span>${esc(d.label||'資料未知')}</span></div>`}).join('')}</div>`}
     function groupRows(item){const groups=item.evidence_groups||{};const order=['position_structure','trend_momentum','participation_flow'];return `<div class="groups">${order.map(key=>{const g=groups[key]||{};const score=Math.max(0,Math.min(100,Number(g.score)||0));const cls=score>=60?'support':score<40?'conflict':'';return `<div class="group-row"><span>${esc(g.label||({position_structure:'位置／結構',trend_momentum:'趨勢／動能',participation_flow:'市場參與'}[key]))}</span><span class="bar"><i class="${cls}" style="width:${score}%"></i></span><b>${num(score,0)}</b></div>`}).join('')}</div>`}
     function list(items,empty){return `<ul>${(items&&items.length?items:[empty]).slice(0,6).map(x=>`<li>${esc(x)}</li>`).join('')}</ul>`}
-    function safetyItems(item){return (item.safety_checks||[]).map(x=>`${x.passed?'✓':'✕'} ${x.label}${x.value!==null&&x.value!==undefined?`：${num(x.value,2)}`:''}`)}
-    function details(item){const m=item.market_metrics||{},oi=oiInterpretation(item);return `<details><summary>查看詳細分析</summary><div class="detail-grid">
+    function safetyItems(item){return (item.safety_checks||[]).map(x=>`${x.passed?'✓':'⚠'} ${x.label}${x.hard===false?'（提示）':''}${x.value!==null&&x.value!==undefined?`：${num(x.value,2)}`:''}`)}
+    function details(item){const m=item.market_metrics||{},oi=oiInterpretation(item),story=item.market_story||{},where=story.where||{},attack=story.attack_efficiency||{},control=story.control_transfer||{},acceptance=story.price_acceptance||{},trigger=story.trigger||{},quality=item.execution_quality||{},dq=item.data_quality||{};return `<details><summary>查看 Market Story 詳細分析</summary><div class="detail-grid">
       <div class="detail"><b>即時價格</b>${price(m.last_price)} · 15m ${signed(m.price_change_15m_pct)} · 1H ${signed(m.price_change_1h_pct)} · 24H ${signed(m.price_change_24h_pct)}</div>
-      <div class="detail"><b>策略／市場型態</b>${esc(item.strategy||item.preferred_strategy)} · ${esc(regimeName[item.regime]||item.regime)}</div>
-      <div class="detail"><b>進場品質</b>${esc(item.entry_quality?.label)} · ${num(item.entry_quality?.extension_atr,2)} ATR</div>
+      <div class="detail"><b>策略／Trigger</b>${esc(item.strategy||item.preferred_strategy)} · ${esc(item.trigger_type||trigger.type||'等待')} · ${esc(regimeName[item.regime]||item.regime)}</div>
+      <div class="detail"><b>所在位置</b>${esc(where.label||item.market_story?.where?.label||'待判定')}</div>
+      <div class="detail"><b>攻擊效率</b>多方 ${esc(attack.BULL?.label||'待比較')} · 空方 ${esc(attack.BEAR?.label||'待比較')}</div>
+      <div class="detail"><b>Price Acceptance</b>${esc(acceptance.label||'尚未形成')}</div>
+      <div class="detail"><b>Push-Away／Control</b>${esc(control.label||'控制權未明')} · 推離 ${control.push_away?'是':'否'} · Micro 防守 ${control.micro_defense_broken?'已破':'未破'}</div>
+      <div class="detail"><b>交易品質（不是勝率）</b>${num(quality.score,0)}% · ${esc(quality.label||'待評估')} · ${esc(quality.recommendation||'—')}</div>
       ${item.entry_low?`<div class="detail"><b>進場區</b>${esc(item.entry_low)} ～ ${esc(item.entry_high)}</div><div class="detail"><b>止損／風報</b>${esc(item.stop_loss)} · ${num(item.risk_reward,2)}R</div><div class="detail"><b>TP1／TP2</b>${esc(item.take_profit_1)}／${esc(item.take_profit_2)}</div><div class="detail"><b>失效條件</b>${esc(item.invalidation)}</div>`:''}
       <div class="detail"><b>成交／資金流</b>15m 量比 ${num(m.volume_ratio_15m,2)} · 5m 量比 ${num(m.volume_ratio_5m,2)} · Taker Buy ${num(m.taker_buy_pct,1)}%</div>
       <div class="detail"><b>OI／Funding</b>${esc(oi[0])} · OI ${num(m.open_interest_usd,0)} USD · 變化 ${signed(m.open_interest_change_pct)} · Funding ${signed(m.funding_rate_pct,5)}</div>
-      <div class="detail"><b>Order Book</b>失衡 ${num(m.order_book_imbalance_pct,1)}% · Bid 深度 ${num(m.bid_depth_usd,0)} · Ask 深度 ${num(m.ask_depth_usd,0)}</div>
+      <div class="detail"><b>Order Book 時間序列</b>${esc(m.order_book_sequence?.reason||'資料待累積')} · 快照失衡 ${num(m.order_book_imbalance_pct,1)}%</div>
       <div class="detail"><b>Execution Cost</b>來回 ${num(m.estimated_round_trip_cost_pct,4)}% · 占原始風險 ${num(m.execution_cost_to_risk_pct,1)}%</div>
-      <div class="detail" style="grid-column:1/-1"><b>原始指標</b><pre class="raw">${esc(JSON.stringify(m.raw_indicators||{},null,2))}</pre></div>
+      <div class="detail"><b>資料品質</b>核心 ${esc(dq.core||dq.core_status||'AVAILABLE')} · Deep ${esc(dq.deep||'PENDING')} · 缺失 ${esc((dq.missing_sources||[]).join('、')||'無')}</div>
+      <div class="detail" style="grid-column:1/-1"><b>開發者資料（Raw Data）</b><pre class="raw">${esc(JSON.stringify({market_story:story,raw_indicators:m.raw_indicators||{}},null,2))}</pre></div>
     </div></details>`}
 
-    function renderSignals(items){const box=$('#signalsBox');if(!items.length){box.innerHTML='<div class="empty">本輪沒有通過證據融合與全部安全底線的正式進場訊號。系統不會為湊滿 20 個而放寬品質。</div>';return}box.innerHTML=items.map((item,index)=>`<article class="signal-card ${item.direction==='LONG'?'long':'short'}"><div class="card-head"><div><div class="symbol">${index+1}. ${esc(item.inst_id)}</div><div class="badges">${directionBadge(item)}${stageBadge(item)}</div></div><div class="card-actions">${favoriteButton(item.inst_id)}<div class="score">${num(item.readiness_score??item.score,0)}<small>%</small></div></div></div>${timeframeGrid(item)}<p class="human">${esc(item.summary||'多時間框架與市場參與證據已完成融合。')}</p>${groupRows(item)}<div class="triage"><div class="bucket support"><h3>支持證據</h3>${list(item.supporting_evidence,'目前沒有額外支持')}</div><div class="bucket conflict"><h3>衝突／風險</h3>${list(item.conflicts,'沒有重大反向證據')}${item.neutral_evidence?.length?`<h4>中性／未額外支持（不是反向）</h4><ul class="neutral">${item.neutral_evidence.slice(0,3).map(x=>`<li>${esc(x)}</li>`).join('')}</ul>`:''}</div><div class="bucket safety"><h3>安全底線</h3>${list(safetyItems(item),'安全資料待確認')}</div></div>${quickLinks(item)}${details(item)}</article>`).join('')}
-    function renderWatchlist(items){const box=$('#watchBox');const filtered=items.filter(x=>x.direction!=='NEUTRAL');if(!filtered.length){box.innerHTML='<div class="empty">目前沒有接近觸發候選。</div>';return}box.innerHTML=filtered.map(item=>`<article class="watch-card"><div class="card-head"><div><div class="symbol">${esc(item.inst_id)}</div><div class="badges">${directionBadge(item)}${stageBadge(item)}</div></div><div class="card-actions">${favoriteButton(item.inst_id)}<div class="score">${num(item.readiness_score,0)}<small>%</small></div></div></div>${timeframeGrid(item)}<p class="human">${esc(item.summary||'Setup 尚在形成，不能直接當作進場訊號。')}</p>${groupRows(item)}${quickLinks(item)}${details(item)}</article>`).join('')}
+    function renderSignals(items,selector='#signalsBox'){const box=$(selector);if(!items.length){box.innerHTML='<div class="empty">目前無新鮮進場訊號。系統不會硬湊 20 個，也不會讓中性 Deep Data 刪除已成立的 Trigger。</div>';return}box.innerHTML=items.map((item,index)=>`<article class="signal-card ${item.direction==='LONG'?'long':'short'}"><div class="card-head"><div><div class="symbol">${index+1}. ${esc(item.inst_id)}</div><div class="badges">${directionBadge(item)}${stageBadge(item)}${freshnessBadge(item)}</div></div><div class="card-actions">${favoriteButton(item.inst_id)}<div class="score">${num(item.execution_quality?.score,0)}<small>交易品質</small></div></div></div>${timeframeGrid(item)}<p class="human">${esc(item.summary||'Market Story 已形成核心價格 Trigger。')}</p>${groupRows(item)}<div class="triage"><div class="bucket support"><h3>支持證據</h3>${list(item.supporting_evidence,'目前沒有額外支持')}</div><div class="bucket conflict"><h3>Conflict／反證</h3>${list(item.conflicts,'沒有重大反向證據')}${item.neutral_evidence?.length?`<h4>中性／資料暫缺（不取消 Trigger）</h4><ul class="neutral">${item.neutral_evidence.slice(0,4).map(x=>`<li>${esc(x)}</li>`).join('')}</ul>`:''}</div><div class="bucket safety"><h3>資料／執行狀態</h3>${list(safetyItems(item),'狀態待確認')}</div></div>${quickLinks(item)}${details(item)}</article>`).join('')}
+    function renderWatchlist(items,selector='#watchBox'){const box=$(selector);const filtered=items.filter(x=>x.direction!=='NEUTRAL');if(!filtered.length){box.innerHTML='<div class="empty">目前沒有接近觸發候選。</div>';return}box.innerHTML=filtered.map(item=>`<article class="watch-card"><div class="card-head"><div><div class="symbol">${esc(item.inst_id)}</div><div class="badges">${directionBadge(item)}${stageBadge(item)}${freshnessBadge(item)}</div></div><div class="card-actions">${favoriteButton(item.inst_id)}<div class="score">${num(item.readiness_score,0)}<small>證據一致</small></div></div></div>${timeframeGrid(item)}<p class="human">${esc(item.summary||'控制權尚未完全轉移，不能直接當進場訊號。')}</p>${groupRows(item)}${quickLinks(item)}${details(item)}</article>`).join('')}
+    function renderStats(stats){const box=$('#statsBox'),o=stats.overall||{};if(!stats.available||!o.sample_size){box.innerHTML='<div class="empty">尚無已完成的真實 Signal 樣本，因此不顯示假勝率。交易品質百分比只代表現在好不好執行。</div>';return}box.innerHTML=`<article class="overview-card"><h3>全部 V3.3 樣本 n=${num(o.sample_size,0)}</h3><div class="heat-grid"><div class="heat-item"><b>${num(o.win_rate_pct,2)}%</b><span>歷史勝率</span></div><div class="heat-item"><b>${num(o.average_r,3)}R</b><span>平均 R／Expectancy</span></div><div class="heat-item"><b>${num(o.profit_factor,3)}</b><span>Profit Factor</span></div></div><div class="detail-grid" style="margin-top:12px"><div class="detail"><b>最大連敗</b>${num(o.max_consecutive_losses,0)}</div><div class="detail"><b>最大 Drawdown</b>${num(o.max_drawdown_r,3)}R</div></div><details><summary>分組績效 JSON</summary><pre class="raw">${esc(JSON.stringify({by_direction:stats.by_direction,by_horizon:stats.by_horizon,by_trigger_type:stats.by_trigger_type,by_participation:stats.by_participation,by_execution_quality:stats.by_execution_quality},null,2))}</pre></details></article>`}
     function renderMap(items,query=''){const q=String(query||'').trim().toUpperCase();const rows=items.filter(x=>!q||String(x.inst_id).includes(q)).sort((a,b)=>(state.favorites.has(b.inst_id)-state.favorites.has(a.inst_id))||(Number(b.readiness_score)-Number(a.readiness_score)));const visible=rows.slice(0,120),box=$('#mapBox');if(!rows.length){box.innerHTML='<div class="empty">找不到符合的市場。</div>';return}box.innerHTML=visible.map(item=>`<article class="map-card"><div><strong>${esc(item.inst_id)}</strong><div class="map-meta">${price(item.market_metrics?.last_price)} · 1H ${signed(item.market_metrics?.price_change_1h_pct)}<br>${esc(regimeName[item.regime]||item.regime)} · ${esc(stageName[item.status]||'觀望')} · 準備度 ${num(item.readiness_score,0)}%</div></div><div class="map-side">${favoriteButton(item.inst_id)}${directionBadge(item)}<a class="quick-link" href="${tvUrl(item.inst_id)}" target="_blank" rel="noopener noreferrer">TV ↗</a></div></article>`).join('')+`<div class="result-note">顯示 ${visible.length} / ${rows.length} 個市場${rows.length>120?'，請用搜尋縮小範圍':''}</div>`}
 
     async function loadReport(){try{const report=await api('/api/report/latest');renderReport(report)}catch(error){if(error.status!==404)throw error}}
@@ -287,7 +319,7 @@
     }
     async function pollUntilComplete(){if(state.polling)return;state.polling=true;let failures=0;try{for(let count=0;count<360;count++){try{const status=await refreshStatus();failures=0;if(status.system_status!=='SCANNING'){await loadReport();return}}catch(error){failures++;if(failures>=5)throw error}await new Promise(resolve=>setTimeout(resolve,2000))}throw new Error('掃描等待超過 12 分鐘，已停止輪詢。')}finally{state.polling=false;const s=state.status||{};$('#scanButton').disabled=s.system_status==='SCANNING';$('#scanButton').textContent=s.system_status==='SCANNING'?'掃描中…':'立即掃描現在市場'}}
     function showConnectionError(error){const danger=$('#dangerNotice');danger.textContent=`無法連接雷達服務：${error.message||error}`;danger.classList.add('show');$('#statusPill').textContent='掃描異常';$('#statusPill').className='status-pill error';$('#scanButton').disabled=false;$('#scanButton').textContent='再次掃描現在市場'}
-    async function bootstrap(){try{await refreshStatus();if(!state.autoStarted){state.autoStarted=true;await startScan()}}catch(error){showConnectionError(error)}}
+    async function bootstrap(){try{if('serviceWorker' in navigator)navigator.serviceWorker.register('/service-worker.js').catch(()=>{});await refreshStatus();if(!state.autoStarted){state.autoStarted=true;await startScan()}}catch(error){showConnectionError(error)}}
     async function refreshFreshness(){try{if(!state.polling){const status=await refreshStatus();const reportChanged=status.system_status==='FRESH'&&(!state.report||status.scan_id!==state.report.scan_id);if(reportChanged||status.system_status==='STALE'||status.system_status==='ERROR')await loadReport()}}catch(error){showConnectionError(error)}finally{setTimeout(refreshFreshness,60000)}}
 
     function activateTab(id){$$('.tab').forEach(x=>x.classList.toggle('active',x.dataset.tab===id));$$('.section').forEach(x=>x.classList.toggle('active',x.id===id))}

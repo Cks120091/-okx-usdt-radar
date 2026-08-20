@@ -1,4 +1,4 @@
-name: OKX Radar V2 CI
+name: OKX Radar V3.3 CI
 
 on:
   push:
@@ -10,7 +10,7 @@ permissions:
   contents: read
 
 concurrency:
-  group: radar-v2-ci-${{ github.ref }}
+  group: radar-v3-3-ci-${{ github.ref }}
   cancel-in-progress: true
 
 jobs:

@@ -1,14 +1,16 @@
 from __future__ import annotations
 
+import inspect
 import time
 import uuid
 from collections import Counter
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass, field, replace
 from datetime import datetime, timezone
-from typing import Callable, Protocol
+from typing import Any, Callable, Protocol
 
 from .models import Candle, Instrument, MarketContext, MarketState, RadarReport, Signal, Ticker
+from .repository import SignalRepository, classify_microstructure
 from .strategy import AdaptiveStrategyEngine, AnalysisResult, StrategyConfig
 
 
@@ -34,12 +36,14 @@ class ScannerConfig:
     max_watchlist: int = 20
     workers: int = 8
     candle_limit: int = 100
+    candle_limit_1d: int = 200
     candle_limit_4h: int = 200
     candle_limit_1h: int = 240
     candle_limit_15m: int = 200
     candle_limit_5m: int = 120
     min_quote_volume_24h: float = 5_000_000.0
     max_spread_pct: float = 0.10
+    universe_max_spread_pct: float = 1.00
     min_open_interest_usd: float = 3_000_000.0
     require_micro_volume_anomaly: bool = False
     minimum_rr: float = 1.8
@@ -50,23 +54,26 @@ class ScannerConfig:
     severe_entry_extension_atr: float = 1.80
     max_slippage_pct: float = 0.15
     previous_open_interest_usd: dict[str, float] = field(default_factory=dict)
+    state_db_path: str = ":memory:"
 
 
 ProgressCallback = Callable[[str, int | None, int | None, str], None]
 
 
 class MarketScanner:
-    bars = ("4H", "1H", "15m")
+    bars = ("1D", "4H", "1H", "15m")
 
     def __init__(self, client: PublicDataClient, config: ScannerConfig | None = None):
         self.client = client
         self.config = config or ScannerConfig()
         self._previous_open_interest_usd = dict(self.config.previous_open_interest_usd)
         self._signal_history: dict[tuple[str, str], dict[str, str]] = {}
+        self.repository = SignalRepository(self.config.state_db_path)
         self.engine = AdaptiveStrategyEngine(
             StrategyConfig(
                 min_quote_volume_24h=self.config.min_quote_volume_24h,
                 max_spread_pct=self.config.max_spread_pct,
+                universe_max_spread_pct=self.config.universe_max_spread_pct,
                 min_open_interest_usd=self.config.min_open_interest_usd,
                 require_micro_volume_anomaly=self.config.require_micro_volume_anomaly,
                 minimum_rr=self.config.minimum_rr,
@@ -79,6 +86,777 @@ class MarketScanner:
         )
 
     def scan_once(
+        self,
+        progress: ProgressCallback | None = None,
+        scan_id: str | None = None,
+    ) -> RadarReport:
+        """Run the V3.3 two-radar pipeline without fake fallback values."""
+
+        started = time.monotonic()
+        scan_started_at = datetime.now(timezone.utc).isoformat()
+        scan_id = scan_id or str(uuid.uuid4())
+        reset_metrics = getattr(self.client, "reset_metrics", None)
+        if callable(reset_metrics):
+            reset_metrics()
+        scope = "OKX state=live、USDT 結算、線性永續合約"
+        self._progress(progress, "INSTRUMENTS", 0, None, "正在同步 OKX live USDT 永續 Universe")
+        try:
+            instruments = self.client.get_usdt_swap_instruments()
+        except Exception as exc:
+            return self._fatal_report(
+                scan_started_at,
+                scope,
+                started,
+                f"無法取得合約母清單：{exc}",
+                scan_id,
+            )
+        if not instruments:
+            return self._fatal_report(
+                scan_started_at,
+                scope,
+                started,
+                "OKX 回傳的 live USDT 永續母清單為空。",
+                scan_id,
+            )
+        try:
+            tickers = self.client.get_swap_tickers()
+        except Exception as exc:
+            return self._fatal_report(
+                scan_started_at,
+                scope,
+                started,
+                f"無法取得全市場 Ticker：{exc}",
+                scan_id,
+            )
+
+        instrument_map = {item.inst_id: item for item in instruments}
+        target_ids = sorted(instrument_map)
+        failures: dict[str, str] = {}
+        eligible = []
+        for instrument in instruments:
+            if instrument.inst_id not in tickers:
+                failures[instrument.inst_id] = "bulk ticker 缺少此 live 合約"
+            else:
+                eligible.append(instrument)
+
+        self._progress(
+            progress,
+            "CANDLES",
+            0,
+            len(eligible),
+            "正在取得 1D／4H／1H／15m 已收盤 K 線",
+        )
+        bundles: dict[str, dict[str, list[Candle]]] = {}
+        with ThreadPoolExecutor(max_workers=max(1, self.config.workers)) as executor:
+            future_map = {
+                executor.submit(self._fetch_bundle, item.inst_id): item.inst_id
+                for item in eligible
+            }
+            for completed, future in enumerate(as_completed(future_map), 1):
+                inst_id = future_map[future]
+                try:
+                    bundle = future.result()
+                    if not all(len(bundle.get(bar, [])) >= 60 for bar in self.bars):
+                        raise RuntimeError("核心 K 線少於 60 根")
+                    bundles[inst_id] = bundle
+                except Exception as exc:
+                    failures[inst_id] = str(exc)
+                self._progress(
+                    progress,
+                    "CANDLES",
+                    completed,
+                    len(eligible),
+                    "正在取得全市場多時間框架資料",
+                )
+
+        if not bundles:
+            completed_at = datetime.now(timezone.utc).isoformat()
+            return RadarReport(
+                status="DATA_INCOMPLETE",
+                generated_at=completed_at,
+                scope=scope,
+                target_count=len(instruments),
+                fetched_count=0,
+                analyzable_count=0,
+                coverage_pct=0.0,
+                target_instruments=target_ids,
+                failed_instruments=dict(sorted(failures.items())),
+                signals=[],
+                exclusion_counts={},
+                duration_seconds=round(time.monotonic() - started, 3),
+                message="所有標的核心 K 線皆不可用，本輪無法判定。",
+                scan_id=scan_id,
+                scan_started_at=scan_started_at,
+                completed_at=completed_at,
+                runtime_status="ERROR",
+                actionable=False,
+                max_signals=min(max(self.config.max_signals, 0), 20),
+                data_quality={"core": "UNAVAILABLE", "no_fake_fallback": True},
+            )
+
+        short_results: dict[str, AnalysisResult] = {}
+        long_results: dict[str, AnalysisResult] = {}
+        analysis_failures: dict[str, str] = {}
+        self._progress(progress, "ANALYSIS", 0, len(bundles), "正在建立 Market Story 與價格 Trigger")
+        for index, (inst_id, bundle) in enumerate(sorted(bundles.items()), 1):
+            try:
+                short_results[inst_id] = self._analyze_short_v33(
+                    instrument_map[inst_id],
+                    tickers[inst_id],
+                    bundle,
+                )
+            except Exception as exc:
+                analysis_failures[f"{inst_id}:SHORT"] = f"短線分析錯誤：{exc}"
+            try:
+                long_result = self._analyze_long_v33(
+                    instrument_map[inst_id],
+                    tickers[inst_id],
+                    bundle,
+                )
+                if long_result is not None:
+                    long_results[inst_id] = long_result
+            except Exception as exc:
+                analysis_failures[f"{inst_id}:LONG"] = f"長線分析錯誤：{exc}"
+            self._progress(
+                progress,
+                "ANALYSIS",
+                index,
+                len(bundles),
+                "短線 15m Trigger 與長線 4H Trigger 分開判定",
+            )
+
+        if not short_results and not long_results:
+            completed_at = datetime.now(timezone.utc).isoformat()
+            return RadarReport(
+                status="DATA_INCOMPLETE",
+                generated_at=completed_at,
+                scope=scope,
+                target_count=len(instruments),
+                fetched_count=len(bundles),
+                analyzable_count=0,
+                coverage_pct=round(len(bundles) / len(instruments) * 100.0, 3),
+                target_instruments=target_ids,
+                failed_instruments={**dict(sorted(failures.items())), **analysis_failures},
+                signals=[],
+                exclusion_counts={},
+                duration_seconds=round(time.monotonic() - started, 3),
+                message="核心資料已取得，但 Market Story Engine 無法完成任何標的。",
+                scan_id=scan_id,
+                scan_started_at=scan_started_at,
+                completed_at=completed_at,
+                runtime_status="ERROR",
+                actionable=False,
+                max_signals=min(max(self.config.max_signals, 0), 20),
+                data_quality={"core": "ANALYSIS_FAILED", "no_fake_fallback": True},
+            )
+
+        market_bias = self._calculate_market_bias(short_results)
+        context_failures: dict[str, list[str]] = {}
+        open_interest: dict[str, float] = {}
+        oi_loader = getattr(self.client, "get_open_interest_usd", None)
+        if callable(oi_loader):
+            try:
+                open_interest = oi_loader()
+                if not open_interest:
+                    context_failures["_OPEN_INTEREST_"] = ["OKX Open Interest 清單為空"]
+            except Exception as exc:
+                context_failures["_OPEN_INTEREST_"] = [str(exc)]
+
+        for results in (short_results, long_results):
+            for inst_id, result in list(results.items()):
+                current_oi = open_interest.get(inst_id)
+                results[inst_id] = self._attach_oi_snapshot(
+                    result,
+                    current_oi,
+                    self._open_interest_change(inst_id, current_oi),
+                )
+
+        context_loader = getattr(self.client, "get_market_context", None)
+        context_applier = getattr(self.engine, "apply_market_context", None)
+        ranked_ids = self._rank_context_candidates(short_results, long_results)
+        context_limit = min(max(0, int(self.config.context_candidates)), 100)
+        context_target_ids = ranked_ids[:context_limit]
+        contexts: dict[str, MarketContext] = {}
+        micro_candles: dict[str, list[Candle]] = {}
+        context_enriched_count = 0
+        context_complete_count = 0
+        source_success = Counter()
+        source_missing = Counter()
+
+        if callable(context_loader) and callable(context_applier) and context_target_ids:
+            self._progress(
+                progress,
+                "CONTEXT",
+                0,
+                len(context_target_ids),
+                "正在取得 5m、Funding、Taker、CVD 與 Order Book",
+            )
+
+            def load_context(inst_id: str) -> tuple[MarketContext, list[Candle], list[str]]:
+                local_errors: list[str] = []
+                timing: list[Candle] = []
+                try:
+                    timing = self.client.get_candles(
+                        inst_id,
+                        "5m",
+                        self.config.candle_limit_5m,
+                    )
+                    if len(timing) < 60:
+                        local_errors.append("5m 已收盤 K 線不足 60 根")
+                        timing = []
+                except Exception as exc:
+                    local_errors.append(f"5m: {exc}")
+                context = context_loader(inst_id, open_interest.get(inst_id))
+                context = replace(
+                    context,
+                    open_interest_change_pct=self._open_interest_change(
+                        inst_id,
+                        context.open_interest_usd,
+                    ),
+                )
+                return context, timing, local_errors
+
+            with ThreadPoolExecutor(max_workers=max(1, min(self.config.workers, 8))) as executor:
+                future_map = {
+                    executor.submit(load_context, inst_id): inst_id
+                    for inst_id in context_target_ids
+                }
+                for completed, future in enumerate(as_completed(future_map), 1):
+                    inst_id = future_map[future]
+                    try:
+                        context, timing, local_errors = future.result()
+                        contexts[inst_id] = context
+                        if timing:
+                            micro_candles[inst_id] = timing
+                        failures_for_symbol = [*context.failures, *local_errors]
+                        if failures_for_symbol:
+                            context_failures[inst_id] = failures_for_symbol
+                        available = set(context.source_timestamps)
+                        if timing:
+                            available.add("timing")
+                        if context.funding_rate is not None:
+                            available.add("funding")
+                        if context.order_book_imbalance is not None:
+                            available.add("order_book")
+                        if context.taker_buy_ratio is not None:
+                            available.add("trades")
+                        if context.open_interest_usd is not None:
+                            available.add("open_interest")
+                        for source in available:
+                            source_success[source] += 1
+                        for source in (
+                            "funding",
+                            "order_book",
+                            "trades",
+                            "timing",
+                            "open_interest",
+                        ):
+                            if source not in available:
+                                source_missing[source] += 1
+                        if available:
+                            context_enriched_count += 1
+                        if (
+                            context.complete
+                            and bool(timing)
+                            and context.open_interest_usd is not None
+                        ):
+                            context_complete_count += 1
+                    except Exception as exc:
+                        context_failures[inst_id] = [str(exc)]
+                    self._progress(
+                        progress,
+                        "CONTEXT",
+                        completed,
+                        len(context_target_ids),
+                        "正在取得候選深度資料；缺失只標記、不刪 Trigger",
+                    )
+
+            btc_result = short_results.get("BTC-USDT-SWAP")
+            btc_bias = (
+                btc_result.market_state.direction
+                if btc_result and btc_result.market_state
+                else "NEUTRAL"
+            )
+            for inst_id in context_target_ids:
+                context = contexts.get(inst_id)
+                if context is None:
+                    if inst_id in short_results:
+                        short_results[inst_id] = self._mark_deep_data_missing(
+                            short_results[inst_id],
+                            context_failures.get(inst_id, ["Deep Data 暫缺"]),
+                        )
+                    if inst_id in long_results:
+                        long_results[inst_id] = self._mark_deep_data_missing(
+                            long_results[inst_id],
+                            context_failures.get(inst_id, ["Deep Data 暫缺"]),
+                        )
+                    continue
+                previous_micro = self.repository.load_microstructure(inst_id)
+                for results, timing in (
+                    (short_results, micro_candles.get(inst_id)),
+                    (long_results, bundles[inst_id]["1H"]),
+                ):
+                    result = results.get(inst_id)
+                    if result is None or result.market_state is None:
+                        continue
+                    direction = result.market_state.direction
+                    sequence = (
+                        classify_microstructure(
+                            previous_micro,
+                            context,
+                            direction,
+                            result.market_state.market_metrics.get("price_change_core_pct"),
+                        )
+                        if direction in ("LONG", "SHORT")
+                        else {
+                            "state": "NEUTRAL",
+                            "reason": "方向中性，不替單張委託簿賦予多空意義",
+                        }
+                    )
+                    directional_context = replace(
+                        context,
+                        order_book_sequence=sequence,
+                    )
+                    try:
+                        results[inst_id] = context_applier(
+                            result,
+                            directional_context,
+                            btc_bias,
+                            timing,
+                            market_bias,
+                        )
+                    except Exception as exc:
+                        context_failures.setdefault(inst_id, []).append(
+                            f"Context 整合失敗：{exc}"
+                        )
+                        results[inst_id] = self._mark_deep_data_missing(
+                            result,
+                            [str(exc)],
+                        )
+                self.repository.save_microstructure(
+                    context,
+                    datetime.now(timezone.utc).isoformat(),
+                )
+
+        if open_interest:
+            self._previous_open_interest_usd = dict(open_interest)
+
+        exclusion_counts: Counter[str] = Counter()
+        short_states, raw_short_signals = self._collect_results(short_results, exclusion_counts)
+        long_states, raw_long_signals = self._collect_results(long_results, exclusion_counts)
+        completed_at = datetime.now(timezone.utc).isoformat()
+        short_signals = self.repository.reconcile(
+            raw_short_signals,
+            short_states,
+            completed_at,
+            "SHORT",
+        )
+        long_signals = self.repository.reconcile(
+            raw_long_signals,
+            long_states,
+            completed_at,
+            "LONG",
+        )
+        short_signals = [_without_internal_metrics(item) for item in short_signals]
+        long_signals = [_without_internal_metrics(item) for item in long_signals]
+        short_states = [_without_internal_metrics(item) for item in short_states]
+        long_states = [_without_internal_metrics(item) for item in long_states]
+        short_signals = sorted(short_signals, key=self._signal_sort_key, reverse=True)[
+            : min(max(self.config.max_signals, 0), 20)
+        ]
+        long_signals = sorted(long_signals, key=self._signal_sort_key, reverse=True)[
+            : min(max(self.config.max_signals, 0), 20)
+        ]
+        short_watchlist = self._watchlist(short_states)
+        long_watchlist = self._watchlist(long_states)
+        short_states.sort(key=lambda item: item.inst_id)
+        long_states.sort(key=lambda item: item.inst_id)
+
+        api_metrics_loader = getattr(self.client, "metrics_snapshot", None)
+        api_metrics = api_metrics_loader() if callable(api_metrics_loader) else {}
+        duration = round(time.monotonic() - started, 3)
+        all_failures = {**dict(sorted(failures.items())), **dict(sorted(analysis_failures.items()))}
+        coverage = round(len(bundles) / len(instruments) * 100.0, 4)
+        status = (
+            "PARTIAL_DATA"
+            if all_failures
+            else "SIGNALS_FOUND"
+            if short_signals or long_signals
+            else "NO_QUALIFIED_SIGNAL"
+        )
+        data_quality = {
+            "core_status": "PARTIAL" if all_failures else "AVAILABLE",
+            "core_coverage_pct": coverage,
+            "core_failed_count": len(all_failures),
+            "deep_candidate_limit": context_limit,
+            "deep_target_count": len(context_target_ids),
+            "deep_enriched_count": context_enriched_count,
+            "deep_complete_count": context_complete_count,
+            "deep_completeness_pct": round(
+                context_complete_count / len(context_target_ids) * 100.0,
+                2,
+            )
+            if context_target_ids
+            else 0.0,
+            "deep_source_completeness_pct": round(
+                sum(
+                    source_success.get(source, 0)
+                    for source in (
+                        "funding",
+                        "order_book",
+                        "trades",
+                        "timing",
+                        "open_interest",
+                    )
+                )
+                / (len(context_target_ids) * 5)
+                * 100.0,
+                2,
+            )
+            if context_target_ids
+            else 0.0,
+            "source_success": dict(source_success),
+            "source_missing": dict(source_missing),
+            "context_failure_count": len(context_failures),
+            "scan_duration_seconds": duration,
+            "api_metrics": api_metrics,
+            "no_fake_fallback": True,
+        }
+        historical = self.repository.performance()
+        fresh_short = sum(item.freshness in ("NEW", "REACTIVATED") for item in short_signals)
+        fresh_long = sum(item.freshness in ("NEW", "REACTIVATED") for item in long_signals)
+        message = (
+            f"掃描完成：短線 {len(short_signals)}、長線 {len(long_signals)}；"
+            f"其中新鮮機會 {fresh_short + fresh_long} 個。"
+            if short_signals or long_signals
+            else "掃描完成：目前無新鮮進場訊號；系統未為湊數降低 Trigger 標準。"
+        )
+        if all_failures:
+            message += f" 另有 {len(all_failures)} 個核心資料缺失標的已獨立排除。"
+
+        report = RadarReport(
+            status=status,
+            generated_at=completed_at,
+            scope=scope,
+            target_count=len(instruments),
+            fetched_count=len(bundles),
+            analyzable_count=len({*short_results, *long_results}),
+            coverage_pct=coverage,
+            target_instruments=target_ids,
+            failed_instruments=all_failures,
+            signals=short_signals,
+            exclusion_counts=dict(exclusion_counts.most_common()),
+            duration_seconds=duration,
+            message=message,
+            market_regime_counts=dict(Counter(item.regime for item in short_states)),
+            watchlist=short_watchlist,
+            market_map=short_states,
+            context_target_count=len(context_target_ids),
+            context_enriched_count=context_enriched_count,
+            context_failures=dict(sorted(context_failures.items())),
+            market_bias=market_bias,
+            scan_id=scan_id,
+            scan_started_at=scan_started_at,
+            completed_at=completed_at,
+            runtime_status="FRESH",
+            actionable=True,
+            max_signals=min(max(self.config.max_signals, 0), 20),
+            api_metrics=api_metrics,
+            long_signals=long_signals,
+            long_watchlist=long_watchlist,
+            long_market_map=long_states,
+            data_quality=data_quality,
+            historical_performance=historical,
+        )
+        self.repository.record_scan(
+            scan_id,
+            scan_started_at,
+            completed_at,
+            status,
+            len(instruments),
+            report.analyzable_count,
+            len(short_signals) + len(long_signals),
+            duration,
+            data_quality,
+        )
+        self._progress(progress, "FINALIZING", 1, 1, "最新 V3.3 雙雷達已完成")
+        return report
+
+    def _analyze_short_v33(
+        self,
+        instrument: Instrument,
+        ticker: Ticker,
+        bundle: dict[str, list[Candle]],
+    ) -> AnalysisResult:
+        previous = self.repository.load_story(instrument.inst_id, "SHORT")
+        parameters = inspect.signature(self.engine.analyze).parameters
+        kwargs: dict[str, Any] = {}
+        if "previous_story" in parameters:
+            kwargs["previous_story"] = previous
+        return self.engine.analyze(
+            instrument,
+            ticker,
+            bundle["4H"],
+            bundle["1H"],
+            bundle["15m"],
+            **kwargs,
+        )
+
+    def _analyze_long_v33(
+        self,
+        instrument: Instrument,
+        ticker: Ticker,
+        bundle: dict[str, list[Candle]],
+    ) -> AnalysisResult | None:
+        analyzer = getattr(self.engine, "analyze_long", None)
+        if not callable(analyzer):
+            return None
+        previous = self.repository.load_story(instrument.inst_id, "LONG")
+        parameters = inspect.signature(analyzer).parameters
+        kwargs: dict[str, Any] = {}
+        if "previous_story" in parameters:
+            kwargs["previous_story"] = previous
+        return analyzer(
+            instrument,
+            ticker,
+            bundle["1D"],
+            bundle["4H"],
+            bundle["1H"],
+            **kwargs,
+        )
+
+    def _attach_oi_snapshot(
+        self,
+        result: AnalysisResult,
+        open_interest_usd: float | None,
+        change_pct: float | None,
+    ) -> AnalysisResult:
+        state = result.market_state
+        if state is None:
+            return result
+        metrics = dict(state.market_metrics)
+        metrics.update(
+            {
+                "open_interest_usd": open_interest_usd,
+                "open_interest_change_pct": change_pct,
+                "oi_flow_state": self._classify_oi_flow(
+                    change_pct,
+                    metrics.get("price_change_1h_pct"),
+                ),
+            }
+        )
+        data_quality = dict(state.data_quality)
+        if open_interest_usd is None:
+            missing = list(data_quality.get("missing_sources", []))
+            data_quality["missing_sources"] = _unique_strings([*missing, "open_interest"])
+        updated_state = replace(
+            state,
+            market_metrics=metrics,
+            data_quality=data_quality,
+        )
+        updated_signal = (
+            replace(
+                result.signal,
+                market_metrics=metrics,
+                data_quality=data_quality,
+            )
+            if result.signal is not None
+            else None
+        )
+        updated_candidate = (
+            replace(
+                result.candidate_signal,
+                market_metrics=metrics,
+                data_quality=data_quality,
+            )
+            if result.candidate_signal is not None
+            else None
+        )
+        return replace(
+            result,
+            signal=updated_signal,
+            market_state=updated_state,
+            candidate_signal=updated_candidate,
+        )
+
+    @staticmethod
+    def _rank_context_candidates(
+        short_results: dict[str, AnalysisResult],
+        long_results: dict[str, AnalysisResult],
+    ) -> list[str]:
+        stage_priority = {
+            "EARLY_SIGNAL": 8,
+            "REENTRY": 7,
+            "NEAR_TRIGGER": 6,
+            "CONFIRMED": 5,
+            "TRENDING": 4,
+            "EXTENDED": 3,
+            "NO_FOLLOW_THROUGH": 2,
+            "WATCH": 1,
+            "FILTERED": 0,
+        }
+        candidates: dict[str, tuple[Any, ...]] = {}
+        for horizon_priority, results in ((1, short_results), (0, long_results)):
+            for inst_id, result in results.items():
+                state = result.market_state
+                if state is None or state.status == "FILTERED":
+                    continue
+                freshness_priority = {
+                    "NEW": 5,
+                    "REACTIVATED": 4,
+                    "NONE": 3,
+                    "ACTIVE": 2,
+                    "EXTENDED": 1,
+                }.get(state.freshness, 0)
+                rank = (
+                    freshness_priority,
+                    stage_priority.get(state.status, 0),
+                    result.signal is not None,
+                    state.direction in ("LONG", "SHORT"),
+                    horizon_priority,
+                    state.readiness_score,
+                    state.quote_volume_24h,
+                )
+                if inst_id not in candidates or rank > candidates[inst_id]:
+                    candidates[inst_id] = rank
+        return [
+            inst_id
+            for inst_id, _ in sorted(
+                candidates.items(),
+                key=lambda item: item[1],
+                reverse=True,
+            )
+        ]
+
+    @staticmethod
+    def _mark_deep_data_missing(
+        result: AnalysisResult,
+        reasons: list[str],
+    ) -> AnalysisResult:
+        state = result.market_state
+        if state is None:
+            return result
+        data_quality = dict(state.data_quality)
+        data_quality.update(
+            {
+                "deep": "MISSING",
+                "missing_sources": _unique_strings(
+                    [*data_quality.get("missing_sources", []), *reasons]
+                ),
+            }
+        )
+        participation = {
+            "state": "DATA_MISSING",
+            "label": "資料暫缺",
+            "supporting": [],
+            "conflicts": [],
+            "neutral": ["Deep Data 暫缺；核心 Trigger 保留"],
+            "missing_sources": reasons,
+            "permission": "CONTEXT_ONLY_NEVER_CANCELS_TRIGGER",
+        }
+        updated_state = replace(
+            state,
+            data_quality=data_quality,
+            market_participation=participation,
+            neutral_evidence=_unique_strings(
+                [*state.neutral_evidence, "Deep Data 暫缺；不取消核心 Trigger"]
+            ),
+            missing_conditions=_unique_strings(
+                [*state.missing_conditions, *reasons]
+            )[:10],
+        )
+        updated_signal = (
+            replace(
+                result.signal,
+                data_quality=data_quality,
+                market_participation=participation,
+                neutral_evidence=_unique_strings(
+                    [
+                        *result.signal.neutral_evidence,
+                        "Deep Data 暫缺；不取消核心 Trigger",
+                    ]
+                ),
+            )
+            if result.signal is not None
+            else None
+        )
+        return replace(
+            result,
+            signal=updated_signal,
+            candidate_signal=updated_signal or result.candidate_signal,
+            market_state=updated_state,
+        )
+
+    def _collect_results(
+        self,
+        results: dict[str, AnalysisResult],
+        exclusion_counts: Counter[str],
+    ) -> tuple[list[MarketState], list[Signal]]:
+        states: list[MarketState] = []
+        signals: list[Signal] = []
+        for result in results.values():
+            if result.market_state is not None:
+                states.append(result.market_state)
+            if result.signal is None:
+                exclusion_counts[result.reason] += 1
+            elif self._passes_output_liquidity(result.signal, False):
+                signals.append(result.signal)
+            else:
+                exclusion_counts["universe_output_gate"] += 1
+        return states, signals
+
+    @staticmethod
+    def _signal_sort_key(signal: Signal) -> tuple[Any, ...]:
+        freshness_priority = {
+            "NEW": 8,
+            "REACTIVATED": 7,
+            "NONE": 6,
+            "ACTIVE": 4,
+            "NO_FOLLOW_THROUGH": 2,
+            "EXTENDED": 1,
+            "INVALIDATED": 0,
+            "COMPLETED": 0,
+        }
+        stage_priority = {
+            "EARLY_SIGNAL": 8,
+            "REENTRY": 7,
+            "NEAR_TRIGGER": 6,
+            "CONFIRMED": 5,
+            "TRENDING": 4,
+            "EXTENDED": 2,
+            "NO_FOLLOW_THROUGH": 1,
+            "INVALIDATED": 0,
+        }
+        return (
+            freshness_priority.get(signal.freshness, 0),
+            stage_priority.get(signal.signal_stage, 0),
+            -int(signal.lifecycle.get("age_bars", 0) or 0),
+            signal.execution_quality.get("score", 0.0),
+            signal.score,
+            signal.quote_volume_24h,
+        )
+
+    def _watchlist(self, states: list[MarketState]) -> list[MarketState]:
+        selected = [
+            item
+            for item in states
+            if item.status in ("NEAR_TRIGGER", "WATCH", "NO_FOLLOW_THROUGH")
+            and item.direction in ("LONG", "SHORT")
+            and item.status != "FILTERED"
+            and self._passes_output_liquidity(item, False)
+        ]
+        selected.sort(
+            key=lambda item: (
+                item.status == "NEAR_TRIGGER",
+                item.freshness == "NEW",
+                item.readiness_score,
+                item.quote_volume_24h,
+            ),
+            reverse=True,
+        )
+        return selected[: max(0, self.config.max_watchlist)]
+
+    def _scan_once_v2(
         self,
         progress: ProgressCallback | None = None,
         scan_id: str | None = None,
@@ -572,30 +1350,11 @@ class MarketScanner:
         item: Signal | MarketState,
         require_context: bool = False,
     ) -> bool:
+        del require_context
         if item.quote_volume_24h < self.config.min_quote_volume_24h:
             return False
-        if item.spread_pct > self.config.max_spread_pct:
+        if item.spread_pct > self.config.universe_max_spread_pct:
             return False
-        if self.config.min_open_interest_usd <= 0:
-            open_interest_ok = True
-        else:
-            open_interest = item.market_metrics.get("open_interest_usd")
-            open_interest_ok = (
-                isinstance(open_interest, (int, float))
-                and open_interest >= self.config.min_open_interest_usd
-            )
-        if not open_interest_ok:
-            return False
-        if require_context and item.market_metrics.get("context_complete") is not True:
-            return False
-        if isinstance(item, Signal):
-            if not item.actionable:
-                return False
-            if any(
-                check.get("hard", True) and not check.get("passed", False)
-                for check in item.safety_checks
-            ):
-                return False
         return True
 
     def _calculate_market_bias(self, results: dict[str, object]) -> dict[str, object]:
@@ -682,6 +1441,7 @@ class MarketScanner:
 
     def _bar_limit(self, bar: str) -> int:
         return {
+            "1D": self.config.candle_limit_1d,
             "4H": self.config.candle_limit_4h,
             "1H": self.config.candle_limit_1h,
             "15m": self.config.candle_limit_15m,
@@ -806,6 +1566,15 @@ class MarketScanner:
             actionable=False,
             max_signals=min(max(self.config.max_signals, 0), 20),
         )
+
+
+def _without_internal_metrics(item: Signal | MarketState) -> Signal | MarketState:
+    metrics = {
+        key: value
+        for key, value in item.market_metrics.items()
+        if not key.startswith("_")
+    }
+    return replace(item, market_metrics=metrics)
 
 
 def _unique_strings(values: list[str]) -> list[str]:

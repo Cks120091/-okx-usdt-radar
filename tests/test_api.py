@@ -18,8 +18,8 @@ class RouteFixtureClient(OKXPublicClient):
     def _get(self, path, params):
         if path.endswith("open-interest"):
             return [
-                {"instId": "BTC-USDT-SWAP", "oiUsd": "25000000"},
-                {"instId": "BTC-USD-SWAP", "oiUsd": "100"},
+                {"instId": "BTC-USDT-SWAP", "oiUsd": "25000000", "ts": "999"},
+                {"instId": "BTC-USD-SWAP", "oiUsd": "100", "ts": "999"},
             ]
         if path.endswith("funding-rate"):
             return [{"fundingRate": "0.0001", "ts": "1000"}]
@@ -67,6 +67,7 @@ class APITests(unittest.TestCase):
         self.assertTrue(context.execution_quality_complete)
         self.assertGreater(context.bid_depth_usd, 1_000)
         self.assertGreaterEqual(context.buy_slippage_pct, 0)
+        self.assertEqual(context.source_timestamps["open_interest"], 999)
 
 
 if __name__ == "__main__":

@@ -5,6 +5,7 @@ import argparse
 import json
 import logging
 import sys
+from pathlib import Path
 from urllib.request import Request, urlopen
 
 from radar.api import OKXPublicClient
@@ -30,12 +31,14 @@ def build_runtime(config: AppConfig) -> RadarRuntime:
             max_watchlist=config.max_watchlist,
             workers=config.workers,
             candle_limit=config.candle_limit,
+            candle_limit_1d=config.candle_limit_1d,
             candle_limit_4h=config.candle_limit_4h,
             candle_limit_1h=config.candle_limit_1h,
             candle_limit_15m=config.candle_limit_15m,
             candle_limit_5m=config.candle_limit_5m,
             min_quote_volume_24h=config.min_quote_volume_24h,
             max_spread_pct=config.max_spread_pct,
+            universe_max_spread_pct=config.universe_max_spread_pct,
             min_open_interest_usd=config.min_open_interest_usd,
             require_micro_volume_anomaly=config.require_micro_volume_anomaly,
             minimum_rr=config.minimum_rr,
@@ -46,6 +49,10 @@ def build_runtime(config: AppConfig) -> RadarRuntime:
             max_entry_extension_atr=config.max_entry_extension_atr,
             severe_entry_extension_atr=config.severe_entry_extension_atr,
             previous_open_interest_usd=previous_open_interest,
+            state_db_path=(
+                config.state_db_path
+                or str(Path(config.data_dir) / "radar_state.sqlite3")
+            ),
         ),
     )
     return RadarRuntime(scanner, config)
@@ -58,7 +65,7 @@ def _load_previous_open_interest(url: str) -> dict[str, float]:
         url,
         headers={
             "Accept": "application/json",
-            "User-Agent": "okx-usdt-perp-radar/0.3 (public-data-only)",
+            "User-Agent": "okx-usdt-perp-radar/3.3 (public-data-only)",
         },
     )
     try:
@@ -77,7 +84,14 @@ def _extract_previous_open_interest(payload: object) -> dict[str, float]:
     if not isinstance(payload, dict):
         return {}
     output: dict[str, float] = {}
-    for section in ("market_map", "watchlist", "signals"):
+    for section in (
+        "market_map",
+        "watchlist",
+        "signals",
+        "long_market_map",
+        "long_watchlist",
+        "long_signals",
+    ):
         rows = payload.get(section, [])
         if not isinstance(rows, list):
             continue

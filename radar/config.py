@@ -16,6 +16,7 @@ class AppConfig:
     max_watchlist: int = 20
     workers: int = 8
     candle_limit: int = 100
+    candle_limit_1d: int = 200
     candle_limit_4h: int = 200
     candle_limit_1h: int = 240
     candle_limit_15m: int = 200
@@ -25,6 +26,7 @@ class AppConfig:
     rate_limit_requests_per_2s: int = 18
     min_quote_volume_24h: float = 5_000_000.0
     max_spread_pct: float = 0.10
+    universe_max_spread_pct: float = 1.00
     min_open_interest_usd: float = 3_000_000.0
     require_micro_volume_anomaly: bool = False
     minimum_rr: float = 1.8
@@ -37,6 +39,7 @@ class AppConfig:
     severe_entry_extension_atr: float = 1.80
     previous_report_url: str = ""
     stale_after_seconds: int = 1800
+    state_db_path: str = ""
 
     @classmethod
     def load(cls, path: str | None = None) -> "AppConfig":
@@ -53,12 +56,14 @@ class AppConfig:
             "RADAR_MAX_SIGNALS": ("max_signals", int),
             "RADAR_MAX_WATCHLIST": ("max_watchlist", int),
             "RADAR_WORKERS": ("workers", int),
+            "RADAR_CANDLE_LIMIT_1D": ("candle_limit_1d", int),
             "RADAR_CANDLE_LIMIT_4H": ("candle_limit_4h", int),
             "RADAR_CANDLE_LIMIT_1H": ("candle_limit_1h", int),
             "RADAR_CANDLE_LIMIT_15M": ("candle_limit_15m", int),
             "RADAR_CANDLE_LIMIT_5M": ("candle_limit_5m", int),
             "RADAR_MIN_QUOTE_VOLUME": ("min_quote_volume_24h", float),
             "RADAR_MAX_SPREAD_PCT": ("max_spread_pct", float),
+            "RADAR_UNIVERSE_MAX_SPREAD_PCT": ("universe_max_spread_pct", float),
             "RADAR_MIN_OPEN_INTEREST_USD": ("min_open_interest_usd", float),
             "RADAR_REQUIRE_MICRO_VOLUME_ANOMALY": ("require_micro_volume_anomaly", _bool),
             "RADAR_MIN_RR": ("minimum_rr", float),
@@ -71,6 +76,7 @@ class AppConfig:
             "RADAR_SEVERE_ENTRY_EXTENSION_ATR": ("severe_entry_extension_atr", float),
             "RADAR_PREVIOUS_REPORT_URL": ("previous_report_url", str),
             "RADAR_STALE_AFTER_SECONDS": ("stale_after_seconds", int),
+            "RADAR_STATE_DB_PATH": ("state_db_path", str),
         }
         for env_name, (field_name, converter) in env_map.items():
             if env_name in os.environ:
@@ -86,8 +92,12 @@ class AppConfig:
             raise ValueError("context_candidates must be between 0 and 100")
         if config.min_quote_volume_24h < 0 or config.min_open_interest_usd < 0:
             raise ValueError("liquidity thresholds must not be negative")
-        if config.max_spread_pct < 0:
-            raise ValueError("max_spread_pct must not be negative")
+        if (
+            config.max_spread_pct < 0
+            or config.universe_max_spread_pct <= 0
+            or config.universe_max_spread_pct < config.max_spread_pct
+        ):
+            raise ValueError("spread thresholds are invalid")
         if config.execution_notional_usdt < 0 or config.estimated_taker_fee_pct < 0:
             raise ValueError("execution-cost assumptions must not be negative")
         if (
@@ -100,6 +110,7 @@ class AppConfig:
         if config.stale_after_seconds < 60:
             raise ValueError("stale_after_seconds must be at least 60")
         candle_limits = (
+            config.candle_limit_1d,
             config.candle_limit_4h,
             config.candle_limit_1h,
             config.candle_limit_15m,

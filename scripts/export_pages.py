@@ -36,6 +36,14 @@ def export_site(report_path: Path, template_path: Path, output_dir: Path) -> tup
     index_path = output_dir / "index.html"
     latest_path = data_dir / "latest.json"
     shutil.copyfile(template_path, index_path)
+    for asset_name in (
+        "manifest.webmanifest",
+        "service-worker.js",
+        "radar-icon.svg",
+    ):
+        asset = template_path.parent / asset_name
+        if asset.exists():
+            shutil.copyfile(asset, output_dir / asset_name)
     latest_path.write_text(
         json.dumps(payload, ensure_ascii=False, indent=2) + "\n",
         encoding="utf-8",

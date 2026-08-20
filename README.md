@@ -1,152 +1,162 @@
-# OKX 雷達 V2
+# OKX Radar V3.3 MASTER
 
-只使用 OKX 公開市場資料的 USDT 永續分析雷達。沒有 API Key、Secret、Passphrase、交易帳戶或任何自動下單程式。
+以 OKX 公開市場資料運作的 USDT 線性永續合約雙雷達。系統只做分析，不接受 API Key、Secret 或 Passphrase，也沒有自動下單、Paper Trading 或 Live Trading 路徑。
 
-## 使用方式
+V3.3 的核心原則是：**方向、價格觸發、強度、衝突、市場參與、執行品質與歷史績效彼此分離**。分數只負責說明，不能憑分數製造 Trigger；Funding、OI、Order Book、交易成本或更高週期反向也不能抹掉已由核心價格完成的 Trigger。
 
-- 使用者每次打開／重新載入雷達，前端會真正呼叫 `POST /api/scan`。
-- 「立即掃描現在市場」使用同一個 scanner 與 Scan Lock，不會建立第二套分析流程。
-- 掃描完成後前端自動取得最新 report 並重繪畫面，不必手動重新整理。
-- 掃描完成後不再定時執行；沒有人使用時，Autoscale 服務可以休眠。
-- GitHub Actions 只跑離線測試，不會用 cron 或 push event 掃描 OKX。
+## 系統流程
 
-若 scan 已執行，後續請求會加入目前 scan，不會再開另一輪。掃描中、最新掃描失敗或資料超過 30 分鐘時，API 會把正式 `signals` 清空並設定 `actionable=false`，因此舊訊號不能冒充最新進場訊號。
+1. 動態取得所有 `state=live`、USDT 結算、線性 `*-USDT-SWAP`。
+2. 全市場載入 Ticker 與 1D／4H／1H／15m 已收盤 K 線。
+3. 短線與長線雷達各自建立 Market Story，不共用 Trigger。
+4. 依新鮮度、生命週期與故事成熟度，對最高順位最多 100 個標的補 5m、Funding、Taker、CVD、OI 與 Order Book。
+5. Deep Data 只加註 `SUPPORT`、`NEUTRAL`、`CONFLICT`；缺失時明確降級，不填假值、不刪價格 Trigger。
+6. SQLite 保存 Trigger、事件、MFE／MAE、TP／SL 先後與結果，再從真實完成樣本計算績效。
+7. 每個雷達最多顯示 20 個訊號；不足就顯示 0 個，不為湊數放寬標準。
 
-## 市場覆蓋與資料
+## 雙雷達時間框架
 
-每輪動態取得所有 `state=live`、USDT 結算、線性 `*-USDT-SWAP`：
+| 雷達 | 時間框架 | 角色 | 可否單獨建立／取消正式 Trigger |
+| --- | --- | --- | --- |
+| 短線 | 4H | 大環境 Context | 否 |
+| 短線 | 1H | Bias／Setup | 否 |
+| 短線 | 15m | 核心 Trigger | 是，只限已收盤 K 線 |
+| 短線 | 5m | Timing／預警／加速 | 否 |
+| 長線 | 1D | Bias | 否 |
+| 長線 | 4H | Setup 與核心 Trigger | 是，只限已收盤 K 線 |
+| 長線 | 1H | Timing／預警／加速 | 否 |
 
-- 全市場：ticker、4H、1H、15m 已收盤 K 線。
-- 全市場批次：Open Interest。
-- 最高順位最多 100 個候選：5m、Funding、Recent Trades／Taker Flow、前 20 檔 Order Book、Bid／Ask imbalance、Spread、Slippage、Execution Cost。
-- 保留 Structure、Support／Resistance、MA5／10／20、EMA21／55、MACD、RSI、ADX、ATR、VWAP、Bollinger Band／Width、Volume、Market Bias、Market Regime、R:R 與追價判斷。
+短線與長線各有獨立的 Signal、Watchlist、Market Map、Lifecycle 與排序。長線不是把短線訊號放大，也不會用 15m Trigger 取代 4H Trigger。
 
-Context 的 `100` 是上限，不是必須湊滿的數量。實際候選不足就只取得符合排序條件者；任何正式訊號的深度資料不完整時都會被安全層擋下。
+## Price-first Market Story
 
-## 手機市場指揮中心
+`radar/market_story.py` 以價格事實組織判定：
 
-雷達首頁以 iPhone 直式為優先，把廣度資訊和可執行訊號分層：
+- 由 swing clustering、測試／拒絕次數、最近觸碰與 ATR 寬度建立動態主／次／微型支撐壓力 Zone。
+- 攻擊波以有意義的價格位移辨識，不把每次 MACD 交叉當成一次攻擊。
+- 多方波使用 MACD 正峰、空方波使用負谷，並同時比較價格成果、耗時、Zone 結果、MA／MACD 回應、反推、延續與回撤。
+- 「一方變弱」不等於「另一方取得控制」。正式 Trigger 仍需 Push-Away、Micro Defense、Reclaim／失敗、Price Acceptance 或角色轉換等價格證據。
+- 壓力／支撐壓縮會提高突破警戒，但可阻止錯誤反轉判定。
+- MA5／10 與 MACD 不要求固定先後，只要在依 Regime／雜訊決定的有限 confirmation window 內相互呼應。
 
-- BTC／ETH 當輪快照：即時價、1H／24H 變化、方向與市場型態。
-- 市場溫度：平均 15m RSI、24H 上漲／下跌家數與多／中性／空廣度。
-- 多空候選排行：各取準備度最高 3 個，正式訊號優先，不會越過 Safety Hard Gates。
-- OI／價格異動：以連續兩輪掃描比較「多頭建倉、空頭建倉、空頭回補、多頭平倉」；首輪不猜測變化。
-- 全市場搜尋、TradingView 快捷圖表與裝置本地收藏；收藏只存在當前瀏覽器，不上傳幣種偏好。
+三種正式 Trigger：
 
-這些是市場探索層；只有「進場訊號」頁籤內、通過證據融合與全部安全底線的候選，才是正式訊號。
+- `REVERSAL`：有效 Zone 反應、對手攻擊衰退、控制權轉移與動能呼應。
+- `BREAKOUT`：突破後價格接受或角色轉換回踩守住，加上控制權與動能確認。
+- `CONTINUATION`：順向 Bias、回踩有效結構／均線後重新發動。
 
-## V2 多時間框架
+沒有上述價格事實時只會得到 `WATCH` 或 `NEAR_TRIGGER`；Explainability／Readiness 再高也不會升格。
 
-| 時間框架 | 角色 | 主要輸出 |
-| --- | --- | --- |
-| 4H | 大方向／Bias | 偏多、偏空、中性；看狀態，不要求這根剛交叉 |
-| 1H | Setup／準備層 | 回踩、結構、動能衰退／轉向及 Setup 成熟度 |
-| 15m | Main Trigger | 已收盤突破、重新站回趨勢側、動能轉向及成交異動 |
-| 5m | 加速／提前預警 | 精細 Timing 與有限加減分，不能單獨推翻完整 Setup |
+## 市場參與只作 Context
 
-## 三大 Evidence Groups
+| 資料 | V3.3 用法 |
+| --- | --- |
+| Taker Flow | 必須與價格成果一起看；量很強但價格推不動視為可能吸收 |
+| Open Interest | 本身沒有方向，只與價格變化組合描述新增部位、平倉或回補 |
+| CVD | 與價格同向才是支持；同向 CVD 但價格沒結果可列吸收 Conflict |
+| Funding | 顯示擁擠程度，不直接判多空或取消 Trigger |
+| Order Book | 首張快照不當支撐壓力；跨掃描比較 persistence、撤單、補單、吸收與反向深度 |
+| 全市場 Bias | 顯示順勢／逆勢背景，不替個別標的建立 Trigger |
 
-1. **位置／結構**：4H／1H Structure、S/R、Breakout、Retest、Price Location、Regime。
-2. **趨勢／動能**：MA／EMA 方向家族、MACD／RSI／Slope 動能家族、連續 ADX 品質。
-3. **市場參與**：1H／15m／5m 成交、Taker、OI、Funding、Order Book。
+Deep Data 可回傳 `SUPPORT`、`NEUTRAL`、`CONFLICT` 或 `DATA_MISSING`。每個結果都保留來源時間、可用來源、缺失來源與 `CONTEXT_ONLY_NEVER_CANCELS_TRIGGER` 權限標記。
 
-每群輸出 0～100 分及 `SUPPORT`、`NEUTRAL`、`CONFLICT`。MA、EMA、MACD、ADX 先在相關家族內聚合，不會各自當作完全獨立的票重複灌分。中性或沒有額外支持不等於反向。
+## Execution Quality 與 Trigger 分離
 
-Market Regime 使用不同權重：
+入場位置、結構 R:R、Stop 距離、Spread、深度、估算滑價與來回成本組成 `execution_quality`。它只回答「現在是否適合執行」，不回答「價格 Trigger 是否存在」。
 
-- `TREND`：35% 位置／結構、40% 趨勢／動能、25% 市場參與。
-- `BREAKOUT_READY`：35%、30%、35%。
-- `RANGE`：45%、30%、25%。
-- `DISORDER`：維持觀望，不輸出普通正式進場訊號。
+- 追價、R:R 偏低、成本偏高或深度不足會產生 `CAUTION`／`AVOID_EXECUTION` 與非硬性 Safety Check。
+- Universe 只有兩類硬排除：24H 報價幣成交額不足，以及 Spread 達極端異常門檻。
+- OI 偏低／缺失、5m 反向、Funding 擁擠、Order Book Conflict 或 Execution Cost 都不取消有效的核心 Trigger。
+- Runtime 的 `SCANNING`、`STALE`、`ERROR` 與核心資料全失敗仍會遮蔽訊號，避免舊資料冒充新機會。
 
-## 訊號生命週期
+## 訊號生命週期與排序
 
-- `WATCH` → 觀望
-- `NEAR_TRIGGER` → 接近觸發
-- `EARLY_SIGNAL` → 早期訊號
-- `CONFIRMED` → 完整確認
+SQLite 以 Event Key 鎖定同一個 Trigger，避免每次掃描重發：
 
-早期訊號要求已收盤的 15m Trigger、至少兩個相對獨立 Evidence Groups 明確支持、第三群沒有強烈反向，並通過全部 Safety Hard Gates。
+- `WATCH`：觀望
+- `NEAR_TRIGGER`：接近觸發
+- `EARLY_SIGNAL`：早期訊號
+- `CONFIRMED`：完整確認
+- `TRENDING`：已進入延續
+- `REENTRY`：有效回踩再發動
+- `EXTENDED`：已延伸
+- `NO_FOLLOW_THROUGH`：觸發後沒有跟進
+- `INVALIDATED`：價格已破壞原故事
 
-完整確認是在早期規則之上，再要求較成熟的 1H Setup、較強的群組一致性與市場參與。若使用者隔一段時間才首次打開雷達，而市場當下已完整確認，可以直接顯示完整確認；有前一輪資料時會額外記錄 `NEW`、`UPGRADED`、`DOWNGRADED` 或 `UNCHANGED`。
+反向變化在原方向尚未被價格失效前只列警告。排序優先新鮮機會：`NEW` → `REACTIVATED` → `NEAR_TRIGGER` → `CONFIRMED` → `TRENDING` → `EXTENDED`；同一事件保留原 Entry／Stop／Target，不因刷新而漂移。
 
-Readiness 是 Setup 成熟度，不是勝率，也不是通過 checkbox 的比例：
+## 真實歷史績效
 
-```text
-15% 4H Bias 品質
-25% 1H Setup 成熟度
-25% 15m Trigger 完成度
- 5% 5m 加速
-20% Evidence Group Alignment
-10% Entry Quality
-- Conflict Penalty
-```
+`data/radar_state.sqlite3` 保存每個訊號的版本、方向、週期、Trigger 類型、Market Participation、Execution Quality、MFE、MAE、TP1／SL 先後與 Final R。
 
-ADX 使用連續函數，不存在 20.9 失敗、21 通過的斷崖門檻。
+`GET /api/stats` 只從已完成樣本計算：
 
-## Safety Hard Gates
+- Sample Size
+- Win Rate
+- Average R／Expectancy
+- Profit Factor
+- Max Consecutive Losses
+- Max Drawdown (R)
+- 依方向、長短線、Trigger 類型、參與狀態與執行品質分組
 
-只有交易安全條件是硬門檻：
+沒有完成樣本時回傳 `null` 與「禁止顯示假勝率」，不會把 Readiness 或 Execution Quality 偽裝成勝率。
 
-- 核心資料完整性與 30 分鐘 STALE。
-- 掃描中／失敗時遮蔽舊正式訊號。
-- 24H 流動性與 Open Interest。
-- Spread、Order Book Depth、Slippage、Execution Cost。
-- Minimum R:R（預設 1.8）。
-- 可以建立合理 Stop Loss。
-- 嚴重追價（預設超過 1.8 ATR）。
-- 結構失效或跨群重大反向證據。
+## 資料可靠性
 
-Funding、Taker Flow、Order Book 的中性狀態不會單獨否決。主動成交與委託簿同時強烈反向才會形成重大即時資金流衝突。
+- 公開 REST 請求有 process-wide rate limit、有限重試、退避、短 TTL cache 與 endpoint metrics。
+- 單一幣種核心資料失敗只排除該幣種，報告為 `PARTIAL_DATA`；所有核心標的失敗才是 `DATA_INCOMPLETE`。
+- OI 或任一 Deep Data endpoint 失敗是可見的 Context 缺失，不會讓全輪掃描失效。
+- 每輪記錄 core coverage、Deep Data completeness、來源成功／缺失、cache hit、retry、timeout 與 duration。
+- 沒有 fallback 數值、placeholder Signal 或用上一輪資料冒充最新 Trigger。
 
-## 正式訊號上限
+## 手機 PWA
 
-每輪依品質排序後最多輸出 20 個正式訊號。這是 Maximum，不是 Minimum；沒有符合條件就輸出 0 個，不會放寬品質湊數。
+首頁以手機直式為優先，提供：
 
-## API 狀態機
+- 短線／長線 Signal 與接近觸發分頁
+- 新鮮度、Lifecycle、價格位置、攻擊效率、Price Acceptance、控制權、市場參與、執行品質與資料品質
+- 原始指標摺疊區、全市場搜尋、收藏與 TradingView 快捷連結
+- 真實歷史統計分頁
+- Web App Manifest、SVG icon 與只快取 App Shell 的 Service Worker；`/api/*` 與 `/health` 永遠走網路
 
-系統狀態：
+## API 與 Runtime 狀態
 
-- `BOOTING`：雷達啟動中。
-- `SCANNING`：掃描中，舊正式訊號已停用。
-- `FRESH`：資料最新且可使用。
-- `STALE`：完成時間超過 30 分鐘，禁止依此進場。
-- `ERROR`：最新掃描失敗，舊正式訊號已停用。
+- `GET /health`：服務健康與 Runtime 狀態，不觸發掃描
+- `GET /api/status`：Scan Lock、進度、資料年齡與最新錯誤
+- `POST /api/scan`：啟動或加入唯一一輪完整掃描
+- `GET /api/report/latest`：安全處理後的 V3.3 JSON
+- `GET /api/report/latest.md`：中文文字報告
+- `GET /api/stats`：SQLite 真實樣本統計
 
-端點：
-
-- `GET /health`：只檢查服務，不觸發市場掃描。
-- `GET /api/status`：狀態、scan id、真實階段進度、最後錯誤。
-- `POST /api/scan`：啟動或加入唯一一輪完整 scan。
-- `GET /api/report/latest`：安全處理後的最新 JSON。
-- `GET /api/report/latest.md`：中文文字報告。
+`BOOTING`、`SCANNING`、`FRESH`、`STALE`、`ERROR` 為 Runtime 狀態。掃描中、超過 `stale_after_seconds` 或最新完整掃描失敗時，API 會清空短線與長線正式訊號並設 `actionable=false`。
 
 ## 設定
 
 | 設定 | 預設 | 用途 |
 | --- | ---: | --- |
-| `max_signals` | 20 | 正式訊號硬上限 |
-| `max_watchlist` | 20 | 接近觸發顯示上限 |
-| `context_candidates` | 100 | 深度即時資料候選上限 |
+| `max_signals` | 20 | 每個雷達的訊號硬上限 |
+| `max_watchlist` | 20 | 每個雷達的 Watchlist 上限 |
+| `context_candidates` | 100 | Deep Data 壓力測試上限 |
+| `candle_limit_1d` | 200 | 1D 已收盤 K 線 |
 | `candle_limit_4h` | 200 | 4H 已收盤 K 線 |
 | `candle_limit_1h` | 240 | 1H 已收盤 K 線 |
 | `candle_limit_15m` | 200 | 15m 已收盤 K 線 |
-| `candle_limit_5m` | 120 | 深度候選的 5m 已收盤 K 線 |
-| `min_quote_volume_24h` | 5,000,000 | 最低近 24 根 1H 報價幣成交額 |
-| `min_open_interest_usd` | 3,000,000 | 最低 OI；缺少 OI 也阻擋 |
-| `max_spread_pct` | 0.10 | 最大 Spread 百分比 |
-| `max_slippage_pct` | 0.15 | 每側最大估算 Slippage 百分比 |
-| `execution_notional_usdt` | 1,000 | 滑價示範部位，不是真實下單金額 |
-| `max_execution_cost_to_risk_pct` | 12 | 來回成本占原始止損風險上限 |
-| `minimum_rr` | 1.8 | 最低 R:R |
-| `max_entry_extension_atr` | 0.8 | 可接受延伸分界，超過只扣 Entry Quality |
-| `severe_entry_extension_atr` | 1.8 | 嚴重追價 Hard Block |
-| `stale_after_seconds` | 1,800 | 資料過期秒數 |
-| `rate_limit_requests_per_2s` | 18 | 保守的 process-wide 公開 API 節流 |
+| `candle_limit_5m` | 120 | 最高順位候選 5m K 線 |
+| `min_quote_volume_24h` | 5,000,000 | Universe 成交額硬門檻 |
+| `universe_max_spread_pct` | 1.00 | Universe 極端 Spread 硬門檻 |
+| `max_spread_pct` | 0.10 | 一般 Spread 品質參考／舊設定相容 |
+| `min_open_interest_usd` | 3,000,000 | OI Context 參考／舊設定相容，非硬門檻 |
+| `minimum_rr` | 1.8 | 結構目標與品質參考，非 Trigger 門檻 |
+| `execution_notional_usdt` | 1,000 | 公開深度滑價估算名目金額，不會下單 |
+| `max_execution_cost_to_risk_pct` | 12 | 成本警告分界，非 Trigger 門檻 |
+| `max_entry_extension_atr` | 0.8 | 延伸位置品質分界 |
+| `severe_entry_extension_atr` | 1.8 | 嚴重追價警告分界，非 Trigger 門檻 |
+| `stale_after_seconds` | 1,800 | 過期後遮蔽正式訊號 |
+| `state_db_path` | `data/radar_state.sqlite3` | Story、Lifecycle 與績效資料庫 |
 
-`require_micro_volume_anomaly` 保留作舊設定相容，V2 預設為 `false`；5m 中性不再是 Hard Gate。
+`require_micro_volume_anomaly` 保留舊設定相容；V3.3 不把 5m 量能當正式 Trigger 門檻。
 
-## 啟動與部署
+## 啟動
 
 需要 Python 3.11 以上，沒有第三方 Python dependency：
 
@@ -155,18 +165,20 @@ cp config.example.json config.json
 python run.py --serve
 ```
 
+一次性掃描：
+
+```bash
+python run.py --once
+```
+
 Docker：
 
 ```bash
-docker build -t okx-radar-v2 .
-docker run --name okx-radar-v2 -p 8000:8000 okx-radar-v2
+docker build -t okx-radar-v33 .
+docker run --name okx-radar-v33 -p 8000:8000 okx-radar-v33
 ```
 
-適合部署到可 scale-to-zero 的動態 Web Service，例如 Replit Autoscale。為維持目前 process-wide Scan Lock，Autoscale 初期應限制最大 instance 為 1。GitHub Pages 只能提供靜態檔案，不能作為 V2 即時 scanner 的主要網址。
-
-專案內的 `.replit` 已設定 Preview 與正式 Deployment 的啟動命令及 port。Replit 發布時使用 **Autoscale**、`Max machines = 1`；不使用 Reserved VM 或 Scheduled Deployment。Replit Starter 免費方案目前可發布 1 個 App，若帳號沒有可用的免費發布名額就停止，不自行啟用付費方案。
-
-GitHub workflow `.github/workflows/ci.yml` 只會 compile 與執行離線 tests，不包含 `schedule`、cron 或 `run.py --once`。
+GitHub Actions 只執行離線 compile／tests，沒有 cron 或市場掃描。若部署多個 Web instance，SQLite 與 process-wide Scan Lock 必須改成共享儲存與分散式鎖；單機部署建議固定一個 instance。
 
 ## 驗證
 
@@ -176,14 +188,14 @@ python -m unittest discover -s tests -v
 git diff --check
 ```
 
-測試涵蓋全市場失敗安全、最多 20 個、Context 兩階段取得、ADX 連續性、中性不等於反向、強烈跨群衝突、5m 不單獨否決、Scan Lock、STALE、掃描中舊訊號遮蔽、中文 Mobile UI contract，以及 GitHub Actions 無市場排程。
+測試涵蓋價格接受、控制權轉移、動態確認窗口、壓縮防假反轉、雜訊不靠分數觸發、長短雷達分離、Context 不取消 Trigger、單幣資料隔離、OI 非硬門檻、20 個上限、Order Book 時間序列、去重、No Follow-through、MFE／MAE、TP／SL、真實績效、Scan Lock、STALE、PWA 與 API contract。
 
-## 限制
+## 安全邊界與限制
 
-- Readiness 與 Evidence Score 不是勝率。
-- Recent Trades 不是長時間 CVD，Order Book 也是瞬時快照。
-- 冷啟動後若沒有上一輪持久化快照，OI change 會顯示未知；不會為填數字猜測。
-- 滑價只依前 20 檔與示範部位估算，不能保證真實成交。
-- 正式使用前仍應以 V1／V2 replay 與數週 shadow logging 比較提早時間、MFE、MAE、先碰 1R 或 Stop 的比例。
+- V3.3 是研究與決策輔助，不是投資建議，也不保證成交或獲利。
+- AI／自動交易屬未來隔離模組；目前沒有模型決策下單、私人 API 或 Live Trading。即使未來加入，Risk Engine 也必須是 AI 之外的硬編碼邊界，並先經 Paper／Demo 驗證。
+- Order Book 深度只涵蓋公開快照；序列判定能降低假牆風險，但不能保證沒有 spoofing。
+- 同一根核心 K 線同時碰 TP 與 SL 時記為 `AMBIGUOUS_SAME_BAR`，不捏造先後；若兩輪掃描間超出已載入 K 線範圍，則記為 `DATA_GAP` 且不納入績效。
+- 上線前仍應長期 shadow logging、replay 與版本分層比較。
 
 公開資料端點依據：[OKX API 文件](https://www.okx.com/docs-v5/en/)。

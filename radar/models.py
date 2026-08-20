@@ -60,6 +60,14 @@ class MarketContext:
     sell_slippage_pct: float | None = None
     execution_notional_usdt: float = 0.0
     open_interest_change_pct: float | None = None
+    taker_buy_volume: float | None = None
+    taker_sell_volume: float | None = None
+    cvd: float | None = None
+    best_bid: float | None = None
+    best_ask: float | None = None
+    order_book_sequence: dict[str, Any] = field(default_factory=dict)
+    source_timestamps: dict[str, int] = field(default_factory=dict)
+    data_quality: dict[str, Any] = field(default_factory=dict)
 
     @property
     def complete(self) -> bool:
@@ -123,9 +131,28 @@ class Signal:
     summary: str = ""
     lifecycle: dict[str, Any] = field(default_factory=dict)
     actionable: bool = True
+    radar_horizon: str = "SHORT"
+    trigger_type: str = "UNKNOWN"
+    trigger_id: str = ""
+    direction_state: str = "NEUTRAL"
+    freshness: str = "NEW"
+    market_participation: dict[str, Any] = field(default_factory=dict)
+    execution_quality: dict[str, Any] = field(default_factory=dict)
+    data_quality: dict[str, Any] = field(default_factory=dict)
+    market_story: dict[str, Any] = field(default_factory=dict)
+    generated_at: str = ""
+    data_timestamp: int = 0
+    strategy_version: str = "V3.3_MASTER"
+    feature_schema_version: str = "3.3.0"
+    historical_performance: dict[str, Any] = field(default_factory=dict)
 
     def to_dict(self) -> dict[str, Any]:
         return asdict(self)
+
+    @classmethod
+    def from_dict(cls, payload: dict[str, Any]) -> "Signal":
+        known = cls.__dataclass_fields__
+        return cls(**{key: value for key, value in payload.items() if key in known})
 
 
 @dataclass
@@ -151,6 +178,17 @@ class MarketState:
     safety_checks: list[dict[str, Any]] = field(default_factory=list)
     entry_quality: dict[str, Any] = field(default_factory=dict)
     summary: str = ""
+    radar_horizon: str = "SHORT"
+    direction_state: str = "NEUTRAL"
+    trigger: dict[str, Any] = field(default_factory=dict)
+    lifecycle: dict[str, Any] = field(default_factory=dict)
+    freshness: str = "NONE"
+    market_participation: dict[str, Any] = field(default_factory=dict)
+    execution_quality: dict[str, Any] = field(default_factory=dict)
+    data_quality: dict[str, Any] = field(default_factory=dict)
+    market_story: dict[str, Any] = field(default_factory=dict)
+    human_reason: str = ""
+    actionable: bool = False
 
     def to_dict(self) -> dict[str, Any]:
         return asdict(self)
@@ -186,18 +224,30 @@ class RadarReport:
     signals_suppressed_reason: str | None = None
     max_signals: int = 20
     api_metrics: dict[str, Any] = field(default_factory=dict)
-    version: str = "2.0"
+    version: str = "3.3"
+    long_signals: list[Signal] = field(default_factory=list)
+    long_watchlist: list[MarketState] = field(default_factory=list)
+    long_market_map: list[MarketState] = field(default_factory=list)
+    data_quality: dict[str, Any] = field(default_factory=dict)
+    historical_performance: dict[str, Any] = field(default_factory=dict)
+    strategy_version: str = "V3.3_MASTER"
+    feature_schema_version: str = "3.3.0"
 
     def to_dict(self) -> dict[str, Any]:
         payload = asdict(self)
         payload["signals"] = [item.to_dict() for item in self.signals]
         payload["watchlist"] = [item.to_dict() for item in self.watchlist]
         payload["market_map"] = [item.to_dict() for item in self.market_map]
+        payload["long_signals"] = [item.to_dict() for item in self.long_signals]
+        payload["long_watchlist"] = [item.to_dict() for item in self.long_watchlist]
+        payload["long_market_map"] = [item.to_dict() for item in self.long_market_map]
         payload["safety"] = {
             "mode": "analysis_only",
             "auto_ordering": False,
+            "paper_trading": False,
+            "live_trading": False,
             "actionable": self.actionable,
             "max_risk_per_trade_pct": 1.0,
-            "note": "訊號是條件式分析，不是保證獲利；實際下單前需自行確認。",
+            "note": "Radar Signal 與是否下單分離；目前只分析，不連接私人交易 API。",
         }
         return payload

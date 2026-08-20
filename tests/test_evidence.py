@@ -13,7 +13,7 @@ from radar.evidence import (
 from radar.indicators import features
 from radar.models import Instrument, MarketContext, Ticker
 from radar.strategy import AdaptiveStrategyEngine, StrategyConfig
-from tests.test_strategy import trend_candles
+from tests.test_strategy import story_candles, trend_candles, valid_breakout_frames
 
 
 class EvidenceV2Tests(unittest.TestCase):
@@ -244,33 +244,50 @@ class EvidenceV2Tests(unittest.TestCase):
         self.assertEqual(stricter.entry_quality["key"], "SEVERE_CHASE")
 
     def test_neutral_live_flow_is_not_a_conflict_or_veto(self):
+        candles_4h, candles_1h, candles_15m = valid_breakout_frames()
+        ticker = replace(
+            self.ticker,
+            last=candles_15m[-1].close,
+            bid=candles_15m[-1].close - 0.01,
+            ask=candles_15m[-1].close + 0.01,
+        )
         engine = AdaptiveStrategyEngine(StrategyConfig(min_quote_volume_24h=1_000_000))
         technical = engine.analyze(
             self.instrument,
-            self.ticker,
-            self.candles_4h,
-            self.candles_1h,
-            self.candles_15m,
+            ticker,
+            candles_4h,
+            candles_1h,
+            candles_15m,
         )
         result = engine.apply_market_context(
             technical,
             MarketContext(self.instrument.inst_id, 20_000_000, 0.0, 0.0, 0.50, 2),
             "LONG",
-            self.candles_5m,
+            story_candles(
+                [100 + (index % 2) * 0.01 for index in range(100)],
+                300_000,
+            ),
             {"score": 50.0, "label": "中性"},
         )
         self.assertIsNotNone(result.signal)
         self.assertEqual(result.reason, "qualified")
         self.assertNotIn("主動成交明顯反向", result.assessment.conflicts)
 
-    def test_two_strong_live_flow_conflicts_block_signal(self):
+    def test_live_flow_conflicts_are_reported_without_cancelling_trigger(self):
+        candles_4h, candles_1h, candles_15m = valid_breakout_frames()
+        ticker = replace(
+            self.ticker,
+            last=candles_15m[-1].close,
+            bid=candles_15m[-1].close - 0.01,
+            ask=candles_15m[-1].close + 0.01,
+        )
         engine = AdaptiveStrategyEngine(StrategyConfig(min_quote_volume_24h=1_000_000))
         technical = engine.analyze(
             self.instrument,
-            self.ticker,
-            self.candles_4h,
-            self.candles_1h,
-            self.candles_15m,
+            ticker,
+            candles_4h,
+            candles_1h,
+            candles_15m,
         )
         result = engine.apply_market_context(
             technical,
@@ -279,11 +296,16 @@ class EvidenceV2Tests(unittest.TestCase):
             self.candles_5m,
             {"score": 72.0, "label": "偏多"},
         )
-        self.assertIsNone(result.signal)
-        self.assertEqual(result.reason, "major_evidence_conflict")
-        self.assertGreaterEqual(result.assessment.conflict_severity, 55.0)
+        self.assertIsNotNone(result.signal)
+        self.assertEqual(result.reason, "qualified")
+        self.assertEqual(result.signal.market_participation["state"], "CONFLICT")
+        self.assertEqual(
+            result.signal.market_participation["permission"],
+            "CONTEXT_ONLY_NEVER_CANCELS_TRIGGER",
+        )
+        self.assertTrue(result.signal.conflicts)
 
-    def test_watch_summary_matches_stage_when_no_safe_entry_plan_exists(self):
+    def test_near_trigger_summary_matches_market_story_stage(self):
         engine = AdaptiveStrategyEngine(StrategyConfig(min_quote_volume_24h=1_000_000))
         technical = engine.analyze(
             self.instrument,
@@ -292,7 +314,6 @@ class EvidenceV2Tests(unittest.TestCase):
             self.candles_1h,
             self.candles_15m,
         )
-        technical = replace(technical, candidate_plan=None, candidate_signal=None)
         result = engine.apply_market_context(
             technical,
             MarketContext(self.instrument.inst_id, 20_000_000, 0.0, 0.0, 0.50, 2),
@@ -301,9 +322,9 @@ class EvidenceV2Tests(unittest.TestCase):
             {"score": 50.0, "label": "中性"},
         )
         self.assertIsNone(result.signal)
-        self.assertEqual(result.market_state.status, "WATCH")
-        self.assertIn("目前列為觀望", result.market_state.summary)
-        self.assertNotIn("目前列為早期", result.market_state.summary)
+        self.assertEqual(result.market_state.status, "NEAR_TRIGGER")
+        self.assertEqual(result.reason, "near_trigger")
+        self.assertIn("突破風險", result.market_state.summary)
 
 
 if __name__ == "__main__":

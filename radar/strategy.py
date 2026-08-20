@@ -11,6 +11,14 @@ from .evidence import (
     summary_for_stage,
 )
 from .indicators import TimeframeFeatures, features
+from .market_story import (
+    FEATURE_SCHEMA_VERSION,
+    STRATEGY_VERSION,
+    MarketStoryEngine,
+    StoryAssessment,
+    enrich_story_context,
+    execution_quality,
+)
 from .models import Candle, Instrument, MarketContext, MarketState, Signal, Ticker
 
 
@@ -19,13 +27,14 @@ class StrategyConfig:
     min_quote_volume_24h: float = 5_000_000.0
     max_spread_pct: float = 0.10
     min_open_interest_usd: float = 3_000_000.0
-    require_micro_volume_anomaly: bool = True
+    require_micro_volume_anomaly: bool = False
     minimum_rr: float = 1.8
     estimated_taker_fee_pct: float = 0.05
     max_execution_cost_to_risk_pct: float = 12.0
     max_entry_extension_atr: float = 0.80
     severe_entry_extension_atr: float = 1.80
     max_slippage_pct: float = 0.15
+    universe_max_spread_pct: float = 1.00
 
 
 @dataclass
@@ -33,7 +42,7 @@ class AnalysisResult:
     signal: Signal | None
     reason: str
     market_state: MarketState | None = None
-    assessment: EvidenceAssessment | None = None
+    assessment: EvidenceAssessment | StoryAssessment | None = None
     candidate_plan: _Plan | None = None
     candidate_signal: Signal | None = None
 
@@ -63,8 +72,421 @@ class AdaptiveStrategyEngine:
 
     def __init__(self, config: StrategyConfig | None = None):
         self.config = config or StrategyConfig()
+        self.story_engine = MarketStoryEngine()
 
     def analyze(
+        self,
+        instrument: Instrument,
+        ticker: Ticker,
+        candles_4h: list[Candle],
+        candles_1h: list[Candle],
+        candles_15m: list[Candle],
+        candles_5m: list[Candle] | None = None,
+        previous_story: dict[str, object] | None = None,
+    ) -> AnalysisResult:
+        return self._analyze_v33(
+            instrument,
+            ticker,
+            candles_4h,
+            candles_1h,
+            candles_15m,
+            candles_5m,
+            previous_story,
+            horizon="SHORT",
+        )
+
+    def analyze_long(
+        self,
+        instrument: Instrument,
+        ticker: Ticker,
+        candles_1d: list[Candle],
+        candles_4h: list[Candle],
+        candles_1h: list[Candle],
+        previous_story: dict[str, object] | None = None,
+    ) -> AnalysisResult:
+        return self._analyze_v33(
+            instrument,
+            ticker,
+            candles_1d,
+            candles_4h,
+            candles_4h,
+            candles_1h,
+            previous_story,
+            horizon="LONG",
+        )
+
+    def _analyze_v33(
+        self,
+        instrument: Instrument,
+        ticker: Ticker,
+        candles_higher: list[Candle],
+        candles_bias: list[Candle],
+        candles_core: list[Candle],
+        candles_timing: list[Candle] | None,
+        previous_story: dict[str, object] | None,
+        horizon: str,
+    ) -> AnalysisResult:
+        required = (candles_higher, candles_bias, candles_core)
+        if min((len(items) for items in required), default=0) < 60:
+            return AnalysisResult(None, "insufficient_history")
+        if ticker.last <= 0 or ticker.bid <= 0 or ticker.ask <= 0:
+            return AnalysisResult(None, "invalid_ticker")
+        if not all(items[-1].confirmed for items in required):
+            return AnalysisResult(None, "core_candle_unconfirmed")
+
+        try:
+            story = (
+                self.story_engine.analyze_long(
+                    candles_higher,
+                    candles_bias,
+                    candles_timing or [],
+                    previous_story,
+                )
+                if horizon == "LONG"
+                else self.story_engine.analyze_short(
+                    candles_higher,
+                    candles_bias,
+                    candles_core,
+                    candles_timing,
+                    previous_story,
+                )
+            )
+        except (ValueError, ArithmeticError) as exc:
+            return AnalysisResult(None, f"market_story_unavailable:{exc}")
+
+        tf_higher = features(candles_higher)
+        tf_bias = features(candles_bias)
+        tf_core = features(candles_core)
+        tf_timing = (
+            features(candles_timing)
+            if candles_timing is not None and len(candles_timing) >= 60
+            else None
+        )
+        volume_source = (
+            candles_bias if horizon == "SHORT" else candles_timing or candles_bias
+        )
+        quote_volume_24h = sum(item.quote_volume for item in volume_source[-24:])
+        metrics = {
+            "last_price": ticker.last,
+            "price_change_core_pct": _price_change_pct(
+                ticker.last,
+                candles_core[-2].close,
+            ),
+            "price_change_15m_pct": (
+                _price_change_pct(ticker.last, candles_core[-2].close)
+                if horizon == "SHORT"
+                else None
+            ),
+            "price_change_1h_pct": _price_change_pct(
+                ticker.last,
+                (candles_bias if horizon == "SHORT" else candles_timing or candles_bias)[-2].close,
+            ),
+            "price_change_24h_pct": _price_change_pct(
+                ticker.last,
+                volume_source[-25].close if len(volume_source) >= 25 else volume_source[0].close,
+            ),
+            "adx_core": round(tf_core.adx14, 1),
+            "adx_1h": round(tf_bias.adx14, 1),
+            "rsi_core": round(tf_core.rsi14, 1),
+            "rsi_15m": round(tf_core.rsi14, 1) if horizon == "SHORT" else None,
+            "volume_ratio_core": round(tf_core.volume_ratio, 2),
+            "volume_ratio_15m": round(tf_core.volume_ratio, 2) if horizon == "SHORT" else None,
+            "volume_ratio_5m": round(tf_timing.volume_ratio, 2) if horizon == "SHORT" and tf_timing else None,
+            "atr_pct_core": round(tf_core.atr_pct, 3),
+            "core_high": candles_core[-1].high,
+            "core_low": candles_core[-1].low,
+            "core_close": candles_core[-1].close,
+            "core_timestamp": candles_core[-1].ts,
+            # Internal ledger input. Scanner/DB serializers remove underscore
+            # fields before publishing, while the repository can still recover
+            # every closed bar between two on-demand scans.
+            "_core_path": [
+                [item.ts, item.high, item.low, item.close]
+                for item in candles_core
+            ],
+            "trigger_event_ts": story.event_ts,
+            "trigger_age_bars": story.event_age_bars,
+            "raw_indicators": {
+                ("4H" if horizon == "SHORT" else "1D"): self._feature_metrics(tf_higher),
+                ("1H" if horizon == "SHORT" else "4H"): self._feature_metrics(tf_bias),
+                ("15m" if horizon == "SHORT" else "4H_TRIGGER"): self._feature_metrics(tf_core),
+                **(
+                    {("5m" if horizon == "SHORT" else "1H_TIMING"): self._feature_metrics(tf_timing)}
+                    if tf_timing is not None
+                    else {}
+                ),
+            },
+        }
+        checks = [
+            self._safety_check("core_data", "核心 K 線與 Ticker 可用", True),
+            self._safety_check(
+                "universe_liquidity",
+                "24H 成交額符合 Universe 門檻",
+                quote_volume_24h >= self.config.min_quote_volume_24h,
+                quote_volume_24h,
+            ),
+            self._safety_check(
+                "universe_spread",
+                "Spread 未達極端異常排除門檻",
+                ticker.spread_pct <= self.config.universe_max_spread_pct,
+                round(ticker.spread_pct, 4),
+            ),
+        ]
+        direction = (
+            story.trigger_direction
+            if story.trigger_direction in ("LONG", "SHORT")
+            else story.direction
+        )
+        market_state = MarketState(
+            inst_id=instrument.inst_id,
+            regime=story.regime,
+            direction=direction,
+            preferred_strategy=self._v33_strategy_name(story.trigger_type),
+            readiness_score=story.readiness,
+            status=story.stage,
+            missing_conditions=_unique([*story.conflicts, *story.neutral])[:10],
+            spread_pct=round(ticker.spread_pct, 4),
+            quote_volume_24h=round(quote_volume_24h, 2),
+            closed_candle_ts=candles_core[-1].ts,
+            passed_conditions=story.supporting[:10],
+            factor_scores={key: float(group["score"]) for key, group in story.groups.items()},
+            market_metrics=metrics,
+            evidence_groups=story.group_dicts(),
+            timeframe_states=story.timeframe_states,
+            supporting_evidence=story.supporting,
+            conflicts=story.conflicts,
+            neutral_evidence=story.neutral,
+            safety_checks=checks,
+            entry_quality=story.entry_quality,
+            summary=story.summary,
+            radar_horizon=horizon,
+            direction_state=story.direction_state,
+            trigger=dict(story.trigger),
+            lifecycle={"current_stage": story.stage, "transition": "TECHNICAL_SNAPSHOT"},
+            freshness=story.freshness,
+            market_participation=dict(story.market_participation),
+            execution_quality=dict(story.execution_quality),
+            data_quality=dict(story.data_quality),
+            market_story=story.story_dict(),
+            human_reason=story.summary,
+            actionable=story.triggered and story.stage in ("EARLY_SIGNAL", "CONFIRMED", "REENTRY"),
+        )
+
+        universe_failures = [
+            item for item in checks if item["key"].startswith("universe_") and not item["passed"]
+        ]
+        if universe_failures:
+            reason = (
+                "liquidity_too_low"
+                if universe_failures[0]["key"] == "universe_liquidity"
+                else "spread_extremely_abnormal"
+            )
+            return AnalysisResult(
+                None,
+                reason,
+                replace(market_state, status="FILTERED", actionable=False),
+                story,
+            )
+        if not story.triggered:
+            return AnalysisResult(
+                None,
+                "near_trigger" if story.stage == "NEAR_TRIGGER" else "no_fresh_trigger",
+                market_state,
+                story,
+            )
+
+        plan = self._v33_plan(story, tf_core)
+        signal = self._signal_from_v33(
+            instrument,
+            ticker,
+            quote_volume_24h,
+            candles_core[-1].ts,
+            story,
+            market_state,
+            plan,
+        )
+        return AnalysisResult(
+            signal,
+            "qualified",
+            market_state,
+            story,
+            plan,
+            signal,
+        )
+
+    def _v33_plan(
+        self,
+        story: StoryAssessment,
+        tf_core: TimeframeFeatures,
+    ) -> _Plan:
+        direction = story.trigger_direction
+        is_long = direction == "LONG"
+        entry = tf_core.close
+        proposed_stop = story.invalidation_price
+        if proposed_stop is None or (is_long and proposed_stop >= entry) or (not is_long and proposed_stop <= entry):
+            proposed_stop = (
+                min(tf_core.recent_low - tf_core.atr14 * 0.20, entry - tf_core.atr14 * 0.65)
+                if is_long
+                else max(tf_core.recent_high + tf_core.atr14 * 0.20, entry + tf_core.atr14 * 0.65)
+            )
+        stop = float(proposed_stop)
+        risk = abs(entry - stop)
+        if risk <= 0:
+            risk = max(tf_core.atr14 * 0.65, abs(entry) * 0.003)
+            stop = entry - risk if is_long else entry + risk
+
+        obstacle_key = "major_resistance" if is_long else "major_support"
+        obstacle = story.zones.get(obstacle_key) or story.zones.get(
+            "resistance" if is_long else "support"
+        )
+        structural_target = float(obstacle["center"]) if obstacle else None
+        structural_rr = (
+            (structural_target - entry) / risk
+            if is_long and structural_target is not None and structural_target > entry
+            else (entry - structural_target) / risk
+            if not is_long and structural_target is not None and structural_target < entry
+            else None
+        )
+        if structural_rr is not None and structural_rr > 0:
+            tp1 = float(structural_target)
+            rr = structural_rr
+        else:
+            rr = self.config.minimum_rr
+            tp1 = entry + risk * rr if is_long else entry - risk * rr
+        tp2 = entry + risk * max(2.7, rr + 0.8) if is_long else entry - risk * max(2.7, rr + 0.8)
+        strength_score = float(story.trigger.get("explainability_score", 50.0))
+        strength_label = "強" if strength_score >= 78.0 else "中等" if strength_score >= 58.0 else "偏弱"
+        management = {
+            "tp1_action": "TP1 後可把 Stop 移到 Break-even；實際委託由使用者決定。",
+            "tp2_action": "TP2 或結構目標分批處理。",
+            "review": "每個核心週期收盤後更新 Lifecycle；5m/1H Timing 不單獨反手。",
+            "auto_ordering": False,
+        }
+        return _Plan(
+            direction=direction,
+            strategy=self._v33_strategy_name(story.trigger_type),
+            regime=story.regime,
+            score=story.readiness,
+            evidence=story.supporting,
+            entry=entry,
+            stop=stop,
+            tp1=tp1,
+            tp2=tp2,
+            rr=max(0.0, rr),
+            invalidation=(
+                "核心週期收盤跌破失效 Zone／Micro 防守，原做多故事失效。"
+                if is_long
+                else "核心週期收盤站回失效 Zone／Micro 防守，原做空故事失效。"
+            ),
+            notes=[
+                "Market Participation、Conflict 與 Execution Quality 均獨立顯示，不取消核心 Trigger。",
+                "只使用已收盤核心 K 線形成正式訊號。",
+            ],
+            signal_stage=story.stage,
+            trend_strength_label=strength_label,
+            trend_strength_score=strength_score,
+            management_plan=management,
+        )
+
+    def _signal_from_v33(
+        self,
+        instrument: Instrument,
+        ticker: Ticker,
+        quote_volume_24h: float,
+        closed_candle_ts: int,
+        story: StoryAssessment,
+        state: MarketState,
+        plan: _Plan,
+    ) -> Signal:
+        tf_atr = float(story.raw.get("core_atr", 0.0) or 0.0)
+        zone_offset = max(tf_atr * 0.12, abs(plan.entry) * 0.0003)
+        if plan.direction == "LONG":
+            entry_low, entry_high = plan.entry - zone_offset, plan.entry + zone_offset * 0.45
+        else:
+            entry_low, entry_high = plan.entry - zone_offset * 0.45, plan.entry + zone_offset
+        risk_pct = abs(plan.entry - plan.stop) / max(abs(plan.entry), 1e-9) * 100.0
+        initial_quality = execution_quality(
+            story,
+            ticker.spread_pct,
+            risk_pct,
+            plan.rr,
+            None,
+            target_rr=self.config.minimum_rr,
+            max_cost_to_risk_pct=self.config.max_execution_cost_to_risk_pct,
+            max_spread_pct=self.config.max_spread_pct,
+            max_slippage_pct=self.config.max_slippage_pct,
+            estimated_taker_fee_pct=self.config.estimated_taker_fee_pct,
+        )
+        metrics = dict(state.market_metrics)
+        metrics.update(
+            {
+                "technical_stop_pct": round(risk_pct, 4),
+                "trigger_type": story.trigger_type,
+                "signal_stage": story.stage,
+                "execution_quality_score": initial_quality["score"],
+            }
+        )
+        return Signal(
+            inst_id=instrument.inst_id,
+            direction=plan.direction,
+            strategy=plan.strategy,
+            score=story.readiness,
+            evidence=story.supporting,
+            entry_low=_format_price(entry_low, instrument.tick_size),
+            entry_high=_format_price(entry_high, instrument.tick_size),
+            stop_loss=_format_price(plan.stop, instrument.tick_size),
+            take_profit_1=_format_price(plan.tp1, instrument.tick_size),
+            take_profit_2=_format_price(plan.tp2, instrument.tick_size),
+            risk_reward=round(plan.rr, 2),
+            invalidation=plan.invalidation,
+            spread_pct=round(ticker.spread_pct, 4),
+            quote_volume_24h=round(quote_volume_24h, 2),
+            closed_candle_ts=closed_candle_ts,
+            regime=story.regime,
+            notes=plan.notes,
+            factor_scores={key: float(group["score"]) for key, group in story.groups.items()},
+            market_metrics=metrics,
+            signal_stage=story.stage,
+            trend_strength_label=plan.trend_strength_label,
+            trend_strength_score=plan.trend_strength_score,
+            management_plan=dict(plan.management_plan or {}),
+            readiness_score=story.readiness,
+            evidence_groups=story.group_dicts(),
+            timeframe_states=story.timeframe_states,
+            supporting_evidence=story.supporting,
+            conflicts=story.conflicts,
+            neutral_evidence=story.neutral,
+            safety_checks=list(state.safety_checks),
+            entry_quality=story.entry_quality,
+            summary=story.summary,
+            lifecycle={
+                "previous_stage": None,
+                "current_stage": story.stage,
+                "transition": "TECHNICAL_EVENT",
+            },
+            actionable=story.stage in ("EARLY_SIGNAL", "CONFIRMED", "REENTRY"),
+            radar_horizon=story.horizon,
+            trigger_type=story.trigger_type,
+            direction_state=story.direction_state,
+            freshness=story.freshness,
+            market_participation=dict(story.market_participation),
+            execution_quality=initial_quality,
+            data_quality=dict(story.data_quality),
+            market_story=story.story_dict(),
+            data_timestamp=closed_candle_ts,
+            strategy_version=STRATEGY_VERSION,
+            feature_schema_version=FEATURE_SCHEMA_VERSION,
+        )
+
+    @staticmethod
+    def _v33_strategy_name(trigger_type: str) -> str:
+        return {
+            "REVERSAL": "控制權轉移反轉",
+            "BREAKOUT": "突破與價格接受",
+            "CONTINUATION": "回踩再發動",
+        }.get(trigger_type, "等待市場故事完成")
+
+    def _analyze_v2(
         self,
         instrument: Instrument,
         ticker: Ticker,
@@ -253,6 +675,255 @@ class AdaptiveStrategyEngine:
         )
 
     def apply_market_context(
+        self,
+        result: AnalysisResult,
+        context: MarketContext,
+        btc_bias: str = "NEUTRAL",
+        candles_5m: list[Candle] | None = None,
+        market_bias: dict[str, object] | None = None,
+    ) -> AnalysisResult:
+        if isinstance(result.assessment, StoryAssessment):
+            return self._apply_v33_market_context(
+                result,
+                context,
+                candles_5m,
+                market_bias,
+            )
+        return self._apply_legacy_market_context(
+            result,
+            context,
+            btc_bias,
+            candles_5m,
+            market_bias,
+        )
+
+    def _apply_v33_market_context(
+        self,
+        result: AnalysisResult,
+        context: MarketContext,
+        timing_candles: list[Candle] | None,
+        market_bias: dict[str, object] | None,
+    ) -> AnalysisResult:
+        state = result.market_state
+        story = result.assessment
+        if state is None or not isinstance(story, StoryAssessment):
+            return result
+        timing = (
+            features(timing_candles)
+            if timing_candles is not None and len(timing_candles) >= 60
+            else None
+        )
+        live_story = enrich_story_context(story, context, timing, market_bias)
+        metrics = dict(state.market_metrics)
+        if timing is not None:
+            raw = dict(metrics.get("raw_indicators", {}))
+            timing_key = "5m" if story.horizon == "SHORT" else "1H_TIMING"
+            raw[timing_key] = self._feature_metrics(timing)
+            metrics["raw_indicators"] = raw
+            timing_long_score = float(
+                live_story.timeframe_states.get(timing_key, {}).get("score", 50.0)
+            )
+            directional_timing_score = (
+                timing_long_score
+                if live_story.trigger_direction == "LONG"
+                else 100.0 - timing_long_score
+                if live_story.trigger_direction == "SHORT"
+                else 50.0
+            )
+            metrics["timing_directional_score"] = round(
+                directional_timing_score,
+                1,
+            )
+            if story.horizon == "SHORT":
+                # Retain the established API field while giving it V3.3 semantics:
+                # this is timing telemetry, never permission to create/cancel a Trigger.
+                metrics["micro_acceleration_5m"] = round(
+                    directional_timing_score,
+                    1,
+                )
+        metrics.update(
+            {
+                "open_interest_usd": context.open_interest_usd,
+                "open_interest_change_pct": context.open_interest_change_pct,
+                "funding_rate_pct": (
+                    round(context.funding_rate * 100.0, 5)
+                    if context.funding_rate is not None
+                    else None
+                ),
+                "order_book_imbalance_pct": (
+                    round(context.order_book_imbalance * 100.0, 1)
+                    if context.order_book_imbalance is not None
+                    else None
+                ),
+                "order_book_sequence": dict(context.order_book_sequence),
+                "taker_buy_pct": (
+                    round(context.taker_buy_ratio * 100.0, 1)
+                    if context.taker_buy_ratio is not None
+                    else None
+                ),
+                "taker_buy_volume": context.taker_buy_volume,
+                "taker_sell_volume": context.taker_sell_volume,
+                "cvd": context.cvd,
+                "context_sampled_at": context.sampled_at,
+                "context_complete": context.complete,
+                "context_available_count": len(
+                    live_story.market_participation.get("available_sources", [])
+                ),
+                "context_missing_sources": live_story.data_quality.get("missing_sources", []),
+                "execution_notional_usdt": context.execution_notional_usdt,
+                "bid_depth_usd": context.bid_depth_usd,
+                "ask_depth_usd": context.ask_depth_usd,
+                "buy_slippage_pct": context.buy_slippage_pct,
+                "sell_slippage_pct": context.sell_slippage_pct,
+                "execution_quality_complete": context.execution_quality_complete,
+                "market_participation_state": live_story.market_participation.get("state"),
+            }
+        )
+        checks = [
+            item
+            for item in state.safety_checks
+            if item.get("key")
+            not in {
+                "context_data",
+                "open_interest",
+                "execution_depth",
+                "slippage",
+                "execution_cost",
+            }
+        ]
+        checks.extend(
+            [
+                self._safety_check(
+                    "context_data",
+                    "Deep Data 完整度（只作 Context）",
+                    context.complete,
+                    len(live_story.market_participation.get("available_sources", [])),
+                    hard=False,
+                ),
+                self._safety_check(
+                    "open_interest",
+                    "Open Interest 可用（本身無多空方向）",
+                    context.open_interest_usd is not None,
+                    context.open_interest_usd,
+                    hard=False,
+                ),
+                self._safety_check(
+                    "execution_depth",
+                    "Order Book 深度足以估算成交",
+                    context.execution_quality_complete,
+                    context.execution_notional_usdt,
+                    hard=False,
+                ),
+            ]
+        )
+
+        updated_state = replace(
+            state,
+            readiness_score=live_story.readiness,
+            status=live_story.stage,
+            passed_conditions=live_story.supporting[:10],
+            missing_conditions=_unique([*live_story.conflicts, *live_story.neutral])[:10],
+            factor_scores={key: float(group["score"]) for key, group in live_story.groups.items()},
+            market_metrics=metrics,
+            evidence_groups=live_story.group_dicts(),
+            timeframe_states=live_story.timeframe_states,
+            supporting_evidence=live_story.supporting,
+            conflicts=live_story.conflicts,
+            neutral_evidence=live_story.neutral,
+            safety_checks=checks,
+            summary=live_story.summary,
+            market_participation=dict(live_story.market_participation),
+            data_quality=dict(live_story.data_quality),
+            market_story=live_story.story_dict(),
+            human_reason=live_story.summary,
+        )
+        if result.signal is None or result.candidate_plan is None:
+            return AnalysisResult(
+                None,
+                result.reason,
+                updated_state,
+                live_story,
+                result.candidate_plan,
+                result.candidate_signal,
+            )
+
+        plan = result.candidate_plan
+        risk_pct = abs(plan.entry - plan.stop) / max(abs(plan.entry), 1e-9) * 100.0
+        quality = execution_quality(
+            live_story,
+            state.spread_pct,
+            risk_pct,
+            plan.rr,
+            context,
+            target_rr=self.config.minimum_rr,
+            max_cost_to_risk_pct=self.config.max_execution_cost_to_risk_pct,
+            max_spread_pct=self.config.max_spread_pct,
+            max_slippage_pct=self.config.max_slippage_pct,
+            estimated_taker_fee_pct=self.config.estimated_taker_fee_pct,
+        )
+        metrics.update(
+            {
+                "execution_quality_score": quality["score"],
+                "execution_quality_label": quality["label"],
+                "estimated_round_trip_cost_pct": quality["estimated_round_trip_cost_pct"],
+                "execution_cost_to_risk_pct": quality["execution_cost_to_risk_pct"],
+            }
+        )
+        checks.extend(
+            [
+                self._safety_check(
+                    "slippage",
+                    "滑價評估（不取消 Radar Trigger）",
+                    quality["recommendation"] != "AVOID_EXECUTION",
+                    max(float(context.buy_slippage_pct or 0.0), float(context.sell_slippage_pct or 0.0)),
+                    hard=False,
+                ),
+                self._safety_check(
+                    "execution_cost",
+                    "Execution Quality（與 Trigger 分離）",
+                    quality["score"] >= 50.0,
+                    quality["score"],
+                    hard=False,
+                ),
+            ]
+        )
+        updated_state = replace(
+            updated_state,
+            market_metrics=metrics,
+            safety_checks=checks,
+            execution_quality=quality,
+            entry_quality=dict(quality.get("entry_location", {})),
+            actionable=live_story.stage in ("EARLY_SIGNAL", "CONFIRMED", "REENTRY"),
+        )
+        signal = replace(
+            result.signal,
+            evidence=live_story.supporting,
+            factor_scores={key: float(group["score"]) for key, group in live_story.groups.items()},
+            market_metrics=metrics,
+            evidence_groups=live_story.group_dicts(),
+            timeframe_states=live_story.timeframe_states,
+            supporting_evidence=live_story.supporting,
+            conflicts=live_story.conflicts,
+            neutral_evidence=live_story.neutral,
+            safety_checks=checks,
+            entry_quality=dict(quality.get("entry_location", {})),
+            summary=live_story.summary,
+            actionable=live_story.stage in ("EARLY_SIGNAL", "CONFIRMED", "REENTRY"),
+            market_participation=dict(live_story.market_participation),
+            execution_quality=quality,
+            data_quality=dict(live_story.data_quality),
+            market_story=live_story.story_dict(),
+        )
+        return AnalysisResult(
+            signal,
+            "qualified",
+            updated_state,
+            live_story,
+            plan,
+            signal,
+        )
+
+    def _apply_legacy_market_context(
         self,
         result: AnalysisResult,
         context: MarketContext,

@@ -101,12 +101,25 @@ class RadarRuntime:
             payload["max_signals"] = self.config.max_signals
             if not actionable:
                 payload["historical_signal_count"] = len(payload.get("signals", []))
+                payload["historical_long_signal_count"] = len(
+                    payload.get("long_signals", [])
+                )
                 payload["signals"] = []
+                payload["long_signals"] = []
                 payload["signals_suppressed_reason"] = system_status
                 payload["safety"]["actionable"] = False
             else:
                 payload["signals_suppressed_reason"] = None
             return payload
+
+    def statistics(self) -> dict[str, Any]:
+        repository = getattr(self.scanner, "repository", None)
+        if repository is None:
+            return {
+                "available": False,
+                "note": "Signal Repository 尚未啟用；禁止顯示假勝率。",
+            }
+        return repository.performance()
 
     def latest_markdown(self) -> str | None:
         with self._state_lock:
@@ -169,6 +182,11 @@ class RadarRuntime:
                     ),
                     actionable=report.status != "DATA_INCOMPLETE",
                     signals=([] if report.status == "DATA_INCOMPLETE" else report.signals),
+                    long_signals=(
+                        []
+                        if report.status == "DATA_INCOMPLETE"
+                        else report.long_signals
+                    ),
                     max_signals=self.config.max_signals,
                 )
                 save_report(report, self.config.data_dir)
@@ -276,16 +294,35 @@ class RadarRuntime:
 
 
 def serve(runtime: RadarRuntime, host: str, port: int) -> None:
-    dashboard_path = Path(__file__).parent / "static" / "pages.html"
+    static_dir = Path(__file__).parent / "static"
+    dashboard_path = static_dir / "pages.html"
     dashboard = dashboard_path.read_bytes()
 
     class Handler(BaseHTTPRequestHandler):
-        server_version = "OKXRadar/2.0"
+        server_version = "OKXRadar/3.3"
 
         def do_GET(self) -> None:  # noqa: N802
             path = urlparse(self.path).path
             if path == "/":
                 self._send_bytes(HTTPStatus.OK, dashboard, "text/html; charset=utf-8")
+            elif path == "/manifest.webmanifest":
+                self._send_bytes(
+                    HTTPStatus.OK,
+                    (static_dir / "manifest.webmanifest").read_bytes(),
+                    "application/manifest+json; charset=utf-8",
+                )
+            elif path == "/service-worker.js":
+                self._send_bytes(
+                    HTTPStatus.OK,
+                    (static_dir / "service-worker.js").read_bytes(),
+                    "application/javascript; charset=utf-8",
+                )
+            elif path == "/radar-icon.svg":
+                self._send_bytes(
+                    HTTPStatus.OK,
+                    (static_dir / "radar-icon.svg").read_bytes(),
+                    "image/svg+xml; charset=utf-8",
+                )
             elif path == "/health":
                 self._send_json(HTTPStatus.OK, {"ok": True, **runtime.status()})
             elif path == "/api/status":
@@ -312,6 +349,8 @@ def serve(runtime: RadarRuntime, host: str, port: int) -> None:
                         markdown.encode("utf-8"),
                         "text/markdown; charset=utf-8",
                     )
+            elif path == "/api/stats":
+                self._send_json(HTTPStatus.OK, runtime.statistics())
             else:
                 self._send_json(HTTPStatus.NOT_FOUND, {"error": "not found"})
 

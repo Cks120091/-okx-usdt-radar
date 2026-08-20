@@ -52,14 +52,59 @@ def early_breakout_candles():
     return output
 
 
+def story_candles(values, step_ms=900_000, quote_volume=200_000):
+    """Closed candles with real price displacement and tight, useful ranges."""
+    output = []
+    for index, close in enumerate(values):
+        previous = values[index - 1] if index else close
+        output.append(
+            Candle(
+                ts=1_700_000_000_000 + index * step_ms,
+                open=previous,
+                high=max(previous, close) + 0.12,
+                low=min(previous, close) - 0.12,
+                close=close,
+                volume=1000,
+                quote_volume=quote_volume * (3.0 if index >= len(values) - 3 else 1.0),
+                confirmed=True,
+            )
+        )
+    return output
+
+
+def valid_breakout_frames(opposed_context=False):
+    base = [100 + math.sin(index * 0.55) * 0.35 for index in range(92)]
+    candles_15m = story_candles(
+        base
+        + [99.95, 100.05, 100.12, 100.20, 100.28, 100.42, 100.72, 101.05]
+    )
+    if opposed_context:
+        candles_1h = story_candles(
+            [110 - index * 0.05 for index in range(100)],
+            3_600_000,
+        )
+        candles_4h = story_candles(
+            [120 - index * 0.09 for index in range(100)],
+            14_400_000,
+        )
+    else:
+        candles_1h = story_candles(
+            [95 + index * 0.05 for index in range(100)],
+            3_600_000,
+        )
+        candles_4h = story_candles(
+            [90 + index * 0.09 for index in range(100)],
+            14_400_000,
+        )
+    return candles_4h, candles_1h, candles_15m
+
+
 class StrategyTests(unittest.TestCase):
     def setUp(self):
         self.instrument = Instrument("TEST-USDT-SWAP", "live", "USDT", "linear", 0.01)
 
     def test_clear_breakout_can_qualify(self):
-        candles_4h = trend_candles(70, 0.4)
-        candles_1h = trend_candles(100, 0.18, breakout=True)
-        candles_15m = trend_candles(110, 0.09, accelerate=True)
+        candles_4h, candles_1h, candles_15m = valid_breakout_frames()
         ticker = Ticker("TEST-USDT-SWAP", candles_15m[-1].close, candles_15m[-1].close - 0.03, candles_15m[-1].close + 0.03, 1)
         engine = AdaptiveStrategyEngine(StrategyConfig(min_quote_volume_24h=1_000_000))
         result = engine.analyze(self.instrument, ticker, candles_4h, candles_1h, candles_15m)
@@ -68,7 +113,10 @@ class StrategyTests(unittest.TestCase):
         self.assertGreaterEqual(result.signal.risk_reward, 1.8)
         self.assertGreaterEqual(len(result.signal.evidence), 2)
         self.assertIsNotNone(result.market_state)
-        self.assertEqual(result.market_state.status, "EARLY_SIGNAL")
+        self.assertEqual(result.market_state.status, "CONFIRMED")
+        self.assertEqual(result.signal.trigger_type, "BREAKOUT")
+        self.assertEqual(result.signal.freshness, "NEW")
+        self.assertEqual(result.signal.radar_horizon, "SHORT")
         self.assertLess(result.market_state.readiness_score, 100.0)
         self.assertEqual(
             set(result.signal.evidence_groups),
@@ -78,6 +126,7 @@ class StrategyTests(unittest.TestCase):
         self.assertIn("tp1_action", result.signal.management_plan)
         metrics = result.market_state.market_metrics
         self.assertEqual(metrics["last_price"], ticker.last)
+        self.assertEqual(metrics["core_timestamp"], candles_15m[-1].ts)
         self.assertIsInstance(metrics["price_change_15m_pct"], float)
         self.assertIsInstance(metrics["price_change_1h_pct"], float)
         self.assertIsInstance(metrics["price_change_24h_pct"], float)
@@ -93,10 +142,10 @@ class StrategyTests(unittest.TestCase):
         self.assertEqual(plan.signal_stage, "EARLY_SIGNAL")
         self.assertEqual(plan.strategy, "早期動能擴張")
 
-    def test_near_higher_timeframe_obstacle_blocks_late_breakout(self):
-        candles_4h = trend_candles(80, 0.4)
-        candles_1h = trend_candles(100, 0.18, breakout=True)
-        candles_15m = trend_candles(110, 0.09, accelerate=True)
+    def test_higher_timeframe_opposition_is_conflict_not_trigger_veto(self):
+        candles_4h, candles_1h, candles_15m = valid_breakout_frames(
+            opposed_context=True
+        )
         ticker = Ticker(
             "TEST-USDT-SWAP",
             candles_15m[-1].close,
@@ -113,8 +162,12 @@ class StrategyTests(unittest.TestCase):
             candles_1h,
             candles_15m,
         )
-        self.assertIsNone(result.signal)
-        self.assertEqual(result.reason, "no_trade_plan")
+        self.assertIsNotNone(result.signal, result.reason)
+        self.assertEqual(result.signal.direction, "LONG")
+        self.assertEqual(result.assessment.direction, "SHORT")
+        self.assertTrue(
+            any("Conflict" in item or "反向" in item for item in result.signal.conflicts)
+        )
 
     def test_low_liquidity_is_rejected(self):
         data = trend_candles(100, 0.1, quote_volume=100)
@@ -126,10 +179,11 @@ class StrategyTests(unittest.TestCase):
         self.assertTrue(result.market_state.missing_conditions)
 
     def test_live_market_context_can_confirm_or_downgrade_signal(self):
-        candles_4h = trend_candles(70, 0.4)
-        candles_1h = trend_candles(100, 0.18, breakout=True)
-        candles_15m = trend_candles(110, 0.09, accelerate=True)
-        candles_5m = trend_candles(118, 0.04, breakout=True)
+        candles_4h, candles_1h, candles_15m = valid_breakout_frames()
+        candles_5m = story_candles(
+            [98 + index * 0.03 for index in range(100)],
+            300_000,
+        )
         ticker = Ticker("TEST-USDT-SWAP", candles_15m[-1].close, candles_15m[-1].close - 0.03, candles_15m[-1].close + 0.03, 1)
         engine = AdaptiveStrategyEngine(StrategyConfig(min_quote_volume_24h=1_000_000))
         technical = engine.analyze(self.instrument, ticker, candles_4h, candles_1h, candles_15m)
@@ -149,14 +203,17 @@ class StrategyTests(unittest.TestCase):
             candles_5m,
             {"score": 72.0, "label": "偏多"},
         )
-        self.assertIsNone(opposed.signal)
-        self.assertEqual(opposed.reason, "major_evidence_conflict")
+        self.assertIsNotNone(opposed.signal)
+        self.assertEqual(opposed.reason, "qualified")
+        self.assertEqual(opposed.signal.market_participation["state"], "CONFLICT")
+        self.assertTrue(opposed.signal.conflicts)
 
     def test_quiet_micro_timeframe_does_not_veto_complete_setup(self):
-        candles_4h = trend_candles(70, 0.4)
-        candles_1h = trend_candles(100, 0.18, breakout=True)
-        candles_15m = trend_candles(110, 0.09, accelerate=True)
-        quiet_5m = trend_candles(118, 0.04)
+        candles_4h, candles_1h, candles_15m = valid_breakout_frames()
+        quiet_5m = story_candles(
+            [100 + math.sin(index * 0.5) * 0.03 for index in range(100)],
+            300_000,
+        )
         ticker = Ticker("TEST-USDT-SWAP", candles_15m[-1].close, candles_15m[-1].close - 0.03, candles_15m[-1].close + 0.03, 1)
         engine = AdaptiveStrategyEngine(StrategyConfig(min_quote_volume_24h=1_000_000))
         technical = engine.analyze(self.instrument, ticker, candles_4h, candles_1h, candles_15m)
@@ -169,16 +226,15 @@ class StrategyTests(unittest.TestCase):
         )
         self.assertIsNotNone(evaluated.signal)
         self.assertEqual(evaluated.reason, "qualified")
-        self.assertIn(
-            evaluated.signal.timeframe_states["5m"]["label"],
-            ("中性", "做多方加速"),
-        )
+        self.assertFalse(evaluated.signal.timeframe_states["5m"]["can_block_trigger"])
+        self.assertIn("micro_acceleration_5m", evaluated.signal.market_metrics)
 
-    def test_execution_cost_can_reject_an_otherwise_valid_signal(self):
-        candles_4h = trend_candles(70, 0.4)
-        candles_1h = trend_candles(100, 0.18, breakout=True)
-        candles_15m = trend_candles(110, 0.09, accelerate=True)
-        candles_5m = trend_candles(118, 0.04, breakout=True)
+    def test_execution_cost_warns_but_does_not_cancel_price_trigger(self):
+        candles_4h, candles_1h, candles_15m = valid_breakout_frames()
+        candles_5m = story_candles(
+            [98 + index * 0.03 for index in range(100)],
+            300_000,
+        )
         ticker = Ticker(
             "TEST-USDT-SWAP",
             candles_15m[-1].close,
@@ -218,17 +274,25 @@ class StrategyTests(unittest.TestCase):
             candles_5m,
             {"score": 72.0, "label": "偏多"},
         )
-        self.assertIsNone(filtered.signal)
-        self.assertEqual(filtered.reason, "execution_cost_too_high")
+        self.assertIsNotNone(filtered.signal)
+        self.assertEqual(filtered.reason, "qualified")
         self.assertGreater(
             filtered.market_state.market_metrics["execution_cost_to_risk_pct"],
             12.0,
         )
+        self.assertIn(
+            filtered.signal.execution_quality["recommendation"],
+            ("CAUTION", "AVOID_EXECUTION"),
+        )
+        execution_check = next(
+            item
+            for item in filtered.signal.safety_checks
+            if item["key"] == "execution_cost"
+        )
+        self.assertFalse(execution_check["hard"])
 
-    def test_low_open_interest_is_a_hard_filter(self):
-        candles_4h = trend_candles(70, 0.4)
-        candles_1h = trend_candles(100, 0.18, breakout=True)
-        candles_15m = trend_candles(110, 0.09, accelerate=True)
+    def test_low_open_interest_is_context_not_a_hard_filter(self):
+        candles_4h, candles_1h, candles_15m = valid_breakout_frames()
         ticker = Ticker("TEST-USDT-SWAP", candles_15m[-1].close, candles_15m[-1].close - 0.03, candles_15m[-1].close + 0.03, 1)
         engine = AdaptiveStrategyEngine(
             StrategyConfig(
@@ -242,9 +306,13 @@ class StrategyTests(unittest.TestCase):
             MarketContext("TEST-USDT-SWAP", 500_000, 0.0001, 0.20, 0.62, 2),
             "LONG",
         )
-        self.assertIsNone(filtered.signal)
-        self.assertEqual(filtered.reason, "open_interest_too_low")
-        self.assertEqual(filtered.market_state.status, "FILTERED")
+        self.assertIsNotNone(filtered.signal)
+        self.assertEqual(filtered.reason, "qualified")
+        self.assertNotEqual(filtered.market_state.status, "FILTERED")
+        self.assertEqual(
+            filtered.signal.market_metrics["open_interest_usd"],
+            500_000,
+        )
 
     def test_unconfirmed_or_short_history_is_rejected(self):
         data = trend_candles(100, 0.1, count=59)

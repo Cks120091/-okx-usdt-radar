@@ -5,11 +5,13 @@ from pathlib import Path
 from radar.config import AppConfig
 
 
-class V2ContractTests(unittest.TestCase):
-    def test_v2_defaults_and_limits(self):
+class V33ContractTests(unittest.TestCase):
+    def test_v33_defaults_and_limits(self):
         config = AppConfig.load()
         self.assertEqual(config.max_signals, 20)
         self.assertEqual(config.context_candidates, 100)
+        self.assertEqual(config.candle_limit_1d, 200)
+        self.assertEqual(config.universe_max_spread_pct, 1.0)
         self.assertEqual(config.stale_after_seconds, 1800)
         self.assertFalse(config.require_micro_volume_anomaly)
         with tempfile.TemporaryDirectory() as directory:
@@ -28,6 +30,11 @@ class V2ContractTests(unittest.TestCase):
         self.assertIn("立即掃描現在市場", html)
         self.assertIn("早期訊號", html)
         self.assertIn("完整確認", html)
+        self.assertIn("短線訊號", html)
+        self.assertIn("長線訊號", html)
+        self.assertIn("真實歷史績效", html)
+        self.assertIn("manifest.webmanifest", html)
+        self.assertIn("serviceWorker.register", html)
         self.assertIn("資料已過期，禁止依此進場", html)
         self.assertIn("overflow-x:hidden", html)
         self.assertIn("env(safe-area-inset-bottom)", html)
@@ -43,6 +50,16 @@ class V2ContractTests(unittest.TestCase):
         self.assertIn("TradingView 圖表", html)
         self.assertIn("搜尋幣種，例如 BTC、SNDK", html)
         self.assertIn("renderOverviewUnavailable", html)
+
+    def test_pwa_never_caches_live_market_api(self):
+        root = Path(__file__).parents[1] / "radar" / "static"
+        worker = (root / "service-worker.js").read_text(encoding="utf-8")
+        manifest = (root / "manifest.webmanifest").read_text(encoding="utf-8")
+        self.assertIn("/api/", worker)
+        self.assertIn('fetch(event.request, {cache: "no-store"})', worker)
+        shell_assets = worker.split("SHELL_ASSETS", 1)[1].split("];", 1)[0]
+        self.assertNotIn("/api/", shell_assets)
+        self.assertIn('"display": "standalone"', manifest)
 
     def test_github_actions_contains_no_market_schedule_or_scan(self):
         root = Path(__file__).parents[1]

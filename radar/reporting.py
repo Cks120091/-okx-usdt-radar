@@ -25,6 +25,7 @@ def report_markdown(report: RadarReport) -> str:
     status_names = {
         "SIGNALS_FOUND": "資料最新",
         "NO_QUALIFIED_SIGNAL": "資料最新／沒有合格訊號",
+        "PARTIAL_DATA": "資料最新／部分標的核心資料缺失",
         "DATA_INCOMPLETE": "掃描異常／資料不完整",
     }
     direction_names = {"LONG": "做多", "SHORT": "做空", "NEUTRAL": "中性"}
@@ -32,6 +33,11 @@ def report_markdown(report: RadarReport) -> str:
         "EARLY": "早期訊號",
         "EARLY_SIGNAL": "早期訊號",
         "CONFIRMED": "完整確認",
+        "TRENDING": "趨勢進行中",
+        "REENTRY": "回踩再發動",
+        "EXTENDED": "已延伸",
+        "NO_FOLLOW_THROUGH": "未獲延續",
+        "INVALIDATED": "訊號失效",
     }
     lines = [
         "# OKX USDT 永續雷達",
@@ -52,7 +58,7 @@ def report_markdown(report: RadarReport) -> str:
         lines.append("本輪依規則不提供多空或進場訊號。")
         return "\n".join(lines)
     if not report.signals:
-        lines.extend(["本輪沒有符合位置、證據與成交成本的進場訊號。", ""])
+        lines.extend(["短線目前無新鮮進場訊號；系統不為湊數降低 Trigger 標準。", ""])
     else:
         lines.extend(["## 進場訊號", ""])
         for index, signal in enumerate(report.signals, 1):
@@ -62,7 +68,9 @@ def report_markdown(report: RadarReport) -> str:
                     "",
                     f"- 策略：{signal.strategy}（{signal.regime}）",
                     f"- 階段：{stage_names.get(signal.signal_stage, signal.signal_stage)}",
-                    f"- 準備度：{signal.readiness_score}%",
+                    f"- 新鮮度：{signal.freshness}",
+                    f"- Trigger 類型：{signal.trigger_type}",
+                    f"- 證據一致度（非勝率）：{signal.readiness_score}%",
                     f"- 說明：{signal.summary}",
                     f"- 趨勢力度：{signal.trend_strength_label}（{signal.trend_strength_score}）",
                     f"- 分數：{signal.score}",
@@ -70,8 +78,25 @@ def report_markdown(report: RadarReport) -> str:
                     f"- 止損：{signal.stop_loss}",
                     f"- TP1 / TP2：{signal.take_profit_1} / {signal.take_profit_2}",
                     f"- 風報比：{signal.risk_reward}",
+                    f"- 交易品質（非勝率）：{signal.execution_quality.get('score', '—')}%",
+                    f"- 市場參與：{signal.market_participation.get('label', '資料暫缺')}",
                     f"- 失效條件：{signal.invalidation}",
                     "- 證據：" + "；".join(signal.evidence),
+                    "",
+                ]
+            )
+    if report.long_signals:
+        lines.extend(["## 波段／長線雷達", ""])
+        for index, signal in enumerate(report.long_signals, 1):
+            lines.extend(
+                [
+                    f"### {index}. {signal.inst_id} — {direction_names.get(signal.direction, '中性')}",
+                    "",
+                    f"- Trigger：4H {stage_names.get(signal.signal_stage, signal.signal_stage)}",
+                    f"- 類型：{signal.trigger_type}",
+                    f"- 新鮮度：{signal.freshness}",
+                    f"- 說明：{signal.summary}",
+                    f"- 交易品質（非勝率）：{signal.execution_quality.get('score', '—')}%",
                     "",
                 ]
             )
@@ -89,7 +114,22 @@ def report_markdown(report: RadarReport) -> str:
                     "",
                 ]
             )
-    lines.append("分析用途，不保證獲利；單筆最大風險建議不超過帳戶 1%。")
+    performance = report.historical_performance.get("overall", {})
+    if performance.get("sample_size", 0):
+        lines.extend(
+            [
+                "## 真實歷史績效",
+                "",
+                f"- 樣本：n={performance['sample_size']}",
+                f"- 勝率：{performance['win_rate_pct']}%",
+                f"- 平均 R / Expectancy：{performance['average_r']} / {performance['expectancy_r']}",
+                f"- Profit Factor：{performance['profit_factor']}",
+                "",
+            ]
+        )
+    else:
+        lines.extend(["歷史樣本尚不足，因此不顯示假勝率。", ""])
+    lines.append("分析用途，不保證獲利；Radar Signal 與是否實際下單完全分離。")
     return "\n".join(lines)
 
 
