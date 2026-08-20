@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import inspect
 import math
+import threading
 import time
 import uuid
 from collections import Counter
@@ -40,7 +41,7 @@ class PublicDataClient(Protocol):
 class ScannerConfig:
     max_signals: int = 20
     max_watchlist: int = 20
-    workers: int = 8
+    workers: int = 12
     candle_limit: int = 100
     candle_limit_1d: int = 200
     candle_limit_4h: int = 200
@@ -72,12 +73,20 @@ PreviewCallback = Callable[[RadarReport], None]
 
 class MarketScanner:
     bars = ("1D", "4H", "1H", "15m")
+    short_bars = ("4H", "1H", "15m")
+    _bar_interval_ms = {
+        "1D": 86_400_000,
+        "4H": 14_400_000,
+        "1H": 3_600_000,
+    }
 
     def __init__(self, client: PublicDataClient, config: ScannerConfig | None = None):
         self.client = client
         self.config = config or ScannerConfig()
         self._previous_open_interest_usd = dict(self.config.previous_open_interest_usd)
         self._signal_history: dict[tuple[str, str], dict[str, str]] = {}
+        self._candle_cache: dict[tuple[str, str], list[Candle]] = {}
+        self._candle_cache_lock = threading.Lock()
         self.repository = SignalRepository(
             self.config.state_db_path,
             self.config.early_signal_max_age_bars,
@@ -161,19 +170,26 @@ class MarketScanner:
             "CANDLES",
             0,
             len(eligible),
-            "正在取得 1D／4H／1H／15m 已收盤 K 線",
+            "正在取得 4H／1H／15m 已收盤 K 線",
         )
         bundles: dict[str, dict[str, list[Candle]]] = {}
         with ThreadPoolExecutor(max_workers=max(1, self.config.workers)) as executor:
             future_map = {
-                executor.submit(self._fetch_bundle, item.inst_id): item.inst_id
+                executor.submit(
+                    self._fetch_bundle,
+                    item.inst_id,
+                    self.short_bars,
+                ): item.inst_id
                 for item in eligible
             }
             for completed, future in enumerate(as_completed(future_map), 1):
                 inst_id = future_map[future]
                 try:
                     bundle = future.result()
-                    if not all(len(bundle.get(bar, [])) >= 60 for bar in self.bars):
+                    if not all(
+                        len(bundle.get(bar, [])) >= 60
+                        for bar in self.short_bars
+                    ):
                         raise RuntimeError("核心 K 線少於 60 根")
                     bundles[inst_id] = bundle
                 except Exception as exc:
@@ -212,9 +228,14 @@ class MarketScanner:
             )
 
         short_results: dict[str, AnalysisResult] = {}
-        long_results: dict[str, AnalysisResult] = {}
         analysis_failures: dict[str, str] = {}
-        self._progress(progress, "ANALYSIS", 0, len(bundles), "正在建立 Market Story 與價格 Trigger")
+        self._progress(
+            progress,
+            "ANALYSIS",
+            0,
+            len(bundles),
+            "正在建立 15m Market Story 與價格 Trigger",
+        )
         for index, (inst_id, bundle) in enumerate(sorted(bundles.items()), 1):
             try:
                 short_results[inst_id] = self._analyze_short_v33(
@@ -224,47 +245,12 @@ class MarketScanner:
                 )
             except Exception as exc:
                 analysis_failures[f"{inst_id}:SHORT"] = f"短線分析錯誤：{exc}"
-            try:
-                long_result = self._analyze_long_v33(
-                    instrument_map[inst_id],
-                    tickers[inst_id],
-                    bundle,
-                )
-                if long_result is not None:
-                    long_results[inst_id] = long_result
-            except Exception as exc:
-                analysis_failures[f"{inst_id}:LONG"] = f"長線分析錯誤：{exc}"
             self._progress(
                 progress,
                 "ANALYSIS",
                 index,
                 len(bundles),
-                "短線 15m Trigger 與長線 4H Trigger 分開判定",
-            )
-
-        if not short_results and not long_results:
-            completed_at = datetime.now(timezone.utc).isoformat()
-            return RadarReport(
-                status="DATA_INCOMPLETE",
-                generated_at=completed_at,
-                scope=scope,
-                target_count=len(instruments),
-                fetched_count=len(bundles),
-                analyzable_count=0,
-                coverage_pct=round(len(bundles) / len(instruments) * 100.0, 3),
-                target_instruments=target_ids,
-                failed_instruments={**dict(sorted(failures.items())), **analysis_failures},
-                signals=[],
-                exclusion_counts={},
-                duration_seconds=round(time.monotonic() - started, 3),
-                message="核心資料已取得，但 Market Story Engine 無法完成任何標的。",
-                scan_id=scan_id,
-                scan_started_at=scan_started_at,
-                completed_at=completed_at,
-                runtime_status="ERROR",
-                actionable=False,
-                max_signals=min(max(self.config.max_signals, 0), 20),
-                data_quality={"core": "ANALYSIS_FAILED", "no_fake_fallback": True},
+                "正在判定短線 15m Trigger",
             )
 
         market_bias = self._calculate_market_bias(short_results)
@@ -283,6 +269,107 @@ class MarketScanner:
                     short_results=short_results,
                     market_bias=market_bias,
                 )
+            )
+
+        long_results: dict[str, AnalysisResult] = {}
+        if callable(getattr(self.engine, "analyze_long", None)):
+            self._progress(
+                progress,
+                "LONG_CANDLES",
+                0,
+                len(bundles),
+                "15m 已發布；正在補 1D 與長線雷達",
+            )
+            with ThreadPoolExecutor(
+                max_workers=max(1, self.config.workers)
+            ) as executor:
+                future_map = {
+                    executor.submit(
+                        self._fetch_bundle,
+                        inst_id,
+                        ("1D",),
+                    ): inst_id
+                    for inst_id in bundles
+                }
+                for completed, future in enumerate(as_completed(future_map), 1):
+                    inst_id = future_map[future]
+                    try:
+                        daily = future.result().get("1D", [])
+                        if len(daily) < 60:
+                            raise RuntimeError("1D K 線少於 60 根")
+                        bundles[inst_id]["1D"] = daily
+                    except Exception as exc:
+                        analysis_failures[f"{inst_id}:LONG"] = (
+                            f"長線 1D 取得錯誤：{exc}"
+                        )
+                    self._progress(
+                        progress,
+                        "LONG_CANDLES",
+                        completed,
+                        len(bundles),
+                        "15m 已發布；正在補 1D 資料",
+                    )
+
+            long_ready = [
+                inst_id for inst_id, bundle in bundles.items() if "1D" in bundle
+            ]
+            self._progress(
+                progress,
+                "LONG_ANALYSIS",
+                0,
+                len(long_ready),
+                "正在判定長線 4H Trigger",
+            )
+            for index, inst_id in enumerate(sorted(long_ready), 1):
+                try:
+                    long_result = self._analyze_long_v33(
+                        instrument_map[inst_id],
+                        tickers[inst_id],
+                        bundles[inst_id],
+                    )
+                    if long_result is not None:
+                        long_results[inst_id] = long_result
+                except Exception as exc:
+                    analysis_failures[f"{inst_id}:LONG"] = (
+                        f"長線分析錯誤：{exc}"
+                    )
+                self._progress(
+                    progress,
+                    "LONG_ANALYSIS",
+                    index,
+                    len(long_ready),
+                    "15m 已發布；長線 4H Trigger 分析中",
+                )
+
+        if not short_results and not long_results:
+            completed_at = datetime.now(timezone.utc).isoformat()
+            return RadarReport(
+                status="DATA_INCOMPLETE",
+                generated_at=completed_at,
+                scope=scope,
+                target_count=len(instruments),
+                fetched_count=len(bundles),
+                analyzable_count=0,
+                coverage_pct=round(len(bundles) / len(instruments) * 100.0, 3),
+                target_instruments=target_ids,
+                failed_instruments={
+                    **dict(sorted(failures.items())),
+                    **analysis_failures,
+                },
+                signals=[],
+                exclusion_counts={},
+                duration_seconds=round(time.monotonic() - started, 3),
+                message="核心資料已取得，但 Market Story Engine 無法完成任何標的。",
+                scan_id=scan_id,
+                scan_started_at=scan_started_at,
+                completed_at=completed_at,
+                runtime_status="ERROR",
+                actionable=False,
+                max_signals=min(max(self.config.max_signals, 0), 20),
+                data_quality={
+                    "core": "ANALYSIS_FAILED",
+                    "no_fake_fallback": True,
+                },
             )
         context_failures: dict[str, list[str]] = {}
         open_interest: dict[str, float] = {}
@@ -558,7 +645,11 @@ class MarketScanner:
             "no_fake_fallback": True,
         }
         historical = self.repository.performance()
-        early_short = sum(item.signal_stage == "EARLY_SIGNAL" for item in short_signals)
+        early_short = sum(
+            item.signal_stage == "EARLY_SIGNAL"
+            and item.entry_eligibility.get("status") == "ENTRY_READY"
+            for item in short_signals
+        )
         ready_short = sum(
             item.entry_eligibility.get("status") == "ENTRY_READY"
             for item in short_signals
@@ -572,7 +663,7 @@ class MarketScanner:
             for item in short_signals
         )
         message = (
-            f"掃描完成：15m 早期 {early_short}、目前可進 {ready_short}、"
+            f"掃描完成：15m 早期可進 {early_short}、目前可進 {ready_short}、"
             f"等待回踩 {wait_short}、已錯過 {missed_short}；長線 {len(long_signals)}。"
             if short_signals or long_signals
             else "掃描完成：目前無新鮮進場訊號；系統未為湊數降低 Trigger 標準。"
@@ -646,9 +737,16 @@ class MarketScanner:
         """Publish closed-candle 15m decisions before optional deep enrichment."""
 
         exclusion_counts: Counter[str] = Counter()
-        short_states, short_signals = self._collect_results(
+        generated_at = datetime.now(timezone.utc).isoformat()
+        short_states, raw_short_signals = self._collect_results(
             short_results,
             exclusion_counts,
+        )
+        short_signals = self.repository.reconcile(
+            raw_short_signals,
+            short_states,
+            generated_at,
+            "SHORT",
         )
         short_signals = [
             _without_internal_metrics(self._refresh_entry_eligibility(item))
@@ -662,14 +760,15 @@ class MarketScanner:
         )[: min(max(self.config.max_signals, 0), 20)]
         short_watchlist = self._watchlist(short_states)
         short_states.sort(key=lambda item: item.inst_id)
-        generated_at = datetime.now(timezone.utc).isoformat()
         all_failures = {
             **dict(sorted(failures.items())),
             **dict(sorted(analysis_failures.items())),
         }
         coverage = round(len(bundles) / len(instruments) * 100.0, 4)
         early_count = sum(
-            item.signal_stage == "EARLY_SIGNAL" for item in short_signals
+            item.signal_stage == "EARLY_SIGNAL"
+            and item.entry_eligibility.get("status") == "ENTRY_READY"
+            for item in short_signals
         )
         ready_count = sum(
             item.entry_eligibility.get("status") == "ENTRY_READY"
@@ -697,7 +796,7 @@ class MarketScanner:
             exclusion_counts=dict(exclusion_counts.most_common()),
             duration_seconds=round(time.monotonic() - started, 3),
             message=(
-                f"15m 核心結果已先發布：早期 {early_count}、目前可進 {ready_count}、"
+                f"15m 核心結果已先發布：早期可進 {early_count}、目前可進 {ready_count}、"
                 f"等待回踩 {wait_count}、已錯過 {missed_count}；"
                 "正在補 Funding、OI、Order Book 與長線結果。"
             ),
@@ -1646,14 +1745,55 @@ class MarketScanner:
             "sample_count": len(directional),
         }
 
-    def _fetch_bundle(self, inst_id: str) -> dict[str, list[Candle]]:
+    def _fetch_bundle(
+        self,
+        inst_id: str,
+        bars: tuple[str, ...] | None = None,
+    ) -> dict[str, list[Candle]]:
         output: dict[str, list[Candle]] = {}
-        for bar in self.bars:
+        for bar in bars or self.bars:
             try:
-                output[bar] = self.client.get_candles(inst_id, bar, self._bar_limit(bar))
+                output[bar] = self._cached_or_fresh_candles(inst_id, bar)
             except Exception as exc:
                 raise RuntimeError(f"{bar} K 線取得失敗：{exc}") from exc
         return output
+
+    def _cached_or_fresh_candles(
+        self,
+        inst_id: str,
+        bar: str,
+    ) -> list[Candle]:
+        cache_key = (inst_id, bar)
+        if bar in self._bar_interval_ms:
+            with self._candle_cache_lock:
+                cached = self._candle_cache.get(cache_key)
+            if cached is not None and self._cache_covers_current_bar(cached, bar):
+                return list(cached)
+
+        candles = self.client.get_candles(
+            inst_id,
+            bar,
+            self._bar_limit(bar),
+        )
+        if bar in self._bar_interval_ms and len(candles) >= 60:
+            with self._candle_cache_lock:
+                self._candle_cache[cache_key] = list(candles)
+        return candles
+
+    def _cache_covers_current_bar(
+        self,
+        candles: list[Candle],
+        bar: str,
+    ) -> bool:
+        """Reuse HTF data only until the next candle should have closed."""
+
+        interval_ms = self._bar_interval_ms.get(bar)
+        if not candles or interval_ms is None or not candles[-1].confirmed:
+            return False
+        last_open_ts = int(candles[-1].ts)
+        if last_open_ts < 1_000_000_000_000:
+            return False
+        return int(time.time() * 1000) < last_open_ts + (interval_ms * 2)
 
     def _bar_limit(self, bar: str) -> int:
         return {

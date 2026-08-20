@@ -14,7 +14,7 @@ class AppConfig:
     data_dir: str = "data"
     max_signals: int = 20
     max_watchlist: int = 20
-    workers: int = 8
+    workers: int = 12
     candle_limit: int = 100
     candle_limit_1d: int = 200
     candle_limit_4h: int = 200
@@ -23,7 +23,7 @@ class AppConfig:
     candle_limit_5m: int = 120
     request_timeout_seconds: float = 12.0
     request_retries: int = 3
-    rate_limit_requests_per_2s: int = 18
+    rate_limit_requests_per_2s: int = 36
     min_quote_volume_24h: float = 5_000_000.0
     max_spread_pct: float = 0.10
     universe_max_spread_pct: float = 1.00

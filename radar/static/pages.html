@@ -149,7 +149,7 @@
       <div id="fifteenAllBox"><div class="empty">等待最新掃描。</div></div>
     </section>
     <section id="earlySignals" class="section">
-      <div class="section-title"><h2>15m 早期訊號</h2><span>觸發後 3 根 K 內 · 不代表可以追價</span></div>
+      <div class="section-title"><h2>15m 早期可進</h2><span>剛觸發且仍在合理區 · 走遠自動移出</span></div>
       <div id="earlySignalsBox"><div class="empty">等待最新掃描。</div></div>
     </section>
     <section id="signals" class="section">
@@ -270,7 +270,7 @@
 
     function renderReport(report){
       state.report=report;const preview=report.runtime_status==='CORE_PREVIEW',actionable=report.actionable===true&&(report.runtime_status==='FRESH'||preview);
-      const shortSignals=report.signals||[],ready=shortSignals.filter(x=>x.entry_eligibility?.status==='ENTRY_READY'),early=shortSignals.filter(x=>x.signal_stage==='EARLY_SIGNAL'),waiting=shortSignals.filter(x=>x.entry_eligibility?.status==='WAIT_RETEST'),missed=shortSignals.filter(x=>x.entry_eligibility?.status==='MISSED_ENTRY');
+      const shortSignals=report.signals||[],ready=shortSignals.filter(x=>x.entry_eligibility?.status==='ENTRY_READY'),early=shortSignals.filter(x=>x.signal_stage==='EARLY_SIGNAL'&&x.entry_eligibility?.status==='ENTRY_READY'),waiting=shortSignals.filter(x=>x.entry_eligibility?.status==='WAIT_RETEST'),missed=shortSignals.filter(x=>x.entry_eligibility?.status==='MISSED_ENTRY');
       const entryPriority={ENTRY_READY:3,WAIT_RETEST:2,MISSED_ENTRY:1};const allShort=[...shortSignals].sort((a,b)=>(entryPriority[b.entry_eligibility?.status]||0)-(entryPriority[a.entry_eligibility?.status]||0)||(Number(b.execution_quality?.score)||0)-(Number(a.execution_quality?.score)||0));
       $('#updatedAt').textContent=taiwanTime(report.completed_at||report.generated_at);
       $('#signalCount').textContent=`${actionable?ready.length:0} / ${num(report.max_signals||20,0)}`;
@@ -279,7 +279,7 @@
       const bias=report.market_bias||{};$('#marketBias').textContent=`${esc(bias.label||'中性')} ${num(bias.score,0)}`;
       $('#contextCount').textContent=`${num(report.context_enriched_count,0)} / ${num(report.context_target_count,0)}`;
       if(!actionable){renderUnavailable(report.runtime_status==='SCANNING'?'正在掃描最新市場，舊正式訊號已暫停使用。':report.runtime_status==='STALE'?'資料已過期，禁止依此進場。':'最新掃描異常，目前沒有可使用的正式訊號。')}
-      else{renderSignals(allShort,'#fifteenAllBox','本輪沒有 15m 正式訊號。');renderSignals(early,'#earlySignalsBox','本輪沒有 3 根 15m K 內的早期訊號。');renderSignals(ready,'#signalsBox','目前沒有仍在合理進場區的訊號。');renderSignals(waiting,'#waitRetestBox','目前沒有等待回踩的訊號。');renderSignals(missed,'#missedSignalsBox','目前沒有已錯過的訊號。');renderSignals(report.long_signals||[],'#longSignalsBox',preview?'15m 核心結果已先發布；長線與深度資料補充中。':'目前沒有長線訊號。');renderOverview({...report,signals:ready});if(preview){$('#scanNotice').classList.add('show');$('#scanMessage').textContent='15m 核心結果已發布；正在補 Funding、OI、Order Book 與長線資料'}}
+      else{renderSignals(allShort,'#fifteenAllBox','本輪沒有 15m 正式訊號。');renderSignals(early,'#earlySignalsBox','本輪沒有剛觸發且仍在合理進場區的早期訊號。');renderSignals(ready,'#signalsBox','目前沒有仍在合理進場區的訊號。');renderSignals(waiting,'#waitRetestBox','目前沒有等待回踩的訊號。');renderSignals(missed,'#missedSignalsBox','目前沒有已錯過的訊號。');renderSignals(report.long_signals||[],'#longSignalsBox',preview?'15m 核心結果已先發布；長線與深度資料補充中。':'目前沒有長線訊號。');renderOverview({...report,signals:ready});if(preview){$('#scanNotice').classList.add('show');$('#scanMessage').textContent='15m 核心結果已發布；正在補 Funding、OI、Order Book 與長線資料'}}
       renderWatchlist(report.watchlist||[],'#watchBox');renderWatchlist(report.long_watchlist||[],'#longWatchBox');renderMap(report.market_map||[],$('#mapSearch').value);renderFavorites();renderStats(report.historical_performance||{});
     }
 

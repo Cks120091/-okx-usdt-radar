@@ -133,6 +133,34 @@ class SignalRepositoryTests(unittest.TestCase):
         ).fetchone()[0]
         self.assertEqual(count, 1)
 
+    def test_same_core_snapshot_does_not_advance_lifecycle_twice(self):
+        event_ts = 1_700_000_000_000
+        core_ts = event_ts + 3 * 900_000
+        raw = replace(
+            signal_fixture(event_ts=event_ts, core_timestamp=core_ts),
+            signal_stage="EXTENDED",
+            freshness="EXTENDED",
+        )
+        state = state_fixture(raw, core_ts)
+
+        first = self.repository.reconcile(
+            [raw],
+            [state],
+            "2026-08-20T00:45:00+00:00",
+            "SHORT",
+        )[0]
+        second = self.repository.reconcile(
+            [raw],
+            [state],
+            "2026-08-20T00:45:01+00:00",
+            "SHORT",
+        )[0]
+
+        self.assertEqual(first.trigger_id, second.trigger_id)
+        self.assertEqual(second.signal_stage, "EXTENDED")
+        self.assertEqual(second.freshness, "EXTENDED")
+        self.assertEqual(second.lifecycle["transition"], "UNCHANGED")
+
     def test_no_follow_through_is_a_lifecycle_state_not_a_new_signal(self):
         raw = signal_fixture()
         first = self.repository.reconcile(

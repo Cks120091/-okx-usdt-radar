@@ -5,6 +5,7 @@ from unittest.mock import patch
 from radar.market_story import (
     DynamicZone,
     MarketStoryEngine,
+    _momentum_confirmation,
     _price_acceptance,
     _trigger_candidate,
 )
@@ -17,14 +18,14 @@ class MarketStoryV33Tests(unittest.TestCase):
     def setUp(self):
         self.engine = MarketStoryEngine()
 
-    def test_price_acceptance_and_control_transfer_create_formal_breakout(self):
+    def test_price_acceptance_preserves_breakout_but_blocks_late_entry(self):
         candles_4h, candles_1h, candles_15m = valid_breakout_frames()
         story = self.engine.analyze_short(candles_4h, candles_1h, candles_15m)
 
         self.assertTrue(story.triggered)
         self.assertEqual(story.trigger_type, "BREAKOUT")
-        self.assertEqual(story.stage, "CONFIRMED")
-        self.assertEqual(story.freshness, "NEW")
+        self.assertEqual(story.stage, "EXTENDED")
+        self.assertEqual(story.freshness, "EXTENDED")
         self.assertEqual(story.price_acceptance["state"], "ACCEPTED")
         self.assertTrue(story.control_transfer["transferred"])
         self.assertTrue(story.control_transfer["push_away"])
@@ -37,6 +38,49 @@ class MarketStoryV33Tests(unittest.TestCase):
         self.assertTrue(story.attack_waves["BEAR"])
         self.assertTrue(any(value for value in story.zones.values()))
         self.assertTrue(story.data_quality["closed_candle"])
+        self.assertGreater(story.trigger["entry_extension_atr"], 0.50)
+        self.assertGreater(story.event_age_bars, 0)
+
+    def test_momentum_event_index_stays_at_onset_instead_of_latest_bar(self):
+        values = [100.0] * 90 + [
+            99.8,
+            99.7,
+            100.0,
+            100.4,
+            100.8,
+            101.0,
+            101.1,
+            101.2,
+            101.3,
+            101.4,
+        ]
+        candles = story_candles(values)
+
+        momentum = _momentum_confirmation(candles, "LONG", 6)
+
+        self.assertTrue(momentum["confirmed"])
+        self.assertEqual(momentum["event_index"], 94)
+        self.assertLess(momentum["event_index"], len(candles) - 1)
+
+    def test_gentle_reactivation_can_still_be_an_early_signal(self):
+        base = [100 + math.sin(index * 0.55) * 0.10 for index in range(98)]
+        start = base[-1]
+        story = self.engine.analyze_short(
+            story_candles(
+                [90 + index * 0.09 for index in range(100)],
+                14_400_000,
+            ),
+            story_candles(
+                [95 + index * 0.05 for index in range(100)],
+                3_600_000,
+            ),
+            story_candles(base + [start + 0.06, start + 0.12]),
+        )
+
+        self.assertTrue(story.triggered)
+        self.assertEqual(story.trigger_type, "CONTINUATION")
+        self.assertEqual(story.stage, "EARLY_SIGNAL")
+        self.assertLessEqual(story.trigger["entry_extension_atr"], 0.50)
 
     def test_role_reversal_retest_requires_a_later_closed_bar(self):
         zone = DynamicZone(

@@ -84,7 +84,7 @@ SQLite 以 Event Key 鎖定同一個 Trigger，避免每次掃描重發：
 - `NO_FOLLOW_THROUGH`：觸發後沒有跟進
 - `INVALIDATED`：價格已破壞原故事
 
-第一個 `CONTINUATION` 事件是 `EARLY_SIGNAL`；只有同方向已有未失效的 active event，後續 continuation 才是 `REENTRY`。早期訊號保留 age 0、1、2 共三根已收盤 15m K，不會因頁面重新整理而重發或消失。
+第一個 `CONTINUATION` 事件是 `EARLY_SIGNAL`；只有同方向已有未失效的 active event，後續 continuation 才是 `REENTRY`。事件 age 從價格／動能開始反應的第一根 K 計算，不會因為後續 MA／MACD 仍然同向就每輪重置成 age 0。age 0、1、2 最多保留三根已收盤 15m K；若價格已從 Entry 結構或近期防守點推離超過 0.50 ATR，會立即轉為 `EXTENDED`，不再冒充早期訊號。
 
 Trigger 是否存在與「現在是否適合進場」分開顯示：
 
@@ -122,7 +122,7 @@ Trigger 是否存在與「現在是否適合進場」分開顯示：
 
 首頁以手機直式為優先，提供：
 
-- 15m 早期、目前可進、等待回踩、已錯過、長線與接近觸發分頁
+- 15m 早期可進、目前可進、等待回踩、已錯過、長線與接近觸發分頁
 - 新鮮度、Lifecycle、價格位置、攻擊效率、Price Acceptance、控制權、市場參與、執行品質與資料品質
 - 原始指標摺疊區、全市場搜尋、收藏與 TradingView 快捷連結
 - 真實歷史統計分頁
@@ -138,7 +138,7 @@ Trigger 是否存在與「現在是否適合進場」分開顯示：
 - `GET /api/report/latest.md`：中文文字報告
 - `GET /api/stats`：SQLite 真實樣本統計
 
-`BOOTING`、`SCANNING`、`FRESH`、`STALE`、`ERROR` 為 Runtime 狀態。掃描期間舊正式訊號會被遮蔽，但已完成的 closed-candle 15m 核心結果會由 `CORE_PREVIEW` 獨立發布。超過 `stale_after_seconds` 或最新完整掃描失敗時，正式訊號仍會清空並設 `actionable=false`。服務啟動會先還原 `data/latest.json`，首頁有新鮮報告時不強制重掃。
+`BOOTING`、`SCANNING`、`FRESH`、`STALE`、`ERROR` 為 Runtime 狀態。掃描期間舊正式訊號會被遮蔽，但 4H／1H／15m 短線核心分析完成後會立即由 `CORE_PREVIEW` 發布，1D、長線與 Deep Data 改為同輪後補。尚未換 K 的 1D／4H／1H 會安全重用，15m 每輪重抓。超過 `stale_after_seconds` 或最新完整掃描失敗時，正式訊號仍會清空並設 `actionable=false`。服務啟動會先還原 `data/latest.json`，首頁有新鮮報告時不強制重掃。
 
 ## 設定
 
@@ -147,6 +147,8 @@ Trigger 是否存在與「現在是否適合進場」分開顯示：
 | `max_signals` | 20 | 每個雷達的訊號硬上限 |
 | `max_watchlist` | 20 | 每個雷達的 Watchlist 上限 |
 | `context_candidates` | 100 | Deep Data 壓力測試上限 |
+| `workers` | 12 | 全市場 K 線併發工作數 |
+| `rate_limit_requests_per_2s` | 36 | K 線端點限流；其他公開端點仍保持每 2 秒 18 次的保守上限 |
 | `candle_limit_1d` | 200 | 1D 已收盤 K 線 |
 | `candle_limit_4h` | 200 | 4H 已收盤 K 線 |
 | `candle_limit_1h` | 240 | 1H 已收盤 K 線 |

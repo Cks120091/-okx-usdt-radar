@@ -49,13 +49,20 @@ class OKXPublicClient:
         base_url: str = "https://www.okx.com",
         timeout_seconds: float = 12.0,
         retries: int = 3,
-        rate_limit_requests: int = 18,
+        rate_limit_requests: int = 36,
         execution_notional_usdt: float = 1_000.0,
     ):
         self.base_url = base_url.rstrip("/")
         self.timeout_seconds = timeout_seconds
         self.retries = retries
-        self.rate_limiter = SlidingWindowRateLimiter(rate_limit_requests, 2.0)
+        self.rate_limiter = SlidingWindowRateLimiter(
+            min(rate_limit_requests, 18),
+            2.0,
+        )
+        self.candle_rate_limiter = SlidingWindowRateLimiter(
+            rate_limit_requests,
+            2.0,
+        )
         self.execution_notional_usdt = max(0.0, execution_notional_usdt)
         self._instrument_meta: dict[str, Instrument] = {}
         self._open_interest_timestamps: dict[str, int] = {}
@@ -117,7 +124,12 @@ class OKXPublicClient:
                     return deepcopy(cached[1])
         last_error: Exception | None = None
         for attempt in range(self.retries + 1):
-            self.rate_limiter.acquire()
+            limiter = (
+                self.candle_rate_limiter
+                if path == "/api/v5/market/candles"
+                else self.rate_limiter
+            )
+            limiter.acquire()
             request_started = time.monotonic()
             self._metric("requests", endpoint=path)
             request = Request(

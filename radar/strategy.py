@@ -75,7 +75,10 @@ class AdaptiveStrategyEngine:
 
     def __init__(self, config: StrategyConfig | None = None):
         self.config = config or StrategyConfig()
-        self.story_engine = MarketStoryEngine(self.config.early_signal_max_age_bars)
+        self.story_engine = MarketStoryEngine(
+            self.config.early_signal_max_age_bars,
+            self.config.entry_missed_chase_atr,
+        )
 
     def analyze(
         self,
@@ -330,7 +333,11 @@ class AdaptiveStrategyEngine:
     ) -> _Plan:
         direction = story.trigger_direction
         is_long = direction == "LONG"
-        entry = float(story.trigger.get("event_price", tf_core.close) or tf_core.close)
+        entry = float(
+            story.trigger.get("entry_reference_price")
+            or story.trigger.get("event_price")
+            or tf_core.close
+        )
         proposed_stop = story.invalidation_price
         if proposed_stop is None or (is_long and proposed_stop >= entry) or (not is_long and proposed_stop <= entry):
             proposed_stop = (

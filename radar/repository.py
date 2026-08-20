@@ -316,6 +316,16 @@ class SignalRepository:
             or 0
         )
         event_ts = int(row["event_ts"] or signal.market_story.get("trigger", {}).get("event_ts", 0) or 0)
+        previous_evaluated_core_ts = int(
+            signal.lifecycle.get("last_evaluated_core_ts")
+            or row["event_ts"]
+            or 0
+        )
+        same_core_snapshot = bool(
+            data_ts
+            and previous_evaluated_core_ts
+            and data_ts <= previous_evaluated_core_ts
+        )
         interval_ms = 900_000 if signal.radar_horizon == "SHORT" else 14_400_000
         age_bars = max(0, int((data_ts - event_ts) / interval_ms)) if data_ts and event_ts else int(signal.market_story.get("trigger", {}).get("event_age_bars", 0) or 0)
         (
@@ -352,6 +362,10 @@ class SignalRepository:
         elif invalidated:
             outcome, final_r, order = "PRICE_INVALIDATED", -1.0, "SL_FIRST"
             stage, freshness, status = "INVALIDATED", "INVALIDATED", "CLOSED"
+        elif same_core_snapshot:
+            stage = stage_before
+            freshness = str(row["freshness"])
+            status = "ACTIVE"
         elif age_bars >= 3 and mfe_r < 0.25:
             stage, freshness, status = "NO_FOLLOW_THROUGH", "NO_FOLLOW_THROUGH", "ACTIVE"
         elif age_bars > (8 if signal.radar_horizon == "SHORT" else 6):
@@ -453,6 +467,7 @@ class SignalRepository:
             "event_atr",
             "trigger_event_key",
             "zone_key",
+            "entry_reference_price",
         ):
             if original_trigger.get(key) not in (None, ""):
                 refreshed_trigger[key] = original_trigger[key]

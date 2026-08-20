@@ -2,9 +2,9 @@ name: OKX Radar 15m Market Scan
 
 on:
   schedule:
-    # OKX 15m candle closes at :00/:15/:30/:45. Allow two minutes for
+    # OKX 15m candle closes at :00/:15/:30/:45. Allow one minute for
     # publication, then wake Render and join its single-scan lock.
-    - cron: "2,17,32,47 * * * *"
+    - cron: "1,16,31,46 * * * *"
   workflow_dispatch:
 
 permissions:

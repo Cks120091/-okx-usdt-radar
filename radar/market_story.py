@@ -125,8 +125,16 @@ class MarketStoryEngine:
     bounded window, and a closed core candle.
     """
 
-    def __init__(self, early_signal_max_age_bars: int = 2):
+    def __init__(
+        self,
+        early_signal_max_age_bars: int = 2,
+        max_early_entry_extension_atr: float = 0.50,
+    ):
         self.early_signal_max_age_bars = max(1, min(int(early_signal_max_age_bars), 5))
+        self.max_early_entry_extension_atr = max(
+            0.10,
+            float(max_early_entry_extension_atr),
+        )
 
     def analyze_short(
         self,
@@ -216,6 +224,7 @@ class MarketStoryEngine:
                 regime,
                 confirmation_window,
                 self.early_signal_max_age_bars,
+                self.max_early_entry_extension_atr,
             )
             for candidate_direction in ("LONG", "SHORT")
         }
@@ -1000,6 +1009,7 @@ def _trigger_candidate(
     regime: str,
     confirmation_window: int,
     early_signal_max_age_bars: int,
+    max_early_entry_extension_atr: float,
 ) -> dict[str, Any]:
     is_long = direction == "LONG"
     side_zone = zones.get("support" if is_long else "resistance")
@@ -1037,34 +1047,97 @@ def _trigger_candidate(
         and bool(momentum["confirmed"])
         and not compression_block
     )
-    breakout = (
+    full_breakout = (
         acceptance["state"] in ("ACCEPTED", "ROLE_REVERSAL_RETEST")
         and bool(control["transferred"])
         and bool(momentum["confirmed"])
     )
+    early_breakout = (
+        acceptance["state"] in ("BREAKING", "ACCEPTED")
+        and float(acceptance.get("excursion_atr", 0.0)) >= 0.05
+        and bool(control["push_away"])
+        and bool(control["micro_defense_broken"])
+        and bool(momentum["partial"])
+    )
+    breakout = full_breakout or early_breakout
     continuation = (
         bias_aligned
         and pullback["reactivated"]
         and bool(control["push_away"])
-        and bool(momentum["confirmed"])
+        and bool(momentum["partial"])
+        and (bool(control["micro_defense_broken"]) or bool(momentum["confirmed"]))
         and not compression_block
     )
     triggered = bool(reversal or breakout or continuation)
     trigger_type = "REVERSAL" if reversal else "BREAKOUT" if breakout else "CONTINUATION" if continuation else "NONE"
-    event_index = max(
-        int(momentum.get("event_index", len(candles) - 1)),
-        int(acceptance.get("event_index", 0)) if breakout else 0,
-        int(pullback.get("event_index", 0)) if continuation else 0,
+    momentum_index = int(momentum.get("event_index", 0))
+    acceptance_index = int(acceptance.get("event_index", 0))
+    pullback_confirmation_index = (
+        int(pullback.get("event_index", 0)) if continuation else 0
     )
+    confirmation_index = max(
+        momentum_index,
+        acceptance_index if breakout else 0,
+        pullback_confirmation_index,
+    )
+    if breakout:
+        onset_indices = [
+            index
+            for index in (acceptance_index, momentum_index)
+            if index > 0
+        ]
+        event_index = min(onset_indices, default=confirmation_index)
+    elif continuation:
+        event_index = int(pullback.get("touch_index", 0)) or confirmation_index
+    else:
+        event_index = confirmation_index
     event_index = min(max(event_index, 0), len(candles) - 1)
+    confirmation_index = min(
+        max(confirmation_index, event_index),
+        len(candles) - 1,
+    )
     event_age = len(candles) - 1 - event_index
     full = bool(momentum.get("full_confirmation")) and (
         acceptance["state"] == "ROLE_REVERSAL_RETEST"
         or control.get("follow_through")
-        or continuation
+        or (continuation and momentum.get("confirmed"))
+    )
+    if early_breakout and not full_breakout:
+        full = False
+    entry_reference = (
+        acceptance.get("boundary")
+        if breakout
+        else pullback.get("reference_price")
+        if continuation
+        else side_zone.center
+        if reversal and side_zone is not None
+        else candles[event_index].close
+    )
+    try:
+        entry_reference = float(entry_reference)
+    except (TypeError, ValueError):
+        entry_reference = float(candles[event_index].close)
+    favorable_extension = (
+        candles[-1].close - entry_reference
+        if is_long
+        else entry_reference - candles[-1].close
+    )
+    structural_extension_atr = max(0.0, favorable_extension) / max(
+        tf.atr14,
+        1e-9,
+    )
+    move_from_defense_atr = max(
+        0.0,
+        float(control.get("close_push_away_atr", 0.0) or 0.0),
+    )
+    entry_extension_atr = max(
+        structural_extension_atr,
+        move_from_defense_atr,
     )
     if triggered:
-        if event_age <= early_signal_max_age_bars:
+        if entry_extension_atr > max_early_entry_extension_atr:
+            stage, freshness = "EXTENDED", "EXTENDED"
+        elif event_age <= early_signal_max_age_bars:
             stage = (
                 "EARLY_SIGNAL"
                 if trigger_type == "CONTINUATION" or not full
@@ -1162,6 +1235,16 @@ def _trigger_candidate(
         "event_atr": tf.atr14,
         "event_index": event_index,
         "event_age_bars": event_age,
+        "confirmation_ts": candles[confirmation_index].ts,
+        "confirmation_index": confirmation_index,
+        "entry_reference_price": entry_reference,
+        "entry_extension_atr": round(entry_extension_atr, 3),
+        "structural_entry_extension_atr": round(
+            structural_extension_atr,
+            3,
+        ),
+        "move_from_defense_atr": round(move_from_defense_atr, 3),
+        "confirmation_level": "FULL" if full else "EARLY",
         "zone_key": f"{event_zone.tier}:{round(event_zone.center, 10)}" if event_zone else "NO_ZONE",
         "invalidation_price": invalidation,
         "position_valid": at_reversal_zone or acceptance["state"] in ("ACCEPTED", "ROLE_REVERSAL_RETEST") or pullback["reactivated"],
@@ -1264,17 +1347,47 @@ def _momentum_confirmation(
     start = max(20, len(candles) - window - 1)
     ma_event = None
     macd_event = None
+    ma_cross_seen = False
+    macd_cross_seen = False
+    first_partial_index = None
+    first_confirmed_index = None
     for index in range(start + 1, len(candles)):
         if (ma5[index] - ma10[index]) * sign > 0 and (ma5[index - 1] - ma10[index - 1]) * sign <= 0:
             ma_event = index
+            ma_cross_seen = True
         if (macd_line[index] - signal_line[index]) * sign > 0 and (macd_line[index - 1] - signal_line[index - 1]) * sign <= 0:
             macd_event = index
+            macd_cross_seen = True
+        ma_aligned_at_index = (ma5[index] - ma10[index]) * sign > 0
+        ma_turning_at_index = (
+            (ma5[index] - ma5[index - 1]) * sign > 0
+            and (ma10[index] - ma10[index - 1]) * sign >= 0
+        )
+        macd_aligned_at_index = (macd_line[index] - signal_line[index]) * sign > 0
+        macd_turning_at_index = (
+            (hist[index] - hist[index - 1]) * sign > 0
+            and (macd_line[index] - macd_line[index - 1]) * sign > 0
+        )
+        ma_response_at_index = ma_aligned_at_index and (
+            ma_cross_seen or ma_turning_at_index
+        )
+        macd_response_at_index = macd_aligned_at_index and (
+            macd_cross_seen or macd_turning_at_index
+        )
+        if first_partial_index is None and (
+            ma_response_at_index or macd_response_at_index
+        ):
+            first_partial_index = index
+        if first_confirmed_index is None and (
+            ma_response_at_index and macd_response_at_index
+        ):
+            first_confirmed_index = index
     ma_aligned = (ma5[-1] - ma10[-1]) * sign > 0
     ma_turning = (ma5[-1] - ma5[-2]) * sign > 0 and (ma10[-1] - ma10[-2]) * sign >= 0
     macd_aligned = (macd_line[-1] - signal_line[-1]) * sign > 0
     macd_turning = (hist[-1] - hist[-2]) * sign > 0 and (macd_line[-1] - macd_line[-2]) * sign > 0
-    ma_response = ma_event is not None or (ma_aligned and ma_turning)
-    macd_response = macd_event is not None or (macd_aligned and macd_turning)
+    ma_response = ma_aligned and (ma_event is not None or ma_turning)
+    macd_response = macd_aligned and (macd_event is not None or macd_turning)
     confirmed = ma_response and macd_response
     partial = ma_response or macd_response
     full = (
@@ -1283,16 +1396,13 @@ def _momentum_confirmation(
         and (macd_line[-1] - signal_line[-1]) * sign > 0
         and hist[-1] * sign > 0
     )
-    event_candidates = [
-        index
-        for index in (
-            ma_event,
-            macd_event,
-            len(candles) - 1 if (confirmed or partial) else None,
-        )
-        if index is not None
-    ]
-    event_index = max(event_candidates, default=0)
+    event_index = (
+        first_confirmed_index
+        if confirmed and first_confirmed_index is not None
+        else first_partial_index
+        if partial and first_partial_index is not None
+        else 0
+    )
     score = 85.0 if full else 72.0 if confirmed else 55.0 if partial else 25.0
     label = (
         "MA5/10 與 MACD 已在合理窗口同向呼應"
@@ -1329,7 +1439,17 @@ def _control_transfer(
     sign = 1.0 if is_long else -1.0
     recent = candles[-4:]
     base = min(item.low for item in recent) if is_long else max(item.high for item in recent)
+    close_base = (
+        min(item.close for item in recent)
+        if is_long
+        else max(item.close for item in recent)
+    )
     push_raw = candles[-1].close - base if is_long else base - candles[-1].close
+    close_push_raw = (
+        candles[-1].close - close_base
+        if is_long
+        else close_base - candles[-1].close
+    )
     push_away = push_raw >= tf.atr14 * 0.18 or acceptance.get("state") in ("ACCEPTED", "ROLE_REVERSAL_RETEST")
     if micro_zone is not None:
         micro_break = candles[-1].close > micro_zone.center if is_long else candles[-1].close < micro_zone.center
@@ -1368,6 +1488,10 @@ def _control_transfer(
         "transferred": transferred,
         "push_away": push_away,
         "push_away_atr": round(push_raw / max(tf.atr14, 1e-9), 3),
+        "close_push_away_atr": round(
+            close_push_raw / max(tf.atr14, 1e-9),
+            3,
+        ),
         "micro_defense_broken": micro_break,
         "opponent_reclaimed": reclaimed_by_opponent,
         "follow_through": follow_through,
@@ -1385,6 +1509,7 @@ def _pullback_reactivation(
     touched_zone = False
     saw_counter_move = False
     touch_index = 0
+    reference_price = None
     for index in range(max(1, len(candles) - 6), len(candles) - 1):
         candle = candles[index]
         zone_touch = bool(
@@ -1402,6 +1527,7 @@ def _pullback_reactivation(
             touched_zone = True
             saw_counter_move = True
             touch_index = index
+            reference_price = zone.center if zone_touch and zone else candle.close
     resumed = (
         candles[-1].close > candles[-1].open and candles[-1].close > candles[-2].close
         if is_long
@@ -1413,6 +1539,8 @@ def _pullback_reactivation(
         "resumed": resumed,
         "reactivated": touched_zone and resumed,
         "touch_index": touch_index if touched_zone else 0,
+        "touch_ts": candles[touch_index].ts if touched_zone else None,
+        "reference_price": reference_price,
         "event_index": len(candles) - 1 if touched_zone and resumed else 0,
     }
 

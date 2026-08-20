@@ -10,6 +10,8 @@ class V33ContractTests(unittest.TestCase):
         config = AppConfig.load()
         self.assertEqual(config.max_signals, 20)
         self.assertEqual(config.context_candidates, 100)
+        self.assertEqual(config.workers, 12)
+        self.assertEqual(config.rate_limit_requests_per_2s, 36)
         self.assertEqual(config.candle_limit_1d, 200)
         self.assertEqual(config.universe_max_spread_pct, 1.0)
         self.assertEqual(config.stale_after_seconds, 1800)
@@ -76,7 +78,7 @@ class V33ContractTests(unittest.TestCase):
             for path in (root / ".github" / "workflows").glob("*.yml")
         )
         self.assertIn("schedule:", workflows)
-        self.assertIn('cron: "2,17,32,47 * * * *"', workflows)
+        self.assertIn('cron: "1,16,31,46 * * * *"', workflows)
         self.assertIn("/api/scan", workflows)
         self.assertNotIn("run.py --once", workflows)
 

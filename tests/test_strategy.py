@@ -164,7 +164,7 @@ class StrategyTests(unittest.TestCase):
         self.assertLess(low_rr["remaining_rr"], 1.8)
         self.assertEqual(inactive["status"], "MISSED_ENTRY")
 
-    def test_clear_breakout_can_qualify(self):
+    def test_far_breakout_is_kept_for_tracking_but_not_actionable(self):
         candles_4h, candles_1h, candles_15m = valid_breakout_frames()
         ticker = Ticker("TEST-USDT-SWAP", candles_15m[-1].close, candles_15m[-1].close - 0.03, candles_15m[-1].close + 0.03, 1)
         engine = AdaptiveStrategyEngine(StrategyConfig(min_quote_volume_24h=1_000_000))
@@ -174,9 +174,9 @@ class StrategyTests(unittest.TestCase):
         self.assertGreaterEqual(result.signal.risk_reward, 1.8)
         self.assertGreaterEqual(len(result.signal.evidence), 2)
         self.assertIsNotNone(result.market_state)
-        self.assertEqual(result.market_state.status, "CONFIRMED")
+        self.assertEqual(result.market_state.status, "EXTENDED")
         self.assertEqual(result.signal.trigger_type, "BREAKOUT")
-        self.assertEqual(result.signal.freshness, "NEW")
+        self.assertEqual(result.signal.freshness, "EXTENDED")
         self.assertEqual(result.signal.radar_horizon, "SHORT")
         self.assertLess(result.market_state.readiness_score, 100.0)
         self.assertEqual(
@@ -185,6 +185,12 @@ class StrategyTests(unittest.TestCase):
         )
         self.assertIn(result.signal.trend_strength_label, ("偏弱", "中等", "強"))
         self.assertIn("tp1_action", result.signal.management_plan)
+        self.assertEqual(result.signal.entry_eligibility["status"], "MISSED_ENTRY")
+        self.assertFalse(result.signal.actionable)
+        self.assertAlmostEqual(
+            result.candidate_plan.entry,
+            result.assessment.trigger["entry_reference_price"],
+        )
         metrics = result.market_state.market_metrics
         self.assertEqual(metrics["last_price"], ticker.last)
         self.assertEqual(metrics["core_timestamp"], candles_15m[-1].ts)

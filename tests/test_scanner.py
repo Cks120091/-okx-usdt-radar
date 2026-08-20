@@ -160,18 +160,48 @@ class ScannerTests(unittest.TestCase):
 
     def test_core_preview_is_emitted_before_final_deep_report(self):
         previews = []
+        request_snapshots = []
+        client = ContextFakeClient()
         scanner = MarketScanner(
-            ContextFakeClient(),
+            client,
             ScannerConfig(workers=2, min_quote_volume_24h=0),
         )
-        scanner.engine = AlwaysSignalEngine()
-        final = scanner.scan_once(preview=previews.append)
+
+        def publish(report):
+            previews.append(report)
+            request_snapshots.append(list(client.candle_requests))
+
+        final = scanner.scan_once(preview=publish)
 
         self.assertEqual(len(previews), 1)
         self.assertEqual(previews[0].runtime_status, "CORE_PREVIEW")
         self.assertEqual(previews[0].data_quality["deep_status"], "PENDING")
         self.assertEqual(previews[0].long_signals, [])
         self.assertEqual(final.runtime_status, "FRESH")
+        self.assertFalse(
+            any(bar == "1D" for _, bar, _ in request_snapshots[0])
+        )
+        self.assertTrue(any(bar == "1D" for _, bar, _ in client.candle_requests))
+
+    def test_unchanged_higher_timeframes_are_reused_between_scans(self):
+        client = FakeClient()
+        scanner = MarketScanner(
+            client,
+            ScannerConfig(workers=2, min_quote_volume_24h=0),
+        )
+        scanner._cache_covers_current_bar = lambda candles, bar: True
+
+        scanner.scan_once()
+        scanner.scan_once()
+
+        counts = {
+            bar: sum(requested_bar == bar for _, requested_bar, _ in client.candle_requests)
+            for bar in ("1D", "4H", "1H", "15m")
+        }
+        self.assertEqual(counts["15m"], 4)
+        self.assertEqual(counts["1H"], 2)
+        self.assertEqual(counts["4H"], 2)
+        self.assertEqual(counts["1D"], 2)
 
     def test_full_fetch_reports_one_hundred_percent_coverage(self):
         client = FakeClient()
