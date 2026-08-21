@@ -90,7 +90,25 @@ class PreviewScanner:
         return report()
 
 
+class ReleasingScanner(ImmediateScanner):
+    def __init__(self):
+        self.release_calls = 0
+
+    def release_transient_data(self):
+        self.release_calls += 1
+        return 7
+
+
 class RuntimeSafetyTests(unittest.TestCase):
+    def test_successful_web_scan_releases_transient_scanner_data(self):
+        with tempfile.TemporaryDirectory() as directory:
+            scanner = ReleasingScanner()
+            runtime = RadarRuntime(scanner, AppConfig(data_dir=directory))
+
+            runtime.scan_blocking()
+
+            self.assertEqual(scanner.release_calls, 1)
+
     def test_runtime_restores_latest_report_without_forced_rescan(self):
         with tempfile.TemporaryDirectory() as directory:
             saved = report()

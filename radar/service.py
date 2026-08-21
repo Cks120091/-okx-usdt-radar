@@ -190,7 +190,10 @@ class RadarRuntime:
                 parameters = inspect.signature(self.scanner.scan_once).parameters
                 if "preview" in parameters:
                     scan_kwargs["preview"] = self._publish_preview
-                report = self.scanner.scan_once(**scan_kwargs)
+                try:
+                    report = self.scanner.scan_once(**scan_kwargs)
+                finally:
+                    self._release_scanner_transient_data()
                 completed_at = datetime.now(timezone.utc).isoformat()
                 report = replace(
                     report,
@@ -253,6 +256,16 @@ class RadarRuntime:
                         "message": "最新掃描失敗",
                     }
                 raise
+
+    def _release_scanner_transient_data(self) -> None:
+        release = getattr(self.scanner, "release_transient_data", None)
+        if not callable(release):
+            return
+        try:
+            released = release()
+            LOGGER.info("Released %s cached candle series", released)
+        except Exception:
+            LOGGER.exception("Unable to release transient scanner data")
 
     def _publish_preview(self, report: RadarReport) -> None:
         with self._state_lock:
@@ -425,7 +438,11 @@ def serve(runtime: RadarRuntime, host: str, port: int) -> None:
             LOGGER.info("HTTP %s - %s", self.address_string(), format_string % args)
 
         def _send_json(self, status: HTTPStatus, payload: dict[str, Any]) -> None:
-            body = json.dumps(payload, ensure_ascii=False).encode("utf-8")
+            body = json.dumps(
+                payload,
+                ensure_ascii=False,
+                separators=(",", ":"),
+            ).encode("utf-8")
             self._send_bytes(status, body, "application/json; charset=utf-8")
 
         def _send_bytes(self, status: HTTPStatus, body: bytes, content_type: str) -> None:

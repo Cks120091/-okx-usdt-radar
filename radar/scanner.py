@@ -594,6 +594,8 @@ class MarketScanner:
         long_watchlist = self._watchlist(long_states)
         short_states.sort(key=lambda item: item.inst_id)
         long_states.sort(key=lambda item: item.inst_id)
+        short_market_map = [_compact_market_map_state(item) for item in short_states]
+        long_market_map = [_compact_market_map_state(item) for item in long_states]
 
         api_metrics_loader = getattr(self.client, "metrics_snapshot", None)
         api_metrics = api_metrics_loader() if callable(api_metrics_loader) else {}
@@ -734,7 +736,7 @@ class MarketScanner:
             message=message,
             market_regime_counts=dict(Counter(item.regime for item in short_states)),
             watchlist=short_watchlist,
-            market_map=short_states,
+            market_map=short_market_map,
             context_target_count=len(context_target_ids),
             context_enriched_count=context_enriched_count,
             context_failures=dict(sorted(context_failures.items())),
@@ -748,7 +750,7 @@ class MarketScanner:
             api_metrics=api_metrics,
             long_signals=long_signals,
             long_watchlist=long_watchlist,
-            long_market_map=long_states,
+            long_market_map=long_market_map,
             data_quality=data_quality,
             historical_performance=historical,
         )
@@ -813,6 +815,7 @@ class MarketScanner:
         )[: min(max(self.config.max_signals, 0), 20)]
         short_watchlist = self._watchlist(short_states)
         short_states.sort(key=lambda item: item.inst_id)
+        short_market_map = [_compact_market_map_state(item) for item in short_states]
         all_failures = {
             **dict(sorted(failures.items())),
             **dict(sorted(analysis_failures.items())),
@@ -857,7 +860,7 @@ class MarketScanner:
                 Counter(item.regime for item in short_states)
             ),
             watchlist=short_watchlist,
-            market_map=short_states,
+            market_map=short_market_map,
             market_bias=market_bias,
             scan_id=scan_id,
             scan_started_at=scan_started_at,
@@ -1857,6 +1860,19 @@ class MarketScanner:
             "5m": self.config.candle_limit_5m,
         }.get(bar, self.config.candle_limit)
 
+    def release_transient_data(self) -> int:
+        """Release cross-timeframe candle reuse after a completed web scan.
+
+        The cache prevents duplicate 4H/1H requests while one scan builds both
+        radar horizons. Keeping hundreds of candle arrays after the report is
+        published provides little value on a memory-constrained web service.
+        """
+
+        with self._candle_cache_lock:
+            cached_series = len(self._candle_cache)
+            self._candle_cache.clear()
+        return cached_series
+
     def _open_interest_change(
         self,
         inst_id: str,
@@ -1984,6 +2000,55 @@ def _without_internal_metrics(item: Signal | MarketState) -> Signal | MarketStat
         if not key.startswith("_")
     }
     return replace(item, market_metrics=metrics)
+
+
+_MARKET_MAP_METRIC_KEYS = frozenset(
+    {
+        "last_price",
+        "price_change_core_pct",
+        "price_change_15m_pct",
+        "price_change_1h_pct",
+        "price_change_24h_pct",
+        "rsi_core",
+        "rsi_15m",
+        "open_interest_usd",
+        "open_interest_change_pct",
+        "oi_flow_state",
+        "funding_rate_pct",
+    }
+)
+
+
+def _compact_market_map_state(item: MarketState) -> MarketState:
+    """Keep overview/search fields without duplicating full analysis stories.
+
+    Full Market Story, evidence and raw indicators remain available on the
+    bounded signal and watchlist collections. The all-market maps are used by
+    the mobile overview, heat map, OI anomalies, favorites and symbol search,
+    all of which only need this compact projection.
+    """
+
+    metrics = {
+        key: value
+        for key, value in item.market_metrics.items()
+        if key in _MARKET_MAP_METRIC_KEYS
+    }
+    return replace(
+        item,
+        market_metrics=metrics,
+        evidence_groups={},
+        timeframe_states={},
+        supporting_evidence=[],
+        conflicts=[],
+        neutral_evidence=[],
+        safety_checks=[],
+        entry_quality={},
+        trigger={},
+        lifecycle={},
+        market_participation={},
+        execution_quality={},
+        market_story={},
+    )
 
 
 def _finite_number(value: object) -> float | None:

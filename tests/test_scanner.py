@@ -1,7 +1,7 @@
 import unittest
 
 from radar.models import Candle, Instrument, MarketContext, MarketState, Signal, Ticker
-from radar.scanner import MarketScanner, ScannerConfig
+from radar.scanner import MarketScanner, ScannerConfig, _compact_market_map_state
 from radar.strategy import AnalysisResult
 
 
@@ -154,6 +154,49 @@ class LowReadinessContextEngine:
 
 
 class ScannerTests(unittest.TestCase):
+    def test_market_map_projection_drops_heavy_analysis_payloads(self):
+        state = MarketState(
+            inst_id="AAA-USDT-SWAP",
+            regime="TREND",
+            direction="LONG",
+            preferred_strategy="fixture",
+            readiness_score=75.0,
+            status="WATCH",
+            missing_conditions=["等待突破"],
+            spread_pct=0.01,
+            quote_volume_24h=10_000_000,
+            closed_candle_ts=1,
+            market_metrics={
+                "last_price": 100.0,
+                "price_change_1h_pct": 1.2,
+                "open_interest_usd": 5_000_000,
+                "raw_indicators": {"oversized": "x" * 20_000},
+                "order_book_sequence": {"oversized": "x" * 20_000},
+            },
+            data_quality={"core": "AVAILABLE", "missing_sources": []},
+            market_story={"oversized": "x" * 20_000},
+            trigger={"oversized": "x" * 20_000},
+            timeframe_states={"15m": {"oversized": "x" * 20_000}},
+        )
+
+        compact = _compact_market_map_state(state)
+
+        self.assertEqual(compact.market_metrics["last_price"], 100.0)
+        self.assertEqual(compact.market_metrics["open_interest_usd"], 5_000_000)
+        self.assertNotIn("raw_indicators", compact.market_metrics)
+        self.assertNotIn("order_book_sequence", compact.market_metrics)
+        self.assertEqual(compact.market_story, {})
+        self.assertEqual(compact.trigger, {})
+        self.assertEqual(compact.timeframe_states, {})
+        self.assertEqual(compact.data_quality["core"], "AVAILABLE")
+
+    def test_release_transient_data_clears_candle_reuse_cache(self):
+        scanner = MarketScanner(FakeClient(), ScannerConfig(workers=2))
+        scanner._candle_cache[("AAA-USDT-SWAP", "1H")] = candles(60)
+
+        self.assertEqual(scanner.release_transient_data(), 1)
+        self.assertEqual(scanner._candle_cache, {})
+
     def test_one_symbol_failure_is_isolated_and_surviving_signal_remains(self):
         scanner = MarketScanner(
             FakeClient("BBB-USDT-SWAP"),

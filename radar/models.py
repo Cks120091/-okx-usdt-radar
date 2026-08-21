@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from dataclasses import asdict, dataclass, field
+from dataclasses import asdict, dataclass, field, fields
 from typing import Any
 
 
@@ -240,7 +240,15 @@ class RadarReport:
     feature_schema_version: str = "3.3.0"
 
     def to_dict(self) -> dict[str, Any]:
-        payload = asdict(self)
+        # Avoid ``asdict(self)`` here: it recursively copies every signal and
+        # market-map item before the explicit conversions below copy them a
+        # second time. A full-universe report can contain hundreds of states,
+        # so that temporary duplication is enough to exhaust a small web
+        # instance while serving ``/api/report/latest``.
+        payload = {
+            definition.name: getattr(self, definition.name)
+            for definition in fields(self)
+        }
         payload["signals"] = [item.to_dict() for item in self.signals]
         payload["watchlist"] = [item.to_dict() for item in self.watchlist]
         payload["market_map"] = [item.to_dict() for item in self.market_map]

@@ -117,6 +117,7 @@ Trigger 是否存在與「現在是否適合進場」分開顯示：
 - 單一幣種短線核心資料失敗只排除該幣種，報告為 `PARTIAL_DATA`；所有短線核心標的失敗才是 `DATA_INCOMPLETE`。長線 1D 歷史不足獨立計數，不冒充短線核心失敗。
 - OI 或任一 Deep Data endpoint 失敗是可見的 Context 缺失，不會讓全輪掃描失效。
 - 每輪記錄 core coverage、Deep Data completeness、來源成功／缺失、cache hit、retry、timeout 與 duration。
+- 1D／4H／1H K 線會在同一輪短長雷達間重用，報告發布後立即釋放；全市場 Map 只保留首頁、熱度、OI、收藏與搜尋需要的摘要欄位，完整 Market Story 仍保留在 Signal／Watchlist，避免小型 Web instance 因重複資料耗盡記憶體。
 - 沒有 fallback 數值、placeholder Signal 或用上一輪資料冒充最新 Trigger。
 
 ## 手機 PWA
@@ -139,7 +140,7 @@ Trigger 是否存在與「現在是否適合進場」分開顯示：
 - `GET /api/report/latest.md`：中文文字報告
 - `GET /api/stats`：SQLite 真實樣本統計
 
-`BOOTING`、`SCANNING`、`FRESH`、`STALE`、`ERROR` 為 Runtime 狀態。掃描期間舊正式訊號會被遮蔽，但 4H／1H／15m 短線核心分析完成後會立即由 `CORE_PREVIEW` 發布，1D、長線與 Deep Data 改為同輪後補。尚未換 K 的 1D／4H／1H 會安全重用，15m 每輪重抓。超過 `stale_after_seconds` 或最新完整掃描失敗時，正式訊號仍會清空並設 `actionable=false`。服務啟動會先還原 `data/latest.json`，首頁有新鮮報告時不強制重掃。
+`BOOTING`、`SCANNING`、`FRESH`、`STALE`、`ERROR` 為 Runtime 狀態。掃描期間舊正式訊號會被遮蔽，但 4H／1H／15m 短線核心分析完成後會立即由 `CORE_PREVIEW` 發布，1D、長線與 Deep Data 改為同輪後補。同一輪短長雷達會安全重用 1D／4H／1H，15m 每輪重抓；報告發布後會清除暫存 K 線。超過 `stale_after_seconds` 或最新完整掃描失敗時，正式訊號仍會清空並設 `actionable=false`。服務啟動會先還原 `data/latest.json`，首頁有新鮮報告時不強制重掃。
 
 ## 設定
 
