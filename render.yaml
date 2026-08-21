@@ -10,4 +10,4 @@ services:
     autoDeployTrigger: commit
     envVars:
       - key: RADAR_RELEASE
-        value: radar-homepage-entry-state-20260821
+        value: radar-public-payload-20260821
