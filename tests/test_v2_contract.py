@@ -47,7 +47,7 @@ class V33ContractTests(unittest.TestCase):
         self.assertIn("longWaitRetest", html)
         self.assertIn("longMissedSignals", html)
         self.assertIn("補充中", html)
-        self.assertIn("雷達服務剛啟動，正在建立第一份市場資料", html)
+        self.assertIn("尚無市場報告，請按「立即掃描現在市場」", html)
         self.assertIn("真實歷史績效", html)
         self.assertIn("manifest.webmanifest", html)
         self.assertIn("serviceWorker.register", html)
@@ -59,6 +59,17 @@ class V33ContractTests(unittest.TestCase):
         self.assertNotIn("setInterval", html)
         self.assertIn("status.latest_generated_at!==state.report.generated_at", html)
         self.assertIn("if(status.has_report)await loadReport()", html)
+        bootstrap = html.split("async function bootstrap(){", 1)[1].split(
+            "async function refreshFreshness", 1
+        )[0]
+        self.assertNotIn("startScan", bootstrap)
+        freshness_poll = html.split("async function refreshFreshness(){", 1)[1].split(
+            "const tabGroups", 1
+        )[0]
+        self.assertNotIn("startScan", freshness_poll)
+        self.assertNotIn("autoStarted", html)
+        self.assertIn("$('#scanButton').addEventListener('click',startScan)", html)
+        self.assertIn("$('#refreshButton').addEventListener('click',startScan)", html)
         self.assertIn("/api/report/preview", html)
         self.assertIn("多空候選排行", html)
         self.assertIn("OI 異動雷達", html)
@@ -78,16 +89,15 @@ class V33ContractTests(unittest.TestCase):
         self.assertNotIn("/api/", shell_assets)
         self.assertIn('"display": "standalone"', manifest)
 
-    def test_github_actions_triggers_scan_after_each_15m_close(self):
+    def test_market_scan_has_no_github_schedule(self):
         root = Path(__file__).parents[1]
         workflows = "\n".join(
             path.read_text(encoding="utf-8")
             for path in (root / ".github" / "workflows").glob("*.yml")
         )
-        self.assertIn("schedule:", workflows)
-        self.assertIn('cron: "1,16,31,46 * * * *"', workflows)
-        self.assertIn("/api/scan", workflows)
-        self.assertNotIn("run.py --once", workflows)
+        self.assertNotIn("schedule:", workflows)
+        self.assertNotIn("cron:", workflows)
+        self.assertNotIn("/api/scan", workflows)
 
 
 if __name__ == "__main__":

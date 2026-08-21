@@ -124,6 +124,7 @@ Trigger 是否存在與「現在是否適合進場」分開顯示：
 
 首頁以手機直式為優先，提供：
 
+- 開啟或重新整理網頁只讀取最新報告，不會自動呼叫掃描；只有使用者按下頁面掃描按鈕才會啟動
 - 15m 與 4H 長線皆有全部、早期可進、目前可進、等待回踩、已錯過與接近觸發分頁
 - 新鮮度、Lifecycle、價格位置、攻擊效率、Price Acceptance、控制權、市場參與、執行品質與資料品質
 - 原始指標摺疊區、全市場搜尋、收藏與 TradingView 快捷連結
@@ -140,7 +141,7 @@ Trigger 是否存在與「現在是否適合進場」分開顯示：
 - `GET /api/report/latest.md`：中文文字報告
 - `GET /api/stats`：SQLite 真實樣本統計
 
-`BOOTING`、`SCANNING`、`FRESH`、`STALE`、`ERROR` 為 Runtime 狀態。掃描期間舊正式訊號會被遮蔽，但 4H／1H／15m 短線核心分析完成後會立即由 `CORE_PREVIEW` 發布，1D、長線與 Deep Data 改為同輪後補。同一輪短長雷達會安全重用 1D／4H／1H，15m 每輪重抓；報告發布後會清除暫存 K 線。超過 `stale_after_seconds` 或最新完整掃描失敗時，正式訊號仍會清空並設 `actionable=false`。服務啟動會先還原 `data/latest.json`，首頁有新鮮報告時不強制重掃。
+`BOOTING`、`SCANNING`、`FRESH`、`STALE`、`ERROR` 為 Runtime 狀態。掃描期間舊正式訊號會被遮蔽，但 4H／1H／15m 短線核心分析完成後會立即由 `CORE_PREVIEW` 發布，1D、長線與 Deep Data 改為同輪後補。同一輪短長雷達會安全重用 1D／4H／1H，15m 每輪重抓；報告發布後會清除暫存 K 線。超過 `stale_after_seconds` 或最新完整掃描失敗時，正式訊號仍會清空並設 `actionable=false`。服務啟動會先還原 `data/latest.json`；開啟或重新整理首頁只讀取狀態與既有報告，即使尚無報告、資料過期或掃描失敗，也只顯示手動掃描按鈕，不會由瀏覽器自動送出 `POST /api/scan`。
 
 ## 設定
 
@@ -195,7 +196,7 @@ docker build -t okx-radar-v33 .
 docker run --name okx-radar-v33 -p 8000:8000 okx-radar-v33
 ```
 
-GitHub Actions 除了離線 compile／tests，也會在每個 15m 收線後第 2 分鐘（`:02/:17/:32/:47`）呼叫正式站 `/api/scan`。GitHub 排程可能有平台延遲；Runtime Scan Lock 會讓重複請求加入同一輪，不會平行重掃。若部署多個 Web instance，SQLite 與 process-wide Scan Lock 必須改成共享儲存與分散式鎖；單機部署建議固定一個 instance。
+GitHub Actions 只執行離線 compile／tests，不再排程市場掃描。正式站只有使用者按下頁面的掃描按鈕才會呼叫 `/api/scan`；若掃描途中重新開啟網頁，Runtime Scan Lock 只會讓頁面接回既有進度，不會平行重掃。若部署多個 Web instance，SQLite 與 process-wide Scan Lock 必須改成共享儲存與分散式鎖；單機部署建議固定一個 instance。
 
 ## 驗證
 

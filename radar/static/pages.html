@@ -228,12 +228,12 @@
     const $=selector=>document.querySelector(selector);
     const $$=selector=>[...document.querySelectorAll(selector)];
     const savedFavorites=(()=>{try{return JSON.parse(localStorage.getItem('okx-radar-favorites')||'[]')}catch(_){return []}})();
-    const state={status:null,report:null,polling:false,autoStarted:false,activeGroup:'home',groupTabs:{home:'overview',fifteen:'fifteenAll',long:'longSignals',more:'anomalies'},favorites:new Set(Array.isArray(savedFavorites)?savedFavorites:[])};
+    const state={status:null,report:null,polling:false,activeGroup:'home',groupTabs:{home:'overview',fifteen:'fifteenAll',long:'longSignals',more:'anomalies'},favorites:new Set(Array.isArray(savedFavorites)?savedFavorites:[])};
     const directionName={LONG:'做多',SHORT:'做空',NEUTRAL:'中性'};
     const stageName={WATCH:'觀望',NEAR_TRIGGER:'接近觸發',EARLY:'早期訊號',EARLY_SIGNAL:'早期訊號',CONFIRMED:'完整確認',TRENDING:'趨勢進行中',REENTRY:'回踩再發動',EXTENDED:'已延伸',NO_FOLLOW_THROUGH:'未獲延續',INVALIDATED:'訊號失效'};
     const freshnessName={NEW:'🆕 剛觸發',REACTIVATED:'↗️ 再發動',ACTIVE:'▶️ 有效中',EXTENDED:'⏳ 已延伸',NO_FOLLOW_THROUGH:'⚠️ 未延續',INVALIDATED:'❌ 已失效',COMPLETED:'✓ 已完成',NONE:'等待新事件'};
     const regimeName={TREND:'趨勢',TRANSITION:'轉換中',COMPRESSION:'壓縮',BREAKOUT_READY:'突破準備',BREAKOUT:'突破準備',RANGE:'區間震盪',DISORDER:'混亂／等待'};
-    const statusName={BOOTING:'雷達啟動中',SCANNING:'掃描中',FRESH:'資料最新',STALE:'資料過期',ERROR:'掃描異常'};
+    const statusName={BOOTING:'尚無資料',SCANNING:'掃描中',FRESH:'資料最新',STALE:'資料過期',ERROR:'掃描異常'};
 
     function esc(value){return String(value??'—').replace(/[&<>'"]/g,ch=>({'&':'&amp;','<':'&lt;','>':'&gt;',"'":'&#39;','"':'&quot;'}[ch]))}
     function metricNumber(value){if(value===null||value===undefined||value==='')return null;const n=Number(value);return Number.isFinite(n)?n:null}
@@ -248,7 +248,7 @@
     async function api(path,options={}){const response=await fetch(path,{cache:'no-store',headers:{'Accept':'application/json',...(options.headers||{})},...options});let payload={};try{payload=await response.json()}catch(_){payload={error:'服務回應格式錯誤'}}if(!response.ok)throw Object.assign(new Error(payload.error||`HTTP ${response.status}`),{status:response.status,payload});return payload}
 
     function syncScanControls(key){
-      const scanning=key==='SCANNING',needsLargeAction=key==='STALE'||key==='ERROR';
+      const scanning=key==='SCANNING',needsLargeAction=key==='BOOTING'||key==='STALE'||key==='ERROR';
       $('#scanButton').disabled=scanning;$('#scanButton').textContent=scanning?'掃描中…':key==='ERROR'?'再次掃描現在市場':'立即掃描現在市場';
       $('#scanAction').classList.toggle('show',needsLargeAction);
       $('#refreshButton').disabled=scanning;$('#refreshButton').classList.toggle('spinning',scanning);
@@ -256,17 +256,17 @@
 
     function renderStatus(status){
       state.status=status;const key=status.system_status||status.runtime_status||'BOOTING';
-      const pill=$('#statusPill');pill.textContent=statusName[key]||'雷達啟動中';pill.className=`status-pill ${String(key).toLowerCase()}`;
+      const pill=$('#statusPill');pill.textContent=statusName[key]||'尚無資料';pill.className=`status-pill ${String(key).toLowerCase()}`;
       const scanning=key==='SCANNING';syncScanControls(key);
-      const notice=$('#scanNotice');notice.classList.toggle('show',scanning||key==='BOOTING');
+      const notice=$('#scanNotice');notice.classList.toggle('show',scanning);
       if(scanning){const p=status.progress||{};$('#scanMessage').textContent=p.message||'正在取得最新市場資料';const bar=$('#scanProgress');const has=Number.isFinite(Number(p.percent));bar.classList.toggle('indeterminate',!has);bar.querySelector('i').style.width=has?`${Math.max(3,Math.min(100,Number(p.percent)))}%`:'35%'}
-      else if(key==='BOOTING'){const bar=$('#scanProgress');$('#scanMessage').textContent='雷達服務剛啟動，正在建立第一份市場資料';bar.classList.add('indeterminate');bar.querySelector('i').style.width='35%'}
       const danger=$('#dangerNotice');let warning='';
       if(key==='STALE'||status.data_status==='STALE')warning=`資料已超過 30 分鐘，禁止依此進場。請立即重新掃描。${status.last_error?' 最新掃描失敗：'+status.last_error:''}`;
       if(key==='ERROR')warning=`最新掃描失敗，舊正式訊號已停用。${status.last_error?' '+status.last_error:''}`;
       danger.textContent=warning;danger.classList.toggle('show',Boolean(warning));
       const showingCorePreview=scanning&&state.report?.runtime_status==='CORE_PREVIEW';
-      if((scanning||key==='BOOTING')&&!showingCorePreview){const message=scanning?'正在掃描最新市場，舊正式訊號已暫停使用。':'雷達啟動中，正在準備最新市場。';renderUnavailable(message);renderOverviewUnavailable(message)}
+      if(scanning&&!showingCorePreview){const message='正在掃描最新市場，舊正式訊號已暫停使用。';renderUnavailable(message);renderOverviewUnavailable(message)}
+      else if(key==='BOOTING'){const message='尚無市場報告，請按「立即掃描現在市場」。';renderUnavailable(message);renderOverviewUnavailable(message)}
       else if(key==='STALE'){renderUnavailable('資料已過期，禁止依此進場。');renderOverviewUnavailable('資料已過期，候選排行已停用。')}
       else if(key==='ERROR'){renderUnavailable('最新掃描異常，目前沒有可使用的正式訊號。');renderOverviewUnavailable('最新掃描異常，候選排行已停用。')}
     }
@@ -405,7 +405,7 @@
     }
     async function pollUntilComplete(){if(state.polling)return;state.polling=true;let failures=0;try{for(let count=0;count<360;count++){try{const status=await refreshStatus();failures=0;if(status.system_status!=='SCANNING'){await loadReport();return}if(status.has_preview)await loadPreview()}catch(error){failures++;if(failures>=5)throw error}await new Promise(resolve=>setTimeout(resolve,2000))}throw new Error('掃描等待超過 12 分鐘，已停止輪詢。')}finally{state.polling=false;const s=state.status||{};syncScanControls(s.system_status||'BOOTING')}}
     function showConnectionError(error){const danger=$('#dangerNotice');danger.textContent=`無法連接雷達服務：${error.message||error}`;danger.classList.add('show');$('#statusPill').textContent='掃描異常';$('#statusPill').className='status-pill error';syncScanControls('ERROR')}
-    async function bootstrap(){try{if('serviceWorker' in navigator)navigator.serviceWorker.register('/service-worker.js').catch(()=>{});const status=await refreshStatus();if(status.has_report)await loadReport();if(status.system_status==='SCANNING')await pollUntilComplete();else if(!status.has_report||status.system_status==='STALE'||status.system_status==='ERROR'){state.autoStarted=true;await startScan()}}catch(error){showConnectionError(error)}}
+    async function bootstrap(){try{if('serviceWorker' in navigator)navigator.serviceWorker.register('/service-worker.js').catch(()=>{});const status=await refreshStatus();if(status.has_report)await loadReport();if(status.system_status==='SCANNING')await pollUntilComplete()}catch(error){showConnectionError(error)}}
     async function refreshFreshness(){try{if(!state.polling){const status=await refreshStatus();if(status.system_status==='SCANNING'){await pollUntilComplete();return}const reportChanged=status.has_report&&(!state.report||status.latest_generated_at!==state.report.generated_at);if(reportChanged)await loadReport()}}catch(error){showConnectionError(error)}finally{setTimeout(refreshFreshness,15000)}}
 
     const tabGroups={overview:'home',fifteenAll:'fifteen',earlySignals:'fifteen',signals:'fifteen',waitRetest:'fifteen',missedSignals:'fifteen',watchlist:'fifteen',longSignals:'long',longEarlySignals:'long',longReadySignals:'long',longWaitRetest:'long',longMissedSignals:'long',longWatchlist:'long',anomalies:'more',map:'more',stats:'more'};
