@@ -1,3 +1,4 @@
+import json
 import tempfile
 import threading
 import time
@@ -5,7 +6,7 @@ import unittest
 from datetime import datetime, timedelta, timezone
 
 from radar.config import AppConfig
-from radar.models import RadarReport, Signal
+from radar.models import MarketState, RadarReport, Signal
 from radar.reporting import save_report
 from radar.service import RadarRuntime
 
@@ -100,6 +101,89 @@ class ReleasingScanner(ImmediateScanner):
 
 
 class RuntimeSafetyTests(unittest.TestCase):
+    def test_public_report_omits_developer_payloads_and_keeps_ui_fields(self):
+        with tempfile.TemporaryDirectory() as directory:
+            current = report()
+            item = current.signals[0]
+            item.market_metrics = {
+                "last_price": 100.0,
+                "price_change_1h_pct": 1.5,
+                "raw_indicators": {"oversized": "x" * 20_000},
+                "order_book_sequence": {
+                    "reason": "已累積時間序列",
+                    "snapshots": ["x" * 10_000],
+                },
+            }
+            item.market_story = {
+                "where": {"label": "壓力上方", "distance_atr": 1.2},
+                "trigger": {"type": "BREAKOUT", "event_age_bars": 1},
+                "attack_waves": {"BULL": ["x" * 20_000]},
+            }
+            item.execution_quality = {"score": 87, "label": "良好", "raw": "x" * 5_000}
+            item.entry_eligibility = {
+                "status": "ENTRY_READY",
+                "label": "可進",
+                "reason": "仍在進場區",
+                "chase_atr": 0.1,
+                "remaining_rr": 2.2,
+                "raw": "x" * 5_000,
+            }
+            market = MarketState(
+                inst_id="AAA-USDT-SWAP",
+                regime="TREND",
+                direction="LONG",
+                preferred_strategy="fixture",
+                readiness_score=75.0,
+                status="NEAR_TRIGGER",
+                missing_conditions=[],
+                spread_pct=0.01,
+                quote_volume_24h=10_000_000,
+                closed_candle_ts=1,
+                market_metrics={
+                    "last_price": 100.0,
+                    "raw_indicators": {"x": "y" * 10_000},
+                },
+                market_story={"raw": "x" * 10_000},
+            )
+            current.market_map = [market]
+            current.long_market_map = [market]
+            runtime = RadarRuntime(ImmediateScanner(), AppConfig(data_dir=directory))
+            runtime._latest = current
+
+            full_size = len(json.dumps(current.to_dict(), ensure_ascii=False))
+            payload = runtime.latest_dict()
+            public_size = len(json.dumps(payload, ensure_ascii=False))
+
+            self.assertNotIn("target_instruments", payload)
+            self.assertNotIn("api_metrics", payload)
+            self.assertNotIn("long_market_map", payload)
+            self.assertNotIn("raw_indicators", payload["signals"][0]["market_metrics"])
+            self.assertEqual(
+                payload["signals"][0]["market_metrics"]["order_book_sequence"],
+                {"reason": "已累積時間序列"},
+            )
+            self.assertEqual(
+                payload["signals"][0]["market_story"]["where"],
+                {"label": "壓力上方"},
+            )
+            self.assertNotIn("attack_waves", payload["signals"][0]["market_story"])
+            self.assertEqual(
+                payload["signals"][0]["entry_eligibility"]["status"],
+                "ENTRY_READY",
+            )
+            self.assertEqual(
+                set(payload["market_map"][0]),
+                {
+                    "inst_id",
+                    "regime",
+                    "direction",
+                    "readiness_score",
+                    "status",
+                    "market_metrics",
+                },
+            )
+            self.assertLess(public_size, full_size / 2)
+
     def test_successful_web_scan_releases_transient_scanner_data(self):
         with tempfile.TemporaryDirectory() as directory:
             scanner = ReleasingScanner()

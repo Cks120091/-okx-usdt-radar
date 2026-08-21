@@ -83,6 +83,9 @@ class V33ContractTests(unittest.TestCase):
         self.assertIn("TradingView 圖表", html)
         self.assertIn("搜尋幣種，例如 BTC、SNDK", html)
         self.assertIn("renderOverviewUnavailable", html)
+        self.assertNotIn("開發者資料（Raw Data）", html)
+        self.assertNotIn("分組績效 JSON", html)
+        self.assertNotIn("raw_indicators", html)
 
     def test_pwa_never_caches_live_market_api(self):
         root = Path(__file__).parents[1] / "radar" / "static"

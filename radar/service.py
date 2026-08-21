@@ -16,6 +16,7 @@ from urllib.parse import urlparse
 
 from .config import AppConfig
 from .models import RadarReport
+from .public_payload import public_report_payload
 from .reporting import load_latest_report, report_markdown, save_report
 from .scanner import MarketScanner
 
@@ -95,7 +96,7 @@ class RadarRuntime:
         with self._state_lock:
             if self._latest is None:
                 return None
-            payload = self._latest.to_dict()
+            payload = public_report_payload(self._latest)
             system_status, age_seconds, _ = self._system_status_locked()
             actionable = system_status == "FRESH" and self._latest.status != "DATA_INCOMPLETE"
             payload["runtime_status"] = system_status
@@ -119,7 +120,7 @@ class RadarRuntime:
         with self._state_lock:
             if not self._running or self._preview is None:
                 return None
-            payload = self._preview.to_dict()
+            payload = public_report_payload(self._preview)
             payload["runtime_status"] = "CORE_PREVIEW"
             payload["actionable"] = True
             payload["preliminary"] = True

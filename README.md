@@ -128,7 +128,7 @@ Trigger 是否存在與「現在是否適合進場」分開顯示：
 - 首頁候選先區分「可進」與「觀察」；未觸發項目以訊號準備度排序，執行環境分數不會被當成進場許可
 - 15m 與 4H 長線皆有全部、早期可進、目前可進、等待回踩、已錯過與接近觸發分頁
 - 新鮮度、Lifecycle、價格位置、攻擊效率、Price Acceptance、控制權、市場參與、執行品質與資料品質
-- 原始指標摺疊區、全市場搜尋、收藏與 TradingView 快捷連結
+- 判定原因、安全檢查、全市場搜尋、收藏與 TradingView 快捷連結；開發者原始資料不傳送到手機
 - 真實歷史統計分頁
 - Web App Manifest、SVG icon 與只快取 App Shell 的 Service Worker；`/api/*` 與 `/health` 永遠走網路
 
@@ -138,7 +138,7 @@ Trigger 是否存在與「現在是否適合進場」分開顯示：
 - `GET /api/status`：Scan Lock、進度、資料年齡與最新錯誤
 - `POST /api/scan`：啟動或加入唯一一輪完整掃描
 - `GET /api/report/preview`：本輪已完成的 15m 核心預覽；Deep Data 與長線仍在補充
-- `GET /api/report/latest`：安全處理後的 V3.3 JSON
+- `GET /api/report/latest`：手機需要的精簡 V3.3 JSON；完整 Raw Indicators 與內部 Market Story 不對外傳送
 - `GET /api/report/latest.md`：中文文字報告
 - `GET /api/stats`：SQLite 真實樣本統計
 
