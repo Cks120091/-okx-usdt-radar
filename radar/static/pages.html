@@ -47,7 +47,7 @@
     .section{display:none}.section.active{display:block}.section-title{display:flex;align-items:flex-end;justify-content:space-between;gap:12px;margin:11px 2px}.section-title h2{font-size:17px;margin:0}.section-title span{font-size:12px;color:var(--muted)}
     .empty{border:1px dashed #38506d;background:rgba(15,31,51,.62);border-radius:16px;padding:28px 18px;text-align:center;color:var(--muted);line-height:1.6}
     .overview-grid{display:grid;gap:12px}.overview-card{background:linear-gradient(155deg,var(--panel2),var(--panel));border:1px solid var(--line);border-radius:17px;padding:14px;box-shadow:var(--shadow);min-width:0}.overview-card h3{font-size:14px;margin:0}.overview-sub{color:var(--muted);font-size:11px;margin-top:4px;line-height:1.5}.heat-grid{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:8px;margin-top:12px}.heat-item{background:#081625;border:1px solid #203a57;border-radius:11px;padding:10px 8px;text-align:center}.heat-item b{display:block;font-size:19px}.heat-item span{display:block;color:var(--muted);font-size:10px;margin-top:3px}.breadth{display:flex;height:9px;border-radius:999px;overflow:hidden;background:#172536;margin-top:12px}.breadth i{display:block;height:100%}.breadth .long{background:var(--green)}.breadth .neutral{background:var(--gray)}.breadth .short{background:var(--red)}.breadth-legend{display:flex;justify-content:space-between;gap:8px;color:var(--muted);font-size:10px;margin-top:6px}
-    .ranking-grid{display:grid;gap:12px}.ranking-panel{background:#091726;border:1px solid #20344e;border-radius:14px;padding:11px}.ranking-panel.long-r{border-top:3px solid var(--green)}.ranking-panel.short-r{border-top:3px solid var(--red)}.ranking-panel h3{display:flex;justify-content:space-between;align-items:center;font-size:13px;margin:0 0 8px}.rank-row{display:grid;grid-template-columns:minmax(0,1fr) auto;gap:8px;align-items:center;border-top:1px solid #1e324a;padding:9px 0}.rank-row:first-of-type{border-top:0}.rank-symbol{font-size:13px;font-weight:900}.rank-meta{font-size:10px;color:var(--muted);margin-top:3px}.rank-score{text-align:right;font-size:16px;font-weight:900}.rank-score small{display:block;font-size:9px;color:var(--muted)}
+    .ranking-grid{display:grid;gap:12px}.ranking-panel{background:#091726;border:1px solid #20344e;border-radius:14px;padding:11px}.ranking-panel.long-r{border-top:3px solid var(--green)}.ranking-panel.short-r{border-top:3px solid var(--red)}.ranking-panel h3{display:flex;justify-content:space-between;align-items:center;gap:8px;font-size:13px;margin:0 0 8px}.rank-count{color:var(--muted);font-size:10px;white-space:nowrap}.rank-row{display:grid;grid-template-columns:minmax(0,1fr) auto;gap:8px;align-items:center;border-top:1px solid #1e324a;padding:10px 0}.rank-row:first-of-type{border-top:0}.rank-main{min-width:0}.rank-title-line{display:flex;align-items:center;gap:6px;min-width:0}.rank-symbol{min-width:0;font-size:13px;font-weight:900;overflow-wrap:anywhere}.rank-state{flex:0 0 auto;border:1px solid;border-radius:999px;padding:3px 6px;font-size:9px;font-weight:900;white-space:nowrap}.rank-state.ready{color:var(--green);border-color:rgba(43,217,143,.45);background:rgba(43,217,143,.10)}.rank-state.watch{color:var(--yellow);border-color:rgba(246,211,101,.42);background:rgba(246,211,101,.09)}.rank-meta{font-size:10px;color:var(--muted);margin-top:4px}.rank-reason{display:-webkit-box;margin-top:4px;color:#c3d2e2;font-size:10px;line-height:1.4;overflow:hidden;-webkit-box-orient:vertical;-webkit-line-clamp:2}.rank-score{min-width:62px;text-align:right;font-size:16px;font-weight:900}.rank-score small,.rank-secondary{display:block;font-size:9px;color:var(--muted)}.rank-secondary{margin-top:3px;white-space:nowrap}
     .anomaly-list{display:grid;gap:8px;margin-top:12px}.anomaly-card{display:grid;grid-template-columns:minmax(0,1fr) auto;gap:9px;align-items:center;background:#081625;border:1px solid #203a57;border-radius:12px;padding:10px}.oi-state{font-size:11px;font-weight:900;margin-bottom:4px}.oi-meta{font-size:10px;color:var(--muted);line-height:1.45}.oi-change{text-align:right;font-size:14px;font-weight:900}.oi-change small{display:block;font-size:9px;color:var(--muted)}
     .signal-card,.watch-card,.map-card{background:linear-gradient(155deg,var(--panel2),var(--panel));border:1px solid var(--line);border-radius:18px;padding:15px;margin:0 0 12px;box-shadow:var(--shadow);min-width:0;overflow:hidden}
     .signal-card.long{border-left:4px solid var(--green)}.signal-card.short{border-left:4px solid var(--red)}
@@ -139,7 +139,7 @@
           <div id="favoritesBox"><div class="empty">尚未收藏幣種。</div></div>
         </article>
         <article class="overview-card wide">
-          <h3>多空候選排行</h3><div class="overview-sub">正式訊號優先，其次是接近觸發；仍須通過卡片內安全底線。</div>
+          <h3>多空候選排行</h3><div class="overview-sub">先看是否可進；未觸發候選顯示準備度，交易品質不會代替價格 Trigger。</div>
           <div id="rankingBox" class="ranking-grid"><div class="empty">等待最新掃描。</div></div>
         </article>
         <article class="overview-card wide">
@@ -338,8 +338,27 @@
 
     function renderRankings(signals,watchlist){
       const seen=new Set();const pool=[...signals,...watchlist].filter(item=>item.direction!=='NEUTRAL'&&!seen.has(item.inst_id)&&(seen.add(item.inst_id),true));
-      function rank(item){const f={NEW:80,REACTIVATED:70,NONE:60,ACTIVE:40,EXTENDED:10}[item.freshness]||0,s={EARLY_SIGNAL:8,REENTRY:7,NEAR_TRIGGER:6,CONFIRMED:5,TRENDING:4,EXTENDED:2,WATCH:1}[item.signal_stage||item.status]||0;return f+s}
-      function panel(direction,title,cls){const rows=pool.filter(x=>x.direction===direction).sort((a,b)=>rank(b)-rank(a)).slice(0,3);return `<div class="ranking-panel ${cls}"><h3><span>${title}</span><span>${rows.length} 個</span></h3>${rows.length?rows.map((item,index)=>{const m=item.market_metrics||{};return `<div class="rank-row"><div><div class="rank-symbol">${index+1}. ${esc(item.inst_id)}</div><div class="rank-meta">${esc(freshnessName[item.freshness]||stageName[item.signal_stage||item.status]||'觀望')} · ${price(m.last_price)} · 1H ${signed(m.price_change_1h_pct)}</div></div><div class="card-actions">${favoriteButton(item.inst_id)}<div class="rank-score">${num(item.execution_quality?.score??item.readiness_score??item.score,0)}<small>${item.execution_quality?'交易品質':'證據一致'}</small></div></div></div>`}).join(''):'<div class="empty">本輪沒有同方向候選。</div>'}</div>`}
+      const isReady=item=>item.entry_eligibility?.status==='ENTRY_READY';
+      const freshnessPriority={NEW:5,REACTIVATED:4,ACTIVE:3,NONE:2,EXTENDED:1};
+      function compare(a,b){
+        const readyDiff=Number(isReady(b))-Number(isReady(a));if(readyDiff)return readyDiff;
+        if(isReady(a)){const freshDiff=(freshnessPriority[b.freshness]||0)-(freshnessPriority[a.freshness]||0);if(freshDiff)return freshDiff;return (metricNumber(b.execution_quality?.score)||0)-(metricNumber(a.execution_quality?.score)||0)}
+        const readinessDiff=(metricNumber(b.readiness_score??b.score)||0)-(metricNumber(a.readiness_score??a.score)||0);if(readinessDiff)return readinessDiff;
+        return (metricNumber(b.execution_quality?.score)||0)-(metricNumber(a.execution_quality?.score)||0);
+      }
+      function row(item,index){
+        const m=item.market_metrics||{},ready=isReady(item),readiness=item.readiness_score??item.score,execution=item.execution_quality?.score;
+        const state=ready?(item.signal_stage==='EARLY_SIGNAL'?'早期可進':item.signal_stage==='REENTRY'?'回踩可進':'目前可進'):'尚未觸發';
+        const stage=ready?(freshnessName[item.freshness]||stageName[item.signal_stage]||'正式訊號'):(stageName[item.signal_stage||item.status]||'接近觸發');
+        const reason=item.summary||(ready?'正式 Trigger 已成立；仍請確認 Entry、SL 與 TP。':'價格 Trigger 尚未成立，先觀察、不要進場。');
+        const primary=ready?execution:readiness,primaryLabel=ready?'交易品質':'訊號準備度';
+        const secondary=ready?`訊號準備 ${num(readiness,0)}`:execution===null||execution===undefined?'執行環境資料不足':`執行環境 ${num(execution,0)}`;
+        return `<div class="rank-row ${ready?'entry-ready':'watch-only'}"><div class="rank-main"><div class="rank-title-line"><div class="rank-symbol">${index+1}. ${esc(item.inst_id)}</div><span class="rank-state ${ready?'ready':'watch'}">${state}</span></div><div class="rank-meta">${esc(stage)} · ${price(m.last_price)} · 1H ${signed(m.price_change_1h_pct)}</div><div class="rank-reason">${esc(reason)}</div></div><div class="card-actions">${favoriteButton(item.inst_id)}<div class="rank-score">${num(primary,0)}<small>${primaryLabel}</small><span class="rank-secondary">${secondary}</span></div></div></div>`;
+      }
+      function panel(direction,title,cls){
+        const rows=pool.filter(x=>x.direction===direction).sort(compare).slice(0,3),readyCount=rows.filter(isReady).length,watchCount=rows.length-readyCount;
+        return `<div class="ranking-panel ${cls}"><h3><span>${title}</span><span class="rank-count">${readyCount} 可進 · ${watchCount} 觀察</span></h3>${rows.length?rows.map(row).join(''):'<div class="empty">本輪沒有同方向候選。</div>'}</div>`;
+      }
       $('#rankingBox').innerHTML=panel('LONG','🟢 做多候選','long-r')+panel('SHORT','🔴 做空候選','short-r');
     }
 
