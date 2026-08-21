@@ -10,4 +10,4 @@ services:
     autoDeployTrigger: commit
     envVars:
       - key: RADAR_RELEASE
-        value: radar-entry-sync-20260820
+        value: radar-memory-stable-20260821
