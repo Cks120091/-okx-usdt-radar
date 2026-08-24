@@ -811,6 +811,28 @@ class SignalRepository:
             "by_execution_quality": _quality_performance(records),
         }
 
+    def recent_history(self, limit: int = 60) -> list[dict[str, Any]]:
+        """Return a compact, user-facing signal ledger without raw payloads."""
+
+        safe_limit = max(1, min(int(limit), 100))
+        with self._lock:
+            rows = list(
+                self._connection.execute(
+                    """
+                    SELECT signal_id, inst_id, horizon, direction, trigger_type,
+                           triggered_at, updated_at, closed_at, stage, freshness,
+                           status, trigger_price, stop_price, tp1_price, tp2_price,
+                           risk_reward, execution_quality, mfe_r, mae_r, outcome,
+                           final_r
+                    FROM signals
+                    ORDER BY updated_at DESC, triggered_at DESC
+                    LIMIT ?
+                    """,
+                    (safe_limit,),
+                ).fetchall()
+            )
+        return [dict(row) for row in rows]
+
 
 def classify_microstructure(
     previous: dict[str, Any] | None,

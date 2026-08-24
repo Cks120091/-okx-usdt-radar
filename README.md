@@ -99,6 +99,8 @@ Trigger 是否存在與「現在是否適合進場」分開顯示：
 
 `data/radar_state.sqlite3` 保存每個訊號的版本、方向、週期、Trigger 類型、Market Participation、Execution Quality、MFE、MAE、TP1／SL 先後與 Final R。
 
+手機頁面的「更多 → 訊號歷史」會顯示精簡生命週期紀錄，包括目前有效、已完成與已失效訊號；不公開 Raw Data，也不把歷史訊號當成現在的進場依據。
+
 `GET /api/stats` 只從已完成樣本計算：
 
 - Sample Size

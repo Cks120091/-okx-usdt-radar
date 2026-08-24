@@ -151,6 +151,25 @@ class RadarRuntime:
             }
         return repository.performance()
 
+    def signal_history(self, limit: int = 60) -> dict[str, Any]:
+        repository = getattr(self.scanner, "repository", None)
+        if repository is None or not hasattr(repository, "recent_history"):
+            return {
+                "available": False,
+                "items": [],
+                "note": "Signal Repository 尚未啟用。",
+            }
+        items = repository.recent_history(limit)
+        return {
+            "available": bool(items),
+            "items": items,
+            "note": (
+                "保留目前有效、已完成與已失效訊號；歷史紀錄不可直接當成現在進場依據。"
+                if items
+                else "尚無訊號生命週期紀錄。"
+            ),
+        }
+
     def preflight_dict(self, inst_id: str, horizon: str) -> dict[str, Any]:
         """Refresh one stored signal's execution conditions without rescanning."""
 
@@ -539,6 +558,13 @@ def serve(runtime: RadarRuntime, host: str, port: int) -> None:
                     )
             elif path == "/api/stats":
                 self._send_json(HTTPStatus.OK, runtime.statistics())
+            elif path == "/api/history":
+                query = parse_qs(parsed.query)
+                try:
+                    limit = int(query.get("limit", ["60"])[0])
+                except (TypeError, ValueError):
+                    limit = 60
+                self._send_json(HTTPStatus.OK, runtime.signal_history(limit))
             elif path == "/api/preflight":
                 query = parse_qs(parsed.query)
                 try:

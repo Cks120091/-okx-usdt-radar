@@ -89,6 +89,21 @@ class SignalRepositoryTests(unittest.TestCase):
         self.repository.close()
         self.temp_dir.cleanup()
 
+    def test_recent_history_is_compact_and_excludes_raw_payload(self):
+        created = self.repository.reconcile(
+            [signal_fixture()],
+            [],
+            "2026-08-21T00:00:00+00:00",
+            "SHORT",
+        )
+
+        rows = self.repository.recent_history(10)
+
+        self.assertEqual(len(created), 1)
+        self.assertEqual(len(rows), 1)
+        self.assertEqual(rows[0]["inst_id"], "AAA-USDT-SWAP")
+        self.assertNotIn("payload_json", rows[0])
+
     def test_same_event_is_deduplicated_and_age_uses_closed_core_time(self):
         raw = signal_fixture()
         first = self.repository.reconcile(

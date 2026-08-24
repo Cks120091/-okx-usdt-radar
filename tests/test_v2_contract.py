@@ -93,6 +93,12 @@ class V33ContractTests(unittest.TestCase):
         self.assertIn("原始 Trigger 沒有被修改", html)
         self.assertIn("data-preflight-id", html)
         self.assertIn("$('#preflightRefresh').addEventListener('click',loadPreflight)", html)
+        self.assertIn("selector==='#signalsBox'||selector==='#longReadySignalsBox'", html)
+        self.assertIn("訊號生命週期", html)
+        self.assertIn("/api/history?limit=60", html)
+        self.assertIn("歷史紀錄不可直接當成現在進場依據", (
+            Path(__file__).parents[1] / "radar" / "service.py"
+        ).read_text(encoding="utf-8"))
 
     def test_pwa_never_caches_live_market_api(self):
         root = Path(__file__).parents[1] / "radar" / "static"
