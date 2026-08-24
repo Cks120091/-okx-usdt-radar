@@ -94,9 +94,17 @@ class V33ContractTests(unittest.TestCase):
         self.assertIn("data-preflight-id", html)
         self.assertIn("$('#preflightRefresh').addEventListener('click',loadPreflight)", html)
         self.assertIn("selector==='#signalsBox'||selector==='#longReadySignalsBox'", html)
-        self.assertIn("訊號生命週期", html)
+        self.assertIn("15m 短線歷史", html)
+        self.assertIn("4H 長線歷史", html)
+        self.assertIn("24 小時內", html)
+        self.assertIn("7 天內", html)
+        self.assertIn("不因 TP／SL 或走遠而提前消失", html)
+        self.assertIn("function historyGroups(items)", html)
+        self.assertIn("觸發 ${events.length} 次", html)
+        self.assertIn("點開查看每次觸發時間與原始價位", html)
+        self.assertIn("${shortCoins} 幣 / ${shortItems.length} 次", html)
         self.assertIn("/api/history?limit=60", html)
-        self.assertIn("歷史紀錄不可直接當成現在進場依據", (
+        self.assertIn("只按原始觸發時間輪替", (
             Path(__file__).parents[1] / "radar" / "service.py"
         ).read_text(encoding="utf-8"))
 

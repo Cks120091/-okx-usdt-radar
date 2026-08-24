@@ -6,7 +6,7 @@ import sqlite3
 import threading
 import uuid
 from dataclasses import replace
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any
 
@@ -811,24 +811,51 @@ class SignalRepository:
             "by_execution_quality": _quality_performance(records),
         }
 
-    def recent_history(self, limit: int = 60) -> list[dict[str, Any]]:
-        """Return a compact, user-facing signal ledger without raw payloads."""
+    def recent_history(
+        self,
+        limit: int = 60,
+        *,
+        horizon: str | None = None,
+        max_age_hours: int | None = None,
+        as_of: datetime | None = None,
+    ) -> list[dict[str, Any]]:
+        """Return recent trigger snapshots without changing lifecycle decisions."""
 
         safe_limit = max(1, min(int(limit), 100))
+        conditions: list[str] = []
+        parameters: list[Any] = []
+        if horizon is not None:
+            normalized_horizon = str(horizon).strip().upper()
+            if normalized_horizon not in ("SHORT", "LONG"):
+                return []
+            conditions.append("horizon=?")
+            parameters.append(normalized_horizon)
+        if max_age_hours is not None:
+            reference_time = as_of or datetime.now(timezone.utc)
+            if reference_time.tzinfo is None:
+                reference_time = reference_time.replace(tzinfo=timezone.utc)
+            cutoff = reference_time.astimezone(timezone.utc) - timedelta(
+                hours=max(1, int(max_age_hours))
+            )
+            conditions.append("triggered_at>=?")
+            parameters.append(cutoff.isoformat())
+        where_clause = f"WHERE {' AND '.join(conditions)}" if conditions else ""
+        parameters.append(safe_limit)
         with self._lock:
             rows = list(
                 self._connection.execute(
-                    """
+                    f"""
                     SELECT signal_id, inst_id, horizon, direction, trigger_type,
                            triggered_at, updated_at, closed_at, stage, freshness,
                            status, trigger_price, stop_price, tp1_price, tp2_price,
                            risk_reward, execution_quality, mfe_r, mae_r, outcome,
                            final_r
                     FROM signals
-                    ORDER BY updated_at DESC, triggered_at DESC
+                    {where_clause}
+                    ORDER BY triggered_at DESC, signal_id DESC
                     LIMIT ?
                     """,
-                    (safe_limit,),
+                    parameters,
                 ).fetchall()
             )
         return [dict(row) for row in rows]

@@ -1,6 +1,7 @@
 import tempfile
 import unittest
 from dataclasses import replace
+from datetime import datetime, timezone
 from pathlib import Path
 
 from radar.models import MarketContext, MarketState, Signal
@@ -103,6 +104,33 @@ class SignalRepositoryTests(unittest.TestCase):
         self.assertEqual(len(rows), 1)
         self.assertEqual(rows[0]["inst_id"], "AAA-USDT-SWAP")
         self.assertNotIn("payload_json", rows[0])
+
+    def test_recent_history_filters_by_horizon_and_original_trigger_age(self):
+        recent_ts = int(datetime(2026, 8, 24, 12, tzinfo=timezone.utc).timestamp() * 1000)
+        old_ts = int(datetime(2026, 8, 23, 11, tzinfo=timezone.utc).timestamp() * 1000)
+        recent = signal_fixture("RECENT-USDT-SWAP", event_ts=recent_ts)
+        old = signal_fixture("OLD-USDT-SWAP", event_ts=old_ts)
+        long_signal = replace(
+            signal_fixture("LONG-USDT-SWAP", event_ts=old_ts),
+            radar_horizon="LONG",
+        )
+        self.repository.reconcile(
+            [recent, old], [], "2026-08-24T12:05:00+00:00", "SHORT"
+        )
+        self.repository.reconcile(
+            [long_signal], [], "2026-08-24T12:05:00+00:00", "LONG"
+        )
+
+        as_of = datetime(2026, 8, 24, 12, 30, tzinfo=timezone.utc)
+        short_rows = self.repository.recent_history(
+            60, horizon="SHORT", max_age_hours=24, as_of=as_of
+        )
+        long_rows = self.repository.recent_history(
+            60, horizon="LONG", max_age_hours=24 * 7, as_of=as_of
+        )
+
+        self.assertEqual([row["inst_id"] for row in short_rows], ["RECENT-USDT-SWAP"])
+        self.assertEqual([row["inst_id"] for row in long_rows], ["LONG-USDT-SWAP"])
 
     def test_same_event_is_deduplicated_and_age_uses_closed_core_time(self):
         raw = signal_fixture()

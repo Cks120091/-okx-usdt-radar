@@ -159,12 +159,28 @@ class RadarRuntime:
                 "items": [],
                 "note": "Signal Repository 尚未啟用。",
             }
-        items = repository.recent_history(limit)
+        short_items = repository.recent_history(
+            limit,
+            horizon="SHORT",
+            max_age_hours=24,
+        )
+        long_items = repository.recent_history(
+            limit,
+            horizon="LONG",
+            max_age_hours=24 * 7,
+        )
+        items = short_items + long_items
         return {
             "available": bool(items),
             "items": items,
+            "short_items": short_items,
+            "long_items": long_items,
+            "retention": {
+                "SHORT": {"hours": 24, "limit": min(max(1, int(limit)), 100)},
+                "LONG": {"hours": 24 * 7, "limit": min(max(1, int(limit)), 100)},
+            },
             "note": (
-                "保留目前有效、已完成與已失效訊號；歷史紀錄不可直接當成現在進場依據。"
+                "15m 保留 24 小時、4H 保留 7 天；各自最多 60 筆，只按原始觸發時間輪替。"
                 if items
                 else "尚無訊號生命週期紀錄。"
             ),
