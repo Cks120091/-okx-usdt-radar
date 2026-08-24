@@ -86,6 +86,13 @@ class V33ContractTests(unittest.TestCase):
         self.assertNotIn("開發者資料（Raw Data）", html)
         self.assertNotIn("分組績效 JSON", html)
         self.assertNotIn("raw_indicators", html)
+        self.assertIn("進場前更新", html)
+        self.assertIn("進場檢查", html)
+        self.assertIn("/api/preflight", html)
+        self.assertIn("只更新這一個訊號，不重新掃描全市場", html)
+        self.assertIn("原始 Trigger 沒有被修改", html)
+        self.assertIn("data-preflight-id", html)
+        self.assertIn("$('#preflightRefresh').addEventListener('click',loadPreflight)", html)
 
     def test_pwa_never_caches_live_market_api(self):
         root = Path(__file__).parents[1] / "radar" / "static"

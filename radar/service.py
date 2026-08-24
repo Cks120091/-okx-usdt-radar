@@ -6,22 +6,30 @@ import logging
 import threading
 import time
 import uuid
+from copy import deepcopy
 from dataclasses import replace
 from datetime import datetime, timezone
 from http import HTTPStatus
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from typing import Any
-from urllib.parse import urlparse
+from urllib.parse import parse_qs, urlparse
 
 from .config import AppConfig
 from .models import RadarReport
+from .preflight import build_preflight_payload
 from .public_payload import public_report_payload
 from .reporting import load_latest_report, report_markdown, save_report
 from .scanner import MarketScanner
 
 
 LOGGER = logging.getLogger("okx_radar")
+
+
+class PreflightError(RuntimeError):
+    def __init__(self, status: HTTPStatus, message: str):
+        super().__init__(message)
+        self.status = status
 
 
 class RadarRuntime:
@@ -32,6 +40,11 @@ class RadarRuntime:
         self.config = config
         self._scan_lock = threading.Lock()
         self._state_lock = threading.Lock()
+        self._preflight_lock = threading.Lock()
+        self._preflight_cache: dict[
+            tuple[str, str, str], tuple[float, dict[str, Any]]
+        ] = {}
+        self._preflight_cache_ttl_seconds = 12.0
         self._latest: RadarReport | None = load_latest_report(config.data_dir)
         self._preview: RadarReport | None = None
         self._running = False
@@ -138,6 +151,103 @@ class RadarRuntime:
             }
         return repository.performance()
 
+    def preflight_dict(self, inst_id: str, horizon: str) -> dict[str, Any]:
+        """Refresh one stored signal's execution conditions without rescanning."""
+
+        normalized_id = str(inst_id or "").strip().upper()
+        normalized_horizon = {
+            "15M": "SHORT",
+            "SHORT": "SHORT",
+            "4H": "LONG",
+            "LONG": "LONG",
+        }.get(str(horizon or "").strip().upper())
+        if not normalized_id.endswith("-USDT-SWAP") or normalized_horizon is None:
+            raise PreflightError(HTTPStatus.BAD_REQUEST, "幣種或長短線參數不正確")
+
+        with self._state_lock:
+            system_status, _, _ = self._system_status_locked()
+            if self._running:
+                raise PreflightError(
+                    HTTPStatus.CONFLICT,
+                    "全市場掃描正在執行，完成後才能進行單幣進場檢查",
+                )
+            if self._latest is None:
+                raise PreflightError(HTTPStatus.NOT_FOUND, "尚未完成第一輪市場掃描")
+            if system_status != "FRESH":
+                raise PreflightError(
+                    HTTPStatus.CONFLICT,
+                    "市場報告已過期或異常，請先重新掃描全市場",
+                )
+            report_generated_at = self._latest.generated_at
+            collection = (
+                self._latest.long_signals
+                if normalized_horizon == "LONG"
+                else self._latest.signals
+            )
+            signal = next(
+                (item for item in collection if item.inst_id == normalized_id),
+                None,
+            )
+            if signal is None:
+                raise PreflightError(
+                    HTTPStatus.NOT_FOUND,
+                    "最新報告中沒有這個週期的正式 Trigger；候選尚不能進行進場檢查",
+                )
+            cache_key = (report_generated_at, normalized_horizon, normalized_id)
+            cached = self._cached_preflight_locked(cache_key)
+            if cached is not None:
+                return cached
+
+        client = getattr(self.scanner, "client", None)
+        if client is None:
+            raise PreflightError(HTTPStatus.SERVICE_UNAVAILABLE, "即時公開資料服務尚未啟用")
+
+        with self._preflight_lock:
+            with self._state_lock:
+                cached = self._cached_preflight_locked(cache_key)
+                if cached is not None:
+                    return cached
+            try:
+                ticker = client.get_ticker(normalized_id)
+                context = client.get_execution_context(normalized_id)
+                payload = build_preflight_payload(
+                    signal,
+                    ticker,
+                    context,
+                    self.config,
+                    report_generated_at=report_generated_at,
+                )
+            except PreflightError:
+                raise
+            except ValueError as exc:
+                raise PreflightError(HTTPStatus.UNPROCESSABLE_ENTITY, str(exc)) from exc
+            except Exception as exc:
+                LOGGER.exception("Preflight market-data refresh failed for %s", normalized_id)
+                raise PreflightError(
+                    HTTPStatus.BAD_GATEWAY,
+                    "OKX 即時公開資料暫時無法取得，請稍後再按一次",
+                ) from exc
+
+            with self._state_lock:
+                if (
+                    self._running
+                    or self._latest is None
+                    or self._latest.generated_at != report_generated_at
+                ):
+                    raise PreflightError(
+                        HTTPStatus.CONFLICT,
+                        "市場報告已更新，請回到訊號頁重新選擇",
+                    )
+                cached_payload = deepcopy(payload)
+                cached_payload["cached"] = False
+                cached_payload["cache_age_seconds"] = 0.0
+                cached_payload["cache_ttl_seconds"] = self._preflight_cache_ttl_seconds
+                self._preflight_cache[cache_key] = (
+                    time.monotonic(),
+                    cached_payload,
+                )
+                return deepcopy(cached_payload)
+
     def latest_markdown(self) -> str | None:
         with self._state_lock:
             if self._latest is None:
@@ -162,6 +272,7 @@ class RadarRuntime:
         self._scan_id = str(uuid.uuid4())
         self._scan_started_at = datetime.now(timezone.utc).isoformat()
         self._preview = None
+        self._preflight_cache.clear()
         self._progress = {
             "phase": "STARTING",
             "completed": 0,
@@ -332,6 +443,23 @@ class RadarRuntime:
         except (TypeError, ValueError):
             return float("inf")
 
+    def _cached_preflight_locked(
+        self,
+        key: tuple[str, str, str],
+    ) -> dict[str, Any] | None:
+        cached = self._preflight_cache.get(key)
+        if cached is None:
+            return None
+        created_at, payload = cached
+        age = max(0.0, time.monotonic() - created_at)
+        if age >= self._preflight_cache_ttl_seconds:
+            self._preflight_cache.pop(key, None)
+            return None
+        result = deepcopy(payload)
+        result["cached"] = True
+        result["cache_age_seconds"] = round(age, 3)
+        return result
+
     @staticmethod
     def _idle_progress() -> dict[str, Any]:
         return {
@@ -352,7 +480,8 @@ def serve(runtime: RadarRuntime, host: str, port: int) -> None:
         server_version = "OKXRadar/3.3"
 
         def do_GET(self) -> None:  # noqa: N802
-            path = urlparse(self.path).path
+            parsed = urlparse(self.path)
+            path = parsed.path
             if path == "/":
                 self._send_bytes(HTTPStatus.OK, dashboard, "text/html; charset=utf-8")
             elif path == "/manifest.webmanifest":
@@ -410,6 +539,17 @@ def serve(runtime: RadarRuntime, host: str, port: int) -> None:
                     )
             elif path == "/api/stats":
                 self._send_json(HTTPStatus.OK, runtime.statistics())
+            elif path == "/api/preflight":
+                query = parse_qs(parsed.query)
+                try:
+                    payload = runtime.preflight_dict(
+                        query.get("inst_id", [""])[0],
+                        query.get("horizon", [""])[0],
+                    )
+                except PreflightError as exc:
+                    self._send_json(exc.status, {"error": str(exc)})
+                else:
+                    self._send_json(HTTPStatus.OK, payload)
             else:
                 self._send_json(HTTPStatus.NOT_FOUND, {"error": "not found"})
 

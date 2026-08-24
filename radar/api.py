@@ -196,27 +196,8 @@ class OKXPublicClient:
         data = self._get("/api/v5/public/instruments", {"instType": "SWAP"})
         instruments: list[Instrument] = []
         for row in data:
-            inst_id = str(row.get("instId", ""))
-            settle_ccy = str(row.get("settleCcy", ""))
-            state = str(row.get("state", ""))
-            ct_type = str(row.get("ctType", ""))
-            if (
-                state == "live"
-                and settle_ccy == "USDT"
-                and inst_id.endswith("-USDT-SWAP")
-                and ct_type in {"linear", ""}
-            ):
-                instrument = Instrument(
-                    inst_id=inst_id,
-                    state=state,
-                    settle_ccy=settle_ccy,
-                    ct_type=ct_type,
-                    tick_size=_float(row.get("tickSz")),
-                    list_time=_int(row.get("listTime")),
-                    contract_value=max(_float(row.get("ctVal"), 1.0), 0.0),
-                    contract_multiplier=max(_float(row.get("ctMult"), 1.0), 0.0),
-                    contract_value_ccy=str(row.get("ctValCcy", "")),
-                )
+            instrument = _instrument_from_row(row)
+            if instrument is not None:
                 instruments.append(instrument)
         ordered = sorted(instruments, key=lambda item: item.inst_id)
         self._instrument_meta = {item.inst_id: item for item in ordered}
@@ -238,6 +219,132 @@ class OKXPublicClient:
             )
             tickers[inst_id] = ticker
         return tickers
+
+    def get_ticker(self, inst_id: str) -> Ticker:
+        """Fetch one live ticker for an explicit user-requested preflight check."""
+
+        rows = self._get("/api/v5/market/ticker", {"instId": inst_id})
+        row = next(
+            (item for item in rows if str(item.get("instId", "")) == inst_id),
+            None,
+        )
+        if row is None:
+            raise OKXAPIError(f"ticker unavailable for {inst_id}")
+        ticker = Ticker(
+            inst_id=inst_id,
+            last=_float(row.get("last")),
+            bid=_float(row.get("bidPx")),
+            ask=_float(row.get("askPx")),
+            ts=_int(row.get("ts")),
+        )
+        if ticker.last <= 0 or ticker.bid <= 0 or ticker.ask <= 0:
+            raise OKXAPIError(f"ticker contains invalid prices for {inst_id}")
+        return ticker
+
+    def get_execution_context(self, inst_id: str) -> MarketContext:
+        """Fetch only the live order-book inputs needed for a preflight check.
+
+        A preflight is deliberately smaller than a full market scan: it does not
+        fetch funding, trades, candles or the complete universe.  It only needs
+        current depth and slippage for one signal selected by the user.
+        """
+
+        failures: list[str] = []
+        instrument = self._instrument_meta.get(inst_id)
+        if instrument is None:
+            try:
+                rows = self._get(
+                    "/api/v5/public/instruments",
+                    {"instType": "SWAP", "instId": inst_id},
+                )
+                instrument = next(
+                    (
+                        parsed
+                        for row in rows
+                        if (parsed := _instrument_from_row(row)) is not None
+                        and parsed.inst_id == inst_id
+                    ),
+                    None,
+                )
+                if instrument is None:
+                    raise OKXAPIError("live linear USDT contract metadata unavailable")
+                self._instrument_meta[inst_id] = instrument
+            except Exception as exc:
+                failures.append(f"instrument_meta: {exc}")
+
+        order_book_imbalance: float | None = None
+        bid_depth_usd: float | None = None
+        ask_depth_usd: float | None = None
+        buy_slippage_pct: float | None = None
+        sell_slippage_pct: float | None = None
+        best_bid: float | None = None
+        best_ask: float | None = None
+        sampled_at = 0
+        source_timestamps: dict[str, int] = {}
+        execution_notional = max(0.0, self.execution_notional_usdt)
+
+        try:
+            rows = self._get("/api/v5/market/books", {"instId": inst_id, "sz": 20})
+            if not rows:
+                raise OKXAPIError("empty order-book response")
+            bids = rows[0].get("bids", [])
+            asks = rows[0].get("asks", [])
+            best_bid = _float_or_none(bids[0][0]) if bids and isinstance(bids[0], list) else None
+            best_ask = _float_or_none(asks[0][0]) if asks and isinstance(asks[0], list) else None
+            bid_depth = _weighted_depth(bids)
+            ask_depth = _weighted_depth(asks)
+            total_depth = bid_depth + ask_depth
+            if total_depth <= 0 or best_bid is None or best_ask is None:
+                raise OKXAPIError("order-book depth is zero")
+            order_book_imbalance = (bid_depth - ask_depth) / total_depth
+            if instrument is not None:
+                bid_depth_usd = _book_depth_usd(bids, instrument)
+                ask_depth_usd = _book_depth_usd(asks, instrument)
+                if execution_notional > 0:
+                    buy_slippage_pct = _estimated_slippage_pct(
+                        asks,
+                        execution_notional,
+                        instrument,
+                        is_buy=True,
+                    )
+                    sell_slippage_pct = _estimated_slippage_pct(
+                        bids,
+                        execution_notional,
+                        instrument,
+                        is_buy=False,
+                    )
+                    if buy_slippage_pct is None or sell_slippage_pct is None:
+                        raise OKXAPIError(
+                            f"top-20 depth cannot fill {execution_notional:,.0f} USDT"
+                        )
+            sampled_at = _int(rows[0].get("ts"))
+            if sampled_at:
+                source_timestamps["order_book"] = sampled_at
+        except Exception as exc:
+            failures.append(f"order_book: {exc}")
+
+        return MarketContext(
+            inst_id=inst_id,
+            open_interest_usd=None,
+            funding_rate=None,
+            order_book_imbalance=order_book_imbalance,
+            taker_buy_ratio=None,
+            sampled_at=sampled_at,
+            failures=failures,
+            bid_depth_usd=bid_depth_usd,
+            ask_depth_usd=ask_depth_usd,
+            buy_slippage_pct=buy_slippage_pct,
+            sell_slippage_pct=sell_slippage_pct,
+            execution_notional_usdt=execution_notional,
+            best_bid=best_bid,
+            best_ask=best_ask,
+            source_timestamps=source_timestamps,
+            data_quality={
+                "available": sorted(source_timestamps),
+                "failures": list(failures),
+                "sampled_at": sampled_at,
+            },
+        )
 
     def get_candles(self, inst_id: str, bar: str, limit: int = 100) -> list[Candle]:
         data = self._get(
@@ -402,6 +509,31 @@ def _float(value: Any, default: float = 0.0) -> float:
         return float(value)
     except (TypeError, ValueError):
         return default
+
+
+def _instrument_from_row(row: dict[str, Any]) -> Instrument | None:
+    inst_id = str(row.get("instId", ""))
+    settle_ccy = str(row.get("settleCcy", ""))
+    state = str(row.get("state", ""))
+    ct_type = str(row.get("ctType", ""))
+    if not (
+        state == "live"
+        and settle_ccy == "USDT"
+        and inst_id.endswith("-USDT-SWAP")
+        and ct_type in {"linear", ""}
+    ):
+        return None
+    return Instrument(
+        inst_id=inst_id,
+        state=state,
+        settle_ccy=settle_ccy,
+        ct_type=ct_type,
+        tick_size=_float(row.get("tickSz")),
+        list_time=_int(row.get("listTime")),
+        contract_value=max(_float(row.get("ctVal"), 1.0), 0.0),
+        contract_multiplier=max(_float(row.get("ctMult"), 1.0), 0.0),
+        contract_value_ccy=str(row.get("ctValCcy", "")),
+    )
 
 
 def _int(value: Any, default: int = 0) -> int:

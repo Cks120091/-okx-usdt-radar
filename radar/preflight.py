@@ -1,0 +1,312 @@
+from __future__ import annotations
+
+import math
+import time
+from datetime import datetime, timezone
+from types import SimpleNamespace
+from typing import Any, Protocol
+
+from .market_story import execution_quality
+from .models import MarketContext, Signal, Ticker
+from .strategy import _entry_eligibility
+
+
+class PreflightConfig(Protocol):
+    minimum_rr: float
+    max_execution_cost_to_risk_pct: float
+    max_spread_pct: float
+    max_slippage_pct: float
+    estimated_taker_fee_pct: float
+    entry_ready_max_chase_atr: float
+    entry_missed_chase_atr: float
+
+
+def build_preflight_payload(
+    signal: Signal,
+    ticker: Ticker,
+    context: MarketContext,
+    config: PreflightConfig,
+    *,
+    report_generated_at: str,
+    now_ms: int | None = None,
+) -> dict[str, Any]:
+    """Re-evaluate execution conditions without mutating the stored Trigger."""
+
+    entry_low = _required_number(signal.entry_low, "entry_low")
+    entry_high = _required_number(signal.entry_high, "entry_high")
+    stop = _required_number(signal.stop_loss, "stop_loss")
+    target_1 = _required_number(signal.take_profit_1, "take_profit_1")
+    target_2 = _required_number(signal.take_profit_2, "take_profit_2")
+    original_price = _optional_number(signal.market_metrics.get("last_price"))
+    current_price = _required_number(ticker.last, "current_price")
+    atr = _signal_atr(signal)
+
+    best_bid = _optional_number(context.best_bid) or _required_number(ticker.bid, "best_bid")
+    best_ask = _optional_number(context.best_ask) or _required_number(ticker.ask, "best_ask")
+    live_spread_pct = _spread_pct(best_bid, best_ask)
+    eligibility = _entry_eligibility(
+        direction=signal.direction,
+        current_price=current_price,
+        entry_low=entry_low,
+        entry_high=entry_high,
+        stop=stop,
+        target=target_1,
+        atr=atr,
+        stage=signal.signal_stage,
+        minimum_rr=config.minimum_rr,
+        ready_max_chase_atr=config.entry_ready_max_chase_atr,
+        missed_chase_atr=config.entry_missed_chase_atr,
+    )
+
+    is_long = signal.direction == "LONG"
+    current_risk = current_price - stop if is_long else stop - current_price
+    current_reward = target_1 - current_price if is_long else current_price - target_1
+    risk_pct = (
+        abs(current_risk) / max(abs(current_price), 1e-9) * 100.0
+        if current_risk > 0
+        else 0.0
+    )
+    remaining_rr = current_reward / current_risk if current_risk > 0 else -1.0
+    invalidated = current_risk <= 0
+    target_reached = current_reward <= 0 and not invalidated
+    entry_location = _live_entry_location(
+        eligibility,
+        invalidated=invalidated,
+        target_reached=target_reached,
+    )
+    live_story = SimpleNamespace(
+        execution_quality={"entry_location": entry_location},
+        trigger_direction=signal.direction,
+    )
+    quality = execution_quality(
+        live_story,
+        live_spread_pct,
+        risk_pct,
+        max(remaining_rr, 0.0),
+        context,
+        target_rr=config.minimum_rr,
+        max_cost_to_risk_pct=config.max_execution_cost_to_risk_pct,
+        max_spread_pct=config.max_spread_pct,
+        max_slippage_pct=config.max_slippage_pct,
+        estimated_taker_fee_pct=config.estimated_taker_fee_pct,
+    )
+
+    verdict_status = eligibility["status"]
+    verdict_label = eligibility["label"]
+    verdict_reason = eligibility["reason"]
+    if invalidated:
+        verdict_status = "SIGNAL_INVALIDATED"
+        verdict_label = "訊號失效｜禁止進場"
+        verdict_reason = "最新價格已越過原始止損／失效位置；原 Trigger 僅保留作歷史紀錄。"
+    elif target_reached:
+        verdict_status = "MISSED_ENTRY"
+        verdict_label = "已到達第一目標｜禁止追價"
+        verdict_reason = "最新價格已到達或越過原始 TP1，這個進場機會已經結束。"
+
+    if invalidated or target_reached:
+        warning = "原始訊號已失效" if invalidated else "原始第一目標已到達"
+        quality = {
+            **quality,
+            "score": 0.0,
+            "label": "不可執行",
+            "recommendation": "AVOID_EXECUTION",
+            "warnings": _unique([warning, *quality.get("warnings", [])]),
+        }
+
+    sampled_at = max(int(ticker.ts or 0), int(context.sampled_at or 0))
+    trigger_age_bars = _trigger_age_bars(signal, sampled_at or now_ms)
+    original_quality = _optional_number(signal.execution_quality.get("score"))
+    price_change_from_scan = (
+        (current_price - original_price) / original_price * 100.0
+        if original_price is not None and original_price > 0
+        else None
+    )
+    book_available = bool(context.source_timestamps.get("order_book"))
+    execution_complete = context.execution_quality_complete and book_available
+
+    return {
+        "inst_id": signal.inst_id,
+        "horizon": signal.radar_horizon,
+        "horizon_label": "4H 長線" if signal.radar_horizon == "LONG" else "15m 短線",
+        "direction": signal.direction,
+        "strategy": signal.strategy,
+        "trigger_type": signal.trigger_type,
+        "signal_stage": signal.signal_stage,
+        "verdict": {
+            "status": verdict_status,
+            "label": verdict_label,
+            "reason": verdict_reason,
+            "actionable": verdict_status == "ENTRY_READY",
+        },
+        "original": {
+            "report_generated_at": report_generated_at,
+            "trigger_age_bars_at_scan": _original_age_bars(signal),
+            "price": _round_or_none(original_price, 12),
+            "quality_score": _round_or_none(original_quality, 1),
+            "entry_low": entry_low,
+            "entry_high": entry_high,
+            "stop_loss": stop,
+            "take_profit_1": target_1,
+            "take_profit_2": target_2,
+        },
+        "live": {
+            "sampled_at": _iso_from_ms(sampled_at),
+            "price": round(current_price, 12),
+            "price_change_from_scan_pct": _round_or_none(price_change_from_scan, 3),
+            "trigger_age_bars": trigger_age_bars,
+            "chase_atr": eligibility["chase_atr"],
+            "remaining_rr": round(remaining_rr, 3),
+            "risk_pct": round(risk_pct, 4),
+            "quality_score": quality["score"],
+            "quality_label": quality["label"],
+            "quality_recommendation": quality["recommendation"],
+        },
+        "execution": {
+            "best_bid": round(best_bid, 12),
+            "best_ask": round(best_ask, 12),
+            "spread_pct": round(live_spread_pct, 4),
+            "buy_slippage_pct": _round_or_none(context.buy_slippage_pct, 5),
+            "sell_slippage_pct": _round_or_none(context.sell_slippage_pct, 5),
+            "estimated_round_trip_cost_pct": quality.get("estimated_round_trip_cost_pct"),
+            "execution_cost_to_risk_pct": quality.get("execution_cost_to_risk_pct"),
+            "bid_depth_usd": _round_or_none(context.bid_depth_usd, 2),
+            "ask_depth_usd": _round_or_none(context.ask_depth_usd, 2),
+            "order_book_imbalance_pct": _round_or_none(
+                (context.order_book_imbalance or 0.0) * 100.0
+                if context.order_book_imbalance is not None
+                else None,
+                1,
+            ),
+            "execution_notional_usdt": context.execution_notional_usdt,
+        },
+        "warnings": _unique(list(quality.get("warnings", []))),
+        "data_quality": {
+            "status": "AVAILABLE" if execution_complete else "PARTIAL",
+            "ticker_available": True,
+            "order_book_available": book_available,
+            "execution_depth_complete": context.execution_quality_complete,
+            "missing_sources": [] if execution_complete else ["order_book_depth"],
+        },
+        "safety": {
+            "analysis_only": True,
+            "auto_ordering": False,
+            "stored_trigger_unchanged": True,
+            "note": "即時檢查只更新執行條件，不產生、刪除或改寫核心 Trigger。",
+        },
+    }
+
+
+def _live_entry_location(
+    eligibility: dict[str, Any],
+    *,
+    invalidated: bool,
+    target_reached: bool,
+) -> dict[str, Any]:
+    chase_atr = float(eligibility.get("chase_atr", 0.0) or 0.0)
+    if invalidated:
+        return {
+            "key": "INVALIDATED",
+            "label": "訊號已失效",
+            "score": 0.0,
+            "extension_atr": round(chase_atr, 3),
+        }
+    if target_reached:
+        return {
+            "key": "SEVERE_CHASE",
+            "label": "第一目標已到達",
+            "score": 0.0,
+            "extension_atr": round(chase_atr, 3),
+        }
+    status = eligibility.get("status")
+    if status == "ENTRY_READY":
+        ready_limit = max(float(eligibility.get("ready_max_chase_atr", 0.15)), 1e-9)
+        score = max(75.0, 95.0 - min(chase_atr / ready_limit, 1.0) * 20.0)
+        key, label = "LIVE_ACCEPTABLE", "仍在合理進場區"
+    elif status == "WAIT_RETEST":
+        score = 55.0
+        key, label = "RETEST_REQUIRED", "等待回踩／重新確認"
+    else:
+        score = 10.0
+        key, label = "SEVERE_CHASE", "已錯過／不宜追價"
+    return {
+        "key": key,
+        "label": label,
+        "score": round(score, 1),
+        "extension_atr": round(chase_atr, 3),
+    }
+
+
+def _signal_atr(signal: Signal) -> float:
+    story = signal.market_story or {}
+    trigger = story.get("trigger", {}) if isinstance(story, dict) else {}
+    raw = story.get("raw", {}) if isinstance(story, dict) else {}
+    for value in (
+        trigger.get("event_atr") if isinstance(trigger, dict) else None,
+        raw.get("core_atr") if isinstance(raw, dict) else None,
+    ):
+        number = _optional_number(value)
+        if number is not None and number > 0:
+            return number
+    raise ValueError("原始訊號缺少 ATR，無法安全重新判定進場距離")
+
+
+def _original_age_bars(signal: Signal) -> int | None:
+    lifecycle = signal.lifecycle or {}
+    story = signal.market_story or {}
+    trigger = story.get("trigger", {}) if isinstance(story, dict) else {}
+    for value in (
+        lifecycle.get("age_bars") if isinstance(lifecycle, dict) else None,
+        trigger.get("event_age_bars") if isinstance(trigger, dict) else None,
+    ):
+        number = _optional_number(value)
+        if number is not None:
+            return max(0, int(number))
+    return None
+
+
+def _trigger_age_bars(signal: Signal, reference_ms: int | None) -> int | None:
+    story = signal.market_story or {}
+    trigger = story.get("trigger", {}) if isinstance(story, dict) else {}
+    event_ts = _optional_number(trigger.get("event_ts")) if isinstance(trigger, dict) else None
+    if event_ts is None or event_ts <= 0:
+        return _original_age_bars(signal)
+    current_ms = int(reference_ms or time.time() * 1000)
+    interval_ms = 14_400_000 if signal.radar_horizon == "LONG" else 900_000
+    return max(0, int((current_ms - int(event_ts)) // interval_ms))
+
+
+def _spread_pct(bid: float, ask: float) -> float:
+    midpoint = (bid + ask) / 2.0
+    if midpoint <= 0 or ask < bid:
+        raise ValueError("即時 Order Book 買賣價無效")
+    return (ask - bid) / midpoint * 100.0
+
+
+def _required_number(value: Any, field: str) -> float:
+    number = _optional_number(value)
+    if number is None:
+        raise ValueError(f"原始訊號缺少 {field}")
+    return number
+
+
+def _optional_number(value: Any) -> float | None:
+    try:
+        number = float(value)
+    except (TypeError, ValueError):
+        return None
+    return number if math.isfinite(number) else None
+
+
+def _round_or_none(value: Any, digits: int) -> float | None:
+    number = _optional_number(value)
+    return round(number, digits) if number is not None else None
+
+
+def _iso_from_ms(value: int) -> str | None:
+    if value <= 0:
+        return None
+    return datetime.fromtimestamp(value / 1000.0, timezone.utc).isoformat()
+
+
+def _unique(values: list[str]) -> list[str]:
+    return list(dict.fromkeys(value for value in values if value))

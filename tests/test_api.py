@@ -17,6 +17,29 @@ class RouteFixtureClient(OKXPublicClient):
         pass
 
     def _get(self, path, params):
+        if path.endswith("/ticker"):
+            return [
+                {
+                    "instId": "BTC-USDT-SWAP",
+                    "last": "100.5",
+                    "bidPx": "100",
+                    "askPx": "101",
+                    "ts": "1004",
+                }
+            ]
+        if path.endswith("instruments"):
+            return [
+                {
+                    "instId": "BTC-USDT-SWAP",
+                    "state": "live",
+                    "settleCcy": "USDT",
+                    "ctType": "linear",
+                    "tickSz": "0.1",
+                    "ctVal": "0.01",
+                    "ctMult": "1",
+                    "ctValCcy": "BTC",
+                }
+            ]
         if path.endswith("open-interest"):
             return [
                 {"instId": "BTC-USDT-SWAP", "oiUsd": "25000000", "ts": "999"},
@@ -85,6 +108,23 @@ class APITests(unittest.TestCase):
         self.assertGreater(context.bid_depth_usd, 1_000)
         self.assertGreaterEqual(context.buy_slippage_pct, 0)
         self.assertEqual(context.source_timestamps["open_interest"], 999)
+
+    def test_single_instrument_execution_context_uses_live_book(self):
+        client = RouteFixtureClient()
+        client.execution_notional_usdt = 5
+        client._instrument_meta = {}
+
+        ticker = client.get_ticker("BTC-USDT-SWAP")
+        context = client.get_execution_context("BTC-USDT-SWAP")
+
+        self.assertEqual(ticker.last, 100.5)
+        self.assertEqual(context.best_bid, 100.0)
+        self.assertEqual(context.best_ask, 101.0)
+        self.assertTrue(context.execution_quality_complete)
+        self.assertGreater(context.bid_depth_usd, 0)
+        self.assertGreater(context.ask_depth_usd, 0)
+        self.assertEqual(context.source_timestamps["order_book"], 1001)
+        self.assertNotIn("funding", context.source_timestamps)
 
 
 if __name__ == "__main__":

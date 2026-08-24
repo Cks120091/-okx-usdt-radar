@@ -129,6 +129,7 @@ Trigger 是否存在與「現在是否適合進場」分開顯示：
 - 15m 與 4H 長線皆有全部、早期可進、目前可進、等待回踩、已錯過與接近觸發分頁
 - 新鮮度、Lifecycle、價格位置、攻擊效率、Price Acceptance、控制權、市場參與、執行品質與資料品質
 - 判定原因、安全檢查、全市場搜尋、收藏與 TradingView 快捷連結；開發者原始資料不傳送到手機
+- 15m／4H 正式 Trigger 可開啟獨立「進場檢查」頁；只有使用者按下時才更新該幣最新 Ticker、Order Book、Spread、滑價、剩餘 R:R 與交易品質，結果不寫回原始訊號
 - 真實歷史統計分頁
 - Web App Manifest、SVG icon 與只快取 App Shell 的 Service Worker；`/api/*` 與 `/health` 永遠走網路
 
@@ -139,6 +140,7 @@ Trigger 是否存在與「現在是否適合進場」分開顯示：
 - `POST /api/scan`：啟動或加入唯一一輪完整掃描
 - `GET /api/report/preview`：本輪已完成的 15m 核心預覽；Deep Data 與長線仍在補充
 - `GET /api/report/latest`：手機需要的精簡 V3.3 JSON；完整 Raw Indicators 與內部 Market Story 不對外傳送
+- `GET /api/preflight?inst_id=...&horizon=SHORT|LONG`：只重新檢查最新正式 Trigger 的單幣執行條件；12 秒防重複快取，不掃全市場、不改寫 Trigger
 - `GET /api/report/latest.md`：中文文字報告
 - `GET /api/stats`：SQLite 真實樣本統計
 
@@ -207,7 +209,7 @@ python -m unittest discover -s tests -v
 git diff --check
 ```
 
-測試涵蓋價格接受、控制權轉移、動態確認窗口、壓縮防假反轉、雜訊不靠分數觸發、長短雷達分離、Context 不取消 Trigger、單幣資料隔離、OI 非硬門檻、20 個上限、Order Book 時間序列、去重、No Follow-through、MFE／MAE、TP／SL、真實績效、Scan Lock、STALE、PWA 與 API contract。
+測試涵蓋價格接受、控制權轉移、動態確認窗口、壓縮防假反轉、雜訊不靠分數觸發、長短雷達分離、Context 不取消 Trigger、單幣資料隔離、OI 非硬門檻、20 個上限、Order Book 時間序列、去重、No Follow-through、MFE／MAE、TP／SL、真實績效、單幣進場檢查、Scan Lock、STALE、PWA 與 API contract。
 
 ## 安全邊界與限制
 
