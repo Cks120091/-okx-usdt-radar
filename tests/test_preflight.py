@@ -172,6 +172,26 @@ class PreflightTests(unittest.TestCase):
             self.assertEqual(payload["live"]["quality_score"], 0.0)
             self.assertEqual(len(runtime._latest.signals), 1)
 
+    def test_adverse_side_hides_artificial_live_rr_without_mutating_trigger(self):
+        with tempfile.TemporaryDirectory() as directory:
+            item = make_signal()
+            original_entry = dict(item.entry_eligibility)
+            runtime = RadarRuntime(
+                PreflightScanner(PreflightClient(price=98.1)),
+                AppConfig(data_dir=directory),
+            )
+            runtime._latest = make_report(item)
+
+            payload = runtime.preflight_dict(item.inst_id, "SHORT")
+
+            self.assertEqual(payload["verdict"]["status"], "WAIT_RETEST")
+            self.assertFalse(payload["verdict"]["actionable"])
+            self.assertIn("接近失效", payload["verdict"]["label"])
+            self.assertIsNone(payload["live"]["remaining_rr"])
+            self.assertFalse(payload["live"]["remaining_rr_applicable"])
+            self.assertEqual(item.entry_eligibility, original_entry)
+            self.assertTrue(payload["safety"]["stored_trigger_unchanged"])
+
     def test_rejects_symbol_without_formal_trigger_for_requested_horizon(self):
         with tempfile.TemporaryDirectory() as directory:
             item = make_signal()
