@@ -39,6 +39,7 @@
     .metric .k{color:var(--muted);font-size:11px;margin-bottom:5px}.metric .v{font-size:19px;font-weight:850;overflow-wrap:anywhere}.metric.wide{grid-column:1/-1}.metric.wide .v{font-size:14px}
     .notice{display:none;border-radius:15px;padding:13px 14px;margin:0 0 12px;font-size:14px;font-weight:700;line-height:1.55;border:1px solid}
     .notice.show{display:block}.notice.scan{color:#d9ebff;background:#0c2949;border-color:#295d91}.notice.danger{color:#ffe5e8;background:#39151e;border-color:#7a2b3b}
+    .push-panel{display:flex;align-items:center;justify-content:space-between;gap:12px;margin:0 0 12px;padding:12px 13px;border:1px solid #294764;border-radius:15px;background:#0a192a}.push-copy{min-width:0}.push-copy b{display:block;font-size:13px}.push-copy span{display:block;margin-top:4px;color:var(--muted);font-size:10px;line-height:1.45}.push-button{flex:0 0 auto;min-width:92px;min-height:44px;padding:8px 11px;border:1px solid #426e9f;border-radius:12px;background:#16304e;color:#fff;font-size:12px;font-weight:850}.push-button.on{color:#052016;border-color:var(--green);background:var(--green)}.push-button:disabled{color:var(--gray);border-color:#34475d;background:#26384d}
     .market-strip{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:10px;margin-bottom:10px}.pulse-card{background:#091827;border:1px solid var(--line);border-radius:14px;padding:11px 12px;min-width:0}.pulse-head{display:flex;align-items:center;justify-content:space-between;gap:7px;font-size:11px;color:var(--muted)}.pulse-head strong{font-size:13px;color:#fff}.pulse-price{font-size:17px;font-weight:900;margin:5px 0 3px}.change{font-size:11px;font-weight:800}.up{color:var(--green)}.down{color:var(--red)}.flat{color:var(--gray)}
     .search-tools{display:flex;gap:8px;margin-bottom:12px}.global-search{width:100%;min-width:0;min-height:46px;border:1px solid var(--line);border-radius:13px;background:var(--panel);color:#fff;padding:10px 12px;font-size:16px}.search-button{min-width:68px;border:1px solid #426e9f;border-radius:13px;background:#16304e;color:#fff;font-weight:850}
     .progress{height:7px;margin-top:10px;border-radius:999px;background:#081422;overflow:hidden}.progress>i{display:block;height:100%;width:18%;background:linear-gradient(90deg,var(--blue),var(--yellow));border-radius:inherit;transition:width .25s}.progress.indeterminate>i{animation:slide 1.3s infinite;width:35%}@keyframes slide{from{transform:translateX(-110%)}to{transform:translateX(310%)}}
@@ -104,6 +105,10 @@
       <div id="scanProgress" class="progress indeterminate"><i></i></div>
     </div>
     <div id="dangerNotice" class="notice danger" role="alert"></div>
+    <div class="push-panel">
+      <div class="push-copy"><b>掃描完成通知</b><span id="pushMessage">正在確認這台裝置是否支援背景通知…</span></div>
+      <button id="pushButton" class="push-button" type="button" disabled>檢查中…</button>
+    </div>
 
     <div id="filterShell" class="filter-shell" hidden>
       <nav class="filter-tabs" data-group-filters="fifteen" aria-label="15m 訊號篩選" hidden>
@@ -250,7 +255,8 @@
     const $=selector=>document.querySelector(selector);
     const $$=selector=>[...document.querySelectorAll(selector)];
     const savedFavorites=(()=>{try{return JSON.parse(localStorage.getItem('okx-radar-favorites')||'[]')}catch(_){return []}})();
-    const state={status:null,report:null,history:[],polling:false,preflight:null,preflightLoading:false,activeGroup:'home',groupTabs:{home:'overview',fifteen:'fifteenAll',long:'longSignals',more:'anomalies'},favorites:new Set(Array.isArray(savedFavorites)?savedFavorites:[])};
+    const savedPushEnabled=(()=>{try{return localStorage.getItem('okx-radar-push-enabled')==='1'}catch(_){return false}})();
+    const state={status:null,report:null,history:[],polling:false,preflight:null,preflightLoading:false,pushConfig:null,pushEnabled:savedPushEnabled,pushSubscription:null,pushLoading:false,activeGroup:'home',groupTabs:{home:'overview',fifteen:'fifteenAll',long:'longSignals',more:'anomalies'},favorites:new Set(Array.isArray(savedFavorites)?savedFavorites:[])};
     const directionName={LONG:'做多',SHORT:'做空',NEUTRAL:'中性'};
     const stageName={WATCH:'觀望',NEAR_TRIGGER:'接近觸發',EARLY:'早期訊號',EARLY_SIGNAL:'早期訊號',CONFIRMED:'完整確認',TRENDING:'趨勢進行中',REENTRY:'回踩再發動',EXTENDED:'已延伸',NO_FOLLOW_THROUGH:'未獲延續',INVALIDATED:'訊號失效'};
     const freshnessName={NEW:'🆕 剛觸發',REACTIVATED:'↗️ 再發動',ACTIVE:'▶️ 有效中',EXTENDED:'⏳ 已延伸',NO_FOLLOW_THROUGH:'⚠️ 未延續',INVALIDATED:'❌ 已失效',COMPLETED:'✓ 已完成',NONE:'等待新事件'};
@@ -269,7 +275,57 @@
     function favoriteButton(instId){const on=state.favorites.has(instId);return `<button class="favorite ${on?'on':''}" type="button" data-favorite="${esc(instId)}" aria-label="${on?'取消收藏':'收藏'} ${esc(instId)}">${on?'★':'☆'}</button>`}
     function quickLinks(item){return `<div class="quick-links"><a class="quick-link" href="${tvUrl(item.inst_id)}" target="_blank" rel="noopener noreferrer">TradingView 圖表 ↗</a></div>`}
     function taiwanTime(value){if(!value)return '尚未完成掃描';const d=new Date(value);return Number.isNaN(d.getTime())?'時間未知':new Intl.DateTimeFormat('zh-TW',{timeZone:'Asia/Taipei',month:'2-digit',day:'2-digit',hour:'2-digit',minute:'2-digit',second:'2-digit',hour12:false}).format(d)}
-    async function api(path,options={}){const response=await fetch(path,{cache:'no-store',headers:{'Accept':'application/json',...(options.headers||{})},...options});let payload={};try{payload=await response.json()}catch(_){payload={error:'服務回應格式錯誤'}}if(!response.ok)throw Object.assign(new Error(payload.error||`HTTP ${response.status}`),{status:response.status,payload});return payload}
+    async function api(path,options={}){const {headers={},...requestOptions}=options;const response=await fetch(path,{...requestOptions,cache:'no-store',headers:{'Accept':'application/json',...headers}});let payload={};try{payload=await response.json()}catch(_){payload={error:'服務回應格式錯誤'}}if(!response.ok)throw Object.assign(new Error(payload.error||`HTTP ${response.status}`),{status:response.status,payload});return payload}
+
+    function isIOSDevice(){return /iphone|ipad|ipod/i.test(navigator.userAgent)||(navigator.platform==='MacIntel'&&navigator.maxTouchPoints>1)}
+    function isStandaloneApp(){return window.matchMedia('(display-mode: standalone)').matches||navigator.standalone===true}
+    function supportsPush(){return window.isSecureContext&&'serviceWorker' in navigator&&'PushManager' in window&&'Notification' in window}
+    function setPushPreference(enabled){state.pushEnabled=enabled;try{if(enabled)localStorage.setItem('okx-radar-push-enabled','1');else localStorage.removeItem('okx-radar-push-enabled')}catch(_){}}
+    function storedPushKeyId(){try{return localStorage.getItem('okx-radar-vapid-key-id')||''}catch(_){return ''}}
+    function setStoredPushKeyId(value){try{if(value)localStorage.setItem('okx-radar-vapid-key-id',value);else localStorage.removeItem('okx-radar-vapid-key-id')}catch(_){}}
+    function base64UrlBytes(value){const padding='='.repeat((4-value.length%4)%4);const raw=atob((value+padding).replace(/-/g,'+').replace(/_/g,'/'));return Uint8Array.from(raw,ch=>ch.charCodeAt(0))}
+    function renderPushState(message=''){
+      const button=$('#pushButton'),copy=$('#pushMessage');button.classList.remove('on');button.disabled=true;
+      if(state.pushLoading){button.textContent='處理中…';copy.textContent=message||'正在設定通知…';return}
+      if(!state.pushConfig){button.textContent='檢查中…';copy.textContent=message||'正在確認這台裝置是否支援背景通知…';return}
+      if(!state.pushConfig.available){button.textContent='暫無法使用';copy.textContent=message||state.pushConfig.note||'通知服務目前無法啟用。';return}
+      if(!supportsPush()){
+        button.textContent='不支援';copy.textContent=message||(isIOSDevice()?(isStandaloneApp()?'需要 iOS / iPadOS 16.4 以上才支援這項背景通知。':'請用 Safari 開啟本頁，「分享 → 加入主畫面」後，再從主畫面開啟。'):'這個瀏覽器不支援背景推播通知。');return
+      }
+      if(isIOSDevice()&&!isStandaloneApp()){
+        button.textContent='加入主畫面';copy.textContent=message||'iPhone 請先在 Safari 點「分享 → 加入主畫面」，再開啟通知。';return
+      }
+      if(Notification.permission==='denied'){
+        button.textContent='權限已關閉';copy.textContent=message||'請到裝置設定重新開啟 OKX 雷達的通知權限。';return
+      }
+      button.disabled=false;
+      if(state.pushEnabled&&state.pushSubscription){button.textContent='已開啟 ✓';button.classList.add('on');button.title='點一下關閉通知';copy.textContent=message||'啟動掃描後可關閉頁面；完成或失敗時會通知。'}
+      else{button.textContent='開啟通知';button.title='開啟掃描完成通知';copy.textContent=message||'只通知你手動啟動的掃描，不含交易訊號內容。'}
+    }
+    async function ensurePushSubscription(){
+      if(!state.pushConfig?.available||!supportsPush())throw new Error('這台裝置目前無法使用掃描通知');
+      if(Notification.permission!=='granted')throw new Error('尚未允許通知權限');
+      const registration=await navigator.serviceWorker.ready;let subscription=await registration.pushManager.getSubscription();const currentKey=String(state.pushConfig.key_id||''),storedKey=storedPushKeyId();
+      if(subscription&&storedKey!==currentKey){await subscription.unsubscribe();subscription=null}
+      if(!subscription)subscription=await registration.pushManager.subscribe({userVisibleOnly:true,applicationServerKey:base64UrlBytes(state.pushConfig.public_key)});
+      setStoredPushKeyId(currentKey);state.pushSubscription=subscription;return subscription
+    }
+    async function loadPushConfig(){
+      try{state.pushConfig=await api('/api/push/config');renderPushState();if(savedPushEnabled&&supportsPush()&&Notification.permission==='granted'&&(!isIOSDevice()||isStandaloneApp())){try{await ensurePushSubscription();setPushPreference(true);renderPushState()}catch(error){setPushPreference(false);state.pushSubscription=null;renderPushState(`通知需重新開啟：${error.message||error}`)}}}
+      catch(error){state.pushConfig={available:false,note:`無法讀取通知設定：${error.message||error}`};renderPushState()}
+    }
+    async function togglePushNotifications(){
+      if(state.pushLoading)return;state.pushLoading=true;renderPushState();
+      try{
+        if(state.pushEnabled&&state.pushSubscription){await state.pushSubscription.unsubscribe();state.pushSubscription=null;setStoredPushKeyId('');setPushPreference(false);renderPushState('已關閉掃描完成通知。');return}
+        if(!state.pushConfig?.available||!supportsPush())throw new Error('這台裝置目前無法使用掃描通知');
+        if(isIOSDevice()&&!isStandaloneApp())throw new Error('iPhone 請先在 Safari 「加入主畫面」，再從主畫面開啟。');
+        const permission=Notification.permission==='granted'?'granted':await Notification.requestPermission();
+        if(permission!=='granted'){setPushPreference(false);throw new Error('你尚未允許通知；雷達掃描功能不受影響。')}
+        await ensurePushSubscription();setPushPreference(true);renderPushState('通知已開啟；下次手動掃描後可安全關閉頁面。');
+      }catch(error){if(!state.pushSubscription)setPushPreference(false);renderPushState(error.message||String(error))}
+      finally{state.pushLoading=false;renderPushState($('#pushMessage').textContent)}
+    }
 
     function syncScanControls(key){
       const scanning=key==='SCANNING',needsLargeAction=key==='BOOTING'||key==='STALE'||key==='ERROR';
@@ -499,11 +555,17 @@
     async function startScan(){
       syncScanControls('SCANNING');
       state.report=null;$('#scanNotice').classList.add('show');$('#scanMessage').textContent='正在取得最新市場資料';renderUnavailable('正在掃描最新市場，舊正式訊號已暫停使用。');renderOverviewUnavailable('正在掃描最新市場，舊候選排行已暫停使用。');
-      try{await api('/api/scan',{method:'POST'});await pollUntilComplete()}catch(error){showConnectionError(error)}
+      try{
+        let subscription=null;if(state.pushEnabled){try{await loadPushConfig();subscription=await ensurePushSubscription()}catch(error){state.pushSubscription=null;setPushPreference(false);renderPushState(`本輪不會通知：${error.message||error}`)}}
+        const request=pushSubscription=>api('/api/scan',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(pushSubscription?{push_subscription:pushSubscription.toJSON()}: {})});
+        let started;try{started=await request(subscription)}catch(error){if(!subscription||error.status!==400)throw error;state.pushSubscription=null;setPushPreference(false);setStoredPushKeyId('');renderPushState('通知訂閱需重新開啟；本輪掃描仍會正常執行。');started=await request(null)}
+        if(subscription&&started.notification_registered)renderPushState('本輪已登記通知；現在可以關閉頁面。');
+        await pollUntilComplete()
+      }catch(error){showConnectionError(error)}
     }
     async function pollUntilComplete(){if(state.polling)return;state.polling=true;let failures=0;try{for(let count=0;count<360;count++){try{const status=await refreshStatus();failures=0;if(status.system_status!=='SCANNING'){await loadReport();return}if(status.has_preview)await loadPreview()}catch(error){failures++;if(failures>=5)throw error}await new Promise(resolve=>setTimeout(resolve,2000))}throw new Error('掃描等待超過 12 分鐘，已停止輪詢。')}finally{state.polling=false;const s=state.status||{};syncScanControls(s.system_status||'BOOTING')}}
     function showConnectionError(error){const danger=$('#dangerNotice');danger.textContent=`無法連接雷達服務：${error.message||error}`;danger.classList.add('show');$('#statusPill').textContent='掃描異常';$('#statusPill').className='status-pill error';syncScanControls('ERROR')}
-    async function bootstrap(){try{if('serviceWorker' in navigator)navigator.serviceWorker.register('/service-worker.js').catch(()=>{});const status=await refreshStatus();if(status.has_report)await loadReport();else await loadHistory();if(status.system_status==='SCANNING')await pollUntilComplete()}catch(error){showConnectionError(error)}}
+    async function bootstrap(){try{if('serviceWorker' in navigator)await navigator.serviceWorker.register('/service-worker.js').catch(()=>null);await loadPushConfig();const status=await refreshStatus();if(status.has_report)await loadReport();else await loadHistory();if(status.system_status==='SCANNING')await pollUntilComplete()}catch(error){showConnectionError(error)}}
     async function refreshFreshness(){try{if(!state.polling){const status=await refreshStatus();if(status.system_status==='SCANNING'){await pollUntilComplete();return}const reportChanged=status.has_report&&(!state.report||status.latest_generated_at!==state.report.generated_at);if(reportChanged)await loadReport()}}catch(error){showConnectionError(error)}finally{setTimeout(refreshFreshness,15000)}}
 
     const tabGroups={overview:'home',fifteenAll:'fifteen',earlySignals:'fifteen',signals:'fifteen',waitRetest:'fifteen',missedSignals:'fifteen',watchlist:'fifteen',longSignals:'long',longEarlySignals:'long',longReadySignals:'long',longWaitRetest:'long',longMissedSignals:'long',longWatchlist:'long',anomalies:'more',map:'more',history:'more',stats:'more'};
@@ -512,6 +574,7 @@
     $$('.filter-tab').forEach(button=>button.addEventListener('click',()=>activateTab(button.dataset.tab)));
     $('#scanButton').addEventListener('click',startScan);
     $('#refreshButton').addEventListener('click',startScan);
+    $('#pushButton').addEventListener('click',togglePushNotifications);
     $('#mapSearch').addEventListener('input',event=>renderMap(state.report?.market_map||[],event.target.value));
     $('#globalSearchForm').addEventListener('submit',event=>{event.preventDefault();const query=$('#globalSearch').value.trim();$('#mapSearch').value=query;activateTab('map');renderMap(state.report?.market_map||[],query);$('#mapSearch').focus()});
     document.addEventListener('click',event=>{const button=event.target.closest?.('[data-preflight-id]');if(!button||button.disabled)return;openPreflight(button.dataset.preflightId,button.dataset.preflightHorizon||'SHORT')});

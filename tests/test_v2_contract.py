@@ -51,6 +51,13 @@ class V33ContractTests(unittest.TestCase):
         self.assertIn("真實歷史績效", html)
         self.assertIn("manifest.webmanifest", html)
         self.assertIn("serviceWorker.register", html)
+        self.assertIn("/api/push/config", html)
+        self.assertIn("pushManager.subscribe", html)
+        self.assertIn("Notification.requestPermission", html)
+        self.assertIn("push_subscription", html)
+        self.assertIn("notification_registered", html)
+        self.assertIn("$('#pushButton').addEventListener('click',togglePushNotifications)", html)
+        self.assertIn("分享 → 加入主畫面", html)
         self.assertIn("資料已過期，禁止依此進場", html)
         self.assertIn("overflow-x:hidden", html)
         self.assertIn("env(safe-area-inset-bottom)", html)
@@ -63,6 +70,7 @@ class V33ContractTests(unittest.TestCase):
             "async function refreshFreshness", 1
         )[0]
         self.assertNotIn("startScan", bootstrap)
+        self.assertNotIn("requestPermission", bootstrap)
         freshness_poll = html.split("async function refreshFreshness(){", 1)[1].split(
             "const tabGroups", 1
         )[0]
@@ -114,6 +122,10 @@ class V33ContractTests(unittest.TestCase):
         manifest = (root / "manifest.webmanifest").read_text(encoding="utf-8")
         self.assertIn("/api/", worker)
         self.assertIn('fetch(event.request, {cache: "no-store"})', worker)
+        self.assertIn('self.addEventListener("push"', worker)
+        self.assertIn('self.addEventListener("notificationclick"', worker)
+        self.assertIn("showNotification", worker)
+        self.assertIn("openWindow", worker)
         shell_assets = worker.split("SHELL_ASSETS", 1)[1].split("];", 1)[0]
         self.assertNotIn("/api/", shell_assets)
         self.assertIn('"display": "standalone"', manifest)

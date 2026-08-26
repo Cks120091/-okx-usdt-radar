@@ -19,6 +19,7 @@ from .config import AppConfig
 from .models import RadarReport
 from .preflight import build_preflight_payload
 from .public_payload import public_report_payload
+from .push import PushSubscriptionError, build_push_notifier
 from .reporting import load_latest_report, report_markdown, save_report
 from .scanner import MarketScanner
 
@@ -35,9 +36,16 @@ class PreflightError(RuntimeError):
 class RadarRuntime:
     """Single-scan runtime with persisted reports and an optional core preview."""
 
-    def __init__(self, scanner: MarketScanner, config: AppConfig):
+    def __init__(
+        self,
+        scanner: MarketScanner,
+        config: AppConfig,
+        *,
+        push_notifier: Any | None = None,
+    ):
         self.scanner = scanner
         self.config = config
+        self.push_notifier = push_notifier or build_push_notifier()
         self._scan_lock = threading.Lock()
         self._state_lock = threading.Lock()
         self._preflight_lock = threading.Lock()
@@ -52,16 +60,27 @@ class RadarRuntime:
         self._last_attempt_status = "RESTORED" if self._latest is not None else "IDLE"
         self._scan_id: str | None = None
         self._scan_started_at: str | None = None
+        self._scan_push_subscriptions: dict[str, dict[str, Any]] = {}
+        self._max_scan_push_subscriptions = 8
         self._progress: dict[str, Any] = self._idle_progress()
 
     def stop(self) -> None:
         return
 
-    def trigger_scan(self) -> bool:
+    def trigger_scan(self, push_subscription: Any | None = None) -> bool:
+        normalized_subscription = (
+            self.push_notifier.normalize_subscription(push_subscription)
+            if push_subscription is not None
+            else None
+        )
         with self._state_lock:
             if self._running:
+                if normalized_subscription is not None:
+                    self._register_scan_push_locked(normalized_subscription)
                 return False
             self._begin_scan_locked()
+            if normalized_subscription is not None:
+                self._register_scan_push_locked(normalized_subscription)
         thread = threading.Thread(
             target=self._scan_worker,
             name="radar-on-demand-scan",
@@ -69,6 +88,9 @@ class RadarRuntime:
         )
         thread.start()
         return True
+
+    def push_config(self) -> dict[str, Any]:
+        return self.push_notifier.public_config()
 
     def scan_blocking(self) -> RadarReport:
         with self._state_lock:
@@ -308,6 +330,7 @@ class RadarRuntime:
         self._scan_started_at = datetime.now(timezone.utc).isoformat()
         self._preview = None
         self._preflight_cache.clear()
+        self._scan_push_subscriptions.clear()
         self._progress = {
             "phase": "STARTING",
             "completed": 0,
@@ -317,11 +340,20 @@ class RadarRuntime:
         }
 
     def _scan_worker(self) -> None:
+        report: RadarReport | None = None
+        error: Exception | None = None
         try:
-            self._perform_scan()
+            report = self._perform_scan()
+        except Exception as exc:
+            error = exc
         finally:
             with self._state_lock:
                 self._running = False
+                scan_id = self._scan_id or "unknown"
+                subscriptions = list(self._scan_push_subscriptions.values())
+                self._scan_push_subscriptions.clear()
+        if subscriptions:
+            self._deliver_scan_notifications(subscriptions, scan_id, report, error)
 
     def _perform_scan(self) -> RadarReport:
         with self._scan_lock:
@@ -413,6 +445,48 @@ class RadarRuntime:
             LOGGER.info("Released %s cached candle series", released)
         except Exception:
             LOGGER.exception("Unable to release transient scanner data")
+
+    def _register_scan_push_locked(self, subscription: dict[str, Any]) -> None:
+        key = self.push_notifier.subscription_key(subscription)
+        if not key or key in self._scan_push_subscriptions:
+            return
+        if len(self._scan_push_subscriptions) >= self._max_scan_push_subscriptions:
+            raise PushSubscriptionError("本輪掃描通知裝置已達安全上限")
+        self._scan_push_subscriptions[key] = subscription
+
+    def _deliver_scan_notifications(
+        self,
+        subscriptions: list[dict[str, Any]],
+        scan_id: str,
+        report: RadarReport | None,
+        error: Exception | None,
+    ) -> None:
+        success = (
+            error is None
+            and report is not None
+            and report.status != "DATA_INCOMPLETE"
+        )
+        payload = {
+            "title": "OKX 雷達掃描完成" if success else "OKX 雷達掃描未完成",
+            "body": (
+                "最新市場報告已完成，點擊查看結果。"
+                if success
+                else "本輪掃描未能完成，點擊查看目前狀態。"
+            ),
+            "url": "/",
+            "tag": f"okx-radar-scan-{scan_id}",
+            "status": "SUCCESS" if success else "ERROR",
+            "scan_id": scan_id,
+        }
+        for subscription in subscriptions:
+            try:
+                self.push_notifier.send(subscription, payload)
+            except Exception as exc:
+                # Browser push endpoints are capability URLs. Never log them.
+                LOGGER.warning(
+                    "Unable to deliver one scan completion notification error=%s",
+                    type(exc).__name__,
+                )
 
     def _publish_preview(self, report: RadarReport) -> None:
         with self._state_lock:
@@ -541,6 +615,8 @@ def serve(runtime: RadarRuntime, host: str, port: int) -> None:
                 self._send_json(HTTPStatus.OK, {"ok": True, **runtime.status()})
             elif path == "/api/status":
                 self._send_json(HTTPStatus.OK, runtime.status())
+            elif path == "/api/push/config":
+                self._send_json(HTTPStatus.OK, runtime.push_config())
             elif path == "/api/report/latest":
                 payload = runtime.latest_dict()
                 if payload is None:
@@ -600,7 +676,16 @@ def serve(runtime: RadarRuntime, host: str, port: int) -> None:
             if path != "/api/scan":
                 self._send_json(HTTPStatus.NOT_FOUND, {"error": "not found"})
                 return
-            started = runtime.trigger_scan()
+            try:
+                payload = self._read_json_body()
+                push_subscription = payload.get("push_subscription")
+                started = runtime.trigger_scan(push_subscription)
+            except PushSubscriptionError as exc:
+                self._send_json(HTTPStatus.BAD_REQUEST, {"error": str(exc)})
+                return
+            except ValueError as exc:
+                self._send_json(HTTPStatus.BAD_REQUEST, {"error": str(exc)})
+                return
             status = runtime.status()
             self._send_json(
                 HTTPStatus.ACCEPTED,
@@ -609,6 +694,7 @@ def serve(runtime: RadarRuntime, host: str, port: int) -> None:
                     "joined_existing_scan": not started,
                     "scan_id": status["scan_id"],
                     "runtime_status": "SCANNING",
+                    "notification_registered": push_subscription is not None,
                     "message": (
                         "已開始完整掃描"
                         if started
@@ -616,6 +702,24 @@ def serve(runtime: RadarRuntime, host: str, port: int) -> None:
                     ),
                 },
             )
+
+        def _read_json_body(self) -> dict[str, Any]:
+            raw_length = self.headers.get("Content-Length", "0")
+            try:
+                length = int(raw_length)
+            except (TypeError, ValueError) as exc:
+                raise ValueError("請求長度不正確") from exc
+            if length < 0 or length > 16_384:
+                raise ValueError("通知請求內容過大")
+            if length == 0:
+                return {}
+            try:
+                payload = json.loads(self.rfile.read(length).decode("utf-8"))
+            except (UnicodeDecodeError, json.JSONDecodeError) as exc:
+                raise ValueError("請求內容必須是正確的 JSON") from exc
+            if not isinstance(payload, dict):
+                raise ValueError("請求內容格式不正確")
+            return payload
 
         def log_message(self, format_string: str, *args: Any) -> None:
             LOGGER.info("HTTP %s - %s", self.address_string(), format_string % args)
