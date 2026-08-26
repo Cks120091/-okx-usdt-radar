@@ -1,4 +1,4 @@
-const SHELL_CACHE = "okx-radar-shell-v3.3";
+const SHELL_CACHE = "okx-radar-shell-v3.3-push-1";
 const SHELL_ASSETS = ["/", "/manifest.webmanifest", "/radar-icon.svg"];
 
 self.addEventListener("install", event => {
@@ -31,4 +31,46 @@ self.addEventListener("fetch", event => {
       })
       .catch(() => caches.match(event.request))
   );
+});
+
+self.addEventListener("push", event => {
+  let payload = {};
+  try {
+    payload = event.data ? event.data.json() : {};
+  } catch (_) {
+    payload = {};
+  }
+  const title = String(payload.title || "OKX 雷達掃描完成");
+  const body = String(payload.body || "最新市場報告已完成，點擊查看結果。");
+  let target = "/";
+  try {
+    const candidate = new URL(String(payload.url || "/"), self.location.origin);
+    if (candidate.origin === self.location.origin) target = candidate.pathname + candidate.search + candidate.hash;
+  } catch (_) {}
+  event.waitUntil((async () => {
+    const windows = await self.clients.matchAll({type: "window", includeUncontrolled: true});
+    if (windows.some(client => client.visibilityState === "visible")) return;
+    await self.registration.showNotification(title, {
+      body,
+      icon: "/radar-icon.svg",
+      badge: "/radar-icon.svg",
+      tag: String(payload.tag || "okx-radar-scan"),
+      renotify: false,
+      data: {url: target},
+    });
+  })());
+});
+
+self.addEventListener("notificationclick", event => {
+  event.notification.close();
+  const target = new URL(event.notification.data?.url || "/", self.location.origin);
+  event.waitUntil((async () => {
+    const windows = await self.clients.matchAll({type: "window", includeUncontrolled: true});
+    for (const client of windows) {
+      if (new URL(client.url).origin !== self.location.origin) continue;
+      if ("navigate" in client) await client.navigate(target.href);
+      return client.focus();
+    }
+    return self.clients.openWindow(target.href);
+  })());
 });

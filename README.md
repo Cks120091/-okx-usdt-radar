@@ -136,12 +136,18 @@ Trigger 是否存在與「現在是否適合進場」分開顯示：
 - 15m／4H 正式 Trigger 可開啟獨立「進場檢查」頁；只有使用者按下時才更新該幣最新 Ticker、Order Book、Spread、滑價、剩餘 R:R 與交易品質，結果不寫回原始訊號
 - 真實歷史統計分頁
 - Web App Manifest、SVG icon 與只快取 App Shell 的 Service Worker；`/api/*` 與 `/health` 永遠走網路
+- 可由使用者開啟「掃描完成通知」；手動啟動掃描後即使關閉頁面，完成或失敗時仍會收到不含交易訊號內容的背景通知，點擊可回到最新報告
+
+iPhone／iPad 的背景通知需先用 Safari 將雷達「加入主畫面」，再從主畫面開啟雷達並按一次「開啟通知」。通知權限只能由使用者手勢授予；一般開啟網頁、重新整理或掃描都不會自行跳出權限要求。
+
+通知訂閱只保留在本輪掃描的記憶體中，不寫入 SQLite，也不使用付費推播服務。若 Render 在掃描期間重啟，該輪掃描及通知都無法延續；正常重啟後，裝置下次開啟雷達會安全地重新建立訂閱。可選擇以 `RADAR_VAPID_PRIVATE_KEY` 固定 Web Push 私鑰，並用 `RADAR_VAPID_SUBJECT` 設定聯絡 URL 或 `mailto:`；未設定時會在每次服務啟動產生臨時金鑰，不影響雷達核心策略。
 
 ## API 與 Runtime 狀態
 
 - `GET /health`：服務健康與 Runtime 狀態，不觸發掃描
 - `GET /api/status`：Scan Lock、進度、資料年齡與最新錯誤
-- `POST /api/scan`：啟動或加入唯一一輪完整掃描
+- `GET /api/push/config`：目前 Web Push 公開金鑰與可用狀態，不含任何私鑰
+- `POST /api/scan`：啟動或加入唯一一輪完整掃描；可附本輪瀏覽器 `push_subscription`
 - `GET /api/report/preview`：本輪已完成的 15m 核心預覽；Deep Data 與長線仍在補充
 - `GET /api/report/latest`：手機需要的精簡 V3.3 JSON；完整 Raw Indicators 與內部 Market Story 不對外傳送
 - `GET /api/preflight?inst_id=...&horizon=SHORT|LONG`：只重新檢查最新正式 Trigger 的單幣執行條件；12 秒防重複快取，不掃全市場、不改寫 Trigger
@@ -183,9 +189,10 @@ Trigger 是否存在與「現在是否適合進場」分開顯示：
 
 ## 啟動
 
-需要 Python 3.11 以上，沒有第三方 Python dependency：
+需要 Python 3.11 以上，先安裝鎖定版本的 Web Push dependency：
 
 ```bash
+python -m pip install -r requirements.txt
 cp config.example.json config.json
 python run.py --serve
 ```
@@ -213,7 +220,7 @@ python -m unittest discover -s tests -v
 git diff --check
 ```
 
-測試涵蓋價格接受、控制權轉移、動態確認窗口、壓縮防假反轉、雜訊不靠分數觸發、長短雷達分離、Context 不取消 Trigger、單幣資料隔離、OI 非硬門檻、20 個上限、Order Book 時間序列、去重、No Follow-through、MFE／MAE、TP／SL、真實績效、單幣進場檢查、Scan Lock、STALE、PWA 與 API contract。
+測試涵蓋價格接受、控制權轉移、動態確認窗口、壓縮防假反轉、雜訊不靠分數觸發、長短雷達分離、Context 不取消 Trigger、單幣資料隔離、OI 非硬門檻、20 個上限、Order Book 時間序列、去重、No Follow-through、MFE／MAE、TP／SL、真實績效、單幣進場檢查、Scan Lock、STALE、Web Push 安全驗證、PWA 與 API contract。
 
 ## 安全邊界與限制
 

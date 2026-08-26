@@ -1,2 +1,1 @@
-# No third-party Python packages are required.
-
+pywebpush==2.4.0

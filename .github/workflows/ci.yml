@@ -26,6 +26,9 @@ jobs:
         with:
           python-version: "3.12"
 
+      - name: Install runtime dependencies
+        run: python -m pip install -r requirements.txt
+
       - name: Compile source
         run: python -m compileall -q radar run.py scripts tests
 

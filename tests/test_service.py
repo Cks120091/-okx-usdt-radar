@@ -100,7 +100,123 @@ class ReleasingScanner(ImmediateScanner):
         return 7
 
 
+class FailingScanner:
+    def scan_once(self, progress=None, scan_id=None):
+        raise RuntimeError("fixture scan failure")
+
+
+class FakePushNotifier:
+    def __init__(self):
+        self.sent = []
+        self.sent_event = threading.Event()
+
+    def public_config(self):
+        return {
+            "available": True,
+            "public_key": "fixture-public-key",
+            "key_id": "fixture-key-id",
+            "temporary_key": True,
+            "note": "fixture",
+        }
+
+    def normalize_subscription(self, payload):
+        if not isinstance(payload, dict) or not payload.get("endpoint"):
+            raise ValueError("invalid fixture subscription")
+        return {"endpoint": payload["endpoint"], "keys": payload.get("keys", {})}
+
+    def subscription_key(self, subscription):
+        return subscription["endpoint"]
+
+    def send(self, subscription, payload):
+        self.sent.append((subscription, payload))
+        self.sent_event.set()
+
+
+class FailingPushNotifier(FakePushNotifier):
+    def send(self, subscription, payload):
+        self.sent_event.set()
+        raise RuntimeError(f"delivery failed for {subscription['endpoint']}")
+
+
 class RuntimeSafetyTests(unittest.TestCase):
+    def test_push_config_is_exposed_without_a_private_key(self):
+        with tempfile.TemporaryDirectory() as directory:
+            notifier = FakePushNotifier()
+            runtime = RadarRuntime(
+                ImmediateScanner(), AppConfig(data_dir=directory), push_notifier=notifier
+            )
+
+            config = runtime.push_config()
+
+            self.assertTrue(config["available"])
+            self.assertEqual(config["public_key"], "fixture-public-key")
+            self.assertNotIn("private_key", config)
+
+    def test_successful_background_scan_sends_one_minimal_completion_notice(self):
+        with tempfile.TemporaryDirectory() as directory:
+            notifier = FakePushNotifier()
+            runtime = RadarRuntime(
+                ImmediateScanner(), AppConfig(data_dir=directory), push_notifier=notifier
+            )
+            device = {"endpoint": "fixture-device", "keys": {}}
+
+            self.assertTrue(runtime.trigger_scan(device))
+            self.assertTrue(notifier.sent_event.wait(2))
+
+            self.assertEqual(len(notifier.sent), 1)
+            sent_device, payload = notifier.sent[0]
+            self.assertEqual(sent_device, device)
+            self.assertEqual(payload["status"], "SUCCESS")
+            self.assertEqual(payload["url"], "/")
+            self.assertNotIn("AAA-USDT-SWAP", json.dumps(payload))
+            self.assertFalse(runtime.status()["running"])
+
+    def test_joining_the_same_scan_deduplicates_the_notification_device(self):
+        with tempfile.TemporaryDirectory() as directory:
+            scanner = BlockingScanner()
+            notifier = FakePushNotifier()
+            runtime = RadarRuntime(
+                scanner, AppConfig(data_dir=directory), push_notifier=notifier
+            )
+            device = {"endpoint": "fixture-device", "keys": {}}
+
+            self.assertTrue(runtime.trigger_scan(device))
+            self.assertTrue(scanner.started.wait(1))
+            self.assertFalse(runtime.trigger_scan(device))
+            scanner.release.set()
+            self.assertTrue(notifier.sent_event.wait(2))
+
+            self.assertEqual(scanner.calls, 1)
+            self.assertEqual(len(notifier.sent), 1)
+
+    def test_failed_background_scan_sends_failure_notice_without_raising_to_user(self):
+        with tempfile.TemporaryDirectory() as directory:
+            notifier = FakePushNotifier()
+            runtime = RadarRuntime(
+                FailingScanner(), AppConfig(data_dir=directory), push_notifier=notifier
+            )
+
+            self.assertTrue(runtime.trigger_scan({"endpoint": "fixture-device", "keys": {}}))
+            self.assertTrue(notifier.sent_event.wait(2))
+
+            self.assertEqual(notifier.sent[0][1]["status"], "ERROR")
+            self.assertEqual(runtime.status()["system_status"], "ERROR")
+
+    def test_push_delivery_failure_does_not_fail_scan_or_log_capability_endpoint(self):
+        with tempfile.TemporaryDirectory() as directory:
+            notifier = FailingPushNotifier()
+            runtime = RadarRuntime(
+                ImmediateScanner(), AppConfig(data_dir=directory), push_notifier=notifier
+            )
+            endpoint = "secret-browser-capability-endpoint"
+
+            with self.assertLogs("okx_radar", level="WARNING") as logs:
+                self.assertTrue(runtime.trigger_scan({"endpoint": endpoint, "keys": {}}))
+                self.assertTrue(notifier.sent_event.wait(2))
+
+            self.assertEqual(runtime.status()["system_status"], "FRESH")
+            self.assertNotIn(endpoint, "\n".join(logs.output))
+
     def test_public_report_omits_developer_payloads_and_keeps_ui_fields(self):
         with tempfile.TemporaryDirectory() as directory:
             current = report()
