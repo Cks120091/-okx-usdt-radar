@@ -187,7 +187,16 @@ def _public_candidate(item: Any, *, signal: bool) -> dict[str, Any]:
     if signal:
         payload["entry_eligibility"] = _select(
             _read(item, "entry_eligibility", {}),
-            ("status", "label", "reason", "chase_atr", "remaining_rr"),
+            (
+                "status",
+                "label",
+                "reason",
+                "chase_atr",
+                "adverse_atr",
+                "invalidation_progress_pct",
+                "remaining_rr",
+                "remaining_rr_applicable",
+            ),
         )
     return payload
 

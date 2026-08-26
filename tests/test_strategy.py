@@ -164,6 +164,43 @@ class StrategyTests(unittest.TestCase):
         self.assertLess(low_rr["remaining_rr"], 1.8)
         self.assertEqual(inactive["status"], "MISSED_ENTRY")
 
+    def test_adverse_side_does_not_publish_misleading_remaining_rr(self):
+        long_result = _entry_eligibility(
+            direction="LONG",
+            current_price=0.05813,
+            entry_low=0.05839,
+            entry_high=0.05871,
+            stop=0.05809,
+            target=0.06074,
+            atr=0.0008,
+            stage="EARLY_SIGNAL",
+            minimum_rr=1.8,
+            ready_max_chase_atr=0.15,
+            missed_chase_atr=0.50,
+        )
+        short_result = _entry_eligibility(
+            direction="SHORT",
+            current_price=101.87,
+            entry_low=101.29,
+            entry_high=101.61,
+            stop=101.91,
+            target=99.26,
+            atr=0.8,
+            stage="EARLY_SIGNAL",
+            minimum_rr=1.8,
+            ready_max_chase_atr=0.15,
+            missed_chase_atr=0.50,
+        )
+
+        for result in (long_result, short_result):
+            self.assertEqual(result["status"], "WAIT_RETEST")
+            self.assertFalse(result["actionable"])
+            self.assertIn("接近失效", result["label"])
+            self.assertIsNone(result["remaining_rr"])
+            self.assertFalse(result["remaining_rr_applicable"])
+            self.assertGreater(result["adverse_atr"], 0.0)
+            self.assertGreaterEqual(result["invalidation_progress_pct"], 80.0)
+
     def test_breakout_near_entry_boundary_is_not_falsely_marked_extended(self):
         candles_4h, candles_1h, candles_15m = valid_breakout_frames()
         ticker = Ticker("TEST-USDT-SWAP", candles_15m[-1].close, candles_15m[-1].close - 0.03, candles_15m[-1].close + 0.03, 1)

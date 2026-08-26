@@ -66,7 +66,12 @@ def build_preflight_payload(
         if current_risk > 0
         else 0.0
     )
-    remaining_rr = current_reward / current_risk if current_risk > 0 else -1.0
+    remaining_rr = eligibility.get("remaining_rr")
+    quality_rr = (
+        float(remaining_rr)
+        if isinstance(remaining_rr, (int, float)) and math.isfinite(remaining_rr)
+        else 0.0
+    )
     invalidated = current_risk <= 0
     target_reached = current_reward <= 0 and not invalidated
     entry_location = _live_entry_location(
@@ -82,7 +87,7 @@ def build_preflight_payload(
         live_story,
         live_spread_pct,
         risk_pct,
-        max(remaining_rr, 0.0),
+        max(quality_rr, 0.0),
         context,
         target_rr=config.minimum_rr,
         max_cost_to_risk_pct=config.max_execution_cost_to_risk_pct,
@@ -155,7 +160,16 @@ def build_preflight_payload(
             "price_change_from_scan_pct": _round_or_none(price_change_from_scan, 3),
             "trigger_age_bars": trigger_age_bars,
             "chase_atr": eligibility["chase_atr"],
-            "remaining_rr": round(remaining_rr, 3),
+            "remaining_rr": _round_or_none(remaining_rr, 3),
+            "remaining_rr_applicable": eligibility.get(
+                "remaining_rr_applicable",
+                False,
+            ),
+            "adverse_atr": eligibility.get("adverse_atr", 0.0),
+            "invalidation_progress_pct": eligibility.get(
+                "invalidation_progress_pct",
+                0.0,
+            ),
             "risk_pct": round(risk_pct, 4),
             "quality_score": quality["score"],
             "quality_label": quality["label"],

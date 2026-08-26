@@ -2957,7 +2957,23 @@ def _entry_eligibility(
         else max(0.0, entry_low - current_price)
     )
     adverse_outside = current_price < entry_low if is_long else current_price > entry_high
+    adverse_distance = (
+        max(0.0, entry_low - current_price)
+        if is_long
+        else max(0.0, current_price - entry_high)
+    )
     chase_atr = favorable_distance / safe_atr
+    adverse_atr = adverse_distance / safe_atr
+    invalidation_span = (
+        entry_low - stop
+        if is_long
+        else stop - entry_high
+    )
+    invalidation_progress = (
+        adverse_distance / max(invalidation_span, 1e-9)
+        if adverse_outside and invalidation_span > 0
+        else 0.0
+    )
     current_risk = current_price - stop if is_long else stop - current_price
     current_reward = target - current_price if is_long else current_price - target
     remaining_rr = current_reward / current_risk if current_risk > 0 else -1.0
@@ -2971,6 +2987,18 @@ def _entry_eligibility(
         status = "MISSED_ENTRY"
         label = "已失效｜禁止進場"
         reason = "價格已越過原失效／止損位置。"
+    elif adverse_outside:
+        status = "WAIT_RETEST"
+        near_invalidation = invalidation_progress >= 0.80
+        label = (
+            "接近失效｜等待重新確認"
+            if near_invalidation
+            else "等待重新站回／確認"
+        )
+        reason = (
+            f"價格位於 Entry Zone 不利側 {adverse_atr:.2f} ATR；"
+            "必須重新站回 Entry Zone 並確認，現在禁止進場。"
+        )
     elif chase_atr > missed_chase_atr or remaining_rr < minimum_rr:
         status = "MISSED_ENTRY"
         label = "已錯過｜禁止追價"
@@ -2978,7 +3006,7 @@ def _entry_eligibility(
             f"順向偏離 {chase_atr:.2f} ATR，剩餘風報 {remaining_rr:.2f}R；"
             f"門檻為 {missed_chase_atr:.2f} ATR 內且至少 {minimum_rr:.2f}R。"
         )
-    elif adverse_outside or chase_atr > ready_max_chase_atr:
+    elif chase_atr > ready_max_chase_atr:
         status = "WAIT_RETEST"
         label = "等待回踩／重新確認"
         reason = (
@@ -3000,7 +3028,18 @@ def _entry_eligibility(
         "trigger_price": round((entry_low + entry_high) / 2.0, 12),
         "current_price": round(current_price, 12),
         "chase_atr": round(chase_atr, 3),
-        "remaining_rr": round(remaining_rr, 3),
+        # Once price is on the adverse side of the original Entry Zone, using
+        # the tiny live distance to Stop as the denominator can create a
+        # meaningless number such as 65.25R.  The stored Trigger and original
+        # plan remain unchanged; live R:R is simply not applicable until price
+        # reclaims the Entry Zone.
+        "remaining_rr": None if adverse_outside else round(remaining_rr, 3),
+        "remaining_rr_applicable": not adverse_outside and current_risk > 0,
+        "adverse_atr": round(adverse_atr, 3),
+        "invalidation_progress_pct": round(
+            _clamp(invalidation_progress, 0.0, 1.0) * 100.0,
+            1,
+        ),
         "entry_low": round(entry_low, 12),
         "entry_high": round(entry_high, 12),
         "ready_max_chase_atr": ready_max_chase_atr,
