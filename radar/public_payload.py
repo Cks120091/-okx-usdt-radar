@@ -171,7 +171,7 @@ def _public_candidate(item: Any, *, signal: bool) -> dict[str, Any]:
     )
     payload["lifecycle"] = _select(
         _read(item, "lifecycle", {}),
-        ("age_bars",),
+        ("age_bars", "triggered_at"),
     )
     payload["execution_quality"] = _select(
         _read(item, "execution_quality", {}),

@@ -236,6 +236,11 @@ class RuntimeSafetyTests(unittest.TestCase):
                 "attack_waves": {"BULL": ["x" * 20_000]},
             }
             item.execution_quality = {"score": 87, "label": "良好", "raw": "x" * 5_000}
+            item.lifecycle = {
+                "age_bars": 1,
+                "triggered_at": "2026-08-27T15:46:18+00:00",
+                "event_key": "internal-only",
+            }
             item.entry_eligibility = {
                 "status": "ENTRY_READY",
                 "label": "可進",
@@ -286,6 +291,13 @@ class RuntimeSafetyTests(unittest.TestCase):
             self.assertEqual(
                 payload["signals"][0]["entry_eligibility"]["status"],
                 "ENTRY_READY",
+            )
+            self.assertEqual(
+                payload["signals"][0]["lifecycle"],
+                {
+                    "age_bars": 1,
+                    "triggered_at": "2026-08-27T15:46:18+00:00",
+                },
             )
             self.assertEqual(
                 set(payload["market_map"][0]),
