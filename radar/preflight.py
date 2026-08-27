@@ -100,16 +100,19 @@ def build_preflight_payload(
     verdict_label = eligibility["label"]
     verdict_reason = eligibility["reason"]
     if invalidated:
-        verdict_status = "SIGNAL_INVALIDATED"
-        verdict_label = "訊號失效｜禁止進場"
-        verdict_reason = "最新價格已越過原始止損／失效位置；原 Trigger 僅保留作歷史紀錄。"
+        verdict_status = "PLAN_INVALIDATED"
+        verdict_label = "原交易計畫失效｜禁止沿用舊價位"
+        verdict_reason = (
+            "最新價格已越過原始止損／失效位置；舊理想價格、SL、TP 已停用。"
+            "這不等於原做多／做空方向已反轉，方向必須等待新 K 線與新 Trigger 重新判定。"
+        )
     elif target_reached:
         verdict_status = "MISSED_ENTRY"
         verdict_label = "已到達第一目標｜禁止追價"
         verdict_reason = "最新價格已到達或越過原始 TP1，這個進場機會已經結束。"
 
     if invalidated or target_reached:
-        warning = "原始訊號已失效" if invalidated else "原始第一目標已到達"
+        warning = "原交易計畫已失效" if invalidated else "原始第一目標已到達"
         quality = {
             **quality,
             "score": 0.0,
@@ -117,6 +120,18 @@ def build_preflight_payload(
             "recommendation": "AVOID_EXECUTION",
             "warnings": _unique([warning, *quality.get("warnings", [])]),
         }
+
+    new_plan_required = invalidated or target_reached or verdict_status == "MISSED_ENTRY"
+    if invalidated:
+        plan_status = "INVALIDATED"
+    elif target_reached:
+        plan_status = "TARGET_REACHED"
+    elif verdict_status == "MISSED_ENTRY":
+        plan_status = "MISSED"
+    elif verdict_status == "WAIT_RETEST":
+        plan_status = "WAITING_RETEST"
+    else:
+        plan_status = "ACTIVE"
 
     sampled_at = max(int(ticker.ts or 0), int(context.sampled_at or 0))
     trigger_age_bars = _trigger_age_bars(signal, sampled_at or now_ms)
@@ -142,6 +157,22 @@ def build_preflight_payload(
             "label": verdict_label,
             "reason": verdict_reason,
             "actionable": verdict_status == "ENTRY_READY",
+        },
+        "plan_state": {
+            "status": plan_status,
+            "old_plan_reusable": not new_plan_required,
+            "direction_status": (
+                "PENDING_REASSESSMENT"
+                if new_plan_required
+                else "ORIGINAL_BIAS_RETAINED"
+            ),
+            "new_trigger_required": new_plan_required,
+            "note": (
+                "舊交易計畫失效不等於方向反轉；若行情重新成立，必須由新的 Trigger／REENTRY "
+                "建立全新的理想價格、SL 與 TP。"
+                if new_plan_required
+                else "原始方向偏向仍保留，但只有即時判定為目前可進時才具備進場資格。"
+            ),
         },
         "original": {
             "report_generated_at": report_generated_at,
@@ -220,7 +251,7 @@ def _live_entry_location(
     if invalidated:
         return {
             "key": "INVALIDATED",
-            "label": "訊號已失效",
+            "label": "原交易計畫已失效",
             "score": 0.0,
             "extension_atr": round(chase_atr, 3),
         }
