@@ -135,6 +135,9 @@ class PreflightTests(unittest.TestCase):
             self.assertEqual(payload["original"]["quality_score"], 87.0)
             self.assertTrue(payload["data_quality"]["execution_depth_complete"])
             self.assertTrue(payload["safety"]["stored_trigger_unchanged"])
+            self.assertEqual(payload["plan_state"]["status"], "ACTIVE")
+            self.assertTrue(payload["plan_state"]["old_plan_reusable"])
+            self.assertFalse(payload["plan_state"]["new_trigger_required"])
             self.assertEqual(item.market_metrics, original_metrics)
             self.assertEqual(item.execution_quality, original_quality)
 
@@ -167,9 +170,19 @@ class PreflightTests(unittest.TestCase):
 
             payload = runtime.preflight_dict(item.inst_id, "SHORT")
 
-            self.assertEqual(payload["verdict"]["status"], "SIGNAL_INVALIDATED")
+            self.assertEqual(payload["verdict"]["status"], "PLAN_INVALIDATED")
+            self.assertIn("原交易計畫失效", payload["verdict"]["label"])
+            self.assertIn("不等於", payload["verdict"]["reason"])
             self.assertFalse(payload["verdict"]["actionable"])
             self.assertEqual(payload["live"]["quality_score"], 0.0)
+            self.assertEqual(payload["plan_state"]["status"], "INVALIDATED")
+            self.assertFalse(payload["plan_state"]["old_plan_reusable"])
+            self.assertEqual(
+                payload["plan_state"]["direction_status"],
+                "PENDING_REASSESSMENT",
+            )
+            self.assertTrue(payload["plan_state"]["new_trigger_required"])
+            self.assertIn("新的 Trigger／REENTRY", payload["plan_state"]["note"])
             self.assertEqual(len(runtime._latest.signals), 1)
 
     def test_adverse_side_hides_artificial_live_rr_without_mutating_trigger(self):
