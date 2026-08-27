@@ -132,6 +132,8 @@ class V33ContractTests(unittest.TestCase):
         self.assertIn("② 現在為什麼是這個結果", html)
         self.assertIn("③ 你現在該怎麼做", html)
         self.assertIn("④ 什麼情況算失效", html)
+        self.assertIn("與理想價格區的距離", html)
+        self.assertIn("等待價格回到理想價格區", html)
         self.assertIn("完整確認」表示原始訊號條件已成立", html)
         self.assertIn("CONTINUATION:'趨勢延續'", html)
         self.assertIn("status==='ENTRY_READY'", html)
