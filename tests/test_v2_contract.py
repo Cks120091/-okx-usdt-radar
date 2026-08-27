@@ -29,6 +29,9 @@ class V33ContractTests(unittest.TestCase):
         html = (Path(__file__).parents[1] / "radar" / "static" / "pages.html").read_text(
             encoding="utf-8"
         )
+        service_worker = (
+            Path(__file__).parents[1] / "radar" / "static" / "service-worker.js"
+        ).read_text(encoding="utf-8")
         self.assertIn("/api/scan", html)
         self.assertIn("method:'POST'", html)
         self.assertIn("bootstrap()", html)
@@ -62,11 +65,19 @@ class V33ContractTests(unittest.TestCase):
         self.assertIn("overflow-x:hidden", html)
         self.assertIn("env(safe-area-inset-bottom)", html)
         self.assertIn("height:100dvh", html)
+        self.assertIn("max-width:100vw", html)
+        self.assertIn("grid-template-columns:minmax(0,1fr)", html)
         self.assertIn("grid-template-rows:auto auto minmax(0,1fr) auto auto", html)
         self.assertIn(".top{grid-row:1;position:relative", html)
         self.assertIn(".filter-shell{grid-row:2;position:relative", html)
-        self.assertIn(".shell{grid-row:3;min-height:0", html)
+        self.assertIn(".shell{grid-row:3;min-width:0;min-height:0;width:100%;max-width:980px", html)
+        self.assertIn(".brand{display:flex;align-items:center;justify-content:space-between;gap:10px;min-width:0;width:100%;max-width:936px", html)
+        self.assertIn(".filter-tabs{display:flex;gap:8px;min-width:0;width:100%;max-width:936px", html)
+        self.assertIn(".filter-tab{flex:0 0 auto", html)
         self.assertIn(".primary-nav{grid-row:5;position:relative", html)
+        self.assertIn("grid-template-columns:repeat(4,minmax(0,1fr))", html)
+        self.assertIn(".decision-actions{display:grid;grid-template-columns:repeat(2,minmax(0,1fr))", html)
+        self.assertIn("okx-radar-shell-v3.3-nav-3", service_worker)
         self.assertIn("--primary-nav-safe-bottom", html)
         self.assertIn(".action-wrap{display:none;grid-row:4;position:relative", html)
         self.assertIn("$('.shell').scrollTo({top:0", html)
