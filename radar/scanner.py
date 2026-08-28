@@ -67,6 +67,17 @@ class ScannerConfig:
     state_db_path: str = ":memory:"
 
 
+@dataclass(frozen=True)
+class SingleInstrumentReanalysis:
+    previous_signal: Signal
+    ticker: Ticker
+    context: MarketContext
+    market_state: MarketState | None
+    raw_signal: Signal | None
+    analyzed_at: str
+    reason: str
+
+
 ProgressCallback = Callable[[str, int | None, int | None, str], None]
 PreviewCallback = Callable[[RadarReport], None]
 
@@ -773,6 +784,256 @@ class MarketScanner:
             "分析完成，正在保存並發布最新雙雷達報告",
         )
         return report
+
+    def reanalyze_instrument(
+        self,
+        previous_signal: Signal,
+        market_bias: dict[str, Any] | None = None,
+    ) -> SingleInstrumentReanalysis:
+        """Re-run the unchanged V3.3 pipeline for one invalidated plan.
+
+        The returned signal is only populated when the latest closed-candle
+        analysis contains a genuinely new Trigger event. The original event is
+        never repackaged with newly calculated prices.
+        """
+
+        inst_id = previous_signal.inst_id
+        horizon = previous_signal.radar_horizon
+        if horizon not in ("SHORT", "LONG"):
+            raise ValueError("單幣重新分析的週期不正確")
+
+        instruments = self.client.get_usdt_swap_instruments()
+        instrument = next((item for item in instruments if item.inst_id == inst_id), None)
+        if instrument is None:
+            raise ValueError("OKX 最新 live USDT 永續清單中已找不到這個幣種")
+
+        ticker_loader = getattr(self.client, "get_ticker", None)
+        if callable(ticker_loader):
+            ticker = ticker_loader(inst_id)
+        else:
+            ticker = self.client.get_swap_tickers().get(inst_id)
+            if ticker is None:
+                raise ValueError("OKX 最新 Ticker 中找不到這個幣種")
+
+        core_bars = self.short_bars if horizon == "SHORT" else ("1D", "4H", "1H")
+        bundle = self._fetch_bundle(inst_id, core_bars)
+        if not all(len(bundle.get(bar, [])) >= 60 for bar in core_bars):
+            raise ValueError("最新多週期已收盤 K 線不足 60 根，無法安全重新分析")
+
+        result = (
+            self._analyze_short_v33(instrument, ticker, bundle)
+            if horizon == "SHORT"
+            else self._analyze_long_v33(instrument, ticker, bundle)
+        )
+        if result is None:
+            raise ValueError("目前分析引擎不支援這個週期的單幣重新分析")
+
+        context_errors: list[str] = []
+        open_interest_usd: float | None = None
+        oi_loader = getattr(self.client, "get_open_interest_usd", None)
+        if callable(oi_loader):
+            try:
+                open_interest_usd = oi_loader().get(inst_id)
+            except Exception as exc:
+                context_errors.append(f"open_interest: {exc}")
+        result = self._attach_oi_snapshot(
+            result,
+            open_interest_usd,
+            self._open_interest_change(inst_id, open_interest_usd),
+        )
+
+        timing: list[Candle] = []
+        if horizon == "SHORT":
+            try:
+                timing = self.client.get_candles(
+                    inst_id,
+                    "5m",
+                    self.config.candle_limit_5m,
+                )
+                if len(timing) < 60:
+                    context_errors.append("5m 已收盤 K 線不足 60 根")
+                    timing = []
+            except Exception as exc:
+                context_errors.append(f"5m: {exc}")
+        else:
+            timing = bundle["1H"]
+
+        context = MarketContext(
+            inst_id=inst_id,
+            open_interest_usd=open_interest_usd,
+            funding_rate=None,
+            order_book_imbalance=None,
+            taker_buy_ratio=None,
+            sampled_at=int(ticker.ts or 0),
+            failures=list(context_errors),
+            best_bid=ticker.bid,
+            best_ask=ticker.ask,
+        )
+        context_loader = getattr(self.client, "get_market_context", None)
+        context_applier = getattr(self.engine, "apply_market_context", None)
+        if callable(context_loader) and callable(context_applier):
+            try:
+                loaded_context = context_loader(inst_id, open_interest_usd)
+                context = replace(
+                    loaded_context,
+                    open_interest_change_pct=self._open_interest_change(
+                        inst_id,
+                        loaded_context.open_interest_usd,
+                    ),
+                    failures=[*loaded_context.failures, *context_errors],
+                )
+                state = result.market_state
+                direction = state.direction if state is not None else "NEUTRAL"
+                previous_micro = self.repository.load_microstructure(inst_id)
+                sequence = (
+                    classify_microstructure(
+                        previous_micro,
+                        context,
+                        direction,
+                        state.market_metrics.get("price_change_core_pct") if state else None,
+                    )
+                    if direction in ("LONG", "SHORT")
+                    else {
+                        "state": "NEUTRAL",
+                        "reason": "方向中性，不替單張委託簿賦予多空意義",
+                    }
+                )
+                directional_context = replace(context, order_book_sequence=sequence)
+                result = context_applier(
+                    result,
+                    directional_context,
+                    "NEUTRAL",
+                    timing or None,
+                    market_bias or {},
+                )
+                context = directional_context
+                self.repository.save_microstructure(
+                    directional_context,
+                    datetime.now(timezone.utc).isoformat(),
+                )
+            except Exception as exc:
+                context_errors.append(f"Context 整合失敗：{exc}")
+                result = self._mark_deep_data_missing(result, context_errors)
+                context = replace(context, failures=list(context_errors))
+        elif result.market_state is not None:
+            context_errors.append("Deep Data 單幣服務暫不可用")
+            result = self._mark_deep_data_missing(result, context_errors)
+            context = replace(context, failures=list(context_errors))
+
+        if open_interest_usd is not None:
+            self._previous_open_interest_usd[inst_id] = open_interest_usd
+
+        raw_signal = result.signal
+        reason = result.reason
+        if raw_signal is not None and not self._passes_output_liquidity(raw_signal, False):
+            raw_signal = None
+            reason = "universe_output_gate"
+        if raw_signal is not None and self._plan_crossed_live_stop(raw_signal, ticker.last):
+            raw_signal = None
+            reason = "new_plan_already_invalidated"
+        if raw_signal is not None:
+            live_metrics = dict(raw_signal.market_metrics)
+            live_metrics["last_price"] = ticker.last
+            raw_signal = self._refresh_entry_eligibility(
+                replace(raw_signal, market_metrics=live_metrics)
+            )
+            if raw_signal.entry_eligibility.get("status") not in (
+                "ENTRY_READY",
+                "WAIT_RETEST",
+            ):
+                raw_signal = None
+                reason = "new_trigger_not_an_entry_opportunity"
+        if raw_signal is not None and not self._is_new_trigger_event(
+            previous_signal,
+            raw_signal,
+        ):
+            raw_signal = None
+            reason = "same_original_trigger"
+
+        return SingleInstrumentReanalysis(
+            previous_signal=previous_signal,
+            ticker=ticker,
+            context=context,
+            market_state=result.market_state,
+            raw_signal=raw_signal,
+            analyzed_at=datetime.now(timezone.utc).isoformat(),
+            reason=reason,
+        )
+
+    def commit_single_reanalysis(
+        self,
+        analysis: SingleInstrumentReanalysis,
+    ) -> Signal | None:
+        """Close the old plan and optionally publish one genuinely new plan."""
+
+        self.repository.invalidate_preflight_plan(
+            analysis.previous_signal,
+            analysis.analyzed_at,
+        )
+        states = [analysis.market_state] if analysis.market_state is not None else []
+        raw_signals = [analysis.raw_signal] if analysis.raw_signal is not None else []
+        committed = self.repository.reconcile(
+            raw_signals,
+            states,
+            analysis.analyzed_at,
+            analysis.previous_signal.radar_horizon,
+        )
+        candidates = [
+            item
+            for item in committed
+            if item.inst_id == analysis.previous_signal.inst_id
+            and item.trigger_id != analysis.previous_signal.trigger_id
+            and self._is_new_trigger_event(analysis.previous_signal, item)
+        ]
+        if not candidates:
+            return None
+        selected = max(candidates, key=self._signal_sort_key)
+        return _without_internal_metrics(self._refresh_entry_eligibility(selected))
+
+    @staticmethod
+    def _is_new_trigger_event(previous: Signal, candidate: Signal) -> bool:
+        if candidate.inst_id != previous.inst_id:
+            return False
+        previous_trigger = previous.market_story.get("trigger", {})
+        candidate_trigger = candidate.market_story.get("trigger", {})
+        previous_key = str(
+            previous.lifecycle.get("event_key")
+            or previous_trigger.get("trigger_event_key")
+            or ""
+        )
+        candidate_key = str(
+            candidate.lifecycle.get("event_key")
+            or candidate_trigger.get("trigger_event_key")
+            or ""
+        )
+        previous_ts = int(
+            previous_trigger.get("event_ts")
+            or previous.data_timestamp
+            or previous.closed_candle_ts
+            or 0
+        )
+        candidate_ts = int(
+            candidate_trigger.get("event_ts")
+            or candidate.data_timestamp
+            or candidate.closed_candle_ts
+            or 0
+        )
+        if previous_key and candidate_key and previous_key == candidate_key:
+            return False
+        if candidate.direction != previous.direction and candidate_ts >= previous_ts:
+            return True
+        return bool(candidate_ts and candidate_ts > previous_ts)
+
+    @staticmethod
+    def _plan_crossed_live_stop(signal: Signal, current_price: float) -> bool:
+        stop = _finite_number(signal.stop_loss)
+        if stop is None:
+            return True
+        return (
+            current_price <= stop
+            if signal.direction == "LONG"
+            else current_price >= stop
+        )
 
     def _core_preview_report(
         self,

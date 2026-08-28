@@ -1,7 +1,9 @@
 import tempfile
 import time
 import unittest
+from dataclasses import replace
 from datetime import datetime, timezone
+from types import SimpleNamespace
 
 from radar.config import AppConfig
 from radar.models import MarketContext, RadarReport, Signal, Ticker
@@ -31,6 +33,7 @@ def make_signal() -> Signal:
         readiness_score=82.0,
         radar_horizon="SHORT",
         trigger_type="BREAKOUT",
+        trigger_id="old-trigger-id",
         freshness="NEW",
         market_metrics={"last_price": 100.0},
         market_story={
@@ -38,9 +41,17 @@ def make_signal() -> Signal:
             "trigger": {
                 "event_ts": now_ms - 900_000,
                 "event_age_bars": 1,
+                "trigger_event_key": "old-trigger-event",
             },
         },
-        lifecycle={"age_bars": 1},
+        lifecycle={
+            "age_bars": 1,
+            "event_key": "old-trigger-event",
+            "triggered_at": datetime.fromtimestamp(
+                (now_ms - 900_000) / 1000,
+                tz=timezone.utc,
+            ).isoformat(),
+        },
         execution_quality={"score": 87.0, "label": "良好"},
         entry_eligibility={
             "status": "ENTRY_READY",
@@ -112,6 +123,64 @@ class PreflightClient:
 class PreflightScanner:
     def __init__(self, client: PreflightClient):
         self.client = client
+
+
+class ReanalysisPreflightScanner(PreflightScanner):
+    def __init__(self, client: PreflightClient, new_signal: Signal | None):
+        super().__init__(client)
+        self.new_signal = new_signal
+        self.reanalysis_calls = 0
+        self.commit_calls = 0
+
+    def reanalyze_instrument(self, previous_signal, market_bias):
+        self.reanalysis_calls += 1
+        return SimpleNamespace(
+            previous_signal=previous_signal,
+            ticker=self.client.get_ticker(previous_signal.inst_id),
+            context=self.client.get_execution_context(previous_signal.inst_id),
+            market_state=None,
+            raw_signal=self.new_signal,
+            analyzed_at=datetime.now(timezone.utc).isoformat(),
+            reason="qualified" if self.new_signal is not None else "no_fresh_trigger",
+        )
+
+    def commit_single_reanalysis(self, analysis):
+        self.commit_calls += 1
+        return analysis.raw_signal
+
+
+def make_new_short_signal() -> Signal:
+    now_ms = int(time.time() * 1000)
+    item = make_signal()
+    return replace(
+        item,
+        direction="SHORT",
+        entry_low="97",
+        entry_high="98",
+        stop_loss="99",
+        take_profit_1="94",
+        take_profit_2="92",
+        trigger_id="new-trigger-id",
+        trigger_type="REVERSAL",
+        market_metrics={"last_price": 97.5},
+        market_story={
+            "raw": {"core_atr": 2.0},
+            "trigger": {
+                "event_ts": now_ms,
+                "event_age_bars": 0,
+                "trigger_event_key": "new-short-trigger-event",
+            },
+        },
+        lifecycle={
+            "age_bars": 0,
+            "event_key": "new-short-trigger-event",
+            "triggered_at": datetime.fromtimestamp(
+                now_ms / 1000,
+                tz=timezone.utc,
+            ).isoformat(),
+        },
+        data_timestamp=now_ms,
+    )
 
 
 class PreflightTests(unittest.TestCase):
@@ -204,6 +273,77 @@ class PreflightTests(unittest.TestCase):
             self.assertFalse(payload["live"]["remaining_rr_applicable"])
             self.assertEqual(item.entry_eligibility, original_entry)
             self.assertTrue(payload["safety"]["stored_trigger_unchanged"])
+
+    def test_second_refresh_after_invalidation_publishes_a_new_plan(self):
+        with tempfile.TemporaryDirectory() as directory:
+            item = make_signal()
+            scanner = ReanalysisPreflightScanner(
+                PreflightClient(price=97.5),
+                make_new_short_signal(),
+            )
+            runtime = RadarRuntime(scanner, AppConfig(data_dir=directory))
+            runtime._latest = make_report(item)
+
+            invalidated = runtime.preflight_dict(item.inst_id, "SHORT")
+            refreshed = runtime.reanalyze_preflight_dict(item.inst_id, "SHORT")
+
+            self.assertEqual(invalidated["verdict"]["status"], "PLAN_INVALIDATED")
+            self.assertEqual(
+                refreshed["reanalysis"]["status"],
+                "NEW_ENTRY_OPPORTUNITY",
+            )
+            self.assertEqual(refreshed["direction"], "SHORT")
+            self.assertEqual(refreshed["original"]["entry_low"], 97.0)
+            self.assertTrue(refreshed["original"]["triggered_at"])
+            self.assertEqual(scanner.reanalysis_calls, 1)
+            self.assertEqual(scanner.commit_calls, 1)
+            self.assertEqual(
+                [signal.trigger_id for signal in runtime._latest.signals],
+                ["new-trigger-id"],
+            )
+
+    def test_second_refresh_without_new_trigger_shows_no_opportunity(self):
+        with tempfile.TemporaryDirectory() as directory:
+            item = make_signal()
+            scanner = ReanalysisPreflightScanner(
+                PreflightClient(price=97.5),
+                None,
+            )
+            runtime = RadarRuntime(scanner, AppConfig(data_dir=directory))
+            runtime._latest = make_report(item)
+
+            runtime.preflight_dict(item.inst_id, "SHORT")
+            first = runtime.reanalyze_preflight_dict(item.inst_id, "SHORT")
+            second = runtime.reanalyze_preflight_dict(item.inst_id, "SHORT")
+
+            self.assertEqual(
+                first["reanalysis"]["status"],
+                "NO_NEW_ENTRY_OPPORTUNITY",
+            )
+            self.assertIn("沒有新的正式 Trigger", first["reanalysis"]["message"])
+            self.assertEqual(runtime._latest.signals, [])
+            self.assertEqual(scanner.reanalysis_calls, 2)
+            self.assertEqual(
+                second["reanalysis"]["status"],
+                "NO_NEW_ENTRY_OPPORTUNITY",
+            )
+
+    def test_reanalysis_is_rejected_before_plan_is_confirmed_invalid(self):
+        with tempfile.TemporaryDirectory() as directory:
+            item = make_signal()
+            scanner = ReanalysisPreflightScanner(
+                PreflightClient(price=100.0),
+                make_new_short_signal(),
+            )
+            runtime = RadarRuntime(scanner, AppConfig(data_dir=directory))
+            runtime._latest = make_report(item)
+
+            with self.assertRaises(PreflightError) as caught:
+                runtime.reanalyze_preflight_dict(item.inst_id, "SHORT")
+
+            self.assertEqual(caught.exception.status.value, 409)
+            self.assertIn("必須先", str(caught.exception))
+            self.assertEqual(scanner.reanalysis_calls, 0)
 
     def test_rejects_symbol_without_formal_trigger_for_requested_horizon(self):
         with tempfile.TemporaryDirectory() as directory:
