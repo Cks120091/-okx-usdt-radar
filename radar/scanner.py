@@ -143,16 +143,27 @@ class MarketScanner:
         progress: ProgressCallback | None = None,
         scan_id: str | None = None,
         preview: PreviewCallback | None = None,
+        scan_mode: str = "FULL",
     ) -> RadarReport:
         """Run the V3.3 two-radar pipeline without fake fallback values."""
 
+        normalized_mode = str(scan_mode or "FULL").strip().upper()
+        if normalized_mode not in {"SHORT", "LONG", "FULL"}:
+            raise ValueError("scan_mode must be SHORT, LONG, or FULL")
+        include_short = normalized_mode in {"SHORT", "FULL"}
+        include_long = normalized_mode in {"LONG", "FULL"}
         started = time.monotonic()
         scan_started_at = datetime.now(timezone.utc).isoformat()
         scan_id = scan_id or str(uuid.uuid4())
         reset_metrics = getattr(self.client, "reset_metrics", None)
         if callable(reset_metrics):
             reset_metrics()
-        scope = "OKX state=live、USDT 結算、線性永續合約"
+        mode_label = {
+            "SHORT": "15m 短線",
+            "LONG": "4H 長線",
+            "FULL": "15m＋4H 全市場",
+        }[normalized_mode]
+        scope = f"OKX state=live、USDT 結算、線性永續合約；{mode_label}掃描"
         self._progress(progress, "INSTRUMENTS", 0, None, "正在同步 OKX live USDT 永續 Universe")
         try:
             instruments = self.client.get_usdt_swap_instruments()
@@ -163,6 +174,7 @@ class MarketScanner:
                 started,
                 f"無法取得合約母清單：{exc}",
                 scan_id,
+                normalized_mode,
             )
         if not instruments:
             return self._fatal_report(
@@ -171,6 +183,7 @@ class MarketScanner:
                 started,
                 "OKX 回傳的 live USDT 永續母清單為空。",
                 scan_id,
+                normalized_mode,
             )
         try:
             tickers = self.client.get_swap_tickers()
@@ -181,6 +194,7 @@ class MarketScanner:
                 started,
                 f"無法取得全市場 Ticker：{exc}",
                 scan_id,
+                normalized_mode,
             )
 
         instrument_map = {item.inst_id: item for item in instruments}
@@ -193,12 +207,17 @@ class MarketScanner:
             else:
                 eligible.append(instrument)
 
+        required_bars = self.short_bars if include_short else ("1D", "4H", "1H")
         self._progress(
             progress,
             "CANDLES",
             0,
             len(eligible),
-            "正在取得 4H／1H／15m 已收盤 K 線",
+            (
+                "正在取得 4H／1H／15m 已收盤 K 線"
+                if include_short
+                else "正在取得 1D／4H／1H 已收盤 K 線"
+            ),
         )
         bundles: dict[str, dict[str, list[Candle]]] = {}
         with ThreadPoolExecutor(max_workers=max(1, self.config.workers)) as executor:
@@ -206,7 +225,7 @@ class MarketScanner:
                 executor.submit(
                     self._fetch_bundle,
                     item.inst_id,
-                    self.short_bars,
+                    required_bars,
                 ): item.inst_id
                 for item in eligible
             }
@@ -216,7 +235,7 @@ class MarketScanner:
                     bundle = future.result()
                     if not all(
                         len(bundle.get(bar, [])) >= 60
-                        for bar in self.short_bars
+                        for bar in required_bars
                     ):
                         raise RuntimeError("核心 K 線少於 60 根")
                     bundles[inst_id] = bundle
@@ -253,36 +272,38 @@ class MarketScanner:
                 actionable=False,
                 max_signals=min(max(self.config.max_signals, 0), 20),
                 data_quality={"core": "UNAVAILABLE", "no_fake_fallback": True},
+                scan_mode=normalized_mode,
             )
 
         short_results: dict[str, AnalysisResult] = {}
         analysis_failures: dict[str, str] = {}
-        self._progress(
-            progress,
-            "ANALYSIS",
-            0,
-            len(bundles),
-            "正在建立 15m Market Story 與價格 Trigger",
-        )
-        for index, (inst_id, bundle) in enumerate(sorted(bundles.items()), 1):
-            try:
-                short_results[inst_id] = self._analyze_short_v33(
-                    instrument_map[inst_id],
-                    tickers[inst_id],
-                    bundle,
-                )
-            except Exception as exc:
-                analysis_failures[f"{inst_id}:SHORT"] = f"短線分析錯誤：{exc}"
+        if include_short:
             self._progress(
                 progress,
                 "ANALYSIS",
-                index,
+                0,
                 len(bundles),
-                "正在判定短線 15m Trigger",
+                "正在建立 15m Market Story 與價格 Trigger",
             )
+            for index, (inst_id, bundle) in enumerate(sorted(bundles.items()), 1):
+                try:
+                    short_results[inst_id] = self._analyze_short_v33(
+                        instrument_map[inst_id],
+                        tickers[inst_id],
+                        bundle,
+                    )
+                except Exception as exc:
+                    analysis_failures[f"{inst_id}:SHORT"] = f"短線分析錯誤：{exc}"
+                self._progress(
+                    progress,
+                    "ANALYSIS",
+                    index,
+                    len(bundles),
+                    "正在判定短線 15m Trigger",
+                )
 
         market_bias = self._calculate_market_bias(short_results)
-        if preview is not None:
+        if include_short and preview is not None:
             preview(
                 self._core_preview_report(
                     scan_id=scan_id,
@@ -300,44 +321,46 @@ class MarketScanner:
             )
 
         long_results: dict[str, AnalysisResult] = {}
-        long_radar_enabled = callable(getattr(self.engine, "analyze_long", None))
+        long_radar_supported = callable(getattr(self.engine, "analyze_long", None))
+        long_radar_enabled = include_long and long_radar_supported
         if long_radar_enabled:
-            self._progress(
-                progress,
-                "LONG_CANDLES",
-                0,
-                len(bundles),
-                "15m 已發布；正在補 1D 與長線雷達",
-            )
-            with ThreadPoolExecutor(
-                max_workers=max(1, self.config.workers)
-            ) as executor:
-                future_map = {
-                    executor.submit(
-                        self._fetch_bundle,
-                        inst_id,
-                        ("1D",),
-                    ): inst_id
-                    for inst_id in bundles
-                }
-                for completed, future in enumerate(as_completed(future_map), 1):
-                    inst_id = future_map[future]
-                    try:
-                        daily = future.result().get("1D", [])
-                        if len(daily) < 60:
-                            raise RuntimeError("1D K 線少於 60 根")
-                        bundles[inst_id]["1D"] = daily
-                    except Exception as exc:
-                        analysis_failures[f"{inst_id}:LONG"] = (
-                            f"長線 1D 取得錯誤：{exc}"
+            if include_short:
+                self._progress(
+                    progress,
+                    "LONG_CANDLES",
+                    0,
+                    len(bundles),
+                    "15m 已發布；正在補 1D 與長線雷達",
+                )
+                with ThreadPoolExecutor(
+                    max_workers=max(1, self.config.workers)
+                ) as executor:
+                    future_map = {
+                        executor.submit(
+                            self._fetch_bundle,
+                            inst_id,
+                            ("1D",),
+                        ): inst_id
+                        for inst_id in bundles
+                    }
+                    for completed, future in enumerate(as_completed(future_map), 1):
+                        inst_id = future_map[future]
+                        try:
+                            daily = future.result().get("1D", [])
+                            if len(daily) < 60:
+                                raise RuntimeError("1D K 線少於 60 根")
+                            bundles[inst_id]["1D"] = daily
+                        except Exception as exc:
+                            analysis_failures[f"{inst_id}:LONG"] = (
+                                f"長線 1D 取得錯誤：{exc}"
+                            )
+                        self._progress(
+                            progress,
+                            "LONG_CANDLES",
+                            completed,
+                            len(bundles),
+                            "15m 已發布；正在補 1D 資料",
                         )
-                    self._progress(
-                        progress,
-                        "LONG_CANDLES",
-                        completed,
-                        len(bundles),
-                        "15m 已發布；正在補 1D 資料",
-                    )
 
             long_ready = [
                 inst_id for inst_id, bundle in bundles.items() if "1D" in bundle
@@ -367,7 +390,11 @@ class MarketScanner:
                     "LONG_ANALYSIS",
                     index,
                     len(long_ready),
-                    "15m 已發布；長線 4H Trigger 分析中",
+                    (
+                        "15m 已發布；長線 4H Trigger 分析中"
+                        if include_short
+                        else "長線 4H Trigger 分析中"
+                    ),
                 )
 
         if not short_results and not long_results:
@@ -399,6 +426,7 @@ class MarketScanner:
                     "core": "ANALYSIS_FAILED",
                     "no_fake_fallback": True,
                 },
+                scan_mode=normalized_mode,
             )
         context_failures: dict[str, list[str]] = {}
         open_interest: dict[str, float] = {}
@@ -438,23 +466,29 @@ class MarketScanner:
                 "CONTEXT",
                 0,
                 len(context_target_ids),
-                "正在取得 5m、Funding、Taker、CVD 與 Order Book",
+                (
+                    "正在取得 5m、Funding、Taker、CVD 與 Order Book"
+                    if include_short
+                    else "正在取得 Funding、Taker、CVD 與 Order Book"
+                ),
             )
 
             def load_context(inst_id: str) -> tuple[MarketContext, list[Candle], list[str]]:
                 local_errors: list[str] = []
-                timing: list[Candle] = []
-                try:
-                    timing = self.client.get_candles(
-                        inst_id,
-                        "5m",
-                        self.config.candle_limit_5m,
-                    )
-                    if len(timing) < 60:
-                        local_errors.append("5m 已收盤 K 線不足 60 根")
-                        timing = []
-                except Exception as exc:
-                    local_errors.append(f"5m: {exc}")
+                timing: list[Candle] = list(bundles[inst_id].get("1H", []))
+                if include_short:
+                    timing = []
+                    try:
+                        timing = self.client.get_candles(
+                            inst_id,
+                            "5m",
+                            self.config.candle_limit_5m,
+                        )
+                        if len(timing) < 60:
+                            local_errors.append("5m 已收盤 K 線不足 60 根")
+                            timing = []
+                    except Exception as exc:
+                        local_errors.append(f"5m: {exc}")
                 context = context_loader(inst_id, open_interest.get(inst_id))
                 context = replace(
                     context,
@@ -520,7 +554,9 @@ class MarketScanner:
                         "正在取得候選深度資料；缺失只標記、不刪 Trigger",
                     )
 
-            btc_result = short_results.get("BTC-USDT-SWAP")
+            btc_result = short_results.get("BTC-USDT-SWAP") or long_results.get(
+                "BTC-USDT-SWAP"
+            )
             btc_bias = (
                 btc_result.market_state.direction
                 if btc_result and btc_result.market_state
@@ -594,17 +630,25 @@ class MarketScanner:
         short_states, raw_short_signals = self._collect_results(short_results, exclusion_counts)
         long_states, raw_long_signals = self._collect_results(long_results, exclusion_counts)
         completed_at = datetime.now(timezone.utc).isoformat()
-        short_signals = self.repository.reconcile(
-            raw_short_signals,
-            short_states,
-            completed_at,
-            "SHORT",
+        short_signals = (
+            self.repository.reconcile(
+                raw_short_signals,
+                short_states,
+                completed_at,
+                "SHORT",
+            )
+            if include_short
+            else []
         )
-        long_signals = self.repository.reconcile(
-            raw_long_signals,
-            long_states,
-            completed_at,
-            "LONG",
+        long_signals = (
+            self.repository.reconcile(
+                raw_long_signals,
+                long_states,
+                completed_at,
+                "LONG",
+            )
+            if include_long
+            else []
         )
         short_signals = [self._refresh_entry_eligibility(item) for item in short_signals]
         long_signals = [self._refresh_entry_eligibility(item) for item in long_signals]
@@ -643,19 +687,29 @@ class MarketScanner:
             for key, value in analysis_failures.items()
             if key not in short_analysis_failures and key not in long_failures
         }
-        core_failures = {
-            **dict(sorted(failures.items())),
-            **dict(sorted(short_analysis_failures.items())),
-            **dict(sorted(uncategorized_analysis_failures.items())),
-        }
+        core_failures = (
+            {
+                **dict(sorted(failures.items())),
+                **dict(sorted(short_analysis_failures.items())),
+                **dict(sorted(uncategorized_analysis_failures.items())),
+            }
+            if include_short
+            else {}
+        )
+        if include_long and not include_short:
+            long_failures = {
+                **dict(sorted(failures.items())),
+                **dict(sorted(long_failures.items())),
+                **dict(sorted(uncategorized_analysis_failures.items())),
+            }
         all_failures = {
             **core_failures,
             **dict(sorted(long_failures.items())),
         }
         coverage = round(len(bundles) / len(instruments) * 100.0, 4)
         long_coverage = (
-            round(len(long_results) / len(bundles) * 100.0, 4)
-            if bundles and long_radar_enabled
+            round(len(long_results) / len(instruments) * 100.0, 4)
+            if instruments and long_radar_enabled
             else 0.0
         )
         status = (
@@ -666,18 +720,26 @@ class MarketScanner:
             else "NO_QUALIFIED_SIGNAL"
         )
         data_quality = {
-            "core_status": "PARTIAL" if core_failures else "AVAILABLE",
-            "core_coverage_pct": coverage,
+            "core_status": (
+                "PARTIAL"
+                if core_failures
+                else "AVAILABLE"
+                if include_short
+                else "NOT_SCANNED"
+            ),
+            "core_coverage_pct": coverage if include_short else 0.0,
             "core_failed_count": len(core_failures),
             "long_status": (
                 "PARTIAL"
                 if long_failures
                 else "AVAILABLE"
                 if long_radar_enabled
+                else "NOT_SCANNED"
+                if not include_long
                 else "NOT_SUPPORTED"
             ),
             "long_coverage_pct": long_coverage,
-            "long_target_count": len(bundles) if long_radar_enabled else 0,
+            "long_target_count": len(instruments) if long_radar_enabled else 0,
             "long_analyzable_count": len(long_results),
             "long_failed_count": len(long_failures),
             "deep_candidate_limit": context_limit,
@@ -732,21 +794,34 @@ class MarketScanner:
             item.entry_eligibility.get("status") == "MISSED_ENTRY"
             for item in short_signals
         )
-        message = (
-            f"掃描完成：15m 早期可進 {early_short}、目前可進 {ready_short}、"
-            f"等待回踩 {wait_short}、已錯過 {missed_short}；長線 {len(long_signals)}。"
-            if short_signals or long_signals
-            else "掃描完成：目前無新鮮進場訊號；系統未為湊數降低 Trigger 標準。"
-        )
+        if normalized_mode == "SHORT":
+            message = (
+                f"15m 掃描完成：早期可進 {early_short}、目前可進 {ready_short}、"
+                f"等待回踩 {wait_short}、已錯過 {missed_short}。"
+                if short_signals
+                else "15m 掃描完成：目前無新鮮進場訊號；系統未降低 Trigger 標準。"
+            )
+        elif normalized_mode == "LONG":
+            message = (
+                f"4H 掃描完成：正式長線訊號 {len(long_signals)}。"
+                if long_signals
+                else "4H 掃描完成：目前無新鮮長線進場訊號；系統未降低 Trigger 標準。"
+            )
+        else:
+            message = (
+                f"全市場掃描完成：15m 早期可進 {early_short}、目前可進 {ready_short}、"
+                f"等待回踩 {wait_short}、已錯過 {missed_short}；4H 訊號 {len(long_signals)}。"
+                if short_signals or long_signals
+                else "全市場掃描完成：目前無新鮮進場訊號；系統未降低 Trigger 標準。"
+            )
         if core_failures:
             message += (
                 f" 另有 {len(core_failures)} 個短線核心資料不足標的已獨立排除。"
             )
         if long_failures:
-            message += (
-                f" 另有 {len(long_failures)} 個長線資料不足標的；"
-                "不影響其短線判定。"
-            )
+            message += f" 另有 {len(long_failures)} 個長線資料不足標的。"
+            if include_short:
+                message += "不影響其短線判定。"
 
         report = RadarReport(
             status=status,
@@ -781,6 +856,9 @@ class MarketScanner:
             long_market_map=long_market_map,
             data_quality=data_quality,
             historical_performance=historical,
+            scan_mode=normalized_mode,
+            short_completed_at=completed_at if include_short else "",
+            long_completed_at=completed_at if include_long else "",
         )
         self.repository.record_scan(
             scan_id,
@@ -798,7 +876,11 @@ class MarketScanner:
             "FINALIZING",
             None,
             None,
-            "分析完成，正在保存並發布最新雙雷達報告",
+            {
+                "SHORT": "15m 分析完成，正在保存最新短線報告",
+                "LONG": "4H 分析完成，正在保存最新長線報告",
+                "FULL": "分析完成，正在保存並發布最新雙雷達報告",
+            }[normalized_mode],
         )
         return report
 
@@ -1391,6 +1473,8 @@ class MarketScanner:
                 "no_fake_fallback": True,
             },
             historical_performance=self.repository.performance(),
+            scan_mode="SHORT",
+            short_completed_at=generated_at,
         )
 
     def _analyze_short_v33(
@@ -1643,14 +1727,29 @@ class MarketScanner:
             "NO_FOLLOW_THROUGH": 1,
             "INVALIDATED": 0,
         }
+        execution_score = _finite_number(signal.execution_quality.get("score")) or 0.0
+        remaining_rr = (
+            _finite_number(signal.entry_eligibility.get("remaining_rr"))
+            or _finite_number(signal.risk_reward)
+            or 0.0
+        )
+        slippage_key = (
+            "buy_slippage_pct" if signal.direction == "LONG" else "sell_slippage_pct"
+        )
+        slippage = _finite_number(signal.market_metrics.get(slippage_key))
+        if slippage is None:
+            slippage = _finite_number(signal.spread_pct)
+        slippage = slippage if slippage is not None else float("inf")
         return (
             entry_priority.get(signal.entry_eligibility.get("status"), 0),
+            execution_score,
             freshness_priority.get(signal.freshness, 0),
-            stage_priority.get(signal.signal_stage, 0),
             -int(signal.lifecycle.get("age_bars", 0) or 0),
-            signal.execution_quality.get("score", 0.0),
-            signal.score,
+            remaining_rr,
+            -slippage,
             signal.quote_volume_24h,
+            stage_priority.get(signal.signal_stage, 0),
+            signal.score,
         )
 
     def _refresh_entry_eligibility(self, signal: Signal) -> Signal:
@@ -2482,6 +2581,7 @@ class MarketScanner:
         started: float,
         message: str,
         scan_id: str,
+        scan_mode: str = "FULL",
     ) -> RadarReport:
         completed_at = datetime.now(timezone.utc).isoformat()
         return RadarReport(
@@ -2504,6 +2604,7 @@ class MarketScanner:
             runtime_status="ERROR",
             actionable=False,
             max_signals=min(max(self.config.max_signals, 0), 20),
+            scan_mode=scan_mode,
         )
 
 

@@ -236,6 +236,9 @@ class RadarReport:
     long_market_map: list[MarketState] = field(default_factory=list)
     data_quality: dict[str, Any] = field(default_factory=dict)
     historical_performance: dict[str, Any] = field(default_factory=dict)
+    scan_mode: str = "FULL"
+    short_completed_at: str = ""
+    long_completed_at: str = ""
     strategy_version: str = "V3.3_MASTER"
     feature_schema_version: str = "3.3.0"
 

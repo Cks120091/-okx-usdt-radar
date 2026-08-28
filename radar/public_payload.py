@@ -24,6 +24,9 @@ _REPORT_FIELDS = (
     "signals_suppressed_reason",
     "max_signals",
     "version",
+    "scan_mode",
+    "short_completed_at",
+    "long_completed_at",
 )
 
 _SIGNAL_FIELDS = (
@@ -37,6 +40,7 @@ _SIGNAL_FIELDS = (
     "take_profit_2",
     "risk_reward",
     "invalidation",
+    "quote_volume_24h",
     "regime",
     "signal_stage",
     "readiness_score",
@@ -74,6 +78,8 @@ _CANDIDATE_METRIC_FIELDS = frozenset(
         "order_book_imbalance_pct",
         "estimated_round_trip_cost_pct",
         "execution_cost_to_risk_pct",
+        "buy_slippage_pct",
+        "sell_slippage_pct",
     }
 )
 

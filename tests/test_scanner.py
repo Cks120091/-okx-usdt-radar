@@ -414,6 +414,85 @@ class ScannerTests(unittest.TestCase):
         self.assertEqual(scanner.release_transient_data(), 1)
         self.assertEqual(scanner._candle_cache, {})
 
+    def test_short_only_scan_skips_long_candles_and_outputs(self):
+        client = FakeClient()
+        report = MarketScanner(
+            client,
+            ScannerConfig(workers=2, min_quote_volume_24h=0),
+        ).scan_once(scan_mode="SHORT")
+
+        requested = {bar for _, bar, _ in client.candle_requests}
+        self.assertEqual(requested, {"4H", "1H", "15m"})
+        self.assertEqual(report.scan_mode, "SHORT")
+        self.assertTrue(report.short_completed_at)
+        self.assertEqual(report.long_completed_at, "")
+        self.assertEqual(report.long_signals, [])
+        self.assertEqual(report.long_market_map, [])
+        self.assertEqual(report.data_quality["long_status"], "NOT_SCANNED")
+
+    def test_long_only_scan_skips_short_and_micro_candles(self):
+        client = FakeClient()
+        report = MarketScanner(
+            client,
+            ScannerConfig(workers=2, min_quote_volume_24h=0),
+        ).scan_once(scan_mode="LONG")
+
+        requested = {bar for _, bar, _ in client.candle_requests}
+        self.assertEqual(requested, {"1D", "4H", "1H"})
+        self.assertEqual(report.scan_mode, "LONG")
+        self.assertEqual(report.short_completed_at, "")
+        self.assertTrue(report.long_completed_at)
+        self.assertEqual(report.signals, [])
+        self.assertEqual(report.market_map, [])
+        self.assertEqual(report.data_quality["core_status"], "NOT_SCANNED")
+
+    def test_entry_ready_sort_uses_quality_then_freshness_rr_and_execution(self):
+        def candidate(inst_id, quality, freshness, remaining_rr, slippage, volume):
+            item = Signal(
+                inst_id=inst_id,
+                direction="LONG",
+                strategy="fixture",
+                score=80,
+                evidence=[],
+                entry_low="1",
+                entry_high="1",
+                stop_loss="0.9",
+                take_profit_1="1.2",
+                take_profit_2="1.3",
+                risk_reward=remaining_rr,
+                invalidation="fixture",
+                spread_pct=0.02,
+                quote_volume_24h=volume,
+                closed_candle_ts=1,
+                regime="TREND",
+                freshness=freshness,
+                execution_quality={"score": quality},
+                entry_eligibility={
+                    "status": "ENTRY_READY",
+                    "remaining_rr": remaining_rr,
+                },
+                market_metrics={"buy_slippage_pct": slippage},
+            )
+            return item
+
+        items = [
+            candidate("LOW-QUALITY", 90, "NEW", 3.0, 0.001, 99_000_000),
+            candidate("OLD", 94, "ACTIVE", 3.0, 0.001, 99_000_000),
+            candidate("LOW-RR", 94, "NEW", 2.0, 0.001, 99_000_000),
+            candidate("HIGH-SLIP", 94, "NEW", 3.0, 0.020, 99_000_000),
+            candidate("BEST", 94, "NEW", 3.0, 0.001, 99_000_000),
+        ]
+
+        ordered = sorted(
+            items,
+            key=MarketScanner._signal_sort_key,
+            reverse=True,
+        )
+        self.assertEqual(
+            [item.inst_id for item in ordered],
+            ["BEST", "HIGH-SLIP", "LOW-RR", "OLD", "LOW-QUALITY"],
+        )
+
     def test_one_symbol_failure_is_isolated_and_surviving_signal_remains(self):
         scanner = MarketScanner(
             FakeClient("BBB-USDT-SWAP"),

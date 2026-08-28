@@ -2,6 +2,10 @@
 
 以 OKX 公開市場資料運作的 USDT 線性永續合約雙雷達。系統只做分析，不接受 API Key、Secret 或 Passphrase，也沒有自動下單、Paper Trading 或 Live Trading 路徑。單一幣種掃描會先明確回答目前能否進場，再依序解釋原始訊號、判定原因、下一步、計畫失效條件與方向含義；各訊號、候選、排行、異動、市場地圖、收藏與歷史頁都可直接開啟幣種掃描。每次點擊「幣種掃描」都會立即重新取得該幣最新資料，不會先把上一輪全市場快照顯示成目前判定。
 
+手機介面將原本的 Entry Zone 統一改為「最佳進場點位」，進場資訊依「判定結論 → 現在位置 → 原始計畫 → 品質變化 → 成交條件」排列；畫面中的常見英文技術詞會緊接中文解釋。單幣請求期間顯示純 CSS 雷達動畫，結果或錯誤回傳後立即移除，不使用 GIF、影片、Canvas 或額外輪詢計時器。
+
+頂部可直接選擇「15m 掃描」、「4H 掃描」或「全市場掃描（15m＋4H）」。部分掃描只更新指定雷達並保留另一週期既有快照與獨立完成時間，因此速度較快，也不會把未掃描週期冒充成最新資料。從 15m／4H 板塊開啟幣種掃描時，畫面只顯示所選雷達；底層仍保留該雷達所需的完整多週期驗證。頂部同時顯示亞洲盤、倫敦盤與紐約盤的台北／香港時間；倫敦與紐約的夏冬令使用 IANA 時區規則即時計算，不寫死日期。
+
 OKX REST 預設使用官方目前建議的 `openapi.okx.com`，連線失敗時會自動改試 `www.okx.com`。兩個官方端點都無法連線時，頁面會明確標示為 OKX 行情連線問題；K 線歷史不足則會列出缺少的週期，不會再誤寫成幣種或訊號失效。
 
 V3.3 的核心原則是：**方向、價格觸發、強度、衝突、市場參與、執行品質與歷史績效彼此分離**。分數只負責說明，不能憑分數製造 Trigger；Funding、OI、Order Book、交易成本或更高週期反向也不能抹掉已由核心價格完成的 Trigger。
@@ -9,7 +13,7 @@ V3.3 的核心原則是：**方向、價格觸發、強度、衝突、市場參�
 ## 系統流程
 
 1. 動態取得所有 `state=live`、USDT 結算、線性 `*-USDT-SWAP`。
-2. 全市場載入 Ticker 與 1D／4H／1H／15m 已收盤 K 線。
+2. 依掃描範圍載入資料：15m 掃描使用 4H／1H／15m，4H 掃描使用 1D／4H／1H，全市場掃描同時執行兩套雷達。
 3. 短線與長線雷達各自建立 Market Story，不共用 Trigger。
 4. 15m 核心判定完成後先發布 `CORE_PREVIEW`，不用等 Deep Data 才看到早期機會。
 5. 依新鮮度、生命週期與故事成熟度，對最高順位最多 100 個標的補 5m、Funding、Taker、CVD、OI 與 Order Book。
@@ -97,7 +101,7 @@ Trigger 是否存在與「現在是否適合進場」分開顯示：
 
 價格若落到原 Entry Zone 的不利側，仍保留原 Trigger 作生命週期追蹤，但必須重新站回 Entry Zone 才能重新評估進場。此時即時 Stop 距離可能極小，直接用目前價格計算會產生失真的超大 R:R，因此頁面顯示「暫不適用」；這只修正執行資格與顯示，不改寫原 Entry／Stop／Target 或 V3.3 Trigger。
 
-反向變化在原方向尚未被價格失效前只列警告。排序先看進場狀態，再看新鮮度與故事成熟度；同一事件保留原 Entry／Stop／Target，不因刷新而漂移。
+反向變化在原方向尚未被價格失效前只列警告。「可進」訊號先依交易品質由高至低排列；同分時依序比較資料新鮮度、較新的事件、剩餘 R:R、較低的方向滑價與較高流動性。同一事件保留原 Entry／Stop／Target，不因刷新而漂移。
 
 ## 真實歷史績效
 
@@ -133,12 +137,15 @@ Trigger 是否存在與「現在是否適合進場」分開顯示：
 - 開啟或重新整理網頁只讀取最新報告，不會自動呼叫掃描；只有使用者按下頁面掃描按鈕才會啟動
 - 首頁候選先區分「可進」與「觀察」；未觸發項目以訊號準備度排序，執行環境分數不會被當成進場許可
 - 15m 與 4H 長線皆有全部、早期可進、目前可進、等待回踩、已錯過與接近觸發分頁
+- 頂部提供 15m、4H 與「全市場掃描（15m＋4H）」三個固定可見入口；部分掃描保留另一雷達但維持各自資料年齡與過期標記
+- 亞洲盤、倫敦盤與紐約盤以台北／香港時間顯示；倫敦、紐約夏冬令依各自時區自動換算
 - 新鮮度、Lifecycle、價格位置、攻擊效率、Price Acceptance、控制權、市場參與、執行品質與資料品質
 - 判定原因、安全檢查、全市場搜尋、收藏與 TradingView 快捷連結；開發者原始資料不傳送到手機
 - 專業交易終端視覺：深黑平面、細邊框、清楚的多空／進場層級與精簡市場指揮台；只使用 CSS、既有 SVG 與掃描中狀態動畫，不載入大型圖片、影片或外部字型，離屏卡片延遲繪製以控制手機負擔
 - 搜尋或點擊任何「幣種掃描」入口都會直接重新取得該幣最新資料並分析，不會先顯示上一輪既有判讀；回傳後不加入全市場報告或保留在伺服器記憶體。頁面會先直接回答目前可進、先不要進、禁止追價或資料不足，並明確區分方向偏向、訊號準備度與正式 Trigger
 - 15m／4H 正式 Trigger 可開啟獨立「進場檢查」頁；只有使用者按下時才更新該幣最新 Ticker、Order Book、Spread、滑價、剩餘 R:R 與交易品質，結果不寫回原始訊號
 - 真實歷史統計分頁
+- 「更多 → 使用手冊」以精簡步驟說明三種掃描、卡片狀態、幣種掃描、進場前更新、交易計畫、資料過期與風險邊界
 - Web App Manifest、SVG icon 與只快取 App Shell 的 Service Worker；`/api/*` 與 `/health` 永遠走網路
 - 可由使用者開啟「掃描完成通知」；手動啟動掃描後即使關閉頁面，完成或失敗時仍會收到不含交易訊號內容的背景通知，點擊可回到最新報告
 
@@ -151,7 +158,7 @@ iPhone／iPad 的背景通知需先用 Safari 將雷達「加入主畫面」，�
 - `GET /health`：服務健康與 Runtime 狀態，不觸發掃描
 - `GET /api/status`：Scan Lock、進度、資料年齡與最新錯誤
 - `GET /api/push/config`：目前 Web Push 公開金鑰與可用狀態，不含任何私鑰
-- `POST /api/scan`：啟動或加入唯一一輪完整掃描；可附本輪瀏覽器 `push_subscription`
+- `POST /api/scan`：啟動或加入唯一一輪掃描；`scan_mode` 可為 `SHORT`（15m）、`LONG`（4H）或 `FULL`（15m＋4H），亦可附本輪瀏覽器 `push_subscription`
 - `GET /api/report/preview`：本輪已完成的 15m 核心預覽；Deep Data 與長線仍在補充
 - `GET /api/report/latest`：手機需要的精簡 V3.3 JSON；完整 Raw Indicators 與內部 Market Story 不對外傳送
 - `POST /api/instrument/scan`：按需只掃一個 live USDT 永續，取得短長線多週期與 Deep Data；不重掃 Universe、不改寫全市場報告
@@ -188,7 +195,7 @@ iPhone／iPad 的背景通知需先用 Safari 將雷達「加入主畫面」，�
 | `early_signal_max_age_bars` | 2 | age 0～2，共保留三根 15m 已收盤 K |
 | `entry_ready_max_chase_atr` | 0.15 | 仍可進的順向偏離上限 |
 | `entry_missed_chase_atr` | 0.50 | 超過即列已錯過、禁止追價 |
-| `stale_after_seconds` | 1,800 | 過期後遮蔽正式訊號 |
+| `stale_after_seconds` | 1,800 | 各雷達快照的有效秒數；過期後保留顯示並標記，但禁止作為進場依據 |
 | `state_db_path` | `data/radar_state.sqlite3` | Story、Lifecycle 與績效資料庫 |
 
 `require_micro_volume_anomaly` 保留舊設定相容；V3.3 不把 5m 量能當正式 Trigger 門檻。
@@ -226,7 +233,7 @@ python -m unittest discover -s tests -v
 git diff --check
 ```
 
-測試涵蓋價格接受、控制權轉移、動態確認窗口、壓縮防假反轉、雜訊不靠分數觸發、長短雷達分離、Context 不取消 Trigger、單幣資料隔離、OI 非硬門檻、20 個上限、Order Book 時間序列、去重、No Follow-through、MFE／MAE、TP／SL、真實績效、單幣進場檢查、Scan Lock、STALE、Web Push 安全驗證、PWA 與 API contract。
+測試涵蓋價格接受、控制權轉移、動態確認窗口、壓縮防假反轉、雜訊不靠分數觸發、長短雷達分離、部分掃描與獨立新鮮度、可進排序、Context 不取消 Trigger、單幣資料隔離、OI 非硬門檻、20 個上限、Order Book 時間序列、去重、No Follow-through、MFE／MAE、TP／SL、真實績效、單幣進場檢查、Scan Lock、STALE、Web Push 安全驗證、PWA 與 API contract。
 
 ## 安全邊界與限制
 

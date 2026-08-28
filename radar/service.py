@@ -28,6 +28,29 @@ from .scanner import MarketScanner
 LOGGER = logging.getLogger("okx_radar")
 
 
+def _normalize_scan_mode(value: Any) -> str:
+    mode = str(value or "FULL").strip().upper()
+    aliases = {
+        "15M": "SHORT",
+        "SHORT": "SHORT",
+        "4H": "LONG",
+        "LONG": "LONG",
+        "ALL": "FULL",
+        "FULL": "FULL",
+    }
+    normalized = aliases.get(mode)
+    if normalized is None:
+        raise ValueError("scan_mode must be SHORT, LONG, or FULL")
+    return normalized
+
+
+_SCAN_MODE_LABELS = {
+    "SHORT": "15m 掃描",
+    "LONG": "4H 掃描",
+    "FULL": "全市場掃描（15m＋4H）",
+}
+
+
 def _single_scan_failure_message(exc: Exception) -> str:
     messages: list[str] = []
     current: BaseException | None = exc
@@ -86,6 +109,7 @@ class RadarRuntime:
         self._last_attempt_status = "RESTORED" if self._latest is not None else "IDLE"
         self._scan_id: str | None = None
         self._scan_started_at: str | None = None
+        self._scan_mode = "FULL"
         self._scan_push_subscriptions: dict[str, dict[str, Any]] = {}
         self._max_scan_push_subscriptions = 8
         self._progress: dict[str, Any] = self._idle_progress()
@@ -93,7 +117,12 @@ class RadarRuntime:
     def stop(self) -> None:
         return
 
-    def trigger_scan(self, push_subscription: Any | None = None) -> bool:
+    def trigger_scan(
+        self,
+        push_subscription: Any | None = None,
+        scan_mode: str = "FULL",
+    ) -> bool:
+        normalized_mode = _normalize_scan_mode(scan_mode)
         normalized_subscription = (
             self.push_notifier.normalize_subscription(push_subscription)
             if push_subscription is not None
@@ -104,7 +133,7 @@ class RadarRuntime:
                 if normalized_subscription is not None:
                     self._register_scan_push_locked(normalized_subscription)
                 return False
-            self._begin_scan_locked()
+            self._begin_scan_locked(normalized_mode)
             if normalized_subscription is not None:
                 self._register_scan_push_locked(normalized_subscription)
         thread = threading.Thread(
@@ -118,11 +147,12 @@ class RadarRuntime:
     def push_config(self) -> dict[str, Any]:
         return self.push_notifier.public_config()
 
-    def scan_blocking(self) -> RadarReport:
+    def scan_blocking(self, scan_mode: str = "FULL") -> RadarReport:
+        normalized_mode = _normalize_scan_mode(scan_mode)
         with self._state_lock:
             if self._running:
                 raise RuntimeError("scan already running")
-            self._begin_scan_locked()
+            self._begin_scan_locked(normalized_mode)
         try:
             return self._perform_scan()
         finally:
@@ -149,6 +179,8 @@ class RadarRuntime:
                 "stale_after_seconds": self.config.stale_after_seconds,
                 "scan_id": self._scan_id,
                 "scan_started_at": self._scan_started_at,
+                "scan_mode": self._scan_mode,
+                "scan_mode_label": _SCAN_MODE_LABELS[self._scan_mode],
                 "progress": dict(self._progress),
                 "analysis_only": True,
                 "auto_ordering": False,
@@ -160,13 +192,22 @@ class RadarRuntime:
                 return None
             payload = public_report_payload(self._latest)
             system_status, age_seconds, _ = self._system_status_locked()
+            horizon_freshness = {
+                horizon: self._horizon_freshness_locked(horizon)
+                for horizon in ("SHORT", "LONG")
+            }
             actionable = system_status == "FRESH" and self._latest.status != "DATA_INCOMPLETE"
             snapshot_expired = system_status == "STALE"
             payload["runtime_status"] = system_status
             payload["actionable"] = actionable
             payload["snapshot_expired"] = snapshot_expired
             payload["latest_age_seconds"] = age_seconds
+            payload["horizon_freshness"] = horizon_freshness
             payload["max_signals"] = self.config.max_signals
+            payload["safety"]["horizon_actionable"] = {
+                horizon: actionable and item["available"] and not item["expired"]
+                for horizon, item in horizon_freshness.items()
+            }
             if not actionable:
                 payload["historical_signal_count"] = len(payload.get("signals", []))
                 payload["historical_long_signal_count"] = len(
@@ -376,7 +417,14 @@ class RadarRuntime:
                     HTTPStatus.CONFLICT,
                     "市場報告已過期或異常，請先重新掃描全市場",
                 )
-            report_generated_at = self._latest.generated_at
+            horizon_freshness = self._horizon_freshness_locked(normalized_horizon)
+            if not horizon_freshness["available"] or horizon_freshness["expired"]:
+                label = "4H" if normalized_horizon == "LONG" else "15m"
+                raise PreflightError(
+                    HTTPStatus.CONFLICT,
+                    f"{label} 資料已過期，請先執行對應週期掃描或全市場掃描",
+                )
+            report_generated_at = str(horizon_freshness["completed_at"])
             collection = (
                 self._latest.long_signals
                 if normalized_horizon == "LONG"
@@ -429,7 +477,8 @@ class RadarRuntime:
             with self._state_lock:
                 if (
                     self._latest is None
-                    or self._latest.generated_at != report_generated_at
+                    or self._horizon_completed_at_locked(normalized_horizon)
+                    != report_generated_at
                 ):
                     raise PreflightError(
                         HTTPStatus.CONFLICT,
@@ -483,7 +532,14 @@ class RadarRuntime:
                         HTTPStatus.CONFLICT,
                         "市場報告已過期或異常，請先重新掃描全市場",
                     )
-                report_generated_at = self._latest.generated_at
+                horizon_freshness = self._horizon_freshness_locked(normalized_horizon)
+                if not horizon_freshness["available"] or horizon_freshness["expired"]:
+                    label = "4H" if normalized_horizon == "LONG" else "15m"
+                    raise PreflightError(
+                        HTTPStatus.CONFLICT,
+                        f"{label} 資料已過期，請先執行對應週期掃描或全市場掃描",
+                    )
+                report_generated_at = str(horizon_freshness["completed_at"])
                 cache_key = (
                     report_generated_at,
                     normalized_horizon,
@@ -520,7 +576,8 @@ class RadarRuntime:
                 if (
                     self._running
                     or self._latest is None
-                    or self._latest.generated_at != report_generated_at
+                    or self._horizon_completed_at_locked(normalized_horizon)
+                    != report_generated_at
                 ):
                     raise PreflightError(
                         HTTPStatus.CONFLICT,
@@ -644,7 +701,8 @@ class RadarRuntime:
                 )
             return report_markdown(self._latest)
 
-    def _begin_scan_locked(self) -> None:
+    def _begin_scan_locked(self, scan_mode: str = "FULL") -> None:
+        self._scan_mode = _normalize_scan_mode(scan_mode)
         self._running = True
         self._last_attempt_status = "SCANNING"
         self._scan_id = str(uuid.uuid4())
@@ -658,7 +716,7 @@ class RadarRuntime:
             "completed": 0,
             "total": None,
             "percent": None,
-            "message": "正在啟動雷達並取得最新市場資料",
+            "message": f"正在啟動{_SCAN_MODE_LABELS[self._scan_mode]}",
         }
 
     def _scan_worker(self) -> None:
@@ -682,7 +740,13 @@ class RadarRuntime:
             with self._state_lock:
                 scan_id = self._scan_id or str(uuid.uuid4())
                 started_at = self._scan_started_at or datetime.now(timezone.utc).isoformat()
-            LOGGER.info("Starting on-demand OKX USDT perpetual scan id=%s", scan_id)
+                scan_mode = self._scan_mode
+                previous_report = self._latest
+            LOGGER.info(
+                "Starting on-demand OKX USDT perpetual scan id=%s mode=%s",
+                scan_id,
+                scan_mode,
+            )
             try:
                 scan_kwargs: dict[str, Any] = {
                     "progress": self._update_progress,
@@ -691,11 +755,20 @@ class RadarRuntime:
                 parameters = inspect.signature(self.scanner.scan_once).parameters
                 if "preview" in parameters:
                     scan_kwargs["preview"] = self._publish_preview
+                if "scan_mode" in parameters:
+                    scan_kwargs["scan_mode"] = scan_mode
                 try:
                     report = self.scanner.scan_once(**scan_kwargs)
                 finally:
                     self._release_scanner_transient_data()
                 completed_at = datetime.now(timezone.utc).isoformat()
+                if report.status != "DATA_INCOMPLETE":
+                    report = self._merge_partial_report(
+                        report,
+                        previous_report,
+                        scan_mode,
+                        completed_at,
+                    )
                 report = replace(
                     report,
                     scan_id=scan_id,
@@ -713,6 +786,7 @@ class RadarRuntime:
                         else report.long_signals
                     ),
                     max_signals=self.config.max_signals,
+                    scan_mode=scan_mode,
                 )
                 save_report(report, self.config.data_dir)
                 with self._state_lock:
@@ -730,14 +804,15 @@ class RadarRuntime:
                         "total": 1,
                         "percent": 100.0,
                         "message": (
-                            "最新市場掃描完成"
+                            f"{_SCAN_MODE_LABELS[scan_mode]}完成"
                             if report.status != "DATA_INCOMPLETE"
-                            else "最新市場掃描失敗"
+                            else f"{_SCAN_MODE_LABELS[scan_mode]}失敗"
                         ),
                     }
                 LOGGER.info(
-                    "Scan finished: id=%s status=%s coverage=%.2f signals=%d",
+                    "Scan finished: id=%s mode=%s status=%s coverage=%.2f signals=%d",
                     scan_id,
+                    scan_mode,
                     report.status,
                     report.coverage_pct,
                     len(report.signals),
@@ -757,6 +832,80 @@ class RadarRuntime:
                         "message": "最新掃描失敗",
                     }
                 raise
+
+    @staticmethod
+    def _previous_horizon_timestamp(
+        report: RadarReport,
+        horizon: str,
+    ) -> str:
+        field_name = "long_completed_at" if horizon == "LONG" else "short_completed_at"
+        timestamp = str(getattr(report, field_name, "") or "").strip()
+        if timestamp:
+            return timestamp
+        mode = getattr(report, "scan_mode", "FULL")
+        if mode == "FULL" or (mode == "SHORT") == (horizon == "SHORT"):
+            return report.completed_at or report.generated_at
+        return ""
+
+    def _merge_partial_report(
+        self,
+        report: RadarReport,
+        previous: RadarReport | None,
+        scan_mode: str,
+        completed_at: str,
+    ) -> RadarReport:
+        """Keep the unrequested radar intact after a successful partial scan."""
+
+        if scan_mode == "FULL":
+            return replace(
+                report,
+                short_completed_at=completed_at,
+                long_completed_at=completed_at,
+            )
+        quality = deepcopy(report.data_quality)
+        if scan_mode == "SHORT":
+            if previous is None:
+                return replace(
+                    report,
+                    short_completed_at=completed_at,
+                    long_completed_at="",
+                )
+            previous_quality = previous.data_quality or {}
+            for key, value in previous_quality.items():
+                if key.startswith("long_"):
+                    quality[key] = deepcopy(value)
+            return replace(
+                report,
+                long_signals=previous.long_signals,
+                long_watchlist=previous.long_watchlist,
+                long_market_map=previous.long_market_map,
+                long_completed_at=self._previous_horizon_timestamp(previous, "LONG"),
+                short_completed_at=completed_at,
+                data_quality=quality,
+                message=f"{report.message} 4H 沿用上一輪資料。",
+            )
+        if previous is None:
+            return replace(
+                report,
+                short_completed_at="",
+                long_completed_at=completed_at,
+            )
+        previous_quality = previous.data_quality or {}
+        for key, value in previous_quality.items():
+            if key.startswith("core_"):
+                quality[key] = deepcopy(value)
+        return replace(
+            report,
+            signals=previous.signals,
+            watchlist=previous.watchlist,
+            market_map=previous.market_map,
+            market_regime_counts=previous.market_regime_counts,
+            market_bias=previous.market_bias,
+            short_completed_at=self._previous_horizon_timestamp(previous, "SHORT"),
+            long_completed_at=completed_at,
+            data_quality=quality,
+            message=f"{report.message} 15m 沿用上一輪資料。",
+        )
 
     def _release_scanner_transient_data(self) -> None:
         release = getattr(self.scanner, "release_transient_data", None)
@@ -873,6 +1022,43 @@ class RadarRuntime:
             return max(0.0, time.time() - completed.timestamp())
         except (TypeError, ValueError):
             return float("inf")
+
+    def _horizon_completed_at_locked(self, horizon: str) -> str | None:
+        if self._latest is None:
+            return None
+        field_name = "long_completed_at" if horizon == "LONG" else "short_completed_at"
+        value = str(getattr(self._latest, field_name, "") or "").strip()
+        if value:
+            return value
+        # Reports created before per-horizon timestamps were introduced were
+        # always full scans. Partial reports intentionally leave the unscanned
+        # horizon blank so it cannot be presented as newly refreshed.
+        if getattr(self._latest, "scan_mode", "FULL") == "FULL":
+            return self._latest.completed_at or self._latest.generated_at or None
+        return None
+
+    def _horizon_freshness_locked(self, horizon: str) -> dict[str, Any]:
+        completed_at = self._horizon_completed_at_locked(horizon)
+        if not completed_at:
+            return {
+                "available": False,
+                "completed_at": None,
+                "age_seconds": None,
+                "expired": False,
+            }
+        try:
+            completed = datetime.fromisoformat(completed_at)
+            if completed.tzinfo is None:
+                completed = completed.replace(tzinfo=timezone.utc)
+            age_seconds = max(0.0, time.time() - completed.timestamp())
+        except (TypeError, ValueError):
+            age_seconds = float("inf")
+        return {
+            "available": True,
+            "completed_at": completed_at,
+            "age_seconds": age_seconds,
+            "expired": age_seconds > self.config.stale_after_seconds,
+        }
 
     def _cached_preflight_locked(
         self,
@@ -1044,7 +1230,11 @@ def serve(runtime: RadarRuntime, host: str, port: int) -> None:
             try:
                 payload = self._read_json_body()
                 push_subscription = payload.get("push_subscription")
-                started = runtime.trigger_scan(push_subscription)
+                scan_mode = _normalize_scan_mode(payload.get("scan_mode", "FULL"))
+                started = runtime.trigger_scan(
+                    push_subscription,
+                    scan_mode=scan_mode,
+                )
             except PushSubscriptionError as exc:
                 self._send_json(HTTPStatus.BAD_REQUEST, {"error": str(exc)})
                 return
@@ -1058,12 +1248,14 @@ def serve(runtime: RadarRuntime, host: str, port: int) -> None:
                     "accepted": started,
                     "joined_existing_scan": not started,
                     "scan_id": status["scan_id"],
+                    "scan_mode": status["scan_mode"],
+                    "scan_mode_label": status["scan_mode_label"],
                     "runtime_status": "SCANNING",
                     "notification_registered": push_subscription is not None,
                     "message": (
-                        "已開始完整掃描"
+                        f"已開始{_SCAN_MODE_LABELS[scan_mode]}"
                         if started
-                        else "掃描正在執行，已加入目前進度"
+                        else f"{status['scan_mode_label']}正在執行，已加入目前進度"
                     ),
                 },
             )
