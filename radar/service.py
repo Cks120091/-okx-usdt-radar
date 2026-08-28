@@ -116,6 +116,7 @@ class RadarRuntime:
                 "runtime_status": system_status,
                 "data_status": "STALE" if stale else "FRESH" if self._latest else "NONE",
                 "actionable": system_status == "FRESH",
+                "snapshot_expired": system_status == "STALE",
                 "last_error": self._last_error,
                 "last_attempt_status": self._last_attempt_status,
                 "has_report": self._latest is not None,
@@ -138,8 +139,10 @@ class RadarRuntime:
             payload = public_report_payload(self._latest)
             system_status, age_seconds, _ = self._system_status_locked()
             actionable = system_status == "FRESH" and self._latest.status != "DATA_INCOMPLETE"
+            snapshot_expired = system_status == "STALE"
             payload["runtime_status"] = system_status
             payload["actionable"] = actionable
+            payload["snapshot_expired"] = snapshot_expired
             payload["latest_age_seconds"] = age_seconds
             payload["max_signals"] = self.config.max_signals
             if not actionable:
@@ -147,12 +150,21 @@ class RadarRuntime:
                 payload["historical_long_signal_count"] = len(
                     payload.get("long_signals", [])
                 )
-                payload["signals"] = []
-                payload["long_signals"] = []
-                payload["signals_suppressed_reason"] = system_status
                 payload["safety"]["actionable"] = False
+                if snapshot_expired:
+                    # Keep the last completed snapshot visible for reference, but
+                    # expose an explicit read-only state so no client can mistake it
+                    # for a current entry opportunity.
+                    payload["signals_suppressed_reason"] = None
+                    payload["signals_read_only_reason"] = "STALE"
+                else:
+                    payload["signals"] = []
+                    payload["long_signals"] = []
+                    payload["signals_suppressed_reason"] = system_status
+                    payload["signals_read_only_reason"] = None
             else:
                 payload["signals_suppressed_reason"] = None
+                payload["signals_read_only_reason"] = None
             return payload
 
     def preview_dict(self) -> dict[str, Any] | None:
@@ -588,10 +600,19 @@ class RadarRuntime:
             if self._latest is None:
                 return None
             system_status, _, _ = self._system_status_locked()
+            if system_status == "STALE":
+                markdown = report_markdown(self._latest)
+                heading = "# OKX USDT 永續雷達\n\n"
+                warning = (
+                    "> ⚠️ 資料已過期：這是超過 30 分鐘的保留快照，"
+                    "禁止依此進場。請重新掃描全市場或只更新單一幣種。\n\n"
+                )
+                if markdown.startswith(heading):
+                    return heading + warning + markdown[len(heading) :]
+                return warning + markdown
             if system_status != "FRESH":
                 labels = {
                     "SCANNING": "掃描中，舊正式訊號已暫停使用。",
-                    "STALE": "資料已過期，禁止依此進場。",
                     "ERROR": "最新掃描失敗，舊正式訊號已暫停使用。",
                     "BOOTING": "雷達啟動中，尚無可用訊號。",
                 }

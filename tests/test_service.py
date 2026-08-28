@@ -433,7 +433,7 @@ class RuntimeSafetyTests(unittest.TestCase):
             self.assertEqual(payload["signals"], [])
             self.assertEqual(payload["historical_signal_count"], 1)
 
-    def test_report_older_than_thirty_minutes_is_stale_and_masked(self):
+    def test_report_older_than_thirty_minutes_is_retained_as_expired_snapshot(self):
         with tempfile.TemporaryDirectory() as directory:
             runtime = RadarRuntime(
                 ImmediateScanner(),
@@ -442,7 +442,17 @@ class RuntimeSafetyTests(unittest.TestCase):
             old = (datetime.now(timezone.utc) - timedelta(minutes=31)).isoformat()
             runtime._latest = report(old)
             self.assertEqual(runtime.status()["system_status"], "STALE")
-            self.assertEqual(runtime.latest_dict()["signals"], [])
+            payload = runtime.latest_dict()
+            self.assertFalse(payload["actionable"])
+            self.assertTrue(payload["snapshot_expired"])
+            self.assertEqual(len(payload["signals"]), 1)
+            self.assertEqual(payload["signals"][0]["inst_id"], "AAA-USDT-SWAP")
+            self.assertIsNone(payload["signals_suppressed_reason"])
+            self.assertEqual(payload["signals_read_only_reason"], "STALE")
+            self.assertFalse(payload["safety"]["actionable"])
+            markdown = runtime.latest_markdown()
+            self.assertIn("資料已過期", markdown)
+            self.assertIn("AAA-USDT-SWAP", markdown)
 
     def test_failed_attempt_keeps_stale_as_primary_safety_state(self):
         with tempfile.TemporaryDirectory() as directory:
@@ -457,7 +467,10 @@ class RuntimeSafetyTests(unittest.TestCase):
             status = runtime.status()
             self.assertEqual(status["system_status"], "STALE")
             self.assertEqual(status["last_error"], "fixture failure")
-            self.assertEqual(runtime.latest_dict()["signals"], [])
+            payload = runtime.latest_dict()
+            self.assertTrue(payload["snapshot_expired"])
+            self.assertFalse(payload["actionable"])
+            self.assertEqual(len(payload["signals"]), 1)
 
     def test_successful_scan_uses_completion_time_and_is_actionable(self):
         with tempfile.TemporaryDirectory() as directory:
