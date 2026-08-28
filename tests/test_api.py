@@ -126,6 +126,16 @@ class APITests(unittest.TestCase):
         self.assertEqual(context.source_timestamps["order_book"], 1001)
         self.assertNotIn("funding", context.source_timestamps)
 
+    def test_targeted_instrument_metadata_and_open_interest(self):
+        client = RouteFixtureClient()
+        instrument = client.get_usdt_swap_instrument("BTC-USDT-SWAP")
+        open_interest = client.get_open_interest_for("BTC-USDT-SWAP")
+
+        self.assertIsNotNone(instrument)
+        self.assertEqual(instrument.inst_id, "BTC-USDT-SWAP")
+        self.assertEqual(open_interest, 25_000_000.0)
+        self.assertEqual(client._open_interest_timestamps["BTC-USDT-SWAP"], 999)
+
 
 if __name__ == "__main__":
     unittest.main()

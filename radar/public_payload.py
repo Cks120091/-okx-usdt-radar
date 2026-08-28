@@ -146,6 +146,12 @@ def public_report_payload(report: Any) -> dict[str, Any]:
     return payload
 
 
+def public_candidate_payload(item: Any, *, signal: bool) -> dict[str, Any]:
+    """Project one on-demand analysis item through the mobile-safe schema."""
+
+    return _public_candidate(item, signal=signal)
+
+
 def _public_candidate(item: Any, *, signal: bool) -> dict[str, Any]:
     payload = _select(item, _SIGNAL_FIELDS if signal else _WATCH_FIELDS)
     payload["market_metrics"] = _public_metrics(

@@ -203,6 +203,28 @@ class OKXPublicClient:
         self._instrument_meta = {item.inst_id: item for item in ordered}
         return ordered
 
+    def get_usdt_swap_instrument(self, inst_id: str) -> Instrument | None:
+        """Fetch one live linear USDT perpetual selected by the user."""
+
+        data = self._get(
+            "/api/v5/public/instruments",
+            {"instType": "SWAP", "instId": inst_id},
+        )
+        instrument = next(
+            (
+                parsed
+                for row in data
+                if (parsed := _instrument_from_row(row)) is not None
+                and parsed.inst_id == inst_id
+            ),
+            None,
+        )
+        if instrument is not None:
+            instrument_meta = getattr(self, "_instrument_meta", {})
+            instrument_meta[instrument.inst_id] = instrument
+            self._instrument_meta = instrument_meta
+        return instrument
+
     def get_swap_tickers(self) -> dict[str, Ticker]:
         data = self._get("/api/v5/market/tickers", {"instType": "SWAP"})
         tickers: dict[str, Ticker] = {}
@@ -384,6 +406,26 @@ class OKXPublicClient:
             and _int(row.get("ts")) > 0
         }
         return output
+
+    def get_open_interest_for(self, inst_id: str) -> float | None:
+        """Fetch open interest for one instrument without loading the universe."""
+
+        data = self._get(
+            "/api/v5/public/open-interest",
+            {"instType": "SWAP", "instId": inst_id},
+        )
+        row = next(
+            (item for item in data if str(item.get("instId", "")) == inst_id),
+            None,
+        )
+        if row is None:
+            return None
+        timestamp = _int(row.get("ts"))
+        if timestamp > 0:
+            timestamps = getattr(self, "_open_interest_timestamps", {})
+            timestamps[inst_id] = timestamp
+            self._open_interest_timestamps = timestamps
+        return _float_or_none(row.get("oiUsd"))
 
     def get_market_context(
         self,

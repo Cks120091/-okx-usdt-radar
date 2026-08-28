@@ -4,6 +4,7 @@ import threading
 import time
 import unittest
 from datetime import datetime, timedelta, timezone
+from types import SimpleNamespace
 
 from radar.config import AppConfig
 from radar.models import MarketState, RadarReport, Signal
@@ -100,6 +101,45 @@ class ReleasingScanner(ImmediateScanner):
         return 7
 
 
+class SingleInstrumentScanner(ImmediateScanner):
+    def __init__(self):
+        self.calls = []
+        self.release_calls = 0
+
+    def scan_instrument(self, inst_id, market_bias, btc_bias):
+        self.calls.append((inst_id, market_bias, btc_bias))
+        state = MarketState(
+            inst_id=inst_id,
+            regime="TREND",
+            direction="LONG",
+            preferred_strategy="等待突破",
+            readiness_score=72.0,
+            status="NEAR_TRIGGER",
+            missing_conditions=["等待 15m Trigger"],
+            spread_pct=0.01,
+            quote_volume_24h=20_000_000,
+            closed_candle_ts=1,
+            summary="目前接近觸發，但還不能進場。",
+        )
+        return SimpleNamespace(
+            inst_id=inst_id,
+            ticker=SimpleNamespace(last=100.5),
+            context=SimpleNamespace(),
+            short_result=SimpleNamespace(
+                signal=None,
+                market_state=state,
+                reason="near_trigger",
+            ),
+            long_result=None,
+            analyzed_at=datetime.now(timezone.utc).isoformat(),
+            errors=[],
+        )
+
+    def release_transient_data(self):
+        self.release_calls += 1
+        return 1
+
+
 class FailingScanner:
     def scan_once(self, progress=None, scan_id=None):
         raise RuntimeError("fixture scan failure")
@@ -139,6 +179,22 @@ class FailingPushNotifier(FakePushNotifier):
 
 
 class RuntimeSafetyTests(unittest.TestCase):
+    def test_single_instrument_scan_is_normalized_and_not_persisted_to_report(self):
+        with tempfile.TemporaryDirectory() as directory:
+            scanner = SingleInstrumentScanner()
+            runtime = RadarRuntime(scanner, AppConfig(data_dir=directory))
+
+            payload = runtime.scan_instrument_dict("btc")
+
+            self.assertEqual(payload["inst_id"], "BTC-USDT-SWAP")
+            self.assertEqual(payload["short"]["kind"], "STATE")
+            self.assertEqual(payload["short"]["item"]["status"], "NEAR_TRIGGER")
+            self.assertEqual(payload["long"]["kind"], "UNAVAILABLE")
+            self.assertFalse(payload["safety"]["full_market_scan"])
+            self.assertFalse(payload["safety"]["persisted_to_report"])
+            self.assertIsNone(runtime._latest)
+            self.assertEqual(scanner.release_calls, 1)
+
     def test_push_config_is_exposed_without_a_private_key(self):
         with tempfile.TemporaryDirectory() as directory:
             notifier = FakePushNotifier()

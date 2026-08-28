@@ -77,7 +77,7 @@ class V33ContractTests(unittest.TestCase):
         self.assertIn(".primary-nav{grid-row:5;position:relative", html)
         self.assertIn("grid-template-columns:repeat(4,minmax(0,1fr))", html)
         self.assertIn(".decision-actions{display:grid;grid-template-columns:repeat(2,minmax(0,1fr))", html)
-        self.assertIn("okx-radar-shell-v3.3-single-reanalysis-1", service_worker)
+        self.assertIn("okx-radar-shell-v3.3-instrument-scan-1", service_worker)
         self.assertIn("--primary-nav-safe-bottom", html)
         self.assertIn(".action-wrap{display:none;grid-row:4;position:relative", html)
         self.assertIn("$('.shell').scrollTo({top:0", html)
@@ -147,7 +147,7 @@ class V33ContractTests(unittest.TestCase):
         self.assertIn("function signalTriggerTime(item,status)", html)
         self.assertIn("訊號觸發時間（台灣）", html)
         self.assertIn("status!=='ENTRY_READY'&&status!=='MISSED_ENTRY'", html)
-        self.assertIn("okx-radar-shell-v3.3-single-reanalysis-1", service_worker)
+        self.assertIn("okx-radar-shell-v3.3-instrument-scan-1", service_worker)
         self.assertIn("$('#preflightRefresh').addEventListener('click',loadPreflight)", html)
         self.assertIn("'#waitRetestBox','#longWaitRetestBox'", html)
         self.assertIn("status==='WAIT_RETEST'?'↻ 更新現狀'", html)
@@ -170,6 +170,13 @@ class V33ContractTests(unittest.TestCase):
         self.assertIn("只按原始觸發時間輪替", (
             Path(__file__).parents[1] / "radar" / "service.py"
         ).read_text(encoding="utf-8"))
+        self.assertIn("幣種掃描", html)
+        self.assertIn("掃描幣種資訊", html)
+        self.assertIn("/api/instrument/scan", html)
+        self.assertIn("data-instrument-id", html)
+        self.assertIn("function openInstrument(instId)", html)
+        self.assertIn("只掃描這一個幣，不重新掃描全市場", html)
+        self.assertIn("結果不加入全市場報告", html)
 
     def test_pwa_never_caches_live_market_api(self):
         root = Path(__file__).parents[1] / "radar" / "static"

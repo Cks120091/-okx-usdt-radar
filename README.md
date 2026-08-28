@@ -133,6 +133,7 @@ Trigger 是否存在與「現在是否適合進場」分開顯示：
 - 15m 與 4H 長線皆有全部、早期可進、目前可進、等待回踩、已錯過與接近觸發分頁
 - 新鮮度、Lifecycle、價格位置、攻擊效率、Price Acceptance、控制權、市場參與、執行品質與資料品質
 - 判定原因、安全檢查、全市場搜尋、收藏與 TradingView 快捷連結；開發者原始資料不傳送到手機
+- 搜尋可直接開啟獨立幣種頁；若該幣已在可進、等待回踩、已錯過、早期或接近觸發中，先顯示本輪既有資料，否則不預載完整分析。按「掃描幣種資訊」才只掃該幣，回傳後不加入全市場報告或保留在伺服器記憶體
 - 15m／4H 正式 Trigger 可開啟獨立「進場檢查」頁；只有使用者按下時才更新該幣最新 Ticker、Order Book、Spread、滑價、剩餘 R:R 與交易品質，結果不寫回原始訊號
 - 真實歷史統計分頁
 - Web App Manifest、SVG icon 與只快取 App Shell 的 Service Worker；`/api/*` 與 `/health` 永遠走網路
@@ -150,7 +151,9 @@ iPhone／iPad 的背景通知需先用 Safari 將雷達「加入主畫面」，�
 - `POST /api/scan`：啟動或加入唯一一輪完整掃描；可附本輪瀏覽器 `push_subscription`
 - `GET /api/report/preview`：本輪已完成的 15m 核心預覽；Deep Data 與長線仍在補充
 - `GET /api/report/latest`：手機需要的精簡 V3.3 JSON；完整 Raw Indicators 與內部 Market Story 不對外傳送
+- `POST /api/instrument/scan`：按需只掃一個 live USDT 永續，取得短長線多週期與 Deep Data；不重掃 Universe、不改寫全市場報告
 - `GET /api/preflight?inst_id=...&horizon=SHORT|LONG`：只重新檢查最新正式 Trigger 的單幣執行條件；12 秒防重複快取，不掃全市場、不改寫 Trigger
+- `POST /api/preflight/reanalyze`：原交易計畫先經進場檢查確認失效後，才用相同 V3.3 條件重新分析該幣是否出現全新 Trigger
 - `GET /api/report/latest.md`：中文文字報告
 - `GET /api/stats`：SQLite 真實樣本統計
 

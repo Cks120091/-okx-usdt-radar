@@ -24,11 +24,17 @@ from .strategy import (
 class PublicDataClient(Protocol):
     def get_usdt_swap_instruments(self) -> list[Instrument]: ...
 
+    def get_usdt_swap_instrument(self, inst_id: str) -> Instrument | None: ...
+
     def get_swap_tickers(self) -> dict[str, Ticker]: ...
+
+    def get_ticker(self, inst_id: str) -> Ticker: ...
 
     def get_candles(self, inst_id: str, bar: str, limit: int = 100) -> list[Candle]: ...
 
     def get_open_interest_usd(self) -> dict[str, float]: ...
+
+    def get_open_interest_for(self, inst_id: str) -> float | None: ...
 
     def get_market_context(
         self,
@@ -76,6 +82,17 @@ class SingleInstrumentReanalysis:
     raw_signal: Signal | None
     analyzed_at: str
     reason: str
+
+
+@dataclass(frozen=True)
+class SingleInstrumentScan:
+    inst_id: str
+    ticker: Ticker
+    context: MarketContext
+    short_result: AnalysisResult
+    long_result: AnalysisResult | None
+    analyzed_at: str
+    errors: list[str]
 
 
 ProgressCallback = Callable[[str, int | None, int | None, str], None]
@@ -784,6 +801,222 @@ class MarketScanner:
             "分析完成，正在保存並發布最新雙雷達報告",
         )
         return report
+
+    def scan_instrument(
+        self,
+        inst_id: str,
+        market_bias: dict[str, Any] | None = None,
+        btc_bias: str = "NEUTRAL",
+    ) -> SingleInstrumentScan:
+        """Analyze one explicitly requested symbol without scanning the universe.
+
+        Results are returned to the requesting page only. This method does not
+        reconcile the signal repository or retain the full analysis in the
+        published market report.
+        """
+
+        inst_id = str(inst_id or "").strip().upper()
+        if not inst_id.endswith("-USDT-SWAP"):
+            raise ValueError("幣種格式不正確")
+
+        instrument_loader = getattr(self.client, "get_usdt_swap_instrument", None)
+        if callable(instrument_loader):
+            instrument = instrument_loader(inst_id)
+        else:
+            instrument = next(
+                (
+                    item
+                    for item in self.client.get_usdt_swap_instruments()
+                    if item.inst_id == inst_id
+                ),
+                None,
+            )
+        if instrument is None:
+            raise ValueError("OKX 最新 live USDT 永續清單中找不到這個幣種")
+
+        ticker_loader = getattr(self.client, "get_ticker", None)
+        if callable(ticker_loader):
+            ticker = ticker_loader(inst_id)
+        else:
+            ticker = self.client.get_swap_tickers().get(inst_id)
+            if ticker is None:
+                raise ValueError("OKX 最新 Ticker 中找不到這個幣種")
+
+        bundle = self._fetch_bundle(inst_id, self.short_bars)
+        if not all(len(bundle.get(bar, [])) >= 60 for bar in self.short_bars):
+            raise ValueError("最新短線多週期已收盤 K 線不足 60 根，無法安全分析")
+        short_result = self._analyze_short_v33(instrument, ticker, bundle)
+
+        errors: list[str] = []
+        long_result: AnalysisResult | None = None
+        if callable(getattr(self.engine, "analyze_long", None)):
+            try:
+                daily = self._fetch_bundle(inst_id, ("1D",)).get("1D", [])
+                if len(daily) < 60:
+                    raise ValueError("1D 已收盤 K 線不足 60 根")
+                bundle["1D"] = daily
+                long_result = self._analyze_long_v33(instrument, ticker, bundle)
+            except Exception as exc:
+                errors.append(f"長線資料：{exc}")
+
+        open_interest_usd: float | None = None
+        oi_loader = getattr(self.client, "get_open_interest_for", None)
+        try:
+            if callable(oi_loader):
+                open_interest_usd = oi_loader(inst_id)
+            else:
+                bulk_oi_loader = getattr(self.client, "get_open_interest_usd", None)
+                if callable(bulk_oi_loader):
+                    open_interest_usd = bulk_oi_loader().get(inst_id)
+        except Exception as exc:
+            errors.append(f"Open Interest：{exc}")
+
+        oi_change = self._open_interest_change(inst_id, open_interest_usd)
+        short_result = self._attach_oi_snapshot(
+            short_result,
+            open_interest_usd,
+            oi_change,
+        )
+        if long_result is not None:
+            long_result = self._attach_oi_snapshot(
+                long_result,
+                open_interest_usd,
+                oi_change,
+            )
+
+        timing: list[Candle] = []
+        try:
+            timing = self.client.get_candles(
+                inst_id,
+                "5m",
+                self.config.candle_limit_5m,
+            )
+            if len(timing) < 60:
+                errors.append("5m 已收盤 K 線不足 60 根")
+                timing = []
+        except Exception as exc:
+            errors.append(f"5m：{exc}")
+
+        context = MarketContext(
+            inst_id=inst_id,
+            open_interest_usd=open_interest_usd,
+            funding_rate=None,
+            order_book_imbalance=None,
+            taker_buy_ratio=None,
+            sampled_at=int(ticker.ts or 0),
+            failures=list(errors),
+            best_bid=ticker.bid,
+            best_ask=ticker.ask,
+        )
+        context_loader = getattr(self.client, "get_market_context", None)
+        context_applier = getattr(self.engine, "apply_market_context", None)
+        if callable(context_loader) and callable(context_applier):
+            try:
+                loaded_context = context_loader(inst_id, open_interest_usd)
+                errors = list(dict.fromkeys([*errors, *loaded_context.failures]))
+                context = replace(
+                    loaded_context,
+                    open_interest_change_pct=oi_change,
+                    failures=list(errors),
+                )
+                previous_micro = self.repository.load_microstructure(inst_id)
+                for result_name, result, result_timing in (
+                    ("short_result", short_result, timing or None),
+                    ("long_result", long_result, bundle.get("1H")),
+                ):
+                    if result is None or result.market_state is None:
+                        continue
+                    direction = result.market_state.direction
+                    sequence = (
+                        classify_microstructure(
+                            previous_micro,
+                            context,
+                            direction,
+                            result.market_state.market_metrics.get(
+                                "price_change_core_pct"
+                            ),
+                        )
+                        if direction in ("LONG", "SHORT")
+                        else {
+                            "state": "NEUTRAL",
+                            "reason": "方向中性，不替單張委託簿賦予多空意義",
+                        }
+                    )
+                    directional_context = replace(
+                        context,
+                        order_book_sequence=sequence,
+                    )
+                    updated = context_applier(
+                        result,
+                        directional_context,
+                        btc_bias,
+                        result_timing,
+                        market_bias or {},
+                    )
+                    if result_name == "short_result":
+                        short_result = updated
+                    else:
+                        long_result = updated
+                self.repository.save_microstructure(
+                    context,
+                    datetime.now(timezone.utc).isoformat(),
+                )
+            except Exception as exc:
+                errors.append(f"Context 整合失敗：{exc}")
+                short_result = self._mark_deep_data_missing(short_result, errors)
+                if long_result is not None:
+                    long_result = self._mark_deep_data_missing(long_result, errors)
+                context = replace(context, failures=list(errors))
+        else:
+            errors.append("Deep Data 單幣服務暫不可用")
+            short_result = self._mark_deep_data_missing(short_result, errors)
+            if long_result is not None:
+                long_result = self._mark_deep_data_missing(long_result, errors)
+            context = replace(context, failures=list(errors))
+
+        if open_interest_usd is not None:
+            self._previous_open_interest_usd[inst_id] = open_interest_usd
+
+        def finalize(result: AnalysisResult | None) -> AnalysisResult | None:
+            if result is None:
+                return None
+            signal = result.signal
+            reason = result.reason
+            if signal is not None and not self._passes_output_liquidity(signal, False):
+                signal = None
+                reason = "universe_output_gate"
+            if signal is not None:
+                live_metrics = dict(signal.market_metrics)
+                live_metrics["last_price"] = ticker.last
+                signal = _without_internal_metrics(
+                    self._refresh_entry_eligibility(
+                        replace(signal, market_metrics=live_metrics)
+                    )
+                )
+            state = (
+                _without_internal_metrics(result.market_state)
+                if result.market_state is not None
+                else None
+            )
+            return replace(
+                result,
+                signal=signal,
+                market_state=state,
+                reason=reason,
+            )
+
+        finalized_short = finalize(short_result)
+        finalized_long = finalize(long_result)
+        assert finalized_short is not None
+        return SingleInstrumentScan(
+            inst_id=inst_id,
+            ticker=ticker,
+            context=context,
+            short_result=finalized_short,
+            long_result=finalized_long,
+            analyzed_at=datetime.now(timezone.utc).isoformat(),
+            errors=list(dict.fromkeys(errors)),
+        )
 
     def reanalyze_instrument(
         self,

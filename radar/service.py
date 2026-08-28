@@ -3,6 +3,7 @@ from __future__ import annotations
 import inspect
 import json
 import logging
+import re
 import threading
 import time
 import uuid
@@ -18,7 +19,7 @@ from urllib.parse import parse_qs, urlparse
 from .config import AppConfig
 from .models import RadarReport
 from .preflight import build_preflight_payload
-from .public_payload import public_report_payload
+from .public_payload import public_candidate_payload, public_report_payload
 from .push import PushSubscriptionError, build_push_notifier
 from .reporting import load_latest_report, report_markdown, save_report
 from .scanner import MarketScanner
@@ -209,6 +210,109 @@ class RadarRuntime:
                 if items
                 else "尚無訊號生命週期紀錄。"
             ),
+        }
+
+    def scan_instrument_dict(self, inst_id: str) -> dict[str, Any]:
+        """Run an isolated, non-persisted analysis for one requested symbol."""
+
+        normalized_id = _normalize_usdt_swap_id(inst_id)
+        analyzer = getattr(self.scanner, "scan_instrument", None)
+        if not callable(analyzer):
+            raise PreflightError(
+                HTTPStatus.SERVICE_UNAVAILABLE,
+                "單幣掃描服務尚未啟用",
+            )
+
+        with self._scan_lock:
+            with self._state_lock:
+                if self._running:
+                    raise PreflightError(
+                        HTTPStatus.CONFLICT,
+                        "全市場掃描正在執行，完成後才能掃描單一幣種",
+                    )
+                market_bias = deepcopy(
+                    self._latest.market_bias if self._latest is not None else {}
+                )
+                btc_bias = "NEUTRAL"
+                if self._latest is not None:
+                    btc_state = next(
+                        (
+                            item
+                            for item in self._latest.market_map
+                            if item.inst_id == "BTC-USDT-SWAP"
+                        ),
+                        None,
+                    )
+                    if btc_state is not None:
+                        btc_bias = btc_state.direction
+            try:
+                analysis = analyzer(normalized_id, market_bias, btc_bias)
+            except ValueError as exc:
+                raise PreflightError(HTTPStatus.UNPROCESSABLE_ENTITY, str(exc)) from exc
+            except Exception as exc:
+                LOGGER.exception("Single-instrument scan failed for %s", normalized_id)
+                raise PreflightError(
+                    HTTPStatus.BAD_GATEWAY,
+                    "OKX 最新單幣資料暫時無法完成分析，請稍後再按一次",
+                ) from exc
+            finally:
+                self._release_scanner_transient_data()
+
+        def horizon_payload(result: Any, horizon: str) -> dict[str, Any]:
+            if result is None:
+                return {
+                    "horizon": horizon,
+                    "horizon_label": "4H 長線" if horizon == "LONG" else "15m 短線",
+                    "kind": "UNAVAILABLE",
+                    "reason_code": "data_unavailable",
+                    "message": "這個週期的資料目前不足，沒有使用替代值硬算。",
+                    "item": None,
+                }
+            signal = result.signal
+            item = signal or result.market_state
+            if signal is not None:
+                message = "已使用最新資料形成正式 Trigger 與交易計畫。"
+                kind = "SIGNAL"
+            elif item is not None:
+                message = (
+                    "目前尚未形成正式 Trigger；下方仍顯示最新方向、階段、"
+                    "多週期證據與缺少條件。"
+                )
+                kind = "STATE"
+            else:
+                message = "核心資料無法形成可判讀的 Market Story，沒有使用假資料。"
+                kind = "UNAVAILABLE"
+            return {
+                "horizon": horizon,
+                "horizon_label": "4H 長線" if horizon == "LONG" else "15m 短線",
+                "kind": kind,
+                "reason_code": result.reason,
+                "message": message,
+                "item": (
+                    public_candidate_payload(item, signal=signal is not None)
+                    if item is not None
+                    else None
+                ),
+            }
+
+        return {
+            "inst_id": analysis.inst_id,
+            "analyzed_at": analysis.analyzed_at,
+            "source": "ON_DEMAND_SINGLE_INSTRUMENT",
+            "current_price": analysis.ticker.last,
+            "short": horizon_payload(analysis.short_result, "SHORT"),
+            "long": horizon_payload(analysis.long_result, "LONG"),
+            "warnings": list(analysis.errors),
+            "safety": {
+                "analysis_only": True,
+                "auto_ordering": False,
+                "full_market_scan": False,
+                "persisted_to_report": False,
+                "note": (
+                    "只掃描這一個幣；結果只回傳目前頁面，不加入全市場報告，"
+                    "也不會在伺服器記憶體保留完整單幣分析。"
+                ),
+            },
         }
 
     def preflight_dict(self, inst_id: str, horizon: str) -> dict[str, Any]:
@@ -755,6 +859,24 @@ class RadarRuntime:
         }
 
 
+def _normalize_usdt_swap_id(value: str) -> str:
+    raw = str(value or "").strip().upper().replace(" ", "")
+    if raw.endswith("-USDT-SWAP"):
+        base = raw[: -len("-USDT-SWAP")]
+    else:
+        base = raw
+        for suffix in ("/USDT", "-USDT", "USDT", "-SWAP"):
+            if base.endswith(suffix):
+                base = base[: -len(suffix)]
+                break
+    if not re.fullmatch(r"[A-Z0-9]{1,24}", base):
+        raise PreflightError(
+            HTTPStatus.BAD_REQUEST,
+            "請輸入正確幣種，例如 BTC 或 BTC-USDT-SWAP",
+        )
+    return f"{base}-USDT-SWAP"
+
+
 def serve(runtime: RadarRuntime, host: str, port: int) -> None:
     static_dir = Path(__file__).parent / "static"
     dashboard_path = static_dir / "pages.html"
@@ -848,6 +970,17 @@ def serve(runtime: RadarRuntime, host: str, port: int) -> None:
 
         def do_POST(self) -> None:  # noqa: N802
             path = urlparse(self.path).path
+            if path == "/api/instrument/scan":
+                try:
+                    payload = self._read_json_body()
+                    result = runtime.scan_instrument_dict(payload.get("inst_id", ""))
+                except PreflightError as exc:
+                    self._send_json(exc.status, {"error": str(exc)})
+                except ValueError as exc:
+                    self._send_json(HTTPStatus.BAD_REQUEST, {"error": str(exc)})
+                else:
+                    self._send_json(HTTPStatus.OK, result)
+                return
             if path == "/api/preflight/reanalyze":
                 try:
                     payload = self._read_json_body()

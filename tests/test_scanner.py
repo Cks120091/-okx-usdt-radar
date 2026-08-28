@@ -155,6 +155,49 @@ class LowReadinessContextEngine:
 
 
 class ScannerTests(unittest.TestCase):
+    def test_on_demand_scan_only_loads_the_requested_instrument(self):
+        class SingleInstrumentClient(ContextFakeClient):
+            def __init__(self):
+                super().__init__()
+                self.bulk_calls = 0
+
+            def get_usdt_swap_instrument(self, inst_id):
+                return next(item for item in self.instruments if item.inst_id == inst_id)
+
+            def get_ticker(self, inst_id):
+                return Ticker(inst_id, 110, 109.99, 110.01, 1)
+
+            def get_open_interest_for(self, inst_id):
+                return 5_000_000
+
+            def get_usdt_swap_instruments(self):
+                self.bulk_calls += 1
+                raise AssertionError("single scan must not load the universe")
+
+            def get_swap_tickers(self):
+                self.bulk_calls += 1
+                raise AssertionError("single scan must not load bulk tickers")
+
+            def get_open_interest_usd(self):
+                self.bulk_calls += 1
+                raise AssertionError("single scan must not load bulk OI")
+
+        client = SingleInstrumentClient()
+        scanner = MarketScanner(
+            client,
+            ScannerConfig(min_quote_volume_24h=0, universe_max_spread_pct=1.0),
+        )
+
+        analysis = scanner.scan_instrument("AAA-USDT-SWAP")
+
+        self.assertEqual(analysis.inst_id, "AAA-USDT-SWAP")
+        self.assertEqual(client.bulk_calls, 0)
+        self.assertIsNotNone(analysis.short_result.market_state)
+        self.assertEqual(
+            {bar for inst_id, bar, _ in client.candle_requests if inst_id == analysis.inst_id},
+            {"1D", "4H", "1H", "15m", "5m"},
+        )
+
     def test_single_reanalysis_uses_latest_multiframe_data_and_rejects_missed_plan(self):
         previous = Signal(
             inst_id="AAA-USDT-SWAP",
