@@ -843,8 +843,15 @@ class MarketScanner:
                 raise ValueError("OKX 最新 Ticker 中找不到這個幣種")
 
         bundle = self._fetch_bundle(inst_id, self.short_bars)
-        if not all(len(bundle.get(bar, [])) >= 60 for bar in self.short_bars):
-            raise ValueError("最新短線多週期已收盤 K 線不足 60 根，無法安全分析")
+        missing_short_bars = [
+            bar for bar in self.short_bars if len(bundle.get(bar, [])) < 60
+        ]
+        if missing_short_bars:
+            raise ValueError(
+                f"OKX 回傳的 {'、'.join(missing_short_bars)} 已收盤 K 線少於 60 根。"
+                "這通常是新上幣歷史不足或 OKX 暫時缺資料，不是訊號失效；"
+                "資料補齊前暫不判斷是否進場。"
+            )
         short_result = self._analyze_short_v33(instrument, ticker, bundle)
 
         errors: list[str] = []
@@ -853,7 +860,10 @@ class MarketScanner:
             try:
                 daily = self._fetch_bundle(inst_id, ("1D",)).get("1D", [])
                 if len(daily) < 60:
-                    raise ValueError("1D 已收盤 K 線不足 60 根")
+                    raise ValueError(
+                        "OKX 回傳的 1D 已收盤 K 線少於 60 根；"
+                        "只會暫停 4H 長線判定，不代表幣種或短線訊號失效。"
+                    )
                 bundle["1D"] = daily
                 long_result = self._analyze_long_v33(instrument, ticker, bundle)
             except Exception as exc:
@@ -1035,8 +1045,12 @@ class MarketScanner:
         if horizon not in ("SHORT", "LONG"):
             raise ValueError("單幣重新分析的週期不正確")
 
-        instruments = self.client.get_usdt_swap_instruments()
-        instrument = next((item for item in instruments if item.inst_id == inst_id), None)
+        instrument_loader = getattr(self.client, "get_usdt_swap_instrument", None)
+        if callable(instrument_loader):
+            instrument = instrument_loader(inst_id)
+        else:
+            instruments = self.client.get_usdt_swap_instruments()
+            instrument = next((item for item in instruments if item.inst_id == inst_id), None)
         if instrument is None:
             raise ValueError("OKX 最新 live USDT 永續清單中已找不到這個幣種")
 
@@ -1050,8 +1064,14 @@ class MarketScanner:
 
         core_bars = self.short_bars if horizon == "SHORT" else ("1D", "4H", "1H")
         bundle = self._fetch_bundle(inst_id, core_bars)
-        if not all(len(bundle.get(bar, [])) >= 60 for bar in core_bars):
-            raise ValueError("最新多週期已收盤 K 線不足 60 根，無法安全重新分析")
+        missing_core_bars = [
+            bar for bar in core_bars if len(bundle.get(bar, [])) < 60
+        ]
+        if missing_core_bars:
+            raise ValueError(
+                f"OKX 回傳的 {'、'.join(missing_core_bars)} 已收盤 K 線少於 60 根。"
+                "這是行情歷史不足，不是舊訊號再次失效；資料補齊前暫不重新分析。"
+            )
 
         result = (
             self._analyze_short_v33(instrument, ticker, bundle)

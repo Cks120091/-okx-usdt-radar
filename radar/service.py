@@ -28,6 +28,28 @@ from .scanner import MarketScanner
 LOGGER = logging.getLogger("okx_radar")
 
 
+def _single_scan_failure_message(exc: Exception) -> str:
+    messages: list[str] = []
+    current: BaseException | None = exc
+    while current is not None and len(messages) < 6:
+        messages.append(str(current))
+        current = current.__cause__
+    detail = " ".join(messages).lower()
+    if "timed out" in detail or "connection refused" in detail or "502" in detail:
+        return (
+            "OKX 公開行情目前連線失敗；系統已嘗試官方主端點與備援端點。"
+            "這不是幣種或訊號失效，請稍後再試。"
+        )
+    if "429" in detail or "code=50011" in detail or "rate limit" in detail:
+        return "OKX 暫時限制請求頻率；這不是幣種失效，請約 10 秒後再試。"
+    if "k 線" in detail:
+        return (
+            "OKX 最新 K 線目前無法完整取得；不是訊號失效。"
+            "系統沒有拿缺漏週期硬算，請稍後再試。"
+        )
+    return "OKX 最新單幣資料暫時無法完成分析；這不是幣種失效，請稍後再試。"
+
+
 class PreflightError(RuntimeError):
     def __init__(self, status: HTTPStatus, message: str):
         super().__init__(message)
@@ -265,7 +287,7 @@ class RadarRuntime:
                 LOGGER.exception("Single-instrument scan failed for %s", normalized_id)
                 raise PreflightError(
                     HTTPStatus.BAD_GATEWAY,
-                    "OKX 最新單幣資料暫時無法完成分析，請稍後再按一次",
+                    _single_scan_failure_message(exc),
                 ) from exc
             finally:
                 self._release_scanner_transient_data()
@@ -489,7 +511,7 @@ class RadarRuntime:
                 )
                 raise PreflightError(
                     HTTPStatus.BAD_GATEWAY,
-                    "最新多週期資料暫時無法完成重新分析，請稍後再按一次",
+                    _single_scan_failure_message(exc),
                 ) from exc
             finally:
                 self._release_scanner_transient_data()

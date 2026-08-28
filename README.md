@@ -1,6 +1,8 @@
 # OKX Radar V3.3 MASTER
 
-以 OKX 公開市場資料運作的 USDT 線性永續合約雙雷達。系統只做分析，不接受 API Key、Secret 或 Passphrase，也沒有自動下單、Paper Trading 或 Live Trading 路徑。單一幣種掃描會先明確回答目前能否進場，再依序解釋原始訊號、判定原因、下一步、計畫失效條件與方向含義。
+以 OKX 公開市場資料運作的 USDT 線性永續合約雙雷達。系統只做分析，不接受 API Key、Secret 或 Passphrase，也沒有自動下單、Paper Trading 或 Live Trading 路徑。單一幣種掃描會先明確回答目前能否進場，再依序解釋原始訊號、判定原因、下一步、計畫失效條件與方向含義；各訊號、候選、排行、異動、市場地圖、收藏與歷史頁都可直接開啟幣種掃描。
+
+OKX REST 預設使用官方目前建議的 `openapi.okx.com`，連線失敗時會自動改試 `www.okx.com`。兩個官方端點都無法連線時，頁面會明確標示為 OKX 行情連線問題；K 線歷史不足則會列出缺少的週期，不會再誤寫成幣種或訊號失效。
 
 V3.3 的核心原則是：**方向、價格觸發、強度、衝突、市場參與、執行品質與歷史績效彼此分離**。分數只負責說明，不能憑分數製造 Trigger；Funding、OI、Order Book、交易成本或更高週期反向也不能抹掉已由核心價格完成的 Trigger。
 

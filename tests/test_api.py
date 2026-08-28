@@ -58,6 +58,23 @@ class RouteFixtureClient(OKXPublicClient):
 
 
 class APITests(unittest.TestCase):
+    def test_official_rest_hosts_use_current_primary_and_fallback(self):
+        client = OKXPublicClient(retries=0)
+        self.assertEqual(client.base_url, "https://openapi.okx.com")
+        self.assertEqual(
+            client.base_urls,
+            ("https://openapi.okx.com", "https://www.okx.com"),
+        )
+
+        legacy = OKXPublicClient(base_url="https://www.okx.com", retries=0)
+        self.assertEqual(
+            legacy.base_urls,
+            ("https://www.okx.com", "https://openapi.okx.com"),
+        )
+
+        custom = OKXPublicClient(base_url="http://127.0.0.1:8001", retries=0)
+        self.assertEqual(custom.base_urls, ("http://127.0.0.1:8001",))
+
     def test_rate_limit_penalty_pauses_all_following_requests(self):
         clock = [10.0]
 

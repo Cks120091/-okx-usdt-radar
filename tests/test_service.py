@@ -9,7 +9,7 @@ from types import SimpleNamespace
 from radar.config import AppConfig
 from radar.models import MarketState, RadarReport, Signal
 from radar.reporting import save_report
-from radar.service import RadarRuntime
+from radar.service import RadarRuntime, _single_scan_failure_message
 
 
 def signal():
@@ -179,6 +179,14 @@ class FailingPushNotifier(FakePushNotifier):
 
 
 class RuntimeSafetyTests(unittest.TestCase):
+    def test_single_scan_failures_explain_connection_and_kline_states(self):
+        timeout = RuntimeError("The read operation timed out")
+        self.assertIn("不是幣種或訊號失效", _single_scan_failure_message(timeout))
+        self.assertIn("官方主端點與備援端點", _single_scan_failure_message(timeout))
+
+        candle = RuntimeError("15m K 線取得失敗")
+        self.assertIn("不是訊號失效", _single_scan_failure_message(candle))
+
     def test_single_instrument_scan_is_normalized_and_not_persisted_to_report(self):
         with tempfile.TemporaryDirectory() as directory:
             scanner = SingleInstrumentScanner()

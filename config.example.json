@@ -1,5 +1,5 @@
 {
-  "okx_base_url": "https://www.okx.com",
+  "okx_base_url": "https://openapi.okx.com",
   "host": "0.0.0.0",
   "port": 8000,
   "data_dir": "data",

@@ -8,7 +8,7 @@ from copy import deepcopy
 from collections import deque
 from typing import Any
 from urllib.error import HTTPError, URLError
-from urllib.parse import urlencode
+from urllib.parse import urlencode, urlparse
 from urllib.request import Request, urlopen
 
 from .models import Candle, Instrument, MarketContext, Ticker
@@ -59,13 +59,14 @@ class OKXPublicClient:
 
     def __init__(
         self,
-        base_url: str = "https://www.okx.com",
+        base_url: str = "https://openapi.okx.com",
         timeout_seconds: float = 12.0,
         retries: int = 3,
         rate_limit_requests: int = 30,
         execution_notional_usdt: float = 1_000.0,
     ):
         self.base_url = base_url.rstrip("/")
+        self.base_urls = self._request_base_urls(self.base_url)
         self.timeout_seconds = timeout_seconds
         self.retries = retries
         self.rate_limiter = SlidingWindowRateLimiter(
@@ -84,6 +85,17 @@ class OKXPublicClient:
         self._metrics_lock = threading.Lock()
         self._metrics: dict[str, Any] = {}
         self.reset_metrics()
+
+    @staticmethod
+    def _request_base_urls(base_url: str) -> tuple[str, ...]:
+        """Use both current official OKX REST hosts, but never alter custom hosts."""
+
+        normalized = str(base_url or "").rstrip("/")
+        host = (urlparse(normalized).hostname or "").lower()
+        if host not in {"openapi.okx.com", "www.okx.com"}:
+            return (normalized,)
+        candidates = (normalized, "https://openapi.okx.com", "https://www.okx.com")
+        return tuple(dict.fromkeys(candidates))
 
     def reset_metrics(self) -> None:
         with self._metrics_lock:
@@ -127,8 +139,7 @@ class OKXPublicClient:
                 "/api/v5/public/open-interest": 3.0,
             }.get(path, 0.0)
         query = urlencode({key: str(value) for key, value in params.items()})
-        url = f"{self.base_url}{path}?{query}"
-        cache_key = url
+        cache_key = f"{path}?{query}"
         if cache_ttl_seconds > 0:
             with self._cache_lock:
                 cached = self._cache.get(cache_key)
@@ -136,7 +147,10 @@ class OKXPublicClient:
                     self._metric("cache_hits")
                     return deepcopy(cached[1])
         last_error: Exception | None = None
+        host_errors: dict[str, str] = {}
         for attempt in range(self.retries + 1):
+            request_base_url = self.base_urls[attempt % len(self.base_urls)]
+            url = f"{request_base_url}{path}?{query}"
             limiter = (
                 self.candle_rate_limiter
                 if path == "/api/v5/market/candles"
@@ -185,12 +199,17 @@ class OKXPublicClient:
                     self._metric("rate_limit_errors")
                     limiter.penalize(2.05)
                 last_error = exc
+                host_errors[urlparse(request_base_url).hostname or request_base_url] = str(exc)
                 if attempt >= self.retries:
                     break
                 self._metric("retries")
                 delay = (0.45 * (2**attempt)) + random.uniform(0.0, 0.15)
                 time.sleep(delay)
-        raise OKXAPIError(f"GET {path} failed after retries: {last_error}")
+        attempted = "; ".join(f"{host}: {error}" for host, error in host_errors.items())
+        raise OKXAPIError(
+            f"GET {path} failed after retries across official endpoints: "
+            f"{attempted or last_error}"
+        )
 
     def get_usdt_swap_instruments(self) -> list[Instrument]:
         data = self._get("/api/v5/public/instruments", {"instType": "SWAP"})
@@ -206,10 +225,16 @@ class OKXPublicClient:
     def get_usdt_swap_instrument(self, inst_id: str) -> Instrument | None:
         """Fetch one live linear USDT perpetual selected by the user."""
 
-        data = self._get(
-            "/api/v5/public/instruments",
-            {"instType": "SWAP", "instId": inst_id},
-        )
+        try:
+            data = self._get(
+                "/api/v5/public/instruments",
+                {"instType": "SWAP", "instId": inst_id},
+            )
+        except OKXAPIError:
+            cached = self._instrument_meta.get(inst_id)
+            if cached is not None:
+                return cached
+            raise
         instrument = next(
             (
                 parsed

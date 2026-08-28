@@ -8,7 +8,7 @@ from pathlib import Path
 
 @dataclass(frozen=True)
 class AppConfig:
-    okx_base_url: str = "https://www.okx.com"
+    okx_base_url: str = "https://openapi.okx.com"
     host: str = "0.0.0.0"
     port: int = 8000
     data_dir: str = "data"
