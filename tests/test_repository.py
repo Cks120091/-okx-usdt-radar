@@ -285,6 +285,36 @@ class SignalRepositoryTests(unittest.TestCase):
         self.assertEqual(row["status"], "CLOSED")
         self.assertFalse(self.repository.performance()["available"])
 
+    def test_preflight_stop_closes_exact_plan_without_fabricating_tp_sl_order(self):
+        raw = signal_fixture("PREFLIGHT-USDT-SWAP")
+        created = self.repository.reconcile(
+            [raw],
+            [state_fixture(raw, raw.data_timestamp)],
+            "2026-08-20T00:00:00+00:00",
+            "SHORT",
+        )[0]
+
+        closed = self.repository.invalidate_preflight_plan(
+            created,
+            "2026-08-20T00:05:00+00:00",
+        )
+        row = self.repository._connection.execute(
+            """
+            SELECT stage, freshness, status, outcome, final_r, tp_sl_order
+            FROM signals WHERE signal_id=?
+            """,
+            (created.trigger_id,),
+        ).fetchone()
+
+        self.assertTrue(closed)
+        self.assertEqual(row["stage"], "INVALIDATED")
+        self.assertEqual(row["freshness"], "INVALIDATED")
+        self.assertEqual(row["status"], "CLOSED")
+        self.assertEqual(row["outcome"], "PREFLIGHT_STOP_CROSSED")
+        self.assertIsNone(row["final_r"])
+        self.assertEqual(row["tp_sl_order"], "UNKNOWN_FROM_LIVE_TICKER")
+        self.assertFalse(self.repository.performance()["available"])
+
     def test_real_closed_samples_feed_statistics_without_fake_win_rate(self):
         empty = self.repository.performance()
         self.assertFalse(empty["available"])

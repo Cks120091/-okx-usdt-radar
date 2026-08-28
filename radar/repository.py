@@ -235,6 +235,76 @@ class SignalRepository:
                 self.save_story(state, completed_at)
         return output
 
+    def invalidate_preflight_plan(
+        self,
+        signal: Signal,
+        observed_at: str,
+    ) -> bool:
+        """Close one exact plan after live preflight observed its stop crossed.
+
+        This deliberately leaves ``final_r`` empty because a ticker snapshot
+        proves that the stop was crossed, but cannot prove whether TP1 was
+        touched first between two closed-candle evaluations.
+        """
+
+        signal_id = str(signal.trigger_id or "").strip()
+        if not signal_id:
+            return False
+        with self._lock:
+            row = self._connection.execute(
+                "SELECT stage, status FROM signals WHERE signal_id=?",
+                (signal_id,),
+            ).fetchone()
+        if row is None or row["status"] != "ACTIVE":
+            return False
+
+        lifecycle = dict(signal.lifecycle)
+        lifecycle.update(
+            {
+                "last_seen_at": observed_at,
+                "previous_stage": row["stage"],
+                "current_stage": "INVALIDATED",
+                "transition": "PREFLIGHT_PLAN_INVALIDATED",
+                "outcome": "PREFLIGHT_STOP_CROSSED",
+                "tp_sl_order": "UNKNOWN_FROM_LIVE_TICKER",
+            }
+        )
+        updated = replace(
+            signal,
+            signal_stage="INVALIDATED",
+            freshness="INVALIDATED",
+            lifecycle=lifecycle,
+            actionable=False,
+        )
+        with self._lock, self._connection:
+            cursor = self._connection.execute(
+                """
+                UPDATE signals SET
+                    updated_at=?, closed_at=?, stage='INVALIDATED',
+                    freshness='INVALIDATED', status='CLOSED',
+                    outcome='PREFLIGHT_STOP_CROSSED', final_r=NULL,
+                    tp_sl_order='UNKNOWN_FROM_LIVE_TICKER', payload_json=?
+                WHERE signal_id=? AND status='ACTIVE'
+                """,
+                (
+                    observed_at,
+                    observed_at,
+                    json.dumps(_signal_payload(updated), ensure_ascii=False),
+                    signal_id,
+                ),
+            )
+        if cursor.rowcount <= 0:
+            return False
+        self._append_event(
+            signal_id,
+            observed_at,
+            str(row["stage"]),
+            "INVALIDATED",
+            "PREFLIGHT_PLAN_INVALIDATED",
+            lifecycle,
+        )
+        return True
+
     def _reconcile_raw_signal(self, raw: Signal, completed_at: str) -> Signal:
         event_key = str(
             raw.market_story.get("trigger", {}).get("trigger_event_key")

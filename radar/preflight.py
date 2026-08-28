@@ -176,6 +176,12 @@ def build_preflight_payload(
         },
         "original": {
             "report_generated_at": report_generated_at,
+            "triggered_at": (
+                signal.lifecycle.get("triggered_at")
+                or _iso_from_ms(
+                    int(signal.market_story.get("trigger", {}).get("event_ts") or 0)
+                )
+            ),
             "trigger_age_bars_at_scan": _original_age_bars(signal),
             "price": _round_or_none(original_price, 12),
             "quality_score": _round_or_none(original_quality, 1),

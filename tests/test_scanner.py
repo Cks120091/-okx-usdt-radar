@@ -1,4 +1,5 @@
 import unittest
+from dataclasses import replace
 
 from radar.models import Candle, Instrument, MarketContext, MarketState, Signal, Ticker
 from radar.scanner import MarketScanner, ScannerConfig, _compact_market_map_state
@@ -154,6 +155,179 @@ class LowReadinessContextEngine:
 
 
 class ScannerTests(unittest.TestCase):
+    def test_single_reanalysis_uses_latest_multiframe_data_and_rejects_missed_plan(self):
+        previous = Signal(
+            inst_id="AAA-USDT-SWAP",
+            direction="LONG",
+            strategy="fixture",
+            score=80.0,
+            evidence=[],
+            entry_low="100",
+            entry_high="102",
+            stop_loss="98",
+            take_profit_1="108",
+            take_profit_2="112",
+            risk_reward=2.0,
+            invalidation="fixture",
+            spread_pct=0.01,
+            quote_volume_24h=20_000_000,
+            closed_candle_ts=1_000,
+            regime="TREND",
+            radar_horizon="SHORT",
+            trigger_id="old-id",
+            lifecycle={"event_key": "old-event"},
+            market_story={
+                "trigger": {"event_ts": 1_000, "trigger_event_key": "old-event"}
+            },
+            data_timestamp=1_000,
+        )
+        candidate = replace(
+            previous,
+            trigger_id="",
+            closed_candle_ts=2_000,
+            lifecycle={},
+            market_story={
+                "raw": {"core_atr": 2.0},
+                "trigger": {
+                    "event_atr": 2.0,
+                    "event_ts": 2_000,
+                    "trigger_event_key": "new-event",
+                },
+            },
+            market_metrics={"last_price": 101.0},
+            data_timestamp=2_000,
+        )
+        state = MarketState(
+            inst_id="AAA-USDT-SWAP",
+            regime="TREND",
+            direction="LONG",
+            preferred_strategy="fixture",
+            readiness_score=80.0,
+            status="CONFIRMED",
+            missing_conditions=[],
+            spread_pct=0.01,
+            quote_volume_24h=20_000_000,
+            closed_candle_ts=2_000,
+            market_metrics={"last_price": 101.0, "price_change_core_pct": 0.5},
+            radar_horizon="SHORT",
+        )
+
+        class ReanalysisClient(ContextFakeClient):
+            price = 101.0
+
+            def get_ticker(self, inst_id):
+                return Ticker(inst_id, self.price, self.price - 0.01, self.price + 0.01, 2_000)
+
+        class ReanalysisEngine:
+            def analyze(self, *args, previous_story=None):
+                return AnalysisResult(candidate, "qualified", state)
+
+            def apply_market_context(self, result, *args):
+                return result
+
+        client = ReanalysisClient()
+        scanner = MarketScanner(
+            client,
+            ScannerConfig(min_quote_volume_24h=0, universe_max_spread_pct=1.0),
+        )
+        scanner.engine = ReanalysisEngine()
+
+        ready = scanner.reanalyze_instrument(previous)
+
+        self.assertIsNotNone(ready.raw_signal)
+        self.assertEqual(ready.raw_signal.entry_eligibility["status"], "ENTRY_READY")
+        self.assertEqual(
+            {bar for inst_id, bar, _ in client.candle_requests if inst_id == previous.inst_id},
+            {"4H", "1H", "15m", "5m"},
+        )
+
+        client.price = 109.0
+        missed = scanner.reanalyze_instrument(previous)
+
+        self.assertIsNone(missed.raw_signal)
+        self.assertEqual(missed.reason, "new_trigger_not_an_entry_opportunity")
+
+    def test_single_reanalysis_never_repackages_the_same_trigger_event(self):
+        previous = Signal(
+            inst_id="AAA-USDT-SWAP",
+            direction="LONG",
+            strategy="fixture",
+            score=80.0,
+            evidence=[],
+            entry_low="100",
+            entry_high="101",
+            stop_loss="98",
+            take_profit_1="105",
+            take_profit_2="108",
+            risk_reward=2.0,
+            invalidation="fixture",
+            spread_pct=0.01,
+            quote_volume_24h=20_000_000,
+            closed_candle_ts=1_000,
+            regime="TREND",
+            radar_horizon="SHORT",
+            trigger_id="old-id",
+            lifecycle={"event_key": "same-event"},
+            market_story={
+                "trigger": {"event_ts": 1_000, "trigger_event_key": "same-event"}
+            },
+            data_timestamp=1_000,
+        )
+        same = replace(
+            previous,
+            trigger_id="",
+            entry_low="101",
+            entry_high="102",
+        )
+        newer = replace(
+            same,
+            lifecycle={"event_key": "new-event"},
+            market_story={
+                "trigger": {"event_ts": 2_000, "trigger_event_key": "new-event"}
+            },
+            data_timestamp=2_000,
+        )
+        older_with_different_key = replace(
+            same,
+            lifecycle={"event_key": "older-event"},
+            market_story={
+                "trigger": {"event_ts": 900, "trigger_event_key": "older-event"}
+            },
+            data_timestamp=900,
+        )
+
+        self.assertFalse(MarketScanner._is_new_trigger_event(previous, same))
+        self.assertFalse(
+            MarketScanner._is_new_trigger_event(previous, older_with_different_key)
+        )
+        self.assertTrue(MarketScanner._is_new_trigger_event(previous, newer))
+
+    def test_single_reanalysis_live_stop_check_is_directional(self):
+        long_signal = Signal(
+            inst_id="AAA-USDT-SWAP",
+            direction="LONG",
+            strategy="fixture",
+            score=80.0,
+            evidence=[],
+            entry_low="100",
+            entry_high="101",
+            stop_loss="98",
+            take_profit_1="105",
+            take_profit_2="108",
+            risk_reward=2.0,
+            invalidation="fixture",
+            spread_pct=0.01,
+            quote_volume_24h=20_000_000,
+            closed_candle_ts=1_000,
+            regime="TREND",
+        )
+        short_signal = replace(long_signal, direction="SHORT", stop_loss="102")
+
+        self.assertTrue(MarketScanner._plan_crossed_live_stop(long_signal, 97.9))
+        self.assertFalse(MarketScanner._plan_crossed_live_stop(long_signal, 98.1))
+        self.assertTrue(MarketScanner._plan_crossed_live_stop(short_signal, 102.1))
+        self.assertFalse(MarketScanner._plan_crossed_live_stop(short_signal, 101.9))
+
     def test_market_map_projection_drops_heavy_analysis_payloads(self):
         state = MarketState(
             inst_id="AAA-USDT-SWAP",

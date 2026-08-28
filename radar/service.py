@@ -52,6 +52,9 @@ class RadarRuntime:
         self._preflight_cache: dict[
             tuple[str, str, str], tuple[float, dict[str, Any]]
         ] = {}
+        self._invalidated_preflight_signals: dict[
+            tuple[str, str, str], Any
+        ] = {}
         self._preflight_cache_ttl_seconds = 12.0
         self._latest: RadarReport | None = load_latest_report(config.data_dir)
         self._preview: RadarReport | None = None
@@ -287,8 +290,7 @@ class RadarRuntime:
 
             with self._state_lock:
                 if (
-                    self._running
-                    or self._latest is None
+                    self._latest is None
                     or self._latest.generated_at != report_generated_at
                 ):
                     raise PreflightError(
@@ -303,7 +305,179 @@ class RadarRuntime:
                     time.monotonic(),
                     cached_payload,
                 )
+                if payload.get("verdict", {}).get("status") == "PLAN_INVALIDATED":
+                    self._invalidated_preflight_signals[cache_key] = deepcopy(signal)
                 return deepcopy(cached_payload)
+
+    def reanalyze_preflight_dict(self, inst_id: str, horizon: str) -> dict[str, Any]:
+        """Re-run one invalidated symbol through the unchanged V3.3 pipeline."""
+
+        normalized_id = str(inst_id or "").strip().upper()
+        normalized_horizon = {
+            "15M": "SHORT",
+            "SHORT": "SHORT",
+            "4H": "LONG",
+            "LONG": "LONG",
+        }.get(str(horizon or "").strip().upper())
+        if not normalized_id.endswith("-USDT-SWAP") or normalized_horizon is None:
+            raise PreflightError(HTTPStatus.BAD_REQUEST, "幣種或長短線參數不正確")
+
+        analyzer = getattr(self.scanner, "reanalyze_instrument", None)
+        committer = getattr(self.scanner, "commit_single_reanalysis", None)
+        if not callable(analyzer) or not callable(committer):
+            raise PreflightError(
+                HTTPStatus.SERVICE_UNAVAILABLE,
+                "單幣重新分析服務尚未啟用",
+            )
+
+        with self._scan_lock:
+            with self._state_lock:
+                system_status, _, _ = self._system_status_locked()
+                if self._running:
+                    raise PreflightError(
+                        HTTPStatus.CONFLICT,
+                        "全市場掃描正在執行，完成後才能重新分析這一個幣",
+                    )
+                if self._latest is None:
+                    raise PreflightError(HTTPStatus.NOT_FOUND, "尚未完成第一輪市場掃描")
+                if system_status != "FRESH":
+                    raise PreflightError(
+                        HTTPStatus.CONFLICT,
+                        "市場報告已過期或異常，請先重新掃描全市場",
+                    )
+                report_generated_at = self._latest.generated_at
+                cache_key = (
+                    report_generated_at,
+                    normalized_horizon,
+                    normalized_id,
+                )
+                previous_signal = self._invalidated_preflight_signals.get(cache_key)
+                if previous_signal is None:
+                    raise PreflightError(
+                        HTTPStatus.CONFLICT,
+                        "必須先由進場檢查確認原交易計畫失效，才能重新分析這一個幣",
+                    )
+                market_bias = deepcopy(self._latest.market_bias)
+
+            try:
+                analysis = analyzer(previous_signal, market_bias)
+                new_signal = committer(analysis)
+            except PreflightError:
+                raise
+            except ValueError as exc:
+                raise PreflightError(HTTPStatus.UNPROCESSABLE_ENTITY, str(exc)) from exc
+            except Exception as exc:
+                LOGGER.exception(
+                    "Single-instrument reanalysis failed for %s",
+                    normalized_id,
+                )
+                raise PreflightError(
+                    HTTPStatus.BAD_GATEWAY,
+                    "最新多週期資料暫時無法完成重新分析，請稍後再按一次",
+                ) from exc
+            finally:
+                self._release_scanner_transient_data()
+
+            with self._state_lock:
+                if (
+                    self._running
+                    or self._latest is None
+                    or self._latest.generated_at != report_generated_at
+                ):
+                    raise PreflightError(
+                        HTTPStatus.CONFLICT,
+                        "市場報告已更新，請回到訊號頁重新選擇",
+                    )
+                current_report = self._latest
+                collection = (
+                    current_report.long_signals
+                    if normalized_horizon == "LONG"
+                    else current_report.signals
+                )
+                updated_collection = [
+                    item
+                    for item in collection
+                    if item.inst_id != normalized_id
+                ]
+                if new_signal is not None:
+                    updated_collection.append(new_signal)
+                    sorter = getattr(self.scanner, "_signal_sort_key", None)
+                    if callable(sorter):
+                        updated_collection.sort(key=sorter, reverse=True)
+                    updated_collection = updated_collection[: self.config.max_signals]
+                repository = getattr(self.scanner, "repository", None)
+                historical = (
+                    repository.performance()
+                    if repository is not None and hasattr(repository, "performance")
+                    else current_report.historical_performance
+                )
+                updated_report = replace(
+                    current_report,
+                    signals=(
+                        updated_collection
+                        if normalized_horizon == "SHORT"
+                        else current_report.signals
+                    ),
+                    long_signals=(
+                        updated_collection
+                        if normalized_horizon == "LONG"
+                        else current_report.long_signals
+                    ),
+                    historical_performance=historical,
+                )
+                self._latest = updated_report
+                self._preflight_cache.pop(cache_key, None)
+                if new_signal is not None:
+                    self._invalidated_preflight_signals.pop(cache_key, None)
+
+            save_report(updated_report, self.config.data_dir)
+
+            if new_signal is None:
+                return {
+                    "inst_id": normalized_id,
+                    "horizon": normalized_horizon,
+                    "horizon_label": (
+                        "4H 長線" if normalized_horizon == "LONG" else "15m 短線"
+                    ),
+                    "reanalysis": {
+                        "performed": True,
+                        "status": "NO_NEW_ENTRY_OPPORTUNITY",
+                        "message": (
+                            "已用最新多週期資料重新分析這一個幣，"
+                            "目前沒有新的正式 Trigger。"
+                        ),
+                        "old_plan_closed": True,
+                        "reason_code": analysis.reason,
+                        "analyzed_at": analysis.analyzed_at,
+                    },
+                    "safety": {
+                        "analysis_only": True,
+                        "auto_ordering": False,
+                        "old_plan_reused": False,
+                        "core_strategy_unchanged": True,
+                    },
+                }
+
+            payload = build_preflight_payload(
+                new_signal,
+                analysis.ticker,
+                analysis.context,
+                self.config,
+                report_generated_at=analysis.analyzed_at,
+            )
+            payload["reanalysis"] = {
+                "performed": True,
+                "status": "NEW_ENTRY_OPPORTUNITY",
+                "message": "已產生全新的正式 Trigger 與交易計畫。",
+                "old_plan_closed": True,
+                "old_trigger_id": previous_signal.trigger_id,
+                "new_trigger_id": new_signal.trigger_id,
+                "analyzed_at": analysis.analyzed_at,
+            }
+            payload["cached"] = False
+            payload["cache_age_seconds"] = 0.0
+            payload["cache_ttl_seconds"] = self._preflight_cache_ttl_seconds
+            return payload
 
     def latest_markdown(self) -> str | None:
         with self._state_lock:
@@ -330,6 +504,7 @@ class RadarRuntime:
         self._scan_started_at = datetime.now(timezone.utc).isoformat()
         self._preview = None
         self._preflight_cache.clear()
+        self._invalidated_preflight_signals.clear()
         self._scan_push_subscriptions.clear()
         self._progress = {
             "phase": "STARTING",
@@ -673,6 +848,20 @@ def serve(runtime: RadarRuntime, host: str, port: int) -> None:
 
         def do_POST(self) -> None:  # noqa: N802
             path = urlparse(self.path).path
+            if path == "/api/preflight/reanalyze":
+                try:
+                    payload = self._read_json_body()
+                    result = runtime.reanalyze_preflight_dict(
+                        payload.get("inst_id", ""),
+                        payload.get("horizon", ""),
+                    )
+                except PreflightError as exc:
+                    self._send_json(exc.status, {"error": str(exc)})
+                except ValueError as exc:
+                    self._send_json(HTTPStatus.BAD_REQUEST, {"error": str(exc)})
+                else:
+                    self._send_json(HTTPStatus.OK, result)
+                return
             if path != "/api/scan":
                 self._send_json(HTTPStatus.NOT_FOUND, {"error": "not found"})
                 return
