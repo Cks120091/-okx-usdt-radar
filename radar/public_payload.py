@@ -108,10 +108,15 @@ def public_report_payload(report: Any) -> dict[str, Any]:
     """
 
     payload = _select(report, _REPORT_FIELDS)
+    market_bias = _read(report, "market_bias", {})
     payload["market_bias"] = _select(
-        _read(report, "market_bias", {}),
-        ("label", "score"),
+        market_bias,
+        ("label", "score", "market_breadth_long_pct", "liquid_breadth_long_pct"),
     )
+    for key in ("btc", "resonance", "exposure_warning"):
+        value = _read(market_bias, key, None)
+        if isinstance(value, Mapping):
+            payload["market_bias"][key] = dict(value)
     payload["data_quality"] = _select(
         _read(report, "data_quality", {}),
         ("core", "core_status", "deep", "deep_status", "missing_sources"),
@@ -196,6 +201,9 @@ def _public_candidate(item: Any, *, signal: bool) -> dict[str, Any]:
     payload["market_story"] = _public_market_story(
         _read(item, "market_story", {})
     )
+    payload["decision_context"] = _public_decision_context(
+        _read(item, "decision_context", {})
+    )
     if signal:
         payload["entry_eligibility"] = _select(
             _read(item, "entry_eligibility", {}),
@@ -208,6 +216,10 @@ def _public_candidate(item: Any, *, signal: bool) -> dict[str, Any]:
                 "invalidation_progress_pct",
                 "remaining_rr",
                 "remaining_rr_applicable",
+                "new_entry_allowed",
+                "direction_still_valid",
+                "hard_blockers",
+                "wait_reason_code",
             ),
         )
     return payload
@@ -264,13 +276,75 @@ def _public_market_story(story: Any) -> dict[str, Any]:
             attacks[direction] = attack
     if attacks:
         payload["attack_efficiency"] = attacks
+    for key in ("context", "interpretation"):
+        value = _read(story, key, None)
+        if isinstance(value, Mapping):
+            payload[key] = dict(value)
+    return payload
+
+
+def _public_decision_context(decision: Any) -> dict[str, Any]:
+    if not isinstance(decision, Mapping):
+        return {}
+    payload = _select(decision, ("schema_version",))
+    hard_gate = _read(decision, "hard_gate", {})
+    payload["hard_gate"] = _select(
+        hard_gate,
+        (
+            "status",
+            "passed",
+            "blocked",
+            "unknown",
+            "blockers",
+            "unknowns",
+            "reasons",
+            "thresholds",
+        ),
+    )
+    payload["hard_gate"]["checks"] = [
+        _select(
+            item,
+            ("key", "label", "status", "value", "reason", "hard"),
+        )
+        for item in (_read(hard_gate, "checks", []) or [])
+        if isinstance(item, Mapping)
+    ]
+    evidence = _read(decision, "evidence", {})
+    payload["evidence"] = _select(evidence, ("main_direction", "direction_quality", "participation", "supporting"))
+    payload["market_context"] = _select(
+        _read(decision, "market_context", {}),
+        ("regime", "phase", "driver", "relative_strength", "resonance", "sessions", "anomalies", "main_direction"),
+    )
+    payload["conflict"] = _select(
+        _read(decision, "conflict", {}),
+        ("main_direction", "level", "label", "items", "countertrend", "opposite_signal_created"),
+    )
+    payload["quality"] = _select(
+        _read(decision, "quality", {}),
+        ("direction", "execution", "participation", "combined_score", "note"),
+    )
+    payload["confidence"] = _select(
+        _read(decision, "confidence", {}),
+        ("key", "label", "reasons", "meaning"),
+    )
+    payload["episode"] = _select(
+        _read(decision, "episode", {}),
+        ("status", "label", "trend", "arrow", "source_stage", "transition", "trigger_id", "terminal"),
+    )
+    payload["final"] = _select(
+        _read(decision, "final", {}),
+        ("status", "label", "direction", "direction_label", "new_entry_allowed", "trigger_preserved", "reasons", "wait_reason", "weakening_conditions", "invalidation_condition", "confidence"),
+    )
     return payload
 
 
 def _public_evidence_groups(groups: Any) -> dict[str, Any]:
     payload: dict[str, Any] = {}
     for key in ("position_structure", "trend_momentum", "participation_flow"):
-        group = _select(_read(groups, key, {}), ("label", "score"))
+        group = _select(
+            _read(groups, key, {}),
+            ("label", "score", "stance", "confidence"),
+        )
         if group:
             payload[key] = group
     return payload
@@ -287,7 +361,10 @@ def _public_timeframes(frames: Any) -> dict[str, Any]:
 
 def _public_safety_checks(checks: Any) -> list[dict[str, Any]]:
     return [
-        _select(item, ("passed", "label", "hard", "value"))
+        _select(
+            item,
+            ("key", "status", "passed", "label", "hard", "value", "reason"),
+        )
         for item in (checks or [])
         if isinstance(item, Mapping)
     ]

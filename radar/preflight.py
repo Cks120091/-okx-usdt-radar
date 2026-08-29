@@ -95,6 +95,32 @@ def build_preflight_payload(
         max_slippage_pct=config.max_slippage_pct,
         estimated_taker_fee_pct=config.estimated_taker_fee_pct,
     )
+    book_available = bool(context.source_timestamps.get("order_book"))
+    execution_complete = context.execution_quality_complete and book_available
+    directional_slippage = (
+        context.buy_slippage_pct
+        if signal.direction == "LONG"
+        else context.sell_slippage_pct
+    )
+    cost_to_risk = _optional_number(quality.get("execution_cost_to_risk_pct"))
+    hard_blockers: list[str] = []
+    if not execution_complete or directional_slippage is None:
+        hard_blockers.append("EXECUTION_DATA_UNAVAILABLE")
+    elif directional_slippage > config.max_slippage_pct:
+        hard_blockers.append("SLIPPAGE_TOO_HIGH")
+    if live_spread_pct > config.max_spread_pct:
+        hard_blockers.append("SPREAD_TOO_HIGH")
+    if cost_to_risk is None:
+        hard_blockers.append("EXECUTION_DATA_UNAVAILABLE")
+    elif cost_to_risk > config.max_execution_cost_to_risk_pct:
+        hard_blockers.append("EXECUTION_COST_TOO_HIGH")
+    # On the adverse side of Entry the plan first needs a structural retest,
+    # so ``remaining_rr`` is intentionally not applicable.  Do not turn that
+    # positional WAIT into a fabricated zero-R:R Hard Gate; the gate is
+    # evaluated again as soon as a live entry becomes eligible.
+    if isinstance(remaining_rr, (int, float)) and quality_rr < config.minimum_rr:
+        hard_blockers.append("RR_INSUFFICIENT")
+    hard_blockers = _unique(hard_blockers)
 
     verdict_status = eligibility["status"]
     verdict_label = eligibility["label"]
@@ -154,6 +180,31 @@ def build_preflight_payload(
     elif verdict_status == "MISSED_ENTRY":
         entry_situation = "ENTRY_WINDOW_CLOSED"
 
+    # Execution Hard Gates block only a new order.  They never erase the
+    # original price Trigger and never turn a temporary no-entry state into a
+    # terminal invalidation.
+    if not invalidated and not target_reached and hard_blockers:
+        missing_execution = "EXECUTION_DATA_UNAVAILABLE" in hard_blockers
+        entry_situation = (
+            "DATA_UNAVAILABLE" if missing_execution else "HARD_GATE_BLOCKED"
+        )
+        verdict_status = entry_situation
+        verdict_label = (
+            "成交資料不足｜禁止新進場"
+            if missing_execution
+            else "執行風控未通過｜暫停新進場"
+        )
+        hard_labels = {
+            "EXECUTION_DATA_UNAVAILABLE": "Order Book／Slippage 資料不足",
+            "SLIPPAGE_TOO_HIGH": "Slippage（滑價）超過上限",
+            "SPREAD_TOO_HIGH": "Spread（買賣價差）超過上限",
+            "EXECUTION_COST_TOO_HIGH": "交易成本占風險過高",
+            "RR_INSUFFICIENT": "R:R（風險報酬比）不足",
+        }
+        verdict_reason = "；".join(
+            hard_labels.get(item, item) for item in hard_blockers[:3]
+        )
+
     if invalidated:
         lifecycle_status = "INVALIDATED"
         lifecycle_label = "已觸發・已失效"
@@ -189,6 +240,8 @@ def build_preflight_payload(
         plan_status = "MISSED"
     elif verdict_status == "WAIT_RETEST":
         plan_status = "WAITING_RETEST"
+    elif verdict_status in {"DATA_UNAVAILABLE", "HARD_GATE_BLOCKED"}:
+        plan_status = "ACTIVE_ENTRY_BLOCKED"
     else:
         plan_status = "ACTIVE"
 
@@ -200,9 +253,6 @@ def build_preflight_payload(
         if original_price is not None and original_price > 0
         else None
     )
-    book_available = bool(context.source_timestamps.get("order_book"))
-    execution_complete = context.execution_quality_complete and book_available
-
     return {
         "inst_id": signal.inst_id,
         "horizon": signal.radar_horizon,
@@ -217,6 +267,7 @@ def build_preflight_payload(
             "label": verdict_label,
             "reason": verdict_reason,
             "actionable": verdict_status == "ENTRY_READY",
+            "hard_blockers": hard_blockers,
         },
         "signal_lifecycle": {
             "status": lifecycle_status,
@@ -235,9 +286,12 @@ def build_preflight_payload(
                 "READY"
                 if verdict_status == "ENTRY_READY"
                 else "WAIT"
-                if verdict_status == "WAIT_RETEST"
+                if verdict_status
+                in {"WAIT_RETEST", "DATA_UNAVAILABLE", "HARD_GATE_BLOCKED"}
                 else "CLOSED"
             ),
+            "new_entry_allowed": verdict_status == "ENTRY_READY",
+            "direction_still_valid": not invalidated,
             "direction_status": (
                 "PENDING_REASSESSMENT"
                 if invalidated

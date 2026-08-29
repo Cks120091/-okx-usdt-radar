@@ -34,6 +34,25 @@ def load_latest_report(data_dir: str | Path) -> RadarReport | None:
         return None
 
 
+def save_runtime_state(data_dir: str | Path, payload: dict) -> Path:
+    """Persist the last scan-attempt state separately from market snapshots."""
+
+    path = Path(data_dir) / "runtime_state.json"
+    _atomic_json(path, payload)
+    return path
+
+
+def load_runtime_state(data_dir: str | Path) -> dict:
+    path = Path(data_dir) / "runtime_state.json"
+    if not path.exists():
+        return {}
+    try:
+        payload = json.loads(path.read_text(encoding="utf-8"))
+        return payload if isinstance(payload, dict) else {}
+    except (OSError, ValueError, TypeError):
+        return {}
+
+
 def report_markdown(report: RadarReport) -> str:
     status_names = {
         "SIGNALS_FOUND": "資料最新",

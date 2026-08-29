@@ -142,10 +142,15 @@ class Signal:
     market_story: dict[str, Any] = field(default_factory=dict)
     generated_at: str = ""
     data_timestamp: int = 0
-    strategy_version: str = "V3.3_MASTER"
-    feature_schema_version: str = "3.3.0"
+    strategy_version: str = "V3.4_CONTEXT"
+    feature_schema_version: str = "3.4.0"
     historical_performance: dict[str, Any] = field(default_factory=dict)
     entry_eligibility: dict[str, Any] = field(default_factory=dict)
+    # Canonical five-layer decision projection.  The original Trigger,
+    # Entry/SL/TP and lifecycle fields remain the source of truth; this object
+    # only explains how hard risk, evidence, context and conflicts combine into
+    # the current execution conclusion.
+    decision_context: dict[str, Any] = field(default_factory=dict)
 
     def to_dict(self) -> dict[str, Any]:
         return asdict(self)
@@ -190,6 +195,7 @@ class MarketState:
     market_story: dict[str, Any] = field(default_factory=dict)
     human_reason: str = ""
     actionable: bool = False
+    decision_context: dict[str, Any] = field(default_factory=dict)
 
     def to_dict(self) -> dict[str, Any]:
         return asdict(self)
@@ -222,6 +228,10 @@ class RadarReport:
     context_enriched_count: int = 0
     context_failures: dict[str, list[str]] = field(default_factory=dict)
     market_bias: dict[str, Any] = field(default_factory=dict)
+    # Keep the two radar contexts separate. ``market_bias`` remains the
+    # backward-compatible 15m context; 4H single-symbol refreshes must never
+    # accidentally consume it as their own market background.
+    long_market_bias: dict[str, Any] = field(default_factory=dict)
     scan_id: str = ""
     scan_started_at: str = ""
     completed_at: str = ""
@@ -230,7 +240,7 @@ class RadarReport:
     signals_suppressed_reason: str | None = None
     max_signals: int = 20
     api_metrics: dict[str, Any] = field(default_factory=dict)
-    version: str = "3.3"
+    version: str = "3.4"
     long_signals: list[Signal] = field(default_factory=list)
     long_watchlist: list[MarketState] = field(default_factory=list)
     long_market_map: list[MarketState] = field(default_factory=list)
@@ -239,8 +249,8 @@ class RadarReport:
     scan_mode: str = "FULL"
     short_completed_at: str = ""
     long_completed_at: str = ""
-    strategy_version: str = "V3.3_MASTER"
-    feature_schema_version: str = "3.3.0"
+    strategy_version: str = "V3.4_CONTEXT"
+    feature_schema_version: str = "3.4.0"
 
     def to_dict(self) -> dict[str, Any]:
         # Avoid ``asdict(self)`` here: it recursively copies every signal and

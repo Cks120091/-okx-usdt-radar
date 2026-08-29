@@ -38,6 +38,8 @@ class StrategyConfig:
     early_signal_max_age_bars: int = 2
     entry_ready_max_chase_atr: float = 0.15
     entry_missed_chase_atr: float = 0.50
+    short_stop_floor_atr: float = 1.15
+    long_stop_floor_atr: float = 1.20
 
 
 @dataclass
@@ -302,6 +304,31 @@ class AdaptiveStrategyEngine:
             )
 
         plan = self._v33_plan(story, tf_core)
+        risk_pct = abs(plan.entry - plan.stop) / max(abs(plan.entry), 1e-9) * 100.0
+        if plan.rr < self.config.minimum_rr:
+            return AnalysisResult(
+                None,
+                "insufficient_structural_headroom",
+                self._fail_safety(
+                    replace(market_state, actionable=False),
+                    "risk_reward",
+                    f"前方結構空間不足 {self.config.minimum_rr:.1f}R，禁止新進場",
+                ),
+                story,
+                plan,
+            )
+        if risk_pct <= 0 or risk_pct > 5.0:
+            return AnalysisResult(
+                None,
+                "stop_distance_unacceptable",
+                self._fail_safety(
+                    replace(market_state, actionable=False),
+                    "stop_loss",
+                    "結構止損超過價格 5%，風險過大，禁止新進場",
+                ),
+                story,
+                plan,
+            )
         signal = self._signal_from_v33(
             instrument,
             ticker,
@@ -339,16 +366,48 @@ class AdaptiveStrategyEngine:
             or tf_core.close
         )
         proposed_stop = story.invalidation_price
+        atr = max(float(tf_core.atr14), abs(entry) * 1e-6)
+        # A Zone edge is a structural invalidation reference, not enough room
+        # for an executable stop by itself.  Require a volatility floor so a
+        # normal wick cannot turn a good story into an impractically tight SL.
+        stop_floor_atr = (
+            self.config.long_stop_floor_atr
+            if story.horizon == "LONG"
+            else self.config.short_stop_floor_atr
+        )
+        if story.trigger_type == "BREAKOUT":
+            stop_floor_atr += 0.10
+        elif story.trigger_type == "REVERSAL":
+            stop_floor_atr += 0.05
+        noise = story.trigger.get("noise", {})
+        if isinstance(noise, dict) and noise.get("high"):
+            stop_floor_atr += 0.25
         if proposed_stop is None or (is_long and proposed_stop >= entry) or (not is_long and proposed_stop <= entry):
             proposed_stop = (
-                min(tf_core.recent_low - tf_core.atr14 * 0.20, entry - tf_core.atr14 * 0.65)
+                min(tf_core.recent_low - atr * 0.20, entry - atr * stop_floor_atr)
                 if is_long
-                else max(tf_core.recent_high + tf_core.atr14 * 0.20, entry + tf_core.atr14 * 0.65)
+                else max(tf_core.recent_high + atr * 0.20, entry + atr * stop_floor_atr)
             )
-        stop = float(proposed_stop)
+        zone_key = str(story.trigger.get("zone_key", "NO_ZONE") or "NO_ZONE")
+        structural_buffer = atr * 0.20 if zone_key != "NO_ZONE" else 0.0
+        structural_stop = (
+            float(proposed_stop) - structural_buffer
+            if is_long
+            else float(proposed_stop) + structural_buffer
+        )
+        volatility_stop = (
+            entry - atr * stop_floor_atr
+            if is_long
+            else entry + atr * stop_floor_atr
+        )
+        stop = (
+            min(structural_stop, volatility_stop)
+            if is_long
+            else max(structural_stop, volatility_stop)
+        )
         risk = abs(entry - stop)
         if risk <= 0:
-            risk = max(tf_core.atr14 * 0.65, abs(entry) * 0.003)
+            risk = max(atr * stop_floor_atr, abs(entry) * 0.003)
             stop = entry - risk if is_long else entry + risk
 
         obstacle_key = "major_resistance" if is_long else "major_support"
@@ -366,9 +425,11 @@ class AdaptiveStrategyEngine:
         if structural_rr is not None and structural_rr > 0:
             tp1 = float(structural_target)
             rr = structural_rr
+            target_method = "實際支撐／壓力結構目標"
         else:
             rr = self.config.minimum_rr
             tp1 = entry + risk * rr if is_long else entry - risk * rr
+            target_method = "R:R 推算目標（非實際支撐／壓力）"
         tp2 = entry + risk * max(2.7, rr + 0.8) if is_long else entry - risk * max(2.7, rr + 0.8)
         strength_score = float(story.trigger.get("explainability_score", 50.0))
         strength_label = "強" if strength_score >= 78.0 else "中等" if strength_score >= 58.0 else "偏弱"
@@ -377,6 +438,10 @@ class AdaptiveStrategyEngine:
             "tp2_action": "TP2 或結構目標分批處理。",
             "review": "每個核心週期收盤後更新 Lifecycle；5m/1H Timing 不單獨反手。",
             "auto_ordering": False,
+            "stop_distance_atr": round(risk / atr, 2),
+            "stop_floor_atr": round(stop_floor_atr, 2),
+            "stop_method": "結構失效＋ATR 最低緩衝（取較遠者）",
+            "target_method": target_method,
         }
         return _Plan(
             direction=direction,
@@ -777,7 +842,7 @@ class AdaptiveStrategyEngine:
                 1,
             )
             if story.horizon == "SHORT":
-                # Retain the established API field while giving it V3.3 semantics:
+                # Retain the established API field while giving it V3.4 semantics:
                 # this is timing telemetry, never permission to create/cancel a Trigger.
                 metrics["micro_acceleration_5m"] = round(
                     directional_timing_score,
@@ -837,10 +902,10 @@ class AdaptiveStrategyEngine:
             [
                 self._safety_check(
                     "context_data",
-                    "Deep Data 完整度（只作 Context）",
+                    "Deep Data 完整度（Trigger 保留／新進場需通過）",
                     context.complete,
                     len(live_story.market_participation.get("available_sources", [])),
-                    hard=False,
+                    hard=True,
                 ),
                 self._safety_check(
                     "open_interest",
@@ -854,7 +919,7 @@ class AdaptiveStrategyEngine:
                     "Order Book 深度足以估算成交",
                     context.execution_quality_complete,
                     context.execution_notional_usdt,
-                    hard=False,
+                    hard=True,
                 ),
             ]
         )
@@ -915,17 +980,38 @@ class AdaptiveStrategyEngine:
             [
                 self._safety_check(
                     "slippage",
-                    "滑價評估（不取消 Radar Trigger）",
-                    quality["recommendation"] != "AVOID_EXECUTION",
-                    max(float(context.buy_slippage_pct or 0.0), float(context.sell_slippage_pct or 0.0)),
-                    hard=False,
+                    "Slippage（滑價）不超過執行上限",
+                    (
+                        context.execution_quality_complete
+                        and context.buy_slippage_pct is not None
+                        and context.sell_slippage_pct is not None
+                        and max(
+                            float(context.buy_slippage_pct),
+                            float(context.sell_slippage_pct),
+                        )
+                        <= self.config.max_slippage_pct
+                    ),
+                    (
+                        max(
+                            float(context.buy_slippage_pct),
+                            float(context.sell_slippage_pct),
+                        )
+                        if context.buy_slippage_pct is not None
+                        and context.sell_slippage_pct is not None
+                        else None
+                    ),
+                    hard=True,
                 ),
                 self._safety_check(
                     "execution_cost",
-                    "Execution Quality（與 Trigger 分離）",
-                    quality["score"] >= 50.0,
-                    quality["score"],
-                    hard=False,
+                    "Execution Cost（交易成本）占風險不超標",
+                    (
+                        quality["execution_cost_to_risk_pct"] is not None
+                        and quality["execution_cost_to_risk_pct"]
+                        <= self.config.max_execution_cost_to_risk_pct
+                    ),
+                    quality["execution_cost_to_risk_pct"],
+                    hard=True,
                 ),
             ]
         )
@@ -938,6 +1024,11 @@ class AdaptiveStrategyEngine:
             actionable=(
                 live_story.stage in ("EARLY_SIGNAL", "CONFIRMED", "REENTRY")
                 and bool(result.signal.entry_eligibility.get("actionable"))
+                and all(
+                    bool(item.get("passed"))
+                    for item in checks
+                    if item.get("hard")
+                )
             ),
         )
         signal = replace(
@@ -956,6 +1047,11 @@ class AdaptiveStrategyEngine:
             actionable=(
                 live_story.stage in ("EARLY_SIGNAL", "CONFIRMED", "REENTRY")
                 and bool(result.signal.entry_eligibility.get("actionable"))
+                and all(
+                    bool(item.get("passed"))
+                    for item in checks
+                    if item.get("hard")
+                )
             ),
             market_participation=dict(live_story.market_participation),
             execution_quality=quality,

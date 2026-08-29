@@ -11,6 +11,15 @@ from dataclasses import dataclass, field, replace
 from datetime import datetime, timezone
 from typing import Any, Callable, Protocol
 
+from .context import (
+    active_sessions,
+    build_interpretation,
+    build_market_context,
+    classify_market_driver,
+    detect_anomaly,
+    summarize_flow_history,
+)
+from .decision import build_decision_context
 from .models import Candle, Instrument, MarketContext, MarketState, RadarReport, Signal, Ticker
 from .repository import SignalRepository, classify_microstructure
 from .strategy import (
@@ -71,6 +80,8 @@ class ScannerConfig:
     entry_missed_chase_atr: float = 0.50
     previous_open_interest_usd: dict[str, float] = field(default_factory=dict)
     state_db_path: str = ":memory:"
+    short_stop_floor_atr: float = 1.15
+    long_stop_floor_atr: float = 1.20
 
 
 @dataclass(frozen=True)
@@ -89,7 +100,7 @@ class SingleInstrumentScan:
     inst_id: str
     ticker: Ticker
     context: MarketContext
-    short_result: AnalysisResult
+    short_result: AnalysisResult | None
     long_result: AnalysisResult | None
     analyzed_at: str
     errors: list[str]
@@ -135,6 +146,8 @@ class MarketScanner:
                 early_signal_max_age_bars=self.config.early_signal_max_age_bars,
                 entry_ready_max_chase_atr=self.config.entry_ready_max_chase_atr,
                 entry_missed_chase_atr=self.config.entry_missed_chase_atr,
+                short_stop_floor_atr=self.config.short_stop_floor_atr,
+                long_stop_floor_atr=self.config.long_stop_floor_atr,
             )
         )
 
@@ -145,7 +158,7 @@ class MarketScanner:
         preview: PreviewCallback | None = None,
         scan_mode: str = "FULL",
     ) -> RadarReport:
-        """Run the V3.3 two-radar pipeline without fake fallback values."""
+        """Run the V3.4 two-radar pipeline without fake fallback values."""
 
         normalized_mode = str(scan_mode or "FULL").strip().upper()
         if normalized_mode not in {"SHORT", "LONG", "FULL"}:
@@ -302,7 +315,11 @@ class MarketScanner:
                     "正在判定短線 15m Trigger",
                 )
 
-        market_bias = self._calculate_market_bias(short_results)
+        market_bias = (
+            self._calculate_market_bias(short_results)
+            if include_short
+            else {}
+        )
         if include_short and preview is not None:
             preview(
                 self._core_preview_report(
@@ -447,6 +464,14 @@ class MarketScanner:
                     current_oi,
                     self._open_interest_change(inst_id, current_oi),
                 )
+        horizon_market_bias = {
+            "SHORT": market_bias,
+            "LONG": (
+                self._calculate_market_bias(long_results)
+                if include_long
+                else {}
+            ),
+        }
 
         context_loader = getattr(self.client, "get_market_context", None)
         context_applier = getattr(self.engine, "apply_market_context", None)
@@ -577,9 +602,9 @@ class MarketScanner:
                         )
                     continue
                 previous_micro = self.repository.load_microstructure(inst_id)
-                for results, timing in (
-                    (short_results, micro_candles.get(inst_id)),
-                    (long_results, bundles[inst_id]["1H"]),
+                for horizon, results, timing in (
+                    ("SHORT", short_results, micro_candles.get(inst_id)),
+                    ("LONG", long_results, bundles[inst_id]["1H"]),
                 ):
                     result = results.get(inst_id)
                     if result is None or result.market_state is None:
@@ -603,12 +628,19 @@ class MarketScanner:
                         order_book_sequence=sequence,
                     )
                     try:
-                        results[inst_id] = context_applier(
+                        updated_result = context_applier(
                             result,
                             directional_context,
                             btc_bias,
                             timing,
-                            market_bias,
+                            horizon_market_bias[horizon],
+                        )
+                        results[inst_id] = self._apply_professional_context(
+                            updated_result,
+                            directional_context,
+                            previous_micro,
+                            horizon_market_bias[horizon],
+                            tickers[inst_id].last,
                         )
                     except Exception as exc:
                         context_failures.setdefault(inst_id, []).append(
@@ -630,28 +662,55 @@ class MarketScanner:
         short_states, raw_short_signals = self._collect_results(short_results, exclusion_counts)
         long_states, raw_long_signals = self._collect_results(long_results, exclusion_counts)
         completed_at = datetime.now(timezone.utc).isoformat()
-        short_signals = (
-            self.repository.reconcile(
-                raw_short_signals,
-                short_states,
+        batch_reconciler = getattr(self.repository, "reconcile_batch", None)
+        if normalized_mode == "FULL":
+            if not callable(batch_reconciler):
+                raise RuntimeError(
+                    "FULL scan repository must support atomic reconciliation"
+                )
+            # Both horizons belong to this completed market scan. Persist them
+            # together so a LONG failure cannot leave SHORT half-committed (or
+            # vice versa).
+            reconciled = batch_reconciler(
+                {
+                    "SHORT": (raw_short_signals, short_states),
+                    "LONG": (raw_long_signals, long_states),
+                },
                 completed_at,
-                "SHORT",
             )
-            if include_short
-            else []
-        )
-        long_signals = (
-            self.repository.reconcile(
-                raw_long_signals,
-                long_states,
-                completed_at,
-                "LONG",
+            short_signals = reconciled.get("SHORT", [])
+            long_signals = reconciled.get("LONG", [])
+        else:
+            short_signals = (
+                self.repository.reconcile(
+                    raw_short_signals,
+                    short_states,
+                    completed_at,
+                    "SHORT",
+                )
+                if include_short
+                else []
             )
-            if include_long
-            else []
-        )
-        short_signals = [self._refresh_entry_eligibility(item) for item in short_signals]
-        long_signals = [self._refresh_entry_eligibility(item) for item in long_signals]
+            long_signals = (
+                self.repository.reconcile(
+                    raw_long_signals,
+                    long_states,
+                    completed_at,
+                    "LONG",
+                )
+                if include_long
+                else []
+            )
+        short_signals = [
+            self._attach_decision_context(self._refresh_entry_eligibility(item))
+            for item in short_signals
+        ]
+        long_signals = [
+            self._attach_decision_context(self._refresh_entry_eligibility(item))
+            for item in long_signals
+        ]
+        short_states = [self._attach_decision_context(item) for item in short_states]
+        long_states = [self._attach_decision_context(item) for item in long_states]
         short_signals = [_without_internal_metrics(item) for item in short_signals]
         long_signals = [_without_internal_metrics(item) for item in long_signals]
         short_states = [_without_internal_metrics(item) for item in short_states]
@@ -844,6 +903,7 @@ class MarketScanner:
             context_enriched_count=context_enriched_count,
             context_failures=dict(sorted(context_failures.items())),
             market_bias=market_bias,
+            long_market_bias=horizon_market_bias["LONG"],
             scan_id=scan_id,
             scan_started_at=scan_started_at,
             completed_at=completed_at,
@@ -888,18 +948,33 @@ class MarketScanner:
         self,
         inst_id: str,
         market_bias: dict[str, Any] | None = None,
+        long_market_bias: dict[str, Any] | None = None,
         btc_bias: str = "NEUTRAL",
+        long_btc_bias: str = "NEUTRAL",
+        requested_horizon: str = "BOTH",
     ) -> SingleInstrumentScan:
         """Analyze one explicitly requested symbol without scanning the universe.
 
-        Results are returned to the requesting page only. This method does not
-        reconcile the signal repository or retain the full analysis in the
-        published market report.
+        Results are returned to the requesting page only and are not inserted
+        into the published market report.  The requested symbol is reconciled
+        through the same durable Signal Episode repository as a market scan so
+        refreshes cannot manufacture a second Trigger.
         """
 
         inst_id = str(inst_id or "").strip().upper()
         if not inst_id.endswith("-USDT-SWAP"):
             raise ValueError("幣種格式不正確")
+        requested_horizon = str(requested_horizon or "BOTH").strip().upper()
+        requested_horizon = {
+            "15M": "SHORT",
+            "4H": "LONG",
+            "FULL": "BOTH",
+            "ALL": "BOTH",
+        }.get(requested_horizon, requested_horizon)
+        if requested_horizon not in {"SHORT", "LONG", "BOTH"}:
+            raise ValueError("單幣掃描週期必須是 SHORT、LONG 或 BOTH")
+        include_short = requested_horizon in {"SHORT", "BOTH"}
+        include_long = requested_horizon in {"LONG", "BOTH"}
 
         instrument_loader = getattr(self.client, "get_usdt_swap_instrument", None)
         if callable(instrument_loader):
@@ -924,29 +999,39 @@ class MarketScanner:
             if ticker is None:
                 raise ValueError("OKX 最新 Ticker 中找不到這個幣種")
 
-        bundle = self._fetch_bundle(inst_id, self.short_bars)
-        missing_short_bars = [
-            bar for bar in self.short_bars if len(bundle.get(bar, [])) < 60
+        requested_bars = (
+            ("1D", "4H", "1H")
+            if include_long and not include_short
+            else self.short_bars
+        )
+        bundle = self._fetch_bundle(inst_id, requested_bars)
+        missing_core_bars = [
+            bar for bar in requested_bars if len(bundle.get(bar, [])) < 60
         ]
-        if missing_short_bars:
+        if missing_core_bars:
             raise ValueError(
-                f"OKX 回傳的 {'、'.join(missing_short_bars)} 已收盤 K 線少於 60 根。"
+                f"OKX 回傳的 {'、'.join(missing_core_bars)} 已收盤 K 線少於 60 根。"
                 "這通常是新上幣歷史不足或 OKX 暫時缺資料，不是訊號失效；"
                 "資料補齊前暫不判斷是否進場。"
             )
-        short_result = self._analyze_short_v33(instrument, ticker, bundle)
+        short_result = (
+            self._analyze_short_v33(instrument, ticker, bundle)
+            if include_short
+            else None
+        )
 
         errors: list[str] = []
         long_result: AnalysisResult | None = None
-        if callable(getattr(self.engine, "analyze_long", None)):
+        if include_long and callable(getattr(self.engine, "analyze_long", None)):
             try:
-                daily = self._fetch_bundle(inst_id, ("1D",)).get("1D", [])
-                if len(daily) < 60:
-                    raise ValueError(
-                        "OKX 回傳的 1D 已收盤 K 線少於 60 根；"
-                        "只會暫停 4H 長線判定，不代表幣種或短線訊號失效。"
-                    )
-                bundle["1D"] = daily
+                if "1D" not in bundle:
+                    daily = self._fetch_bundle(inst_id, ("1D",)).get("1D", [])
+                    if len(daily) < 60:
+                        raise ValueError(
+                            "OKX 回傳的 1D 已收盤 K 線少於 60 根；"
+                            "只會暫停 4H 長線判定，不代表幣種或短線訊號失效。"
+                        )
+                    bundle["1D"] = daily
                 long_result = self._analyze_long_v33(instrument, ticker, bundle)
             except Exception as exc:
                 errors.append(f"長線資料：{exc}")
@@ -964,11 +1049,12 @@ class MarketScanner:
             errors.append(f"Open Interest：{exc}")
 
         oi_change = self._open_interest_change(inst_id, open_interest_usd)
-        short_result = self._attach_oi_snapshot(
-            short_result,
-            open_interest_usd,
-            oi_change,
-        )
+        if short_result is not None:
+            short_result = self._attach_oi_snapshot(
+                short_result,
+                open_interest_usd,
+                oi_change,
+            )
         if long_result is not None:
             long_result = self._attach_oi_snapshot(
                 long_result,
@@ -977,17 +1063,18 @@ class MarketScanner:
             )
 
         timing: list[Candle] = []
-        try:
-            timing = self.client.get_candles(
-                inst_id,
-                "5m",
-                self.config.candle_limit_5m,
-            )
-            if len(timing) < 60:
-                errors.append("5m 已收盤 K 線不足 60 根")
-                timing = []
-        except Exception as exc:
-            errors.append(f"5m：{exc}")
+        if include_short:
+            try:
+                timing = self.client.get_candles(
+                    inst_id,
+                    "5m",
+                    self.config.candle_limit_5m,
+                )
+                if len(timing) < 60:
+                    errors.append("5m 已收盤 K 線不足 60 根")
+                    timing = []
+            except Exception as exc:
+                errors.append(f"5m：{exc}")
 
         context = MarketContext(
             inst_id=inst_id,
@@ -1038,12 +1125,29 @@ class MarketScanner:
                         context,
                         order_book_sequence=sequence,
                     )
+                    result_market_bias = (
+                        dict(long_market_bias or {})
+                        if result_name == "long_result"
+                        else dict(market_bias or {})
+                    )
+                    result_btc_bias = (
+                        long_btc_bias
+                        if result_name == "long_result"
+                        else btc_bias
+                    )
                     updated = context_applier(
                         result,
                         directional_context,
-                        btc_bias,
+                        result_btc_bias,
                         result_timing,
-                        market_bias or {},
+                        result_market_bias,
+                    )
+                    updated = self._apply_professional_context(
+                        updated,
+                        directional_context,
+                        previous_micro,
+                        result_market_bias,
+                        ticker.last,
                     )
                     if result_name == "short_result":
                         short_result = updated
@@ -1055,13 +1159,15 @@ class MarketScanner:
                 )
             except Exception as exc:
                 errors.append(f"Context 整合失敗：{exc}")
-                short_result = self._mark_deep_data_missing(short_result, errors)
+                if short_result is not None:
+                    short_result = self._mark_deep_data_missing(short_result, errors)
                 if long_result is not None:
                     long_result = self._mark_deep_data_missing(long_result, errors)
                 context = replace(context, failures=list(errors))
         else:
             errors.append("Deep Data 單幣服務暫不可用")
-            short_result = self._mark_deep_data_missing(short_result, errors)
+            if short_result is not None:
+                short_result = self._mark_deep_data_missing(short_result, errors)
             if long_result is not None:
                 long_result = self._mark_deep_data_missing(long_result, errors)
             context = replace(context, failures=list(errors))
@@ -1069,7 +1175,12 @@ class MarketScanner:
         if open_interest_usd is not None:
             self._previous_open_interest_usd[inst_id] = open_interest_usd
 
-        def finalize(result: AnalysisResult | None) -> AnalysisResult | None:
+        analyzed_at = datetime.now(timezone.utc).isoformat()
+
+        def finalize(
+            result: AnalysisResult | None,
+            horizon: str,
+        ) -> AnalysisResult | None:
             if result is None:
                 return None
             signal = result.signal
@@ -1077,16 +1188,45 @@ class MarketScanner:
             if signal is not None and not self._passes_output_liquidity(signal, False):
                 signal = None
                 reason = "universe_output_gate"
+            raw_signal = signal
+            reconciler = getattr(self.repository, "reconcile_instrument", None)
+            if callable(reconciler):
+                persisted = reconciler(
+                    raw_signal,
+                    result.market_state,
+                    analyzed_at,
+                    horizon,
+                )
+                if (
+                    persisted is not None
+                    and raw_signal is not None
+                    and persisted.direction == raw_signal.direction
+                ):
+                    signal = self._episode_with_latest_signal_context(
+                        persisted,
+                        raw_signal,
+                    )
+                elif persisted is not None and result.market_state is not None:
+                    signal = self._episode_with_latest_state_context(
+                        persisted,
+                        result.market_state,
+                    )
+                else:
+                    signal = persisted
             if signal is not None:
                 live_metrics = dict(signal.market_metrics)
                 live_metrics["last_price"] = ticker.last
                 signal = _without_internal_metrics(
-                    self._refresh_entry_eligibility(
-                        replace(signal, market_metrics=live_metrics)
+                    self._attach_decision_context(
+                        self._refresh_entry_eligibility(
+                            replace(signal, market_metrics=live_metrics)
+                        )
                     )
                 )
             state = (
-                _without_internal_metrics(result.market_state)
+                _without_internal_metrics(
+                    self._attach_decision_context(result.market_state)
+                )
                 if result.market_state is not None
                 else None
             )
@@ -1097,17 +1237,84 @@ class MarketScanner:
                 reason=reason,
             )
 
-        finalized_short = finalize(short_result)
-        finalized_long = finalize(long_result)
-        assert finalized_short is not None
+        finalized_short = finalize(short_result, "SHORT")
+        finalized_long = finalize(long_result, "LONG")
         return SingleInstrumentScan(
             inst_id=inst_id,
             ticker=ticker,
             context=context,
             short_result=finalized_short,
             long_result=finalized_long,
-            analyzed_at=datetime.now(timezone.utc).isoformat(),
+            analyzed_at=analyzed_at,
             errors=list(dict.fromkeys(errors)),
+        )
+
+    @staticmethod
+    def _episode_with_latest_signal_context(
+        episode: Signal,
+        latest: Signal,
+    ) -> Signal:
+        """Project fresh context onto an immutable episode/trade plan."""
+
+        story = dict(latest.market_story)
+        story["trigger"] = dict(episode.market_story.get("trigger", {}))
+        return replace(
+            latest,
+            direction=episode.direction,
+            strategy=episode.strategy,
+            entry_low=episode.entry_low,
+            entry_high=episode.entry_high,
+            stop_loss=episode.stop_loss,
+            take_profit_1=episode.take_profit_1,
+            take_profit_2=episode.take_profit_2,
+            risk_reward=episode.risk_reward,
+            invalidation=episode.invalidation,
+            trigger_id=episode.trigger_id,
+            trigger_type=episode.trigger_type,
+            signal_stage=episode.signal_stage,
+            freshness=episode.freshness,
+            lifecycle=dict(episode.lifecycle),
+            generated_at=episode.generated_at,
+            market_story=story,
+            decision_context={},
+        )
+
+    @staticmethod
+    def _episode_with_latest_state_context(
+        episode: Signal,
+        state: MarketState,
+    ) -> Signal:
+        """Keep an episode visible while applying the newest fail-closed state."""
+
+        story = dict(state.market_story)
+        story["trigger"] = dict(episode.market_story.get("trigger", {}))
+        metrics = dict(episode.market_metrics)
+        metrics.update(state.market_metrics)
+        return replace(
+            episode,
+            spread_pct=state.spread_pct,
+            quote_volume_24h=state.quote_volume_24h,
+            closed_candle_ts=state.closed_candle_ts,
+            regime=state.regime,
+            readiness_score=state.readiness_score,
+            factor_scores=dict(state.factor_scores),
+            market_metrics=metrics,
+            evidence_groups=dict(state.evidence_groups),
+            timeframe_states=dict(state.timeframe_states),
+            supporting_evidence=list(state.supporting_evidence),
+            conflicts=list(state.conflicts),
+            neutral_evidence=list(state.neutral_evidence),
+            safety_checks=list(state.safety_checks),
+            entry_quality=dict(state.entry_quality),
+            summary=state.summary,
+            direction_state=state.direction_state,
+            market_participation=dict(state.market_participation),
+            execution_quality=dict(state.execution_quality),
+            data_quality=dict(state.data_quality),
+            market_story=story,
+            data_timestamp=state.data_timestamp,
+            actionable=False,
+            decision_context={},
         )
 
     def reanalyze_instrument(
@@ -1115,7 +1322,7 @@ class MarketScanner:
         previous_signal: Signal,
         market_bias: dict[str, Any] | None = None,
     ) -> SingleInstrumentReanalysis:
-        """Re-run the unchanged V3.3 pipeline for one invalidated plan.
+        """Re-run the unchanged V3.4 pipeline for one invalidated plan.
 
         The returned signal is only populated when the latest closed-candle
         analysis contains a genuinely new Trigger event. The original event is
@@ -1240,6 +1447,13 @@ class MarketScanner:
                     "NEUTRAL",
                     timing or None,
                     market_bias or {},
+                )
+                result = self._apply_professional_context(
+                    result,
+                    directional_context,
+                    previous_micro,
+                    dict(market_bias or {}),
+                    ticker.last,
                 )
                 context = directional_context
                 self.repository.save_microstructure(
@@ -1393,17 +1607,45 @@ class MarketScanner:
             short_results,
             exclusion_counts,
         )
-        short_signals = self.repository.reconcile(
-            raw_short_signals,
-            short_states,
-            generated_at,
-            "SHORT",
-        )
+        # A core preview is deliberately read-only.  Funding, OI, Order Book,
+        # slippage and execution-cost gates have not finished yet, so it must
+        # neither create/advance a durable Signal Episode nor claim entry
+        # permission.  The final report is the only commit point.
         short_signals = [
-            _without_internal_metrics(self._refresh_entry_eligibility(item))
-            for item in short_signals
+            self._attach_decision_context(
+                self._refresh_entry_eligibility(
+                    replace(
+                    item,
+                    actionable=False,
+                    entry_eligibility={
+                        "status": "DATA_PENDING",
+                        "label": "初步候選｜掃描中不可進",
+                        "reason": "完整 Hard Gate 與成交條件尚未完成。",
+                        "actionable": False,
+                        "new_entry_allowed": False,
+                        "wait_reason_code": "DEEP_DATA_PENDING",
+                        "direction_still_valid": True,
+                    },
+                    safety_checks=[
+                        *item.safety_checks,
+                        {
+                            "key": "final_hard_gate",
+                            "label": "完整 Hard Gate 尚未完成",
+                            "passed": False,
+                            "value": "PENDING",
+                            "hard": True,
+                        },
+                    ],
+                    )
+                )
+            )
+            for item in raw_short_signals
         ]
-        short_states = [_without_internal_metrics(item) for item in short_states]
+        short_signals = [_without_internal_metrics(item) for item in short_signals]
+        short_states = [
+            _without_internal_metrics(self._attach_decision_context(item))
+            for item in short_states
+        ]
         short_signals = sorted(
             short_signals,
             key=self._signal_sort_key,
@@ -1417,23 +1659,7 @@ class MarketScanner:
             **dict(sorted(analysis_failures.items())),
         }
         coverage = round(len(bundles) / len(instruments) * 100.0, 4)
-        early_count = sum(
-            item.signal_stage == "EARLY_SIGNAL"
-            and item.entry_eligibility.get("status") == "ENTRY_READY"
-            for item in short_signals
-        )
-        ready_count = sum(
-            item.entry_eligibility.get("status") == "ENTRY_READY"
-            for item in short_signals
-        )
-        wait_count = sum(
-            item.entry_eligibility.get("status") == "WAIT_RETEST"
-            for item in short_signals
-        )
-        missed_count = sum(
-            item.entry_eligibility.get("status") == "MISSED_ENTRY"
-            for item in short_signals
-        )
+        candidate_count = len(short_signals)
         return RadarReport(
             status="CORE_PREVIEW",
             generated_at=generated_at,
@@ -1448,9 +1674,8 @@ class MarketScanner:
             exclusion_counts=dict(exclusion_counts.most_common()),
             duration_seconds=round(time.monotonic() - started, 3),
             message=(
-                f"15m 核心結果已先發布：早期可進 {early_count}、目前可進 {ready_count}、"
-                f"等待回踩 {wait_count}、已錯過 {missed_count}；"
-                "正在補 Funding、OI、Order Book 與長線結果。"
+                f"15m 核心初步候選 {candidate_count} 筆；目前一律不可進場。"
+                "正在補 Funding、OI、Order Book、滑價與完整 Hard Gate。"
             ),
             market_regime_counts=dict(
                 Counter(item.regime for item in short_states)
@@ -1462,7 +1687,7 @@ class MarketScanner:
             scan_started_at=scan_started_at,
             completed_at="",
             runtime_status="CORE_PREVIEW",
-            actionable=True,
+            actionable=False,
             max_signals=min(max(self.config.max_signals, 0), 20),
             data_quality={
                 "core_status": "PARTIAL" if all_failures else "AVAILABLE",
@@ -1647,12 +1872,28 @@ class MarketScanner:
             "conflicts": [],
             "neutral": ["Deep Data 暫缺；核心 Trigger 保留"],
             "missing_sources": reasons,
-            "permission": "CONTEXT_ONLY_NEVER_CANCELS_TRIGGER",
+            "trigger_permission": "NEVER_CREATES_OR_CANCELS_TRIGGER",
+            "entry_permission": "BLOCK_NEW_ENTRY_UNTIL_DATA_AVAILABLE",
         }
         updated_state = replace(
             state,
             data_quality=data_quality,
             market_participation=participation,
+            actionable=False,
+            safety_checks=[
+                *[
+                    item
+                    for item in state.safety_checks
+                    if item.get("key") != "deep_data_available"
+                ],
+                {
+                    "key": "deep_data_available",
+                    "label": "Deep Data 不完整；Trigger 保留但禁止新進場",
+                    "passed": False,
+                    "value": "MISSING",
+                    "hard": True,
+                },
+            ],
             neutral_evidence=_unique_strings(
                 [*state.neutral_evidence, "Deep Data 暫缺；不取消核心 Trigger"]
             ),
@@ -1665,6 +1906,21 @@ class MarketScanner:
                 result.signal,
                 data_quality=data_quality,
                 market_participation=participation,
+                actionable=False,
+                safety_checks=[
+                    *[
+                        item
+                        for item in result.signal.safety_checks
+                        if item.get("key") != "deep_data_available"
+                    ],
+                    {
+                        "key": "deep_data_available",
+                        "label": "Deep Data 不完整；Trigger 保留但禁止新進場",
+                        "passed": False,
+                        "value": "MISSING",
+                        "hard": True,
+                    },
+                ],
                 neutral_evidence=_unique_strings(
                     [
                         *result.signal.neutral_evidence,
@@ -1767,17 +2023,43 @@ class MarketScanner:
             ),
         }
         if any(value is None for value in values.values()):
-            fallback = dict(signal.entry_eligibility)
-            if not fallback:
-                fallback = {
-                    "status": "ENTRY_READY" if signal.actionable else "MISSED_ENTRY",
-                    "label": "目前可進" if signal.actionable else "目前不可進",
-                    "reason": "缺少即時 Entry 距離資料，沿用策略狀態。",
-                    "actionable": signal.actionable,
-                    "chase_atr": None,
-                    "remaining_rr": signal.risk_reward,
+            missing_inputs = [key for key, value in values.items() if value is None]
+            eligibility = {
+                "status": "DATA_UNAVAILABLE",
+                "label": "資料不足｜禁止新進場",
+                "reason": (
+                    "缺少即時進場判定資料：" + "、".join(missing_inputs)
+                    + "；不知道就不使用舊值或 0 補算。"
+                ),
+                "actionable": False,
+                "new_entry_allowed": False,
+                "direction_still_valid": True,
+                "wait_reason_code": "DATA_MISSING",
+                "hard_blockers": ["ENTRY_INPUT_MISSING"],
+                "chase_atr": None,
+                "remaining_rr": None,
+                "remaining_rr_applicable": False,
+            }
+            checks = [
+                item
+                for item in signal.safety_checks
+                if item.get("key") != "entry_inputs_available"
+            ]
+            checks.append(
+                {
+                    "key": "entry_inputs_available",
+                    "label": "即時 Entry／SL／TP／ATR 資料完整",
+                    "passed": False,
+                    "value": missing_inputs,
+                    "hard": True,
                 }
-            return replace(signal, entry_eligibility=fallback)
+            )
+            return replace(
+                signal,
+                safety_checks=checks,
+                entry_eligibility=eligibility,
+                actionable=False,
+            )
         eligibility = _entry_eligibility(
             direction=signal.direction,
             current_price=float(values["current_price"]),
@@ -1790,6 +2072,58 @@ class MarketScanner:
             minimum_rr=self.config.minimum_rr,
             ready_max_chase_atr=self.config.entry_ready_max_chase_atr,
             missed_chase_atr=self.config.entry_missed_chase_atr,
+        )
+        eligibility = dict(eligibility)
+        position_status = str(eligibility.get("status", "DATA_UNAVAILABLE"))
+        direction_still_valid = not (
+            position_status == "MISSED_ENTRY"
+            and "失效" in str(eligibility.get("label", ""))
+        )
+        hard_blockers = self._signal_hard_gate_blockers(signal)
+        if hard_blockers:
+            data_block = any(
+                code in {
+                    "CORE_DATA_UNAVAILABLE",
+                    "DEEP_DATA_UNAVAILABLE",
+                    "EXECUTION_DATA_UNAVAILABLE",
+                    "SOURCE_DATA_UNAVAILABLE",
+                }
+                for code in hard_blockers
+            )
+            anomaly_block = "ANOMALOUS_MARKET" in hard_blockers
+            eligibility.update(
+                {
+                    "position_status": position_status,
+                    "status": (
+                        "DATA_UNAVAILABLE"
+                        if data_block
+                        else "ANOMALY"
+                        if anomaly_block
+                        else "HARD_GATE_BLOCKED"
+                    ),
+                    "label": (
+                        "資料不足｜禁止新進場"
+                        if data_block
+                        else "異常行情｜等待穩定"
+                        if anomaly_block
+                        else "風控未通過｜暫停新進場"
+                    ),
+                    "reason": "；".join(self._hard_gate_labels(hard_blockers)[:3]),
+                }
+            )
+        eligibility.update(
+            {
+                "actionable": bool(eligibility.get("actionable"))
+                and not hard_blockers,
+                "new_entry_allowed": bool(eligibility.get("actionable"))
+                and not hard_blockers,
+                "direction_still_valid": direction_still_valid,
+                "hard_blockers": hard_blockers,
+                "wait_reason_code": self._entry_wait_reason(
+                    eligibility,
+                    hard_blockers,
+                ),
+            }
         )
         metrics.update(
             {
@@ -1819,6 +2153,346 @@ class MarketScanner:
             entry_eligibility=eligibility,
             actionable=bool(eligibility["actionable"]),
         )
+
+    def _attach_decision_context(
+        self,
+        item: Signal | MarketState,
+    ) -> Signal | MarketState:
+        decision = build_decision_context(item, self.config)
+        final = decision.get("final", {})
+        allowed = bool(final.get("new_entry_allowed"))
+        if isinstance(item, Signal):
+            eligibility = dict(item.entry_eligibility)
+            eligibility["new_entry_allowed"] = allowed
+            eligibility.setdefault(
+                "direction_still_valid",
+                str(final.get("status")) != "INVALIDATED",
+            )
+            eligibility.setdefault(
+                "hard_blockers",
+                list(decision.get("hard_gate", {}).get("blockers", [])),
+            )
+            wait_reason = final.get("wait_reason")
+            if isinstance(wait_reason, dict):
+                eligibility.setdefault("wait_reason_code", wait_reason.get("code"))
+            return replace(
+                item,
+                actionable=allowed,
+                entry_eligibility=eligibility,
+                decision_context=decision,
+            )
+        return replace(
+            item,
+            actionable=allowed,
+            decision_context=decision,
+        )
+
+    def _apply_professional_context(
+        self,
+        result: AnalysisResult,
+        context: MarketContext,
+        previous_micro: dict[str, Any] | None,
+        market_bias: dict[str, Any],
+        reference_price: float,
+    ) -> AnalysisResult:
+        """Attach bounded context interpretation without changing the Trigger."""
+
+        state = result.market_state
+        if state is None:
+            return result
+        direction = state.direction if state.direction in {"LONG", "SHORT"} else "NEUTRAL"
+        history = list((previous_micro or {}).get("history", []) or [])
+        if not history and previous_micro and previous_micro.get("sampled_at"):
+            history.append(dict(previous_micro))
+        current_sample = {
+            "timestamp_ms": int(context.sampled_at or 0),
+            "price": _finite_number(reference_price),
+            "open_interest_usd": context.open_interest_usd,
+            "taker_buy_ratio": context.taker_buy_ratio,
+            "funding_rate": context.funding_rate,
+            "bid_depth_usd": context.bid_depth_usd,
+            "ask_depth_usd": context.ask_depth_usd,
+            "order_book_imbalance": context.order_book_imbalance,
+        }
+        if current_sample["timestamp_ms"] > 0:
+            history.append(current_sample)
+        flow = summarize_flow_history(history[-8:], direction)
+
+        story = dict(state.market_story)
+        raw = dict(story.get("raw", {}) or {})
+        metrics = dict(state.market_metrics)
+        anomaly_metrics = {
+            "range_atr": raw.get("core_range_atr"),
+            "volume_ratio": raw.get("core_volume_ratio"),
+            "funding_rate": context.funding_rate,
+            "spread_pct": state.spread_pct,
+            "buy_slippage_pct": context.buy_slippage_pct,
+            "sell_slippage_pct": context.sell_slippage_pct,
+            "order_book_sequence": dict(context.order_book_sequence),
+            "required_missing_sources": list(
+                state.data_quality.get("missing_sources", []) or []
+            ),
+            "api_failures": list(context.failures),
+        }
+        anomaly = detect_anomaly(anomaly_metrics, flow)
+        btc = dict(market_bias.get("btc", {}) or {})
+        resonance = dict(market_bias.get("resonance", {}) or {})
+        symbol_change = _finite_number(metrics.get("price_change_core_pct"))
+        driver = classify_market_driver(
+            symbol_change,
+            btc.get("core_change_pct"),
+            state.market_participation,
+            _finite_number(market_bias.get("market_breadth_long_pct")) / 100.0
+            if _finite_number(market_bias.get("market_breadth_long_pct")) is not None
+            else None,
+            resonance,
+        )
+        trigger_type = str(
+            getattr(result.signal, "trigger_type", "")
+            or story.get("trigger", {}).get("type", "NONE")
+        ).upper()
+        phase = (
+            "BREAKOUT"
+            if trigger_type == "BREAKOUT"
+            else "RETEST"
+            if trigger_type == "CONTINUATION"
+            else "REVERSAL"
+            if trigger_type == "REVERSAL"
+            else "WEAKENING"
+            if state.status in {"NO_FOLLOW_THROUGH", "EXTENDED"}
+            else "MATURE"
+            if state.status in {"CONFIRMED", "TRENDING"}
+            else "FORMING"
+        )
+        anomaly_status = str(anomaly.get("status", "NORMAL"))
+        volatility = (
+            "ANOMALOUS"
+            if anomaly_status == "BLOCK"
+            else "HIGH"
+            if anomaly_status == "WATCH"
+            or (_finite_number(raw.get("core_range_atr")) or 0.0) >= 2.0
+            else "NORMAL"
+        )
+        context_payload = build_market_context(
+            regime=state.regime,
+            phase=phase,
+            volatility=volatility,
+            anomaly=anomaly,
+            driver=driver,
+            sessions=active_sessions(datetime.now(timezone.utc)),
+        )
+        invalidation_condition = (
+            result.signal.invalidation
+            if result.signal is not None
+            else "等待正式 Trigger 後建立失效條件"
+        )
+        interpretation = build_interpretation(
+            evidence_groups=state.evidence_groups,
+            flow_summary=flow,
+            anomaly=anomaly,
+            main_conflicts=state.conflicts,
+            change_conditions={
+                "weaken": [
+                    "OI／Taker／Volume 持續衰退",
+                    "核心結構失去延續性",
+                ],
+                "invalidate": [invalidation_condition],
+            },
+            data_quality=state.data_quality,
+        )
+        story.update(
+            {
+                "context": context_payload,
+                "interpretation": interpretation,
+            }
+        )
+        metrics.update(
+            {
+                "flow_trend": flow.get("state"),
+                "flow_velocity_abnormal": flow.get("abnormal_speed"),
+                "market_driver": driver,
+                "relative_strength": driver.get("relative_strength"),
+                "market_resonance": resonance,
+                "market_sessions": context_payload.get("sessions", {}).get("items", []),
+                "anomaly_state": anomaly_status,
+                "anomalies": [
+                    str(item.get("label"))
+                    for item in anomaly.get("reasons", [])
+                    if isinstance(item, dict) and item.get("label")
+                ],
+            }
+        )
+        conflicts = list(state.conflicts)
+        supporting = list(state.supporting_evidence)
+        if flow.get("state") == "WEAKENING":
+            conflicts = _unique_strings([*conflicts, "市場參與趨勢正在轉弱"])
+        elif flow.get("state") == "STRENGTHENING":
+            supporting = _unique_strings([*supporting, "市場參與趨勢正在增強"])
+        participation = dict(state.market_participation)
+        participation["trend"] = {
+            "state": flow.get("state", "UNKNOWN"),
+            "label": flow.get("label", "資料不足"),
+        }
+        checks = [
+            item
+            for item in state.safety_checks
+            if item.get("key") != "anomalous_market"
+        ]
+        checks.append(
+            {
+                "key": "anomalous_market",
+                "label": anomaly.get("label", "行情狀態未知"),
+                "passed": not bool(anomaly.get("entry_block")),
+                "value": anomaly_status,
+                "hard": True,
+            }
+        )
+        updated_state = replace(
+            state,
+            market_metrics=metrics,
+            market_story=story,
+            market_participation=participation,
+            conflicts=conflicts,
+            supporting_evidence=supporting,
+            safety_checks=checks,
+            actionable=state.actionable and not bool(anomaly.get("entry_block")),
+        )
+
+        def update_signal(signal: Signal | None) -> Signal | None:
+            if signal is None:
+                return None
+            return replace(
+                signal,
+                market_metrics=metrics,
+                market_story=story,
+                market_participation=participation,
+                conflicts=conflicts,
+                supporting_evidence=supporting,
+                safety_checks=checks,
+                actionable=signal.actionable and not bool(anomaly.get("entry_block")),
+            )
+
+        updated_signal = update_signal(result.signal)
+        updated_candidate = update_signal(result.candidate_signal)
+        return replace(
+            result,
+            market_state=updated_state,
+            signal=updated_signal,
+            candidate_signal=updated_candidate,
+        )
+
+    def _signal_hard_gate_blockers(self, signal: Signal) -> list[str]:
+        """Return entry blockers without cancelling the stored Trigger."""
+
+        blockers: list[str] = []
+        for check in signal.safety_checks:
+            if check.get("hard") and not bool(check.get("passed")):
+                blockers.append(str(check.get("key") or "HARD_CHECK_FAILED").upper())
+
+        quality = signal.data_quality or {}
+        core_status = str(
+            quality.get("core_status") or quality.get("core") or "UNKNOWN"
+        ).upper()
+        if core_status not in {"AVAILABLE", "FRESH"}:
+            blockers.append("CORE_DATA_UNAVAILABLE")
+        if quality.get("closed_candle") is False:
+            blockers.append("CORE_DATA_UNAVAILABLE")
+        deep_status = str(
+            quality.get("deep_status") or quality.get("deep") or "UNKNOWN"
+        ).upper()
+        if deep_status not in {"AVAILABLE", "FRESH"}:
+            blockers.append("DEEP_DATA_UNAVAILABLE")
+
+        spread = _finite_number(signal.spread_pct)
+        if spread is None or spread > self.config.max_spread_pct:
+            blockers.append("SPREAD_TOO_HIGH")
+
+        metrics = signal.market_metrics or {}
+        slippage_key = (
+            "buy_slippage_pct" if signal.direction == "LONG" else "sell_slippage_pct"
+        )
+        slippage = _finite_number(metrics.get(slippage_key))
+        execution_notional = _finite_number(metrics.get("execution_notional_usdt"))
+        execution_required = execution_notional is None or execution_notional > 0
+        if execution_required and (
+            metrics.get("execution_quality_complete") is not True
+            or slippage is None
+        ):
+            blockers.append("EXECUTION_DATA_UNAVAILABLE")
+        elif slippage is not None and slippage > self.config.max_slippage_pct:
+            blockers.append("SLIPPAGE_TOO_HIGH")
+
+        cost_to_risk = _finite_number(
+            metrics.get("execution_cost_to_risk_pct")
+            if metrics.get("execution_cost_to_risk_pct") is not None
+            else signal.execution_quality.get("execution_cost_to_risk_pct")
+        )
+        if execution_required and cost_to_risk is None:
+            blockers.append("EXECUTION_DATA_UNAVAILABLE")
+        elif (
+            cost_to_risk is not None
+            and cost_to_risk > self.config.max_execution_cost_to_risk_pct
+        ):
+            blockers.append("EXECUTION_COST_TOO_HIGH")
+
+        rr = _finite_number(signal.risk_reward)
+        if rr is None or rr < self.config.minimum_rr:
+            blockers.append("RR_INSUFFICIENT")
+
+        context = (signal.market_story or {}).get("context", {})
+        anomaly = context.get("anomaly", {}) if isinstance(context, dict) else {}
+        if str(anomaly.get("status", "NORMAL")).upper() == "BLOCK":
+            blockers.append("ANOMALOUS_MARKET")
+        if bool((signal.lifecycle or {}).get("terminal")) or str(
+            (signal.lifecycle or {}).get("status", "")
+        ).upper() in {"INVALIDATED", "COMPLETED", "CLOSED"}:
+            blockers.append("PLAN_TERMINAL")
+        return _unique_strings(blockers)
+
+    @staticmethod
+    def _hard_gate_labels(blockers: list[str]) -> list[str]:
+        labels = {
+            "CORE_DATA_UNAVAILABLE": "核心資料不足或尚未確認收盤",
+            "DEEP_DATA_UNAVAILABLE": "市場深度資料不足",
+            "SOURCE_DATA_UNAVAILABLE": "行情來源資料不足",
+            "EXECUTION_DATA_UNAVAILABLE": "成交深度／滑價資料不足",
+            "SPREAD_TOO_HIGH": "Spread（買賣價差）超過上限",
+            "SLIPPAGE_TOO_HIGH": "Slippage（滑價）超過上限",
+            "EXECUTION_COST_TOO_HIGH": "交易成本占風險過高",
+            "RR_INSUFFICIENT": "R:R（風險報酬比）不足",
+            "ANOMALOUS_MARKET": "行情異常，等待市場穩定",
+            "PLAN_TERMINAL": "原交易計畫已永久失效或完成",
+            "CONTEXT_DATA": "Deep Data 不完整",
+            "EXECUTION_DEPTH": "Order Book（訂單簿）深度不足",
+            "SLIPPAGE": "Slippage（滑價）未通過",
+            "EXECUTION_COST": "Execution Cost（交易成本）未通過",
+        }
+        return [labels.get(code, code.replace("_", " ")) for code in blockers]
+
+    @staticmethod
+    def _entry_wait_reason(
+        eligibility: dict[str, Any],
+        blockers: list[str],
+    ) -> str | None:
+        if blockers:
+            if "ANOMALOUS_MARKET" in blockers:
+                return "ANOMALY"
+            if any("DATA" in code or "DEPTH" in code for code in blockers):
+                return "DATA_MISSING"
+            if "RR_INSUFFICIENT" in blockers:
+                return "RR_INSUFFICIENT"
+            if "SPREAD_TOO_HIGH" in blockers or "SLIPPAGE_TOO_HIGH" in blockers:
+                return "LIQUIDITY_RISK"
+            return "HARD_GATE"
+        status = str(eligibility.get("status", ""))
+        label = str(eligibility.get("label", ""))
+        if status == "ENTRY_READY":
+            return None
+        if "追價" in label or "錯過" in label:
+            return "NO_CHASE"
+        if status == "WAIT_RETEST":
+            return "WAIT_RETEST"
+        return "SIGNAL_FORMING"
 
     def _watchlist(self, states: list[MarketState]) -> list[MarketState]:
         selected = [
@@ -2394,6 +3068,39 @@ class MarketScanner:
 
         btc_score = anchor_score("BTC-USDT-SWAP")
         eth_score = anchor_score("ETH-USDT-SWAP")
+        btc_result = results.get("BTC-USDT-SWAP")
+        btc_state = getattr(btc_result, "market_state", None)
+        btc_core_change = (
+            _finite_number(btc_state.market_metrics.get("price_change_core_pct"))
+            if btc_state is not None
+            else None
+        )
+        btc_direction = (
+            btc_state.direction
+            if btc_state is not None and btc_state.direction in {"LONG", "SHORT"}
+            else "NEUTRAL"
+        )
+        formal_directions = [
+            str(getattr(result.signal, "direction", ""))
+            for result in results.values()
+            if getattr(result, "signal", None) is not None
+            and str(getattr(result.signal, "direction", "")) in {"LONG", "SHORT"}
+        ]
+        formal_long = sum(item == "LONG" for item in formal_directions)
+        formal_short = sum(item == "SHORT" for item in formal_directions)
+        formal_count = len(formal_directions)
+        dominant_formal = max(formal_long, formal_short)
+        resonance_ratio = (
+            dominant_formal / formal_count if formal_count else 0.0
+        )
+        resonance_direction = (
+            "LONG"
+            if formal_long > formal_short
+            else "SHORT"
+            if formal_short > formal_long
+            else "NEUTRAL"
+        )
+        resonance_active = formal_count >= 5 and resonance_ratio >= 0.65
         score = round(
             (breadth_score * 0.35)
             + (liquid_score * 0.25)
@@ -2412,6 +3119,24 @@ class MarketScanner:
             "long_count": long_count,
             "short_count": short_count,
             "sample_count": len(directional),
+            "btc": {
+                "direction": btc_direction,
+                "core_change_pct": btc_core_change,
+            },
+            "resonance": {
+                "active": resonance_active,
+                "direction": resonance_direction,
+                "formal_count": formal_count,
+                "ratio": round(resonance_ratio, 3),
+            },
+            "exposure_warning": {
+                "active": resonance_active and dominant_formal >= 3,
+                "label": (
+                    "多個機會可能屬同一市場方向曝險"
+                    if resonance_active
+                    else "未見明顯同向群體曝險"
+                ),
+            },
         }
 
     def _fetch_bundle(
@@ -2663,6 +3388,7 @@ def _compact_market_map_state(item: MarketState) -> MarketState:
         market_participation={},
         execution_quality={},
         market_story={},
+        decision_context={},
     )
 
 

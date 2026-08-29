@@ -1,5 +1,6 @@
 import math
 import unittest
+from types import SimpleNamespace
 
 from radar.models import Candle, Instrument, MarketContext, Ticker
 from radar.indicators import features
@@ -107,6 +108,65 @@ def valid_breakout_frames(opposed_context=False):
 class StrategyTests(unittest.TestCase):
     def setUp(self):
         self.instrument = Instrument("TEST-USDT-SWAP", "live", "USDT", "linear", 0.01)
+
+    def test_v33_stop_uses_structural_level_with_atr_floor(self):
+        engine = AdaptiveStrategyEngine(StrategyConfig(minimum_rr=1.8))
+        story = SimpleNamespace(
+            trigger_direction="LONG",
+            trigger_type="BREAKOUT",
+            horizon="SHORT",
+            trigger={
+                "entry_reference_price": 100.0,
+                "zone_key": "major_support",
+                "explainability_score": 80.0,
+            },
+            invalidation_price=99.8,
+            zones={},
+            regime="TREND",
+            stage="EARLY_SIGNAL",
+            readiness=80.0,
+            supporting=["fixture"],
+        )
+        core = SimpleNamespace(
+            close=100.0,
+            atr14=1.0,
+            recent_low=99.7,
+            recent_high=100.3,
+        )
+
+        plan = engine._v33_plan(story, core)
+
+        self.assertLessEqual(plan.stop, 98.75)
+        self.assertGreaterEqual(plan.management_plan["stop_distance_atr"], 1.25)
+        self.assertEqual(
+            plan.management_plan["stop_method"],
+            "結構失效＋ATR 最低緩衝（取較遠者）",
+        )
+
+    def test_v33_nearby_obstacle_exposes_insufficient_reward_space(self):
+        engine = AdaptiveStrategyEngine(StrategyConfig(minimum_rr=1.8))
+        story = SimpleNamespace(
+            trigger_direction="LONG",
+            trigger_type="BREAKOUT",
+            horizon="SHORT",
+            trigger={"entry_reference_price": 100.0},
+            invalidation_price=98.75,
+            zones={"major_resistance": {"center": 100.5}},
+            regime="TREND",
+            stage="EARLY_SIGNAL",
+            readiness=80.0,
+            supporting=["fixture"],
+        )
+        core = SimpleNamespace(
+            close=100.0,
+            atr14=1.0,
+            recent_low=99.7,
+            recent_high=100.3,
+        )
+
+        plan = engine._v33_plan(story, core)
+
+        self.assertLess(plan.rr, engine.config.minimum_rr)
 
     def test_entry_eligibility_separates_trigger_from_chase_state(self):
         base = {
@@ -339,7 +399,7 @@ class StrategyTests(unittest.TestCase):
         self.assertFalse(evaluated.signal.timeframe_states["5m"]["can_block_trigger"])
         self.assertIn("micro_acceleration_5m", evaluated.signal.market_metrics)
 
-    def test_execution_cost_warns_but_does_not_cancel_price_trigger(self):
+    def test_execution_cost_hard_blocks_entry_but_keeps_price_trigger(self):
         candles_4h, candles_1h, candles_15m = valid_breakout_frames()
         candles_5m = story_candles(
             [98 + index * 0.03 for index in range(100)],
@@ -399,7 +459,9 @@ class StrategyTests(unittest.TestCase):
             for item in filtered.signal.safety_checks
             if item["key"] == "execution_cost"
         )
-        self.assertFalse(execution_check["hard"])
+        self.assertTrue(execution_check["hard"])
+        self.assertFalse(filtered.signal.entry_eligibility["actionable"])
+        self.assertFalse(execution_check["passed"])
 
     def test_low_open_interest_is_context_not_a_hard_filter(self):
         candles_4h, candles_1h, candles_15m = valid_breakout_frames()

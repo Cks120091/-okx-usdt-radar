@@ -21,7 +21,13 @@ from .models import RadarReport
 from .preflight import build_preflight_payload
 from .public_payload import public_candidate_payload, public_report_payload
 from .push import PushSubscriptionError, build_push_notifier
-from .reporting import load_latest_report, report_markdown, save_report
+from .reporting import (
+    load_latest_report,
+    load_runtime_state,
+    report_markdown,
+    save_report,
+    save_runtime_state,
+)
 from .scanner import MarketScanner
 
 
@@ -79,6 +85,403 @@ def _single_scan_failure_message(exc: Exception) -> str:
     return "OKX 最新單幣資料暫時無法完成分析；這不是幣種失效，請稍後再試。"
 
 
+def _normalize_horizon(value: Any) -> str | None:
+    return {
+        "15M": "SHORT",
+        "SHORT": "SHORT",
+        "4H": "LONG",
+        "LONG": "LONG",
+    }.get(str(value or "").strip().upper())
+
+
+def _latest_confirmation(result: Any, original_direction: str) -> dict[str, Any]:
+    """Describe the newest closed-candle evidence without rewriting a plan."""
+
+    if result is None:
+        return {
+            "status": "DATA_UNAVAILABLE",
+            "label": "最新確認資料不足",
+            "message": "最新多週期資料不完整；禁止用舊現價判定補算進場資格。",
+            "new_entry_allowed": False,
+        }
+    state = getattr(result, "market_state", None)
+    signal = getattr(result, "signal", None)
+    direction = str(
+        getattr(signal, "direction", "")
+        or getattr(state, "direction", "")
+        or "NEUTRAL"
+    )
+    stage = str(
+        getattr(signal, "signal_stage", "")
+        or getattr(state, "status", "")
+        or "WATCH"
+    )
+    trigger = dict(getattr(state, "trigger", {}) or {})
+    if signal is not None:
+        signal_story = getattr(signal, "market_story", {}) or {}
+        if isinstance(signal_story, dict):
+            trigger = dict(signal_story.get("trigger", {}) or trigger)
+    noise = dict(trigger.get("noise", {}) or {})
+    opposite = direction in ("LONG", "SHORT") and direction != original_direction
+    formal = signal is not None and stage in ("EARLY_SIGNAL", "CONFIRMED", "REENTRY")
+    item = signal or state
+    decision = dict(getattr(item, "decision_context", {}) or {}) if item else {}
+    hard_gate = dict(decision.get("hard_gate", {}) or {})
+    final = dict(decision.get("final", {}) or {})
+    failed_hard_checks = [
+        str(check.get("key") or check.get("label") or "hard_gate")
+        for check in list(getattr(item, "safety_checks", []) or [])
+        if check.get("hard") and check.get("passed") is False
+    ] if item is not None else []
+    reason_code = str(getattr(result, "reason", "") or "").lower()
+    reason_hard_blocked = any(
+        token in reason_code
+        for token in (
+            "data", "liquidity", "spread", "slippage", "execution",
+            "insufficient", "stop_distance", "structural_headroom", "risk_reward",
+        )
+    )
+    hard_blocked = bool(
+        hard_gate.get("blocked")
+        or hard_gate.get("unknown")
+        or failed_hard_checks
+        or getattr(state, "status", "") == "FILTERED"
+        or reason_hard_blocked
+        or final.get("status") in {"DATA_UNAVAILABLE", "ANOMALY", "NO_EDGE"}
+    )
+
+    if hard_blocked:
+        status = "HARD_GATE_BLOCKED"
+        label = "方向訊號保留・執行風控未通過"
+        message = (
+            "最新資料、流動性、滑價、R:R 或結構風控未完整通過；"
+            "原 Signal Episode 保留追蹤，但禁止新進場。"
+        )
+    elif opposite:
+        status = "OPPOSITE_WARNING"
+        label = "反向證據增加・尚未確認轉向"
+        message = (
+            "舊 Episode 尚未正式終止，反向變化只能列警告；"
+            "必須先越過原 Invalidation，再由更新事件建立新方向。"
+        )
+    elif noise.get("high"):
+        status = "HIGH_NOISE"
+        label = "疑似假突破・等待收盤確認"
+        message = "最新核心週期來回交叉、雜訊偏高；方向不翻轉，但暫停新進場。"
+    elif (
+        formal
+        and direction == original_direction
+        and final.get("new_entry_allowed") is True
+    ):
+        status = "REVALIDATED"
+        label = "原方向重新確認"
+        message = "最新已收盤多週期資料仍形成同方向正式 Trigger。"
+    elif formal and direction == original_direction:
+        status = "SAME_DIRECTION_WAIT"
+        label = "原方向仍有效・目前等待"
+        message = "最新仍是同方向正式 Trigger，但目前位置或執行條件不允許新進場。"
+    elif direction == original_direction:
+        status = "ORIGINAL_DIRECTION_STABLE"
+        label = "原方向結構仍穩定"
+        message = (
+            "最新收盤沒有反轉，但也沒有新的正式 Trigger；"
+            "原訊號只作生命週期追蹤，尚未進場者先等待。"
+        )
+    else:
+        status = "NO_FORMAL_TRIGGER"
+        label = "最新確認不足・暫停新進場"
+        message = (
+            "舊訊號仍保留作生命週期追蹤，但最新核心週期已無同方向正式 Trigger；"
+            "尚未進場者目前不可使用舊 Entry。"
+        )
+
+    groups = dict(getattr(state, "evidence_groups", {}) or {})
+    return {
+        "status": status,
+        "label": label,
+        "message": message,
+        "direction": direction,
+        "stage": stage,
+        "formal_trigger": formal,
+        "two_step_reversal_confirmed": False,
+        "hard_blockers": list(hard_gate.get("blockers", [])) or failed_hard_checks,
+        "closed_candle_ts": getattr(state, "closed_candle_ts", None),
+        "group_stances": {
+            key: str((value or {}).get("stance", "NEUTRAL"))
+            for key, value in groups.items()
+            if isinstance(value, dict)
+        },
+        "new_entry_allowed": status == "REVALIDATED",
+    }
+
+
+def _merge_preflight_confirmation(
+    payload: dict[str, Any],
+    confirmation: dict[str, Any],
+) -> dict[str, Any]:
+    merged = deepcopy(payload)
+    merged["latest_confirmation"] = deepcopy(confirmation)
+    verdict = merged.setdefault("verdict", {})
+    lifecycle = merged.setdefault("signal_lifecycle", {})
+    plan = merged.setdefault("plan_state", {})
+    terminal = verdict.get("status") == "PLAN_INVALIDATED" or lifecycle.get("terminal")
+    status = confirmation.get("status")
+
+    if not terminal and status == "CONFIRMED_REVERSAL":
+        verdict.update(
+            {
+                "status": "PLAN_INVALIDATED",
+                "situation": "CONFIRMED_REVERSAL",
+                "label": "原方向失效・新方向已確認",
+                "reason": confirmation.get("message"),
+                "actionable": False,
+            }
+        )
+        lifecycle.update(
+            {
+                "status": "INVALIDATED",
+                "label": "已觸發・結構轉向失效",
+                "active": False,
+                "terminal": True,
+                "note": confirmation.get("message"),
+            }
+        )
+        plan.update(
+            {
+                "status": "INVALIDATED",
+                "old_plan_reusable": False,
+                "old_plan_reusable_for_new_entry": False,
+                "existing_position_plan_active": False,
+                "new_entry_status": "CLOSED",
+                "direction_status": "CONFIRMED_REVERSAL",
+                "new_trigger_required": True,
+            }
+        )
+    elif not terminal and status in {
+        "OPPOSITE_WARNING",
+        "HIGH_NOISE",
+        "NO_FORMAL_TRIGGER",
+        "DATA_UNAVAILABLE",
+        "HARD_GATE_BLOCKED",
+        "SAME_DIRECTION_WAIT",
+        "ORIGINAL_DIRECTION_STABLE",
+    }:
+        labels = {
+            "OPPOSITE_WARNING": "反向證據增加｜暫停新進場",
+            "HIGH_NOISE": "疑似假突破｜等待收盤確認",
+            "NO_FORMAL_TRIGGER": "最新確認不足｜暫停新進場",
+            "DATA_UNAVAILABLE": "最新資料不足｜暫停新進場",
+            "HARD_GATE_BLOCKED": "執行風控未通過｜暫停新進場",
+            "SAME_DIRECTION_WAIT": "原方向仍有效｜目前等待",
+            "ORIGINAL_DIRECTION_STABLE": "方向未反轉｜等待正式確認",
+        }
+        verdict.update(
+            {
+                "status": "WAIT_RETEST",
+                "situation": status,
+                "label": labels[status],
+                "reason": confirmation.get("message"),
+                "actionable": False,
+            }
+        )
+        plan.update(
+            {
+                "old_plan_reusable_for_new_entry": False,
+                "new_entry_status": "WAIT",
+                "direction_status": (
+                    "OPPOSITE_WARNING"
+                    if status == "OPPOSITE_WARNING"
+                    else "ORIGINAL_BIAS_RETAINED"
+                ),
+            }
+        )
+
+    confirmation["new_entry_allowed"] = bool(verdict.get("actionable"))
+    merged["latest_confirmation"] = deepcopy(confirmation)
+    merged.setdefault("safety", {})["unified_single_scan"] = True
+    merged["safety"]["note"] = (
+        "本頁已使用同一次單幣完整掃描，同時核對原訊號生命週期、"
+        "最新多週期收盤、現價與成交條件；不再使用兩套互相獨立的判定。"
+    )
+    return merged
+
+
+def _canonical_single_decision(
+    item: Any | None,
+    preflight: dict[str, Any] | None,
+    confirmation: dict[str, Any] | None,
+) -> dict[str, Any]:
+    """Collapse the episode refresh into one user-facing conclusion."""
+
+    decision = deepcopy(getattr(item, "decision_context", {}) or {})
+    final = deepcopy(decision.get("final", {}) or {})
+    if preflight is None:
+        if final:
+            decision["final"] = final
+        return decision
+
+    verdict = dict(preflight.get("verdict", {}) or {})
+    lifecycle = dict(preflight.get("signal_lifecycle", {}) or {})
+    plan = dict(preflight.get("plan_state", {}) or {})
+    status = str(verdict.get("status", "DATA_UNAVAILABLE")).upper()
+    situation = str(verdict.get("situation", "")).upper()
+    direction = str(preflight.get("direction") or final.get("direction") or "NEUTRAL")
+    mapped_status = (
+        "INVALIDATED"
+        if status == "PLAN_INVALIDATED" or lifecycle.get("terminal")
+        else "ENTER"
+        if status == "ENTRY_READY" and verdict.get("actionable") is True
+        else "DATA_UNAVAILABLE"
+        if status == "DATA_UNAVAILABLE" or situation == "DATA_UNAVAILABLE"
+        else "ANOMALY"
+        if status == "ANOMALY"
+        else "NO_CHASE"
+        if status == "MISSED_ENTRY"
+        and situation in {"FAVORABLE_MISSED", "TARGET_REACHED", "ENTRY_WINDOW_CLOSED"}
+        else "NO_EDGE"
+        if status == "HARD_GATE_BLOCKED"
+        and "RR_INSUFFICIENT" in set(verdict.get("hard_blockers", []) or [])
+        else "WAIT"
+    )
+    labels = {
+        "INVALIDATED": "交易計畫已失效｜等待全新 Trigger",
+        "ENTER": "目前可進｜完整風控已通過",
+        "DATA_UNAVAILABLE": "資料不足｜禁止新進場",
+        "ANOMALY": "異常行情｜等待穩定",
+        "NO_CHASE": "方向仍可追蹤｜禁止追價",
+        "NO_EDGE": "風險報酬不值得",
+        "WAIT": str(verdict.get("label") or "目前等待確認"),
+    }
+    reason = str(verdict.get("reason") or "等待下一次完整資料確認")
+    confirmation_message = str((confirmation or {}).get("message") or "")
+    reasons = [reason]
+    if confirmation_message and confirmation_message != reason:
+        reasons.append(confirmation_message)
+    existing_reasons = list(final.get("reasons", []) or [])
+    reasons.extend(existing_reasons)
+    wait_codes = {
+        "INVALIDATED": ("NEW_TRIGGER_REQUIRED", "等待新的 Trigger／REENTRY"),
+        "DATA_UNAVAILABLE": ("DATA_MISSING", "等待最新完整資料"),
+        "ANOMALY": ("ANOMALY", "等待市場恢復穩定"),
+        "NO_CHASE": ("PRICE_TOO_FAR", "等待回到合理進場區或新事件"),
+        "NO_EDGE": ("RISK_REWARD", "等待新的合理交易計畫"),
+        "WAIT": (str(situation or "ENTRY_CONFIRMATION"), labels["WAIT"]),
+    }
+    final.update(
+        {
+            "status": mapped_status,
+            "label": labels[mapped_status],
+            "direction": direction,
+            "direction_label": (
+                "做多" if direction == "LONG" else "做空" if direction == "SHORT" else "中性"
+            ),
+            "new_entry_allowed": mapped_status == "ENTER",
+            "trigger_preserved": mapped_status != "INVALIDATED",
+            "reasons": list(dict.fromkeys(item for item in reasons if item))[:3],
+            "wait_reason": (
+                None
+                if mapped_status == "ENTER"
+                else {
+                    "code": wait_codes[mapped_status][0],
+                    "label": wait_codes[mapped_status][1],
+                }
+            ),
+            "invalidation_condition": (
+                str(preflight.get("original", {}).get("stop_loss"))
+                if not final.get("invalidation_condition")
+                else final.get("invalidation_condition")
+            ),
+        }
+    )
+    decision["final"] = final
+    decision["episode_plan_state"] = {
+        "status": plan.get("status"),
+        "terminal": bool(lifecycle.get("terminal")),
+        "old_plan_reusable_for_new_entry": bool(
+            plan.get("old_plan_reusable_for_new_entry")
+        ),
+    }
+    return decision
+
+
+_HORIZON_CANDIDATE_ARRAYS = {
+    "SHORT": ("signals", "watchlist"),
+    "LONG": ("long_signals", "long_watchlist"),
+}
+
+
+def _project_horizon_read_only(
+    payload: dict[str, Any],
+    horizon: str,
+    reason: str,
+) -> None:
+    """Disable entry permission in an API projection, never in the saved model."""
+
+    for field_name in _HORIZON_CANDIDATE_ARRAYS[horizon]:
+        for item in payload.get(field_name, []) or []:
+            if not isinstance(item, dict):
+                continue
+            item["actionable"] = False
+            item["read_only_reason"] = reason
+            decision = item.setdefault("decision_context", {})
+            if not isinstance(decision, dict):
+                decision = {}
+                item["decision_context"] = decision
+            final = decision.setdefault("final", {})
+            if not isinstance(final, dict):
+                final = {}
+                decision["final"] = final
+            original_status = str(final.get("status") or "UNKNOWN")
+            final.setdefault("original_final_status", original_status)
+            read_only_status = {
+                "STALE": "EXPIRED",
+                "ERROR": "UPDATE_FAILED",
+                "SCANNING": "WAIT",
+                "CORE_PREVIEW": "WAIT",
+            }.get(reason, "WAIT")
+            read_only_label = {
+                "STALE": "資料已過期｜禁止依此進場",
+                "ERROR": "更新失敗｜顯示上一輪資料",
+                "SCANNING": "掃描中｜顯示上一輪資料",
+                "CORE_PREVIEW": "核心預覽｜等待完整風控",
+            }.get(reason, "唯讀資料｜禁止進場")
+            final["status"] = read_only_status
+            final["label"] = read_only_label
+            final["new_entry_allowed"] = False
+            final["read_only_reason"] = reason
+            eligibility = item.get("entry_eligibility")
+            if isinstance(eligibility, dict):
+                eligibility.setdefault(
+                    "original_status",
+                    str(eligibility.get("status") or "UNKNOWN"),
+                )
+                eligibility["status"] = (
+                    "EXPIRED" if reason == "STALE" else "WAIT_RETEST"
+                )
+                eligibility["label"] = read_only_label
+                eligibility["reason"] = reason
+                eligibility["actionable"] = False
+                eligibility["new_entry_allowed"] = False
+
+
+def _read_only_reasons(
+    system_status: str,
+    freshness: dict[str, dict[str, Any]],
+    requested_horizons: frozenset[str] | set[str],
+) -> dict[str, str | None]:
+    reasons: dict[str, str | None] = {"SHORT": None, "LONG": None}
+    for horizon, item in freshness.items():
+        if not item.get("available"):
+            continue
+        if system_status in {"SCANNING", "ERROR", "CORE_PREVIEW"} and (
+            horizon in requested_horizons
+        ):
+            reasons[horizon] = system_status
+        elif item.get("expired"):
+            reasons[horizon] = "STALE"
+    return reasons
+
+
 class PreflightError(RuntimeError):
     def __init__(self, status: HTTPStatus, message: str):
         super().__init__(message)
@@ -98,7 +501,10 @@ class RadarRuntime:
         self.scanner = scanner
         self.config = config
         self.push_notifier = push_notifier or build_push_notifier()
-        self._scan_lock = threading.Lock()
+        # Re-entrant because the public single-scan guard holds this lock for
+        # the whole analyze -> reconcile -> preflight -> response transaction,
+        # while the legacy inner path also enters it defensively.
+        self._scan_lock = threading.RLock()
         self._state_lock = threading.Lock()
         self._preflight_lock = threading.Lock()
         self._preflight_cache: dict[
@@ -109,15 +515,36 @@ class RadarRuntime:
         ] = {}
         self._preflight_cache_ttl_seconds = 12.0
         self._latest: RadarReport | None = load_latest_report(config.data_dir)
+        restored_runtime = load_runtime_state(config.data_dir)
         self._preview: RadarReport | None = None
         self._running = False
-        self._last_error: str | None = None
-        self._last_attempt_status = "RESTORED" if self._latest is not None else "IDLE"
+        restored_status = str(restored_runtime.get("last_attempt_status") or "").upper()
+        if restored_status == "SCANNING":
+            restored_status = "ERROR"
+            restored_runtime["last_error"] = "上一次掃描在完成前中斷；舊資料不可冒充最新。"
+        self._last_error: str | None = (
+            str(restored_runtime.get("last_error"))
+            if restored_runtime.get("last_error")
+            else None
+        )
+        self._last_attempt_status = (
+            restored_status
+            if restored_status in {"SUCCESS", "ERROR"}
+            else "RESTORED"
+            if self._latest is not None
+            else "IDLE"
+        )
         self._scan_id: str | None = None
         self._scan_started_at: str | None = None
-        self._scan_mode = "FULL"
+        try:
+            self._scan_mode = _normalize_scan_mode(
+                restored_runtime.get("scan_mode", "FULL")
+            )
+        except ValueError:
+            self._scan_mode = "FULL"
         self._scan_push_subscriptions: dict[str, dict[str, Any]] = {}
         self._max_scan_push_subscriptions = 8
+        self._single_inflight: set[tuple[str, str]] = set()
         self._progress: dict[str, Any] = self._idle_progress()
 
     def stop(self) -> None:
@@ -135,6 +562,11 @@ class RadarRuntime:
             else None
         )
         with self._state_lock:
+            if self._single_inflight:
+                raise PreflightError(
+                    HTTPStatus.CONFLICT,
+                    "單幣掃描正在執行；完成後再啟動全市場掃描",
+                )
             if self._running:
                 if normalized_subscription is not None:
                     self._register_scan_push_locked(normalized_subscription)
@@ -156,7 +588,7 @@ class RadarRuntime:
     def scan_blocking(self, scan_mode: str = "FULL") -> RadarReport:
         normalized_mode = _normalize_scan_mode(scan_mode)
         with self._state_lock:
-            if self._running:
+            if self._running or self._single_inflight:
                 raise RuntimeError("scan already running")
             self._begin_scan_locked(normalized_mode)
         try:
@@ -233,6 +665,11 @@ class RadarRuntime:
                 )
                 for horizon, item in horizon_freshness.items()
             }
+            read_only_reasons = _read_only_reasons(
+                system_status,
+                horizon_freshness,
+                unavailable_horizons,
+            )
             payload["runtime_status"] = system_status
             payload["actionable"] = actionable
             payload["snapshot_expired"] = snapshot_expired
@@ -240,6 +677,10 @@ class RadarRuntime:
             payload["horizon_freshness"] = horizon_freshness
             payload["max_signals"] = self.config.max_signals
             payload["safety"]["horizon_actionable"] = horizon_actionable
+            payload["horizon_read_only_reasons"] = read_only_reasons
+            payload["safety"]["horizon_read_only_reasons"] = deepcopy(
+                read_only_reasons
+            )
             payload["scan_in_progress_horizons"] = (
                 sorted(unavailable_horizons) if system_status == "SCANNING" else []
             )
@@ -258,6 +699,9 @@ class RadarRuntime:
             if not horizon_freshness["LONG"]["available"]:
                 payload["long_signals"] = []
                 payload["long_watchlist"] = []
+            for horizon, reason in read_only_reasons.items():
+                if reason:
+                    _project_horizon_read_only(payload, horizon, reason)
             if not actionable:
                 payload["historical_signal_count"] = len(payload.get("signals", []))
                 payload["historical_long_signal_count"] = len(
@@ -271,28 +715,33 @@ class RadarRuntime:
                     payload["signals_suppressed_reason"] = None
                     payload["signals_read_only_reason"] = "STALE"
                 elif system_status == "SCANNING":
-                    # A partial scan invalidates only the horizon currently being
-                    # recalculated. The other radar remains visible and usable at
-                    # its own timestamp instead of disappearing with the request.
-                    if "SHORT" in unavailable_horizons:
-                        payload["signals"] = []
-                        payload["watchlist"] = []
-                        payload["market_map"] = []
-                    if "LONG" in unavailable_horizons:
-                        payload["long_signals"] = []
-                        payload["long_watchlist"] = []
-                    payload["signals_suppressed_reason"] = "SCANNING"
-                    payload["signals_read_only_reason"] = None
+                    # Keep the last completed requested horizons mounted while the
+                    # replacement is running. They are reference-only projections;
+                    # the untouched horizon can remain actionable at its own age.
+                    payload["signals_suppressed_reason"] = None
+                    payload["signals_read_only_reason"] = (
+                        "SCANNING"
+                        if all(
+                            not item["available"]
+                            or read_only_reasons[horizon] == "SCANNING"
+                            for horizon, item in horizon_freshness.items()
+                        )
+                        else None
+                    )
                 elif system_status == "ERROR" and unavailable_horizons:
-                    if "SHORT" in unavailable_horizons:
-                        payload["signals"] = []
-                        payload["watchlist"] = []
-                        payload["market_map"] = []
-                    if "LONG" in unavailable_horizons:
-                        payload["long_signals"] = []
-                        payload["long_watchlist"] = []
-                    payload["signals_suppressed_reason"] = "ERROR"
-                    payload["signals_read_only_reason"] = None
+                    # A failed attempt must not erase the last completed cards.
+                    # Only the requested horizon is disabled; the other horizon
+                    # retains its independent timestamp and permission.
+                    payload["signals_suppressed_reason"] = None
+                    payload["signals_read_only_reason"] = (
+                        "ERROR"
+                        if all(
+                            not item["available"]
+                            or read_only_reasons[horizon] == "ERROR"
+                            for horizon, item in horizon_freshness.items()
+                        )
+                        else None
+                    )
                 else:
                     payload["signals"] = []
                     payload["watchlist"] = []
@@ -316,17 +765,39 @@ class RadarRuntime:
                 for horizon in ("SHORT", "LONG")
             }
             payload["runtime_status"] = "CORE_PREVIEW"
-            payload["actionable"] = True
+            payload["actionable"] = False
             payload["preliminary"] = True
             payload["deep_data_pending"] = True
             payload["scan_request_mode"] = self._scan_mode
             payload["horizon_freshness"] = horizon_freshness
             payload["signals_suppressed_reason"] = None
-            payload["safety"]["actionable"] = True
+            payload["safety"]["actionable"] = False
+            requested = (
+                {"SHORT", "LONG"}
+                if self._scan_mode == "FULL"
+                else {self._scan_mode}
+            )
             payload["safety"]["horizon_actionable"] = {
-                horizon: item["available"] and not item["expired"]
+                horizon: bool(
+                    horizon not in requested
+                    and item.get("available")
+                    and not item.get("expired")
+                )
                 for horizon, item in horizon_freshness.items()
             }
+            read_only_reasons = _read_only_reasons(
+                "CORE_PREVIEW",
+                horizon_freshness,
+                requested,
+            )
+            payload["horizon_read_only_reasons"] = read_only_reasons
+            payload["safety"]["horizon_read_only_reasons"] = deepcopy(
+                read_only_reasons
+            )
+            for horizon, reason in read_only_reasons.items():
+                if reason:
+                    _project_horizon_read_only(payload, horizon, reason)
+            payload["signals_read_only_reason"] = "CORE_PREVIEW"
             return payload
 
     def statistics(self) -> dict[str, Any]:
@@ -373,10 +844,69 @@ class RadarRuntime:
             ),
         }
 
-    def scan_instrument_dict(self, inst_id: str) -> dict[str, Any]:
-        """Run an isolated, non-persisted analysis for one requested symbol."""
+    def scan_instrument_dict(
+        self,
+        inst_id: str,
+        horizon: str = "BOTH",
+    ) -> dict[str, Any]:
+        """Run one deduplicated single-symbol transaction end to end."""
 
         normalized_id = _normalize_usdt_swap_id(inst_id)
+        requested_horizon = str(horizon or "BOTH").strip().upper()
+        requested_horizon = {
+            "15M": "SHORT",
+            "4H": "LONG",
+            "FULL": "BOTH",
+            "ALL": "BOTH",
+        }.get(requested_horizon, requested_horizon)
+        if requested_horizon not in {"SHORT", "LONG", "BOTH"}:
+            raise PreflightError(
+                HTTPStatus.BAD_REQUEST,
+                "單幣掃描週期必須是 15m、4H 或 15m＋4H",
+            )
+        request_key = (normalized_id, requested_horizon)
+        with self._state_lock:
+            if self._running:
+                raise PreflightError(
+                    HTTPStatus.CONFLICT,
+                    "全市場掃描正在執行，完成後才能掃描單一幣種",
+                )
+            if self._single_inflight:
+                raise PreflightError(
+                    HTTPStatus.CONFLICT,
+                    "另一個單幣掃描正在執行，請等待本輪完成",
+                )
+            self._single_inflight.add(request_key)
+        try:
+            with self._scan_lock:
+                return self._scan_instrument_dict_locked(
+                    normalized_id,
+                    requested_horizon,
+                )
+        finally:
+            with self._state_lock:
+                self._single_inflight.discard(request_key)
+
+    def _scan_instrument_dict_locked(
+        self,
+        inst_id: str,
+        horizon: str = "BOTH",
+    ) -> dict[str, Any]:
+        """Refresh one symbol for the explicitly requested radar horizon."""
+
+        normalized_id = _normalize_usdt_swap_id(inst_id)
+        requested_horizon = str(horizon or "BOTH").strip().upper()
+        requested_horizon = {
+            "15M": "SHORT",
+            "4H": "LONG",
+            "FULL": "BOTH",
+            "ALL": "BOTH",
+        }.get(requested_horizon, requested_horizon)
+        if requested_horizon not in {"SHORT", "LONG", "BOTH"}:
+            raise PreflightError(
+                HTTPStatus.BAD_REQUEST,
+                "單幣掃描週期必須是 15m、4H 或 15m＋4H",
+            )
         analyzer = getattr(self.scanner, "scan_instrument", None)
         if not callable(analyzer):
             raise PreflightError(
@@ -394,7 +924,39 @@ class RadarRuntime:
                 market_bias = deepcopy(
                     self._latest.market_bias if self._latest is not None else {}
                 )
+                long_market_bias = deepcopy(
+                    self._latest.long_market_bias
+                    if self._latest is not None
+                    else {}
+                )
+                stored_signals: dict[str, Any | None] = {"SHORT": None, "LONG": None}
+                horizon_timestamps: dict[str, str] = {"SHORT": "", "LONG": ""}
+                if self._latest is not None:
+                    stored_signals["SHORT"] = next(
+                        (
+                            item
+                            for item in self._latest.signals
+                            if item.inst_id == normalized_id
+                        ),
+                        None,
+                    )
+                    stored_signals["LONG"] = next(
+                        (
+                            item
+                            for item in self._latest.long_signals
+                            if item.inst_id == normalized_id
+                        ),
+                        None,
+                    )
+                    horizon_timestamps = {
+                        horizon: self._previous_horizon_timestamp(
+                            self._latest,
+                            horizon,
+                        )
+                        for horizon in ("SHORT", "LONG")
+                    }
                 btc_bias = "NEUTRAL"
+                long_btc_bias = "NEUTRAL"
                 if self._latest is not None:
                     btc_state = next(
                         (
@@ -406,8 +968,53 @@ class RadarRuntime:
                     )
                     if btc_state is not None:
                         btc_bias = btc_state.direction
+                    long_btc_state = next(
+                        (
+                            item
+                            for item in self._latest.long_market_map
+                            if item.inst_id == "BTC-USDT-SWAP"
+                        ),
+                        None,
+                    )
+                    if long_btc_state is not None:
+                        long_btc_bias = long_btc_state.direction
+                btc_bias = str(
+                    dict(market_bias.get("btc", {}) or {}).get("direction")
+                    or btc_bias
+                )
+                long_btc_bias = str(
+                    dict(long_market_bias.get("btc", {}) or {}).get("direction")
+                    or long_btc_bias
+                )
+            repository = getattr(self.scanner, "repository", None)
+            active_loader = getattr(repository, "load_active_signal", None)
+            repository_active_ids: set[str] = set()
+            if callable(active_loader):
+                for stored_horizon in ("SHORT", "LONG"):
+                    if (
+                        requested_horizon != "BOTH"
+                        and requested_horizon != stored_horizon
+                    ):
+                        continue
+                    active_signal = active_loader(normalized_id, stored_horizon)
+                    if active_signal is not None:
+                        stored_signals[stored_horizon] = active_signal
+                        if active_signal.trigger_id:
+                            repository_active_ids.add(active_signal.trigger_id)
             try:
-                analysis = analyzer(normalized_id, market_bias, btc_bias)
+                analyzer_parameters = inspect.signature(analyzer).parameters
+                analyzer_args: dict[str, Any] = {}
+                if "market_bias" in analyzer_parameters:
+                    analyzer_args["market_bias"] = market_bias
+                if "long_market_bias" in analyzer_parameters:
+                    analyzer_args["long_market_bias"] = long_market_bias
+                if "btc_bias" in analyzer_parameters:
+                    analyzer_args["btc_bias"] = btc_bias
+                if "long_btc_bias" in analyzer_parameters:
+                    analyzer_args["long_btc_bias"] = long_btc_bias
+                if "requested_horizon" in analyzer_parameters:
+                    analyzer_args["requested_horizon"] = requested_horizon
+                analysis = analyzer(normalized_id, **analyzer_args)
             except ValueError as exc:
                 raise PreflightError(HTTPStatus.UNPROCESSABLE_ENTITY, str(exc)) from exc
             except Exception as exc:
@@ -420,7 +1027,113 @@ class RadarRuntime:
                 self._release_scanner_transient_data()
 
         def horizon_payload(result: Any, horizon: str) -> dict[str, Any]:
+            if requested_horizon != "BOTH" and requested_horizon != horizon:
+                return {
+                    "horizon": horizon,
+                    "horizon_label": "4H 長線" if horizon == "LONG" else "15m 短線",
+                    "kind": "NOT_REQUESTED",
+                    "reason_code": "horizon_not_requested",
+                    "message": "本次沒有執行這個週期，既有另一週期結果不受影響。",
+                    "item": None,
+                    "preflight": None,
+                    "latest_confirmation": None,
+                }
+            stored_signal = stored_signals[horizon]
+            confirmation = (
+                _latest_confirmation(result, stored_signal.direction)
+                if stored_signal is not None
+                else None
+            )
+            preflight = None
+            if stored_signal is not None:
+                try:
+                    preflight = build_preflight_payload(
+                        stored_signal,
+                        analysis.ticker,
+                        analysis.context,
+                        self.config,
+                        report_generated_at=(
+                            horizon_timestamps[horizon]
+                            or analysis.analyzed_at
+                        ),
+                    )
+                    preflight = _merge_preflight_confirmation(
+                        preflight,
+                        confirmation or {},
+                    )
+                    preflight["cached"] = False
+                    preflight["cache_age_seconds"] = 0.0
+                    preflight["cache_ttl_seconds"] = 0.0
+                    if preflight.get("verdict", {}).get("status") == "PLAN_INVALIDATED":
+                        repository = getattr(self.scanner, "repository", None)
+                        invalidator = getattr(repository, "invalidate_preflight_plan", None)
+                        invalidated = False
+                        if callable(invalidator):
+                            invalidated = bool(
+                                invalidator(stored_signal, analysis.analyzed_at)
+                            )
+                            # The scanner may already have closed this exact
+                            # repository-backed episode from the newest closed
+                            # candle. That is safe to reflect, but a legacy or
+                            # newer active episode must never be deleted merely
+                            # because compare-and-set returned False.
+                            if (
+                                not invalidated
+                                and stored_signal.trigger_id in repository_active_ids
+                                and callable(active_loader)
+                            ):
+                                active_now = active_loader(normalized_id, horizon)
+                                invalidated = active_now is None
+                        if invalidated:
+                            cache_key = (
+                                horizon_timestamps[horizon] or analysis.analyzed_at,
+                                horizon,
+                                normalized_id,
+                            )
+                            with self._state_lock:
+                                self._invalidated_preflight_signals[cache_key] = deepcopy(
+                                    stored_signal
+                                )
+                                current_report = self._latest
+                                if current_report is not None:
+                                    if horizon == "LONG":
+                                        report_to_save = replace(
+                                            current_report,
+                                            long_signals=[
+                                                item
+                                                for item in current_report.long_signals
+                                                if item.trigger_id
+                                                != stored_signal.trigger_id
+                                            ],
+                                        )
+                                    else:
+                                        report_to_save = replace(
+                                            current_report,
+                                            signals=[
+                                                item
+                                                for item in current_report.signals
+                                                if item.trigger_id
+                                                != stored_signal.trigger_id
+                                            ],
+                                        )
+                                    # Keep memory and latest.json on the same
+                                    # commit while the full single-scan lock is
+                                    # still held.
+                                    save_report(report_to_save, self.config.data_dir)
+                                    self._latest = report_to_save
+                except (TypeError, ValueError) as exc:
+                    confirmation = {
+                        "status": "DATA_UNAVAILABLE",
+                        "label": "舊計畫資料不足",
+                        "message": f"無法安全核對舊交易計畫：{exc}",
+                        "new_entry_allowed": False,
+                    }
             if result is None:
+                canonical_decision = _canonical_single_decision(
+                    stored_signal,
+                    preflight,
+                    confirmation,
+                )
                 return {
                     "horizon": horizon,
                     "horizon_label": "4H 長線" if horizon == "LONG" else "15m 短線",
@@ -428,16 +1141,27 @@ class RadarRuntime:
                     "reason_code": "data_unavailable",
                     "message": "這個週期的資料目前不足，沒有使用替代值硬算。",
                     "item": None,
+                    "preflight": preflight,
+                    "latest_confirmation": confirmation,
+                    "decision_context": canonical_decision,
                 }
             signal = result.signal
             item = signal or result.market_state
+            canonical_decision = _canonical_single_decision(
+                item,
+                preflight,
+                confirmation,
+            )
             if signal is not None:
-                message = "已使用最新資料形成正式 Trigger 與交易計畫。"
+                message = str(
+                    canonical_decision.get("final", {}).get("label")
+                    or "已使用最新資料更新同一個 Signal Episode。"
+                )
                 kind = "SIGNAL"
             elif item is not None:
-                message = (
-                    "目前尚未形成正式 Trigger；下方仍顯示最新方向、階段、"
-                    "多週期證據與缺少條件。"
+                message = str(
+                    canonical_decision.get("final", {}).get("label")
+                    or "目前尚未形成正式 Trigger；顯示最新方向與等待原因。"
                 )
                 kind = "STATE"
             else:
@@ -450,16 +1174,23 @@ class RadarRuntime:
                 "reason_code": result.reason,
                 "message": message,
                 "item": (
-                    public_candidate_payload(item, signal=signal is not None)
+                    {
+                        **public_candidate_payload(item, signal=signal is not None),
+                        "decision_context": canonical_decision,
+                    }
                     if item is not None
                     else None
                 ),
+                "preflight": preflight,
+                "latest_confirmation": confirmation,
+                "decision_context": canonical_decision,
             }
 
         return {
             "inst_id": analysis.inst_id,
             "analyzed_at": analysis.analyzed_at,
             "source": "ON_DEMAND_SINGLE_INSTRUMENT",
+            "requested_horizon": requested_horizon,
             "current_price": analysis.ticker.last,
             "short": horizon_payload(analysis.short_result, "SHORT"),
             "long": horizon_payload(analysis.long_result, "LONG"),
@@ -468,26 +1199,38 @@ class RadarRuntime:
                 "analysis_only": True,
                 "auto_ordering": False,
                 "full_market_scan": False,
+                "persisted_signal_episode": True,
+                "persisted_to_market_report": False,
                 "persisted_to_report": False,
                 "note": (
-                    "只掃描這一個幣；結果只回傳目前頁面，不加入全市場報告，"
-                    "也不會在伺服器記憶體保留完整單幣分析。"
+                    "只掃描這一個幣；Signal Episode 會安全延續，但結果不加入"
+                    "全市場排行，也不在伺服器記憶體保留完整單幣分析。"
                 ),
             },
         }
 
     def preflight_dict(self, inst_id: str, horizon: str) -> dict[str, Any]:
-        """Refresh one stored signal's execution conditions without rescanning."""
+        """Run the canonical single-symbol refresh for one stored signal."""
 
         normalized_id = str(inst_id or "").strip().upper()
-        normalized_horizon = {
-            "15M": "SHORT",
-            "SHORT": "SHORT",
-            "4H": "LONG",
-            "LONG": "LONG",
-        }.get(str(horizon or "").strip().upper())
+        normalized_horizon = _normalize_horizon(horizon)
         if not normalized_id.endswith("-USDT-SWAP") or normalized_horizon is None:
             raise PreflightError(HTTPStatus.BAD_REQUEST, "幣種或長短線參數不正確")
+
+        # Production uses one canonical source for both the card's
+        # "更新現狀" action and the dedicated coin scan page.  Lightweight
+        # scanner fixtures without scan_instrument keep the compatibility path
+        # below for deterministic unit tests and offline integrations.
+        if callable(getattr(self.scanner, "scan_instrument", None)):
+            refreshed = self.scan_instrument_dict(normalized_id, normalized_horizon)
+            side = refreshed["long" if normalized_horizon == "LONG" else "short"]
+            payload = side.get("preflight")
+            if payload is None:
+                raise PreflightError(
+                    HTTPStatus.NOT_FOUND,
+                    "目前沒有可核對的舊正式 Trigger；請以單幣最新分析結果為準",
+                )
+            return deepcopy(payload)
 
         with self._state_lock:
             system_status, _, _ = self._system_status_locked()
@@ -583,7 +1326,7 @@ class RadarRuntime:
                 return deepcopy(cached_payload)
 
     def reanalyze_preflight_dict(self, inst_id: str, horizon: str) -> dict[str, Any]:
-        """Re-run one invalidated symbol through the unchanged V3.3 pipeline."""
+        """Re-run one invalidated symbol through the V3.4 context pipeline."""
 
         normalized_id = str(inst_id or "").strip().upper()
         normalized_horizon = {
@@ -804,6 +1547,7 @@ class RadarRuntime:
             "percent": None,
             "message": f"正在啟動{_SCAN_MODE_LABELS[self._scan_mode]}",
         }
+        self._persist_runtime_state_locked()
 
     def _scan_worker(self) -> None:
         report: RadarReport | None = None
@@ -890,6 +1634,7 @@ class RadarRuntime:
                             "percent": 100.0,
                             "message": f"{_SCAN_MODE_LABELS[scan_mode]}失敗",
                         }
+                        self._persist_runtime_state_locked()
                     LOGGER.info(
                         "Scan attempt failed without replacing completed snapshot: "
                         "id=%s mode=%s status=%s",
@@ -919,6 +1664,7 @@ class RadarRuntime:
                             else f"{_SCAN_MODE_LABELS[scan_mode]}失敗"
                         ),
                     }
+                    self._persist_runtime_state_locked()
                 LOGGER.info(
                     "Scan finished: id=%s mode=%s status=%s coverage=%.2f signals=%d",
                     scan_id,
@@ -941,6 +1687,7 @@ class RadarRuntime:
                         "percent": None,
                         "message": "最新掃描失敗",
                     }
+                    self._persist_runtime_state_locked()
                 raise
 
     @staticmethod
@@ -985,6 +1732,7 @@ class RadarRuntime:
                     long_signals=[],
                     long_watchlist=[],
                     long_market_map=[],
+                    long_market_bias={},
                     short_completed_at=completed_at,
                     long_completed_at="",
                 )
@@ -997,6 +1745,7 @@ class RadarRuntime:
                 long_signals=previous.long_signals,
                 long_watchlist=previous.long_watchlist,
                 long_market_map=previous.long_market_map,
+                long_market_bias=previous.long_market_bias,
                 long_completed_at=previous_long_completed_at,
                 short_completed_at=completed_at,
                 data_quality=quality,
@@ -1091,7 +1840,7 @@ class RadarRuntime:
         with self._state_lock:
             if not self._running or report.scan_id != self._scan_id:
                 return
-            if self._scan_mode == "SHORT":
+            if self._scan_mode in {"SHORT", "FULL"}:
                 report = self._merge_partial_report(
                     report,
                     self._latest,
@@ -1231,6 +1980,21 @@ class RadarRuntime:
             "message": "等待排程或使用者要求最新市場掃描",
         }
 
+    def _persist_runtime_state_locked(self) -> None:
+        try:
+            save_runtime_state(
+                self.config.data_dir,
+                {
+                    "last_attempt_status": self._last_attempt_status,
+                    "last_error": self._last_error,
+                    "scan_mode": self._scan_mode,
+                    "scan_id": self._scan_id,
+                    "updated_at": datetime.now(timezone.utc).isoformat(),
+                },
+            )
+        except Exception:
+            LOGGER.exception("Unable to persist scan attempt state")
+
 
 def _normalize_usdt_swap_id(value: str) -> str:
     raw = str(value or "").strip().upper().replace(" ", "")
@@ -1256,7 +2020,7 @@ def serve(runtime: RadarRuntime, host: str, port: int) -> None:
     dashboard = dashboard_path.read_bytes()
 
     class Handler(BaseHTTPRequestHandler):
-        server_version = "OKXRadar/3.3"
+        server_version = "OKXRadar/3.4"
 
         def do_GET(self) -> None:  # noqa: N802
             parsed = urlparse(self.path)
@@ -1346,7 +2110,10 @@ def serve(runtime: RadarRuntime, host: str, port: int) -> None:
             if path == "/api/instrument/scan":
                 try:
                     payload = self._read_json_body()
-                    result = runtime.scan_instrument_dict(payload.get("inst_id", ""))
+                    result = runtime.scan_instrument_dict(
+                        payload.get("inst_id", ""),
+                        payload.get("horizon", "BOTH"),
+                    )
                 except PreflightError as exc:
                     self._send_json(exc.status, {"error": str(exc)})
                 except ValueError as exc:
@@ -1357,7 +2124,10 @@ def serve(runtime: RadarRuntime, host: str, port: int) -> None:
             if path == "/api/preflight/reanalyze":
                 try:
                     payload = self._read_json_body()
-                    result = runtime.reanalyze_preflight_dict(
+                    # Backward-compatible alias for older installed PWA shells.
+                    # It must use the same canonical scan as every current
+                    # single-symbol refresh and must not mutate the report.
+                    result = runtime.preflight_dict(
                         payload.get("inst_id", ""),
                         payload.get("horizon", ""),
                     )
@@ -1379,6 +2149,9 @@ def serve(runtime: RadarRuntime, host: str, port: int) -> None:
                     push_subscription,
                     scan_mode=scan_mode,
                 )
+            except PreflightError as exc:
+                self._send_json(exc.status, {"error": str(exc)})
+                return
             except PushSubscriptionError as exc:
                 self._send_json(HTTPStatus.BAD_REQUEST, {"error": str(exc)})
                 return

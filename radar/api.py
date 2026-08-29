@@ -163,7 +163,7 @@ class OKXPublicClient:
                 url,
                 headers={
                     "Accept": "application/json",
-                    "User-Agent": "okx-usdt-perp-radar/3.3 (public-data-only)",
+                    "User-Agent": "okx-usdt-perp-radar/3.4 (public-data-only)",
                 },
             )
             try:

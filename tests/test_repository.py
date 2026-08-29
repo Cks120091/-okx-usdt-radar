@@ -1,8 +1,11 @@
+import json
+import sqlite3
 import tempfile
 import unittest
 from dataclasses import replace
 from datetime import datetime, timezone
 from pathlib import Path
+from unittest.mock import patch
 
 from radar.models import MarketContext, MarketState, Signal
 from radar.repository import SignalRepository, classify_microstructure
@@ -54,6 +57,8 @@ def signal_fixture(
             }
         },
         data_timestamp=core_timestamp,
+        strategy_version="V3.4_CONTEXT",
+        feature_schema_version="3.4.0",
     )
 
 
@@ -89,6 +94,71 @@ class SignalRepositoryTests(unittest.TestCase):
     def tearDown(self):
         self.repository.close()
         self.temp_dir.cleanup()
+
+    def test_dual_horizon_batch_rolls_back_short_when_long_reconcile_fails(self):
+        short_signal = signal_fixture("ATOMIC-SHORT-USDT-SWAP")
+        short_state = state_fixture(
+            short_signal,
+            short_signal.data_timestamp,
+        )
+        long_signal = replace(
+            signal_fixture("ATOMIC-LONG-USDT-SWAP"),
+            radar_horizon="LONG",
+            market_story={
+                "trigger": {
+                    "event_ts": 1_700_000_000_000,
+                    "trigger_event_key": (
+                        "LONG:LONG:BREAKOUT:1700000000000:ZONE-A"
+                    ),
+                }
+            },
+        )
+        long_state = state_fixture(
+            long_signal,
+            long_signal.data_timestamp,
+        )
+        original_reconcile = self.repository.reconcile
+
+        def fail_long(raw_signals, market_states, completed_at, horizon):
+            if horizon == "LONG":
+                raise RuntimeError("simulated LONG persistence failure")
+            return original_reconcile(
+                raw_signals,
+                market_states,
+                completed_at,
+                horizon,
+            )
+
+        with patch.object(
+            self.repository,
+            "reconcile",
+            side_effect=fail_long,
+        ):
+            with self.assertRaisesRegex(RuntimeError, "LONG persistence"):
+                self.repository.reconcile_batch(
+                    {
+                        "SHORT": ([short_signal], [short_state]),
+                        "LONG": ([long_signal], [long_state]),
+                    },
+                    "2026-08-29T00:00:00+00:00",
+                )
+
+        for table in ("signals", "signal_events", "story_state"):
+            count = self.repository._connection.execute(
+                f"SELECT COUNT(*) FROM {table}"
+            ).fetchone()[0]
+            self.assertEqual(count, 0, f"{table} retained a half-commit")
+        self.assertEqual(self.repository._transaction_depth, 0)
+
+        # A rolled-back batch must leave the connection usable by the existing
+        # independent single-horizon path.
+        committed = self.repository.reconcile(
+            [short_signal],
+            [short_state],
+            "2026-08-29T00:01:00+00:00",
+            "SHORT",
+        )
+        self.assertEqual(len(committed), 1)
 
     def test_recent_history_is_compact_and_excludes_raw_payload(self):
         created = self.repository.reconcile(
@@ -175,6 +245,97 @@ class SignalRepositoryTests(unittest.TestCase):
             "SELECT COUNT(*) FROM signals"
         ).fetchone()[0]
         self.assertEqual(count, 1)
+
+    def test_duplicate_raw_candidates_are_applied_in_core_time_order(self):
+        raw = signal_fixture("RAW-ORDER-USDT-SWAP")
+        first_ts = raw.data_timestamp + 900_000
+        second_ts = raw.data_timestamp + 1_800_000
+        first_update = replace(
+            raw,
+            score=87.0,
+            data_timestamp=first_ts,
+            closed_candle_ts=first_ts,
+            market_metrics={
+                **raw.market_metrics,
+                "core_timestamp": first_ts,
+            },
+        )
+        second_update = replace(
+            raw,
+            score=88.0,
+            data_timestamp=second_ts,
+            closed_candle_ts=second_ts,
+            market_metrics={
+                **raw.market_metrics,
+                "core_timestamp": second_ts,
+            },
+        )
+
+        def run(repository, candidates):
+            repository.reconcile(
+                [raw],
+                [state_fixture(raw, raw.data_timestamp)],
+                "2026-08-20T00:00:00+00:00",
+                "SHORT",
+            )
+            output = repository.reconcile(
+                candidates,
+                [state_fixture(second_update, second_ts)],
+                "2026-08-20T00:30:00+00:00",
+                "SHORT",
+            )
+            row = repository._connection.execute(
+                "SELECT status, outcome FROM signals WHERE inst_id=?",
+                (raw.inst_id,),
+            ).fetchone()
+            return output, row
+
+        forward_output, forward_row = run(
+            self.repository,
+            [first_update, second_update],
+        )
+        reverse_repository = SignalRepository(
+            Path(self.temp_dir.name) / "reverse-order.sqlite3"
+        )
+        try:
+            reverse_output, reverse_row = run(
+                reverse_repository,
+                [second_update, first_update],
+            )
+        finally:
+            reverse_repository.close()
+
+        for output, row in (
+            (forward_output, forward_row),
+            (reverse_output, reverse_row),
+        ):
+            self.assertEqual(len(output), 1)
+            self.assertEqual(output[0].score, 88.0)
+            self.assertEqual(output[0].lifecycle["age_bars"], 2)
+            self.assertEqual(row["status"], "ACTIVE")
+            self.assertIsNone(row["outcome"])
+
+    def test_load_story_exposes_active_last_evaluated_core_timestamp(self):
+        raw = signal_fixture("STORY-CORE-USDT-SWAP")
+        next_ts = raw.data_timestamp + 900_000
+        self.repository.reconcile(
+            [raw],
+            [state_fixture(raw, raw.data_timestamp)],
+            "2026-08-20T00:00:00+00:00",
+            "SHORT",
+        )
+        state = state_fixture(raw, next_ts)
+        self.repository.reconcile(
+            [],
+            [state],
+            "2026-08-20T00:15:00+00:00",
+            "SHORT",
+        )
+
+        story = self.repository.load_story(raw.inst_id, "SHORT")
+
+        self.assertEqual(story["active_trigger_direction"], "LONG")
+        self.assertEqual(story["last_evaluated_core_ts"], next_ts)
 
     def test_same_core_snapshot_does_not_advance_lifecycle_twice(self):
         event_ts = 1_700_000_000_000
@@ -315,6 +476,895 @@ class SignalRepositoryTests(unittest.TestCase):
         self.assertEqual(row["tp_sl_order"], "UNKNOWN_FROM_LIVE_TICKER")
         self.assertFalse(self.repository.performance()["available"])
 
+    def test_closed_event_tombstone_survives_repository_restart(self):
+        raw = signal_fixture("TOMBSTONE-USDT-SWAP")
+        created = self.repository.reconcile(
+            [raw],
+            [state_fixture(raw, raw.data_timestamp)],
+            "2026-08-20T00:00:00+00:00",
+            "SHORT",
+        )[0]
+        self.assertTrue(
+            self.repository.invalidate_preflight_plan(
+                created,
+                "2026-08-20T00:05:00+00:00",
+            )
+        )
+
+        database_path = Path(self.temp_dir.name) / "radar-state.sqlite3"
+        self.repository.close()
+        self.repository = SignalRepository(database_path)
+        replay = replace(
+            raw,
+            data_timestamp=raw.data_timestamp + 900_000,
+            closed_candle_ts=raw.data_timestamp + 900_000,
+            market_metrics={
+                **raw.market_metrics,
+                "core_timestamp": raw.data_timestamp + 900_000,
+                "core_close": 100.0,
+            },
+        )
+
+        output = self.repository.reconcile(
+            [replay],
+            [state_fixture(replay, replay.data_timestamp)],
+            "2026-08-20T00:15:00+00:00",
+            "SHORT",
+        )
+        rows = self.repository._connection.execute(
+            "SELECT signal_id, status FROM signals WHERE inst_id=?",
+            (raw.inst_id,),
+        ).fetchall()
+
+        self.assertEqual(output, [])
+        self.assertIsNone(self.repository.load_active_signal(raw.inst_id, "SHORT"))
+        self.assertEqual([(row["signal_id"], row["status"]) for row in rows], [(created.trigger_id, "CLOSED")])
+
+    def test_price_returning_to_entry_cannot_revive_closed_plan(self):
+        raw = signal_fixture("RETURN-USDT-SWAP")
+        created = self.repository.reconcile(
+            [raw],
+            [state_fixture(raw, raw.data_timestamp)],
+            "2026-08-20T00:00:00+00:00",
+            "SHORT",
+        )[0]
+        self.repository.invalidate_preflight_plan(
+            created,
+            "2026-08-20T00:05:00+00:00",
+        )
+        returned_to_entry = replace(
+            raw,
+            data_timestamp=raw.data_timestamp + 900_000,
+            closed_candle_ts=raw.data_timestamp + 900_000,
+            market_metrics={
+                **raw.market_metrics,
+                "core_timestamp": raw.data_timestamp + 900_000,
+                "core_high": 101.0,
+                "core_low": 99.0,
+                "core_close": 100.0,
+            },
+        )
+
+        replay = self.repository.reconcile(
+            [returned_to_entry],
+            [state_fixture(returned_to_entry, returned_to_entry.data_timestamp)],
+            "2026-08-20T00:15:00+00:00",
+            "SHORT",
+        )
+        active_count = self.repository._connection.execute(
+            "SELECT COUNT(*) FROM signals WHERE inst_id=? AND status='ACTIVE'",
+            (raw.inst_id,),
+        ).fetchone()[0]
+
+        self.assertEqual(replay, [])
+        self.assertEqual(active_count, 0)
+
+        renamed_old_event = replace(
+            returned_to_entry,
+            market_story={
+                "trigger": {
+                    "event_ts": raw.market_story["trigger"]["event_ts"],
+                    "trigger_event_key": "SHORT:LONG:BREAKOUT:renamed-old:ZONE-X",
+                }
+            },
+        )
+        self.assertEqual(
+            self.repository.reconcile(
+                [renamed_old_event],
+                [state_fixture(renamed_old_event, renamed_old_event.data_timestamp)],
+                "2026-08-20T00:16:00+00:00",
+                "SHORT",
+            ),
+            [],
+        )
+
+        new_event_ts = raw.data_timestamp + 1_800_000
+        new_trigger = replace(
+            returned_to_entry,
+            entry_low="101",
+            entry_high="101",
+            stop_loss="91",
+            take_profit_1="121",
+            take_profit_2="131",
+            data_timestamp=new_event_ts,
+            closed_candle_ts=new_event_ts,
+            market_story={
+                "trigger": {
+                    "event_ts": new_event_ts,
+                    "trigger_event_key": f"SHORT:LONG:BREAKOUT:{new_event_ts}:ZONE-B",
+                }
+            },
+            market_metrics={
+                **raw.market_metrics,
+                "core_timestamp": new_event_ts,
+                "core_high": 102.0,
+                "core_low": 100.0,
+                "core_close": 101.0,
+            },
+        )
+        replacement = self.repository.reconcile(
+            [new_trigger],
+            [state_fixture(new_trigger, new_event_ts, 102.0, 100.0)],
+            "2026-08-20T00:30:00+00:00",
+            "SHORT",
+        )[0]
+
+        self.assertNotEqual(replacement.trigger_id, created.trigger_id)
+        self.assertEqual(replacement.entry_low, "101")
+
+    def test_closed_event_replay_cannot_mutate_a_newer_active_episode(self):
+        old = signal_fixture("REPLAY-USDT-SWAP")
+        old_created = self.repository.reconcile(
+            [old],
+            [state_fixture(old, old.data_timestamp)],
+            "2026-08-20T00:00:00+00:00",
+            "SHORT",
+        )[0]
+        self.repository.invalidate_preflight_plan(
+            old_created,
+            "2026-08-20T00:05:00+00:00",
+        )
+        new_ts = old.data_timestamp + 900_000
+        new = replace(
+            old,
+            score=94.0,
+            evidence=["新 Episode 證據"],
+            entry_low="101",
+            entry_high="101",
+            stop_loss="91",
+            take_profit_1="121",
+            take_profit_2="131",
+            data_timestamp=new_ts,
+            closed_candle_ts=new_ts,
+            market_story={
+                "trigger": {
+                    "event_ts": new_ts,
+                    "trigger_event_key": f"SHORT:LONG:BREAKOUT:{new_ts}:ZONE-B",
+                }
+            },
+            market_metrics={
+                **old.market_metrics,
+                "core_timestamp": new_ts,
+                "core_high": 102.0,
+                "core_low": 100.0,
+                "core_close": 101.0,
+            },
+        )
+        new_created = self.repository.reconcile(
+            [new],
+            [state_fixture(new, new_ts, 102.0, 100.0)],
+            "2026-08-20T00:15:00+00:00",
+            "SHORT",
+        )[0]
+        replay_ts = new_ts + 900_000
+        old_replay = replace(
+            old,
+            score=1.0,
+            evidence=["不可倒灌的舊證據"],
+            data_timestamp=replay_ts,
+            closed_candle_ts=replay_ts,
+            market_metrics={
+                **old.market_metrics,
+                "core_timestamp": replay_ts,
+                "core_high": 81.0,
+                "core_low": 79.0,
+                "core_close": 80.0,
+            },
+        )
+
+        output = self.repository.reconcile(
+            [old_replay],
+            [state_fixture(old_replay, replay_ts, 81.0, 79.0)],
+            "2026-08-20T00:30:00+00:00",
+            "SHORT",
+        )
+        active_row = self.repository._connection.execute(
+            """
+            SELECT status, outcome, payload_json FROM signals
+            WHERE signal_id=?
+            """,
+            (new_created.trigger_id,),
+        ).fetchone()
+        persisted = self.repository.load_active_signal(old.inst_id, "SHORT")
+
+        self.assertEqual(len(output), 1)
+        self.assertEqual(output[0].trigger_id, new_created.trigger_id)
+        self.assertEqual(output[0].freshness, "DATA_UNAVAILABLE")
+        self.assertEqual(
+            output[0].lifecycle["transition"],
+            "TERMINAL_REPLAY_IGNORED",
+        )
+        self.assertFalse(output[0].actionable)
+        self.assertEqual(active_row["status"], "ACTIVE")
+        self.assertIsNone(active_row["outcome"])
+        self.assertEqual(persisted.score, 94.0)
+        self.assertEqual(persisted.evidence, ["新 Episode 證據"])
+
+        ordered_ts = replay_ts
+        valid_update = replace(
+            new,
+            score=96.0,
+            evidence=["有效的新資料"],
+            data_timestamp=ordered_ts,
+            closed_candle_ts=ordered_ts,
+            market_metrics={
+                **new.market_metrics,
+                "core_timestamp": ordered_ts,
+            },
+        )
+        replay_same_round = replace(
+            old_replay,
+            data_timestamp=ordered_ts,
+            closed_candle_ts=ordered_ts,
+            market_metrics={
+                **old.market_metrics,
+                "core_timestamp": ordered_ts,
+            },
+        )
+        valid_first = self.repository.reconcile(
+            [valid_update, replay_same_round],
+            [state_fixture(valid_update, ordered_ts)],
+            "2026-08-20T00:45:00+00:00",
+            "SHORT",
+        )
+        self.assertEqual(len(valid_first), 1)
+        self.assertEqual(valid_first[0].score, 96.0)
+        self.assertNotEqual(valid_first[0].freshness, "DATA_UNAVAILABLE")
+
+        reverse_ts = ordered_ts + 900_000
+        reverse_valid = replace(
+            valid_update,
+            score=97.0,
+            evidence=["反序仍採用有效資料"],
+            data_timestamp=reverse_ts,
+            closed_candle_ts=reverse_ts,
+            market_metrics={
+                **valid_update.market_metrics,
+                "core_timestamp": reverse_ts,
+            },
+        )
+        reverse_replay = replace(
+            replay_same_round,
+            data_timestamp=reverse_ts,
+            closed_candle_ts=reverse_ts,
+            market_metrics={
+                **replay_same_round.market_metrics,
+                "core_timestamp": reverse_ts,
+            },
+        )
+        replay_first = self.repository.reconcile(
+            [reverse_replay, reverse_valid],
+            [state_fixture(reverse_valid, reverse_ts)],
+            "2026-08-20T01:00:00+00:00",
+            "SHORT",
+        )
+        self.assertEqual(len(replay_first), 1)
+        self.assertEqual(replay_first[0].score, 97.0)
+        self.assertNotEqual(replay_first[0].freshness, "DATA_UNAVAILABLE")
+
+    def test_one_active_direction_per_horizon_while_horizons_stay_independent(self):
+        long_short_term = signal_fixture("ISOLATED-USDT-SWAP")
+        created = self.repository.reconcile(
+            [long_short_term],
+            [state_fixture(long_short_term, long_short_term.data_timestamp)],
+            "2026-08-20T00:00:00+00:00",
+            "SHORT",
+        )[0]
+        opposite_ts = long_short_term.data_timestamp + 900_000
+        short_short_term = replace(
+            long_short_term,
+            direction="SHORT",
+            entry_low="100",
+            entry_high="100",
+            stop_loss="110",
+            take_profit_1="80",
+            take_profit_2="70",
+            data_timestamp=opposite_ts,
+            closed_candle_ts=opposite_ts,
+            market_story={
+                "trigger": {
+                    "event_ts": opposite_ts,
+                    "trigger_event_key": f"SHORT:SHORT:REVERSAL:{opposite_ts}:ZONE-B",
+                }
+            },
+            market_metrics={
+                **long_short_term.market_metrics,
+                "core_timestamp": opposite_ts,
+                "core_high": 101.0,
+                "core_low": 99.0,
+                "core_close": 100.0,
+            },
+        )
+
+        short_output = self.repository.reconcile(
+            [short_short_term],
+            [state_fixture(short_short_term, opposite_ts)],
+            "2026-08-20T00:15:00+00:00",
+            "SHORT",
+        )
+        short_rows = self.repository._connection.execute(
+            """
+            SELECT signal_id, direction FROM signals
+            WHERE inst_id=? AND horizon='SHORT' AND status='ACTIVE'
+            """,
+            (long_short_term.inst_id,),
+        ).fetchall()
+
+        self.assertEqual(len(short_output), 1)
+        self.assertEqual(short_output[0].trigger_id, created.trigger_id)
+        self.assertEqual(short_output[0].direction, "LONG")
+        self.assertEqual([(row["signal_id"], row["direction"]) for row in short_rows], [(created.trigger_id, "LONG")])
+
+        short_long_term = replace(
+            short_short_term,
+            radar_horizon="LONG",
+            market_story={
+                "trigger": {
+                    "event_ts": opposite_ts,
+                    "trigger_event_key": f"LONG:SHORT:REVERSAL:{opposite_ts}:ZONE-B",
+                }
+            },
+        )
+        long_output = self.repository.reconcile(
+            [short_long_term],
+            [state_fixture(short_long_term, opposite_ts)],
+            "2026-08-20T00:15:00+00:00",
+            "LONG",
+        )
+
+        self.assertEqual(long_output[0].direction, "SHORT")
+        self.assertEqual(
+            self.repository.load_active_signal(long_short_term.inst_id, "SHORT").direction,
+            "LONG",
+        )
+        self.assertEqual(
+            self.repository.load_active_signal(long_short_term.inst_id, "LONG").direction,
+            "SHORT",
+        )
+
+    def test_restart_repairs_legacy_dual_active_rows_and_enforces_unique_main(self):
+        raw = signal_fixture("LEGACY-DUAL-USDT-SWAP")
+        created = self.repository.reconcile(
+            [raw],
+            [state_fixture(raw, raw.data_timestamp)],
+            "2026-08-20T00:00:00+00:00",
+            "SHORT",
+        )[0]
+        connection = self.repository._connection
+        connection.execute("DROP INDEX uq_signals_active_episode")
+        source = connection.execute(
+            "SELECT * FROM signals WHERE signal_id=?",
+            (created.trigger_id,),
+        ).fetchone()
+        columns = [
+            row["name"]
+            for row in connection.execute("PRAGMA table_info(signals)").fetchall()
+        ]
+        values = {column: source[column] for column in columns}
+        legacy_id = "legacy-opposite-active"
+        legacy_payload = created.to_dict()
+        legacy_payload.update(
+            {
+                "trigger_id": legacy_id,
+                "direction": "LONG",
+            }
+        )
+        legacy_payload["market_story"] = raw.market_story
+        values.update(
+            {
+                "signal_id": legacy_id,
+                "event_key": raw.market_story["trigger"]["trigger_event_key"],
+                "direction": "LONG",
+                "event_ts": raw.data_timestamp,
+                "updated_at": "2026-08-20T00:15:00+00:00",
+                "payload_json": json.dumps(legacy_payload, ensure_ascii=False),
+            }
+        )
+        placeholders = ", ".join("?" for _ in columns)
+        connection.execute(
+            f"INSERT INTO signals({', '.join(columns)}) VALUES({placeholders})",
+            [values[column] for column in columns],
+        )
+        connection.commit()
+        self.assertEqual(
+            connection.execute(
+                """
+                SELECT COUNT(*) FROM signals
+                WHERE inst_id=? AND horizon='SHORT' AND status='ACTIVE'
+                """,
+                (raw.inst_id,),
+            ).fetchone()[0],
+            2,
+        )
+
+        database_path = Path(self.temp_dir.name) / "radar-state.sqlite3"
+        self.repository.close()
+        self.repository = SignalRepository(database_path)
+        rows = self.repository._connection.execute(
+            """
+            SELECT signal_id, status, outcome FROM signals
+            WHERE inst_id=? ORDER BY signal_id
+            """,
+            (raw.inst_id,),
+        ).fetchall()
+
+        active = [row for row in rows if row["status"] == "ACTIVE"]
+        retired = [row for row in rows if row["status"] == "CLOSED"]
+        self.assertEqual([row["signal_id"] for row in active], [legacy_id])
+        self.assertEqual([row["signal_id"] for row in retired], [created.trigger_id])
+        self.assertEqual(retired[0]["outcome"], "REPOSITORY_ACTIVE_CONFLICT")
+        with self.assertRaises(sqlite3.IntegrityError):
+            self.repository._connection.execute(
+                "UPDATE signals SET status='ACTIVE' WHERE signal_id=?",
+                (created.trigger_id,),
+            )
+        self.repository._connection.rollback()
+
+        next_ts = raw.data_timestamp + 900_000
+        refreshed = replace(
+            raw,
+            score=99.0,
+            data_timestamp=next_ts,
+            closed_candle_ts=next_ts,
+            market_metrics={
+                **raw.market_metrics,
+                "core_timestamp": next_ts,
+            },
+        )
+        winner = self.repository.reconcile(
+            [refreshed],
+            [state_fixture(refreshed, next_ts)],
+            "2026-08-20T00:30:00+00:00",
+            "SHORT",
+        )[0]
+
+        self.assertEqual(winner.trigger_id, legacy_id)
+        self.assertEqual(winner.score, 99.0)
+        self.assertNotEqual(winner.freshness, "DATA_UNAVAILABLE")
+
+    def test_active_reentry_keeps_episode_id_and_original_trade_plan(self):
+        base = signal_fixture("REENTRY-USDT-SWAP")
+        raw = replace(
+            base,
+            management_plan={"plan": "ORIGINAL"},
+            market_story={
+                "trigger": {
+                    **base.market_story["trigger"],
+                    "invalidation_price": 90.0,
+                }
+            },
+        )
+        created = self.repository.reconcile(
+            [raw],
+            [state_fixture(raw, raw.data_timestamp)],
+            "2026-08-20T00:00:00+00:00",
+            "SHORT",
+        )[0]
+        next_ts = raw.data_timestamp + 900_000
+        reentry = replace(
+            raw,
+            trigger_type="CONTINUATION",
+            signal_stage="REENTRY",
+            freshness="REACTIVATED",
+            entry_low="105",
+            entry_high="106",
+            stop_loss="95",
+            take_profit_1="125",
+            take_profit_2="135",
+            risk_reward=9.0,
+            invalidation="新的失效說明不可覆蓋舊計畫",
+            management_plan={"plan": "REPLACEMENT"},
+            data_timestamp=next_ts,
+            closed_candle_ts=next_ts,
+            market_story={
+                "trigger": {
+                    "event_ts": next_ts,
+                    "trigger_event_key": f"SHORT:LONG:CONTINUATION:{next_ts}:ZONE-B",
+                    "invalidation_price": 95.0,
+                }
+            },
+            market_metrics={
+                **raw.market_metrics,
+                "core_timestamp": next_ts,
+            },
+        )
+
+        updated = self.repository.reconcile(
+            [reentry],
+            [state_fixture(reentry, next_ts)],
+            "2026-08-20T00:15:00+00:00",
+            "SHORT",
+        )[0]
+        row_count = self.repository._connection.execute(
+            "SELECT COUNT(*) FROM signals WHERE inst_id=?",
+            (raw.inst_id,),
+        ).fetchone()[0]
+
+        self.assertEqual(updated.trigger_id, created.trigger_id)
+        self.assertEqual(updated.signal_stage, "REENTRY")
+        self.assertEqual(updated.entry_low, raw.entry_low)
+        self.assertEqual(updated.entry_high, raw.entry_high)
+        self.assertEqual(updated.stop_loss, raw.stop_loss)
+        self.assertEqual(updated.take_profit_1, raw.take_profit_1)
+        self.assertEqual(updated.take_profit_2, raw.take_profit_2)
+        self.assertEqual(updated.risk_reward, raw.risk_reward)
+        self.assertEqual(updated.invalidation, raw.invalidation)
+        self.assertEqual(updated.management_plan, {"plan": "ORIGINAL"})
+        self.assertEqual(
+            updated.market_story["trigger"]["invalidation_price"],
+            90.0,
+        )
+        self.assertEqual(row_count, 1)
+
+        self.assertTrue(
+            self.repository.invalidate_preflight_plan(
+                created,
+                "2026-08-20T00:20:00+00:00",
+            )
+        )
+        replay_ts = next_ts + 900_000
+        replayed_reentry = replace(
+            reentry,
+            data_timestamp=replay_ts,
+            closed_candle_ts=replay_ts,
+            market_metrics={
+                **reentry.market_metrics,
+                "core_timestamp": replay_ts,
+            },
+        )
+        replay_output = self.repository.reconcile(
+            [replayed_reentry],
+            [state_fixture(replayed_reentry, replay_ts)],
+            "2026-08-20T00:30:00+00:00",
+            "SHORT",
+        )
+
+        self.assertEqual(replay_output, [])
+        self.assertIsNone(self.repository.load_active_signal(raw.inst_id, "SHORT"))
+
+    def test_stale_advance_cannot_resurrect_concurrently_closed_plan(self):
+        raw = signal_fixture("CAS-CLOSED-USDT-SWAP")
+        created = self.repository.reconcile(
+            [raw],
+            [state_fixture(raw, raw.data_timestamp)],
+            "2026-08-20T00:00:00+00:00",
+            "SHORT",
+        )[0]
+        stale_row = self.repository._connection.execute(
+            "SELECT * FROM signals WHERE signal_id=?",
+            (created.trigger_id,),
+        ).fetchone()
+        self.assertTrue(
+            self.repository.invalidate_preflight_plan(
+                created,
+                "2026-08-20T00:05:00+00:00",
+            )
+        )
+
+        next_ts = raw.data_timestamp + 900_000
+        stale_result = self.repository._advance_existing(
+            created,
+            stale_row,
+            {
+                **raw.market_metrics,
+                "core_timestamp": next_ts,
+                "core_close": 100.0,
+            },
+            "2026-08-20T00:15:00+00:00",
+        )
+        row = self.repository._connection.execute(
+            "SELECT status, stage, freshness FROM signals WHERE signal_id=?",
+            (created.trigger_id,),
+        ).fetchone()
+
+        self.assertFalse(stale_result.actionable)
+        self.assertEqual(stale_result.freshness, "INVALIDATED")
+        self.assertEqual(row["status"], "CLOSED")
+        self.assertEqual(row["stage"], "INVALIDATED")
+        self.assertEqual(row["freshness"], "INVALIDATED")
+
+    def test_out_of_order_candidate_cannot_roll_back_any_episode_content(self):
+        raw = signal_fixture("ORDERED-USDT-SWAP")
+        self.repository.reconcile(
+            [raw],
+            [state_fixture(raw, raw.data_timestamp)],
+            "2026-08-20T00:00:00+00:00",
+            "SHORT",
+        )
+        newer_ts = raw.data_timestamp + 900_000
+        newer = replace(
+            raw,
+            score=94.0,
+            evidence=["較新的證據"],
+            summary="較新的情境",
+            market_participation={"state": "STRONG_SUPPORT", "trend": "IMPROVING"},
+            execution_quality={"score": 91.0, "label": "HIGH"},
+            data_quality={"status": "COMPLETE", "marker": "NEWER"},
+            entry_eligibility={"status": "ENTRY_READY", "actionable": True},
+            data_timestamp=newer_ts,
+            closed_candle_ts=newer_ts,
+            market_story={
+                "context_marker": "NEWER",
+                "trigger": {
+                    "event_ts": newer_ts,
+                    "trigger_event_key": f"SHORT:LONG:BREAKOUT:{newer_ts}:ZONE-B",
+                },
+            },
+            market_metrics={
+                **raw.market_metrics,
+                "core_timestamp": newer_ts,
+                "context_marker": "NEWER",
+            },
+        )
+        accepted = self.repository.reconcile(
+            [newer],
+            [state_fixture(newer, newer_ts)],
+            "2026-08-20T00:15:00+00:00",
+            "SHORT",
+        )[0]
+        older_ts = raw.data_timestamp + 450_000
+        delayed = replace(
+            raw,
+            score=1.0,
+            evidence=["過期證據"],
+            summary="過期情境",
+            market_participation={"state": "CONFLICT", "trend": "WORSENING"},
+            execution_quality={"score": 1.0, "label": "LOW"},
+            data_quality={"status": "MISSING", "marker": "OLDER"},
+            entry_eligibility={"status": "MISSED_ENTRY", "actionable": False},
+            data_timestamp=older_ts,
+            closed_candle_ts=older_ts,
+            market_story={
+                "context_marker": "OLDER",
+                "trigger": raw.market_story["trigger"],
+            },
+            market_metrics={
+                **raw.market_metrics,
+                "core_timestamp": older_ts,
+                "context_marker": "OLDER",
+            },
+        )
+
+        returned = self.repository.reconcile(
+            [delayed],
+            [state_fixture(delayed, older_ts)],
+            "2026-08-20T00:07:30+00:00",
+            "SHORT",
+        )[0]
+        persisted = self.repository.load_active_signal(raw.inst_id, "SHORT")
+
+        self.assertEqual(returned.trigger_id, accepted.trigger_id)
+        self.assertEqual(returned.lifecycle["transition"], "UNCHANGED")
+        for signal in (returned, persisted):
+            self.assertEqual(signal.score, 94.0)
+            self.assertEqual(signal.evidence, ["較新的證據"])
+            self.assertEqual(signal.summary, "較新的情境")
+            self.assertEqual(signal.market_participation["trend"], "IMPROVING")
+            self.assertEqual(signal.execution_quality["score"], 91.0)
+            self.assertEqual(signal.data_quality["marker"], "NEWER")
+            self.assertEqual(signal.entry_eligibility["status"], "ENTRY_READY")
+            self.assertEqual(signal.market_story["context_marker"], "NEWER")
+            self.assertEqual(signal.market_metrics["context_marker"], "NEWER")
+            self.assertEqual(signal.data_timestamp, newer_ts)
+
+    def test_out_of_order_state_only_update_cannot_invalidate_or_regress_story(self):
+        raw = signal_fixture("STATE-ORDER-USDT-SWAP")
+        initial_state = replace(
+            state_fixture(raw, raw.data_timestamp),
+            market_story={"context_marker": "INITIAL"},
+        )
+        created = self.repository.reconcile(
+            [raw],
+            [initial_state],
+            "2026-08-20T00:00:00+00:00",
+            "SHORT",
+        )[0]
+        newer_ts = raw.data_timestamp + 900_000
+        newer_state = replace(
+            state_fixture(raw, newer_ts),
+            market_story={"context_marker": "NEWER"},
+            market_metrics={
+                **raw.market_metrics,
+                "core_timestamp": newer_ts,
+                "core_high": 101.0,
+                "core_low": 99.0,
+                "core_close": 100.0,
+                "context_marker": "NEWER",
+            },
+        )
+        accepted = self.repository.reconcile(
+            [],
+            [newer_state],
+            "2026-08-20T00:15:00+00:00",
+            "SHORT",
+        )[0]
+        event_count_before = self.repository._connection.execute(
+            "SELECT COUNT(*) FROM signal_events WHERE signal_id=?",
+            (created.trigger_id,),
+        ).fetchone()[0]
+        older_ts = raw.data_timestamp + 450_000
+        stale_state = replace(
+            state_fixture(raw, older_ts, core_high=81.0, core_low=79.0),
+            market_story={"context_marker": "OLDER"},
+            market_metrics={
+                **raw.market_metrics,
+                "core_timestamp": older_ts,
+                "core_high": 81.0,
+                "core_low": 79.0,
+                "core_close": 80.0,
+                "context_marker": "OLDER",
+            },
+        )
+
+        returned = self.repository.reconcile(
+            [],
+            [stale_state],
+            "2026-08-20T00:07:30+00:00",
+            "SHORT",
+        )[0]
+        row = self.repository._connection.execute(
+            """
+            SELECT status, outcome, payload_json FROM signals
+            WHERE signal_id=?
+            """,
+            (created.trigger_id,),
+        ).fetchone()
+        event_count_after = self.repository._connection.execute(
+            "SELECT COUNT(*) FROM signal_events WHERE signal_id=?",
+            (created.trigger_id,),
+        ).fetchone()[0]
+        story = self.repository.load_story(raw.inst_id, "SHORT")
+
+        self.assertEqual(returned.trigger_id, accepted.trigger_id)
+        self.assertEqual(returned.market_metrics["context_marker"], "NEWER")
+        self.assertEqual(returned.lifecycle["transition"], "UNCHANGED")
+        self.assertEqual(row["status"], "ACTIVE")
+        self.assertIsNone(row["outcome"])
+        self.assertEqual(event_count_after, event_count_before)
+        self.assertEqual(story["closed_candle_ts"], newer_ts)
+        self.assertEqual(story["market_story"]["context_marker"], "NEWER")
+
+    def test_missing_symbol_state_keeps_read_only_non_actionable_episode(self):
+        raw = replace(
+            signal_fixture("MISSING-USDT-SWAP"),
+            entry_eligibility={"status": "ENTRY_READY", "actionable": True},
+            data_quality={"status": "COMPLETE"},
+        )
+        created = self.repository.reconcile(
+            [raw],
+            [state_fixture(raw, raw.data_timestamp)],
+            "2026-08-20T00:00:00+00:00",
+            "SHORT",
+        )[0]
+
+        output = self.repository.reconcile(
+            [],
+            [],
+            "2026-08-20T00:15:00+00:00",
+            "SHORT",
+        )
+        row = self.repository._connection.execute(
+            "SELECT status FROM signals WHERE signal_id=?",
+            (created.trigger_id,),
+        ).fetchone()
+
+        self.assertEqual(len(output), 1)
+        self.assertEqual(output[0].trigger_id, created.trigger_id)
+        self.assertEqual(output[0].freshness, "DATA_UNAVAILABLE")
+        self.assertEqual(output[0].lifecycle["transition"], "DATA_UNAVAILABLE")
+        self.assertTrue(output[0].lifecycle["read_only"])
+        self.assertEqual(output[0].data_quality["status"], "DATA_UNAVAILABLE")
+        self.assertEqual(output[0].entry_eligibility["status"], "DATA_UNAVAILABLE")
+        self.assertFalse(output[0].entry_eligibility["actionable"])
+        self.assertIsNone(output[0].market_metrics["last_price"])
+        self.assertFalse(output[0].actionable)
+        self.assertEqual(row["status"], "ACTIVE")
+
+    def test_single_instrument_reconcile_keeps_id_and_never_touches_other_coins(self):
+        first_raw = signal_fixture("SINGLE-A-USDT-SWAP")
+        other_raw = signal_fixture("SINGLE-B-USDT-SWAP")
+        created = self.repository.reconcile(
+            [first_raw, other_raw],
+            [
+                state_fixture(first_raw, first_raw.data_timestamp),
+                state_fixture(other_raw, other_raw.data_timestamp),
+            ],
+            "2026-08-20T00:00:00+00:00",
+            "SHORT",
+        )
+        by_inst = {item.inst_id: item for item in created}
+        first_id = by_inst[first_raw.inst_id].trigger_id
+        other_id = by_inst[other_raw.inst_id].trigger_id
+        other_before = self.repository._connection.execute(
+            "SELECT * FROM signals WHERE signal_id=?",
+            (other_id,),
+        ).fetchone()
+
+        for step in (1, 2):
+            core_ts = first_raw.data_timestamp + step * 900_000
+            refreshed = replace(
+                first_raw,
+                score=86.0 + step,
+                data_timestamp=core_ts,
+                closed_candle_ts=core_ts,
+                market_metrics={
+                    **first_raw.market_metrics,
+                    "core_timestamp": core_ts,
+                },
+            )
+            current = self.repository.reconcile_instrument(
+                refreshed,
+                state_fixture(refreshed, core_ts),
+                f"2026-08-20T00:{step * 15:02d}:00+00:00",
+                "SHORT",
+            )
+            self.assertEqual(current.trigger_id, first_id)
+            self.assertEqual(current.score, 86.0 + step)
+
+        other_after = self.repository._connection.execute(
+            "SELECT * FROM signals WHERE signal_id=?",
+            (other_id,),
+        ).fetchone()
+        self.assertEqual(dict(other_after), dict(other_before))
+
+        state_only_ts = first_raw.data_timestamp + 3 * 900_000
+        state_only = state_fixture(first_raw, state_only_ts)
+        state_only_result = self.repository.reconcile_instrument(
+            None,
+            state_only,
+            "2026-08-20T00:45:00+00:00",
+            "SHORT",
+        )
+        self.assertEqual(state_only_result.trigger_id, first_id)
+
+        missing_ts = first_raw.data_timestamp + 4 * 900_000
+        missing_state_view = self.repository.reconcile_instrument(
+            replace(
+                first_raw,
+                data_timestamp=missing_ts,
+                closed_candle_ts=missing_ts,
+                market_metrics={
+                    **first_raw.market_metrics,
+                    "core_timestamp": missing_ts,
+                },
+            ),
+            None,
+            "2026-08-20T01:00:00+00:00",
+            "SHORT",
+        )
+
+        self.assertEqual(missing_state_view.trigger_id, first_id)
+        self.assertEqual(missing_state_view.freshness, "DATA_UNAVAILABLE")
+        self.assertFalse(missing_state_view.actionable)
+        self.assertEqual(
+            self.repository.load_active_signal(first_raw.inst_id, "SHORT").score,
+            88.0,
+        )
+        self.assertEqual(
+            self.repository.load_active_signal(other_raw.inst_id, "SHORT").trigger_id,
+            other_id,
+        )
+
     def test_real_closed_samples_feed_statistics_without_fake_win_rate(self):
         empty = self.repository.performance()
         self.assertFalse(empty["available"])
@@ -368,6 +1418,68 @@ class SignalRepositoryTests(unittest.TestCase):
         self.assertEqual(stats["overall"]["expectancy_r"], 0.5)
         self.assertEqual(stats["overall"]["profit_factor"], 2.0)
         self.assertEqual(stats["overall"]["max_consecutive_losses"], 1)
+
+    def test_performance_research_is_read_only_and_hides_tiny_group_rates(self):
+        base = signal_fixture("RESEARCH-USDT-SWAP")
+        raw = replace(
+            base,
+            market_story={
+                **base.market_story,
+                "context": {
+                    "sessions": {"active": ["LONDON"]},
+                    "market_driver": {"key": "INDEPENDENT"},
+                    "counter_higher_timeframe": True,
+                },
+            },
+        )
+        self.repository.reconcile(
+            [raw],
+            [state_fixture(raw, raw.data_timestamp)],
+            "2026-08-20T00:00:00+00:00",
+            "SHORT",
+        )
+        next_ts = raw.data_timestamp + 900_000
+        completed = replace(
+            raw,
+            data_timestamp=next_ts,
+            closed_candle_ts=next_ts,
+            market_metrics={
+                **raw.market_metrics,
+                "core_timestamp": next_ts,
+                "core_high": 121.0,
+                "core_low": 99.0,
+            },
+        )
+        self.repository.reconcile(
+            [completed],
+            [state_fixture(completed, next_ts, 121.0, 99.0)],
+            "2026-08-20T00:15:00+00:00",
+            "SHORT",
+        )
+
+        research = self.repository.performance()["research"]
+
+        self.assertEqual(research["sample_size"], 1)
+        self.assertEqual(research["avg_mfe_r"], 2.1)
+        self.assertEqual(research["avg_mae_r"], 0.1)
+        self.assertTrue(research["read_only"])
+        self.assertFalse(research["auto_tuning"])
+        self.assertEqual(research["by_session"]["LONDON"], {"sample_size": 1})
+        self.assertEqual(
+            research["by_market_driver"]["INDEPENDENT"],
+            {"sample_size": 1},
+        )
+        self.assertEqual(
+            research["by_horizon_trigger"]["SHORT:BREAKOUT"],
+            {"sample_size": 1},
+        )
+        self.assertEqual(
+            research["by_higher_timeframe_alignment"][
+                "COUNTER_HIGHER_TIMEFRAME"
+            ],
+            {"sample_size": 1},
+        )
+        self.assertNotIn("win_rate_pct", research["by_session"]["LONDON"])
 
     def test_all_closed_bars_between_scans_preserve_tp_sl_order(self):
         raw = signal_fixture("PATH-USDT-SWAP")
@@ -457,6 +1569,77 @@ class SignalRepositoryTests(unittest.TestCase):
 
         self.assertEqual(result["state"], "STALE_SNAPSHOT")
         self.assertIsNone(result["persistence"])
+
+    def test_microstructure_raw_history_is_bounded_monotonic_and_durable(self):
+        inst_id = "FLOW-USDT-SWAP"
+        for timestamp in range(1, 11):
+            self.repository.save_microstructure(
+                MarketContext(
+                    inst_id,
+                    1_000_000.0 + timestamp,
+                    0.0001 * timestamp,
+                    0.01 * timestamp,
+                    0.50 + timestamp / 100.0,
+                    timestamp,
+                    bid_depth_usd=100_000.0 + timestamp,
+                    ask_depth_usd=90_000.0 + timestamp,
+                    best_bid=100.0 + timestamp,
+                    best_ask=100.2 + timestamp,
+                ),
+                f"2026-08-20T00:00:{timestamp:02d}+00:00",
+            )
+
+        self.repository.save_microstructure(
+            MarketContext(
+                inst_id,
+                9_999_999.0,
+                9.0,
+                9.0,
+                0.99,
+                10,
+                bid_depth_usd=9.0,
+                ask_depth_usd=9.0,
+                best_bid=9.0,
+                best_ask=9.1,
+            ),
+            "2026-08-20T00:01:00+00:00",
+        )
+        self.repository.save_microstructure(
+            MarketContext(
+                inst_id,
+                8_888_888.0,
+                8.0,
+                8.0,
+                0.98,
+                5,
+                bid_depth_usd=8.0,
+                ask_depth_usd=8.0,
+                best_bid=8.0,
+                best_ask=8.1,
+            ),
+            "2026-08-20T00:01:01+00:00",
+        )
+        loaded = self.repository.load_microstructure(inst_id)
+        history = loaded["raw_history"]
+
+        self.assertEqual(len(history), 8)
+        self.assertEqual(
+            [item["timestamp_ms"] for item in history],
+            list(range(3, 11)),
+        )
+        self.assertEqual(history[-1]["open_interest_usd"], 1_000_010.0)
+        self.assertAlmostEqual(history[-1]["mid_price"], 110.1)
+        self.assertNotIn("direction", history[-1])
+        self.assertNotIn("signal", history[-1])
+
+        database_path = Path(self.temp_dir.name) / "radar-state.sqlite3"
+        self.repository.close()
+        self.repository = SignalRepository(database_path)
+
+        self.assertEqual(
+            self.repository.load_microstructure(inst_id)["raw_history"],
+            history,
+        )
 
 
 if __name__ == "__main__":

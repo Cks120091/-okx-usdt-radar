@@ -100,7 +100,7 @@ class V33ContractTests(unittest.TestCase):
         self.assertIn(".primary-nav{grid-row:5;position:relative", html)
         self.assertIn("grid-template-columns:repeat(4,minmax(0,1fr))", html)
         self.assertIn(".decision-actions{display:grid;grid-template-columns:repeat(2,minmax(0,1fr))", html)
-        self.assertIn("okx-radar-shell-v3.3-trigger-lifecycle-1", service_worker)
+        self.assertIn("okx-radar-shell-v3.4-context-race-safe-1", service_worker)
         self.assertIn("--primary-nav-safe-bottom", html)
         self.assertIn(".action-wrap{display:none;grid-row:4;position:relative", html)
         self.assertIn("$('.shell').scrollTo({top:0", html)
@@ -145,7 +145,7 @@ class V33ContractTests(unittest.TestCase):
         self.assertIn("訊號準備度", html)
         self.assertIn("尚未觸發", html)
         self.assertIn("可進 · ${watchCount} 觀察", html)
-        self.assertIn("item.entry_eligibility?.status==='ENTRY_READY'", html)
+        self.assertIn("itemDisplayEntryStatus(x)==='ENTRY_READY'", html)
         self.assertIn("OI（未平倉量）異動雷達", html)
         self.assertIn("市場平均 RSI", html)
         self.assertIn("localStorage", html)
@@ -155,7 +155,7 @@ class V33ContractTests(unittest.TestCase):
         self.assertNotIn("開發者資料（Raw Data）", html)
         self.assertNotIn("分組績效 JSON", html)
         self.assertNotIn("raw_indicators", html)
-        self.assertIn("進場前更新", html)
+        self.assertIn("幣種掃描（更新判定）", html)
         self.assertIn("進場檢查", html)
         self.assertIn("/api/preflight", html)
         self.assertIn("只更新或重新分析這一個幣，不重新掃描全市場", html)
@@ -176,15 +176,15 @@ class V33ContractTests(unittest.TestCase):
         self.assertIn("function signalTriggerTime(item,status)", html)
         self.assertIn("訊號觸發時間（台灣）", html)
         self.assertIn("status!=='ENTRY_READY'&&status!=='MISSED_ENTRY'", html)
-        self.assertIn("okx-radar-shell-v3.3-trigger-lifecycle-1", service_worker)
+        self.assertIn("okx-radar-shell-v3.4-context-race-safe-1", service_worker)
         self.assertIn("$('#preflightRefresh').addEventListener('click',loadPreflight)", html)
         self.assertIn("'#waitRetestBox','#longWaitRetestBox'", html)
-        self.assertIn("status==='WAIT_RETEST'?'↻ 更新現狀'", html)
-        self.assertIn("/api/preflight/reanalyze", html)
-        self.assertIn("reanalyzeMode", html)
-        self.assertIn("無最新進場機會", html)
-        self.assertIn("沒有新的正式 Trigger", html)
-        self.assertIn("舊計畫沒有被沿用", html)
+        self.assertIn("updateLabel='↻ 幣種掃描（更新判定）'", html)
+        self.assertNotIn("/api/preflight/reanalyze", html)
+        self.assertNotIn("reanalyzeMode", html)
+        self.assertIn("ORIGINAL_DIRECTION_STABLE", html)
+        self.assertIn("最新多週期確認", html)
+        self.assertIn("同時核對舊訊號、最新收盤與成交條件", html)
         self.assertIn("訊號觸發時間（台灣）", html)
         self.assertIn("15m 短線歷史", html)
         self.assertIn("4H 長線歷史", html)
@@ -200,7 +200,7 @@ class V33ContractTests(unittest.TestCase):
             Path(__file__).parents[1] / "radar" / "service.py"
         ).read_text(encoding="utf-8"))
         self.assertIn("幣種掃描", html)
-        self.assertIn("重新掃描最新資料", html)
+        self.assertIn("正在統一更新判定", html)
         self.assertIn("/api/instrument/scan", html)
         self.assertIn("data-instrument-id", html)
         self.assertIn("function openInstrument(instId,{scanNow=true,horizon='BOTH'}={})", html)
@@ -222,7 +222,7 @@ class V33ContractTests(unittest.TestCase):
         self.assertIn("目前不可進場｜尚無正式 Trigger", html)
         self.assertIn("準備度不是進場許可", html)
         self.assertIn("只掃描這一個幣，不重新掃描全市場", html)
-        self.assertIn("結果不加入全市場報告", html)
+        self.assertIn("不加入全市場排名", html)
         self.assertIn("最佳進場點位", html)
         self.assertIn("已觸發・有效中", html)
         self.assertIn("目前進場資格", html)
@@ -254,10 +254,67 @@ class V33ContractTests(unittest.TestCase):
         self.assertIn('id="manual"', html)
         self.assertIn("使用手冊", html)
         self.assertIn("底層仍執行完整多週期驗證", html)
-        self.assertIn("horizon==='LONG'?null:data.short", html)
-        self.assertIn("horizon==='SHORT'?null:data.long", html)
+        self.assertIn(
+            "horizon==='LONG'?null:isolatedInstrumentSide(data.short,'SHORT')",
+            html,
+        )
+        self.assertIn(
+            "horizon==='SHORT'?null:isolatedInstrumentSide(data.long,'LONG')",
+            html,
+        )
         self.assertIn("@media(prefers-reduced-motion:reduce)", html)
         self.assertNotIn("<canvas", html)
+
+    def test_retained_horizon_cards_stay_mounted_as_read_only_references(self):
+        html = (Path(__file__).parents[1] / "radar" / "static" / "pages.html").read_text(
+            encoding="utf-8"
+        )
+        self.assertIn("horizon_read_only_reasons", html)
+        self.assertIn("function horizonReadOnlyReason(report,horizon)", html)
+        self.assertIn("function readOnlyReferenceBanner(reason,horizon)", html)
+        self.assertIn("function itemDisplayEntryStatus(item)", html)
+        self.assertIn("掃描中｜上一輪結果只供參考", html)
+        self.assertIn("更新失敗｜上一輪結果只供參考", html)
+        self.assertIn("下方快照只供回看，更新確認前不可進場", html)
+        self.assertIn("class=\"read-only-reference", html)
+
+        pending = html.split("function renderScanPending(mode,message){", 1)[1].split(
+            "function renderUnavailable", 1
+        )[0]
+        self.assertIn(
+            "if(state.report&&(shortAvailable||longAvailable)){renderReport(state.report);return}",
+            pending,
+        )
+
+        report = html.split("function renderReport(report){", 1)[1].split(
+            "function renderOverview(report)", 1
+        )[0]
+        self.assertIn("shortAvailable=shortState.available", report)
+        self.assertIn("longAvailable=longState.available", report)
+        self.assertIn("shortReadOnlyReason=horizonReadOnlyReason(report,'SHORT')", report)
+        self.assertIn("longReadOnlyReason=horizonReadOnlyReason(report,'LONG')", report)
+        self.assertIn("itemDisplayEntryStatus(x)==='ENTRY_READY'", report)
+        self.assertIn("true,shortReadOnlyReason", report)
+        self.assertIn("true,longReadOnlyReason", report)
+        self.assertNotIn("shortAvailable=shortState.available&&!shortPending", report)
+        self.assertNotIn("if(shortPending)", report)
+
+        decision = html.split("function decisionContextStatus(item,payload={})", 1)[1].split(
+            "function itemEntryStatus", 1
+        )[0]
+        self.assertIn("if(itemReadOnlyReason(item))return 'READ_ONLY'", decision)
+        final_panel = html.split("function finalDecisionPanel", 1)[1].split(
+            "function entryBadge", 1
+        )[0]
+        self.assertIn("canPreflight=showPreflight&&!expired&&!readOnlyReason", final_panel)
+        self.assertIn(
+            "copyAction=status==='ENTRY_READY'&&!expired&&!readOnlyReason", final_panel
+        )
+        self.assertNotIn("longAwaitingFullPreview", report)
+        self.assertIn(
+            "if(mode==='FULL')return horizon==='SHORT'", html
+        )
+        self.assertIn("目前沒有上一輪 4H 卡片可保留", report)
 
     def test_pwa_never_caches_live_market_api(self):
         root = Path(__file__).parents[1] / "radar" / "static"

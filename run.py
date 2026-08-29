@@ -68,7 +68,7 @@ def _load_previous_open_interest(url: str) -> dict[str, float]:
         url,
         headers={
             "Accept": "application/json",
-            "User-Agent": "okx-usdt-perp-radar/3.3 (public-data-only)",
+            "User-Agent": "okx-usdt-perp-radar/3.4 (public-data-only)",
         },
     )
     try:

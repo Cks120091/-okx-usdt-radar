@@ -273,10 +273,16 @@ class PreflightTests(unittest.TestCase):
 
             payload = runtime.preflight_dict(item.inst_id, "SHORT")
 
-            self.assertEqual(payload["verdict"]["status"], "WAIT_RETEST")
+            # The original episode remains active, but a new order this close
+            # to SL fails the execution-cost Hard Gate.
+            self.assertEqual(payload["verdict"]["status"], "HARD_GATE_BLOCKED")
             self.assertFalse(payload["verdict"]["actionable"])
-            self.assertIn("接近失效", payload["verdict"]["label"])
-            self.assertEqual(payload["verdict"]["situation"], "NEAR_INVALIDATION")
+            self.assertIn("執行風控未通過", payload["verdict"]["label"])
+            self.assertEqual(payload["verdict"]["situation"], "HARD_GATE_BLOCKED")
+            self.assertIn(
+                "EXECUTION_COST_TOO_HIGH",
+                payload["verdict"]["hard_blockers"],
+            )
             self.assertEqual(payload["signal_lifecycle"]["status"], "ACTIVE")
             self.assertIsNone(payload["live"]["remaining_rr"])
             self.assertFalse(payload["live"]["remaining_rr_applicable"])

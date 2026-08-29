@@ -5,6 +5,7 @@ import math
 import sqlite3
 import threading
 import uuid
+from contextlib import contextmanager
 from dataclasses import replace
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -44,6 +45,9 @@ class SignalRepository:
             check_same_thread=False,
         )
         self._connection.row_factory = sqlite3.Row
+        # FULL scans reconcile both horizons as one durable unit. Nested write
+        # helpers use this depth to avoid committing one horizon early.
+        self._transaction_depth = 0
         if self.path != ":memory:":
             self._connection.execute("PRAGMA journal_mode=WAL")
         self._connection.execute("PRAGMA foreign_keys=ON")
@@ -131,6 +135,93 @@ class SignalRepository:
                 );
                 """
             )
+            self._repair_active_episode_conflicts()
+            self._connection.execute(
+                """
+                CREATE UNIQUE INDEX IF NOT EXISTS uq_signals_active_episode
+                ON signals(inst_id, horizon)
+                WHERE status='ACTIVE'
+                """
+            )
+
+    def _repair_active_episode_conflicts(self) -> None:
+        """Retire legacy duplicate ACTIVE rows before adding the invariant.
+
+        Older versions allowed one active row per direction. Preserve the most
+        recently updated row as the formal main episode and retain every other
+        row as terminal history instead of deleting it.
+        """
+
+        conflicts = self._connection.execute(
+            """
+            SELECT inst_id, horizon
+            FROM signals
+            WHERE status='ACTIVE'
+            GROUP BY inst_id, horizon
+            HAVING COUNT(*) > 1
+            """
+        ).fetchall()
+        retired_at = datetime.now(timezone.utc).isoformat()
+        for conflict in conflicts:
+            rows = self._connection.execute(
+                """
+                SELECT * FROM signals
+                WHERE inst_id=? AND horizon=? AND status='ACTIVE'
+                ORDER BY updated_at DESC, signal_id DESC
+                """,
+                (conflict["inst_id"], conflict["horizon"]),
+            ).fetchall()
+            for row in rows[1:]:
+                signal = Signal.from_dict(json.loads(row["payload_json"]))
+                lifecycle = dict(signal.lifecycle)
+                lifecycle.update(
+                    {
+                        "last_seen_at": retired_at,
+                        "previous_stage": row["stage"],
+                        "current_stage": "INVALIDATED",
+                        "transition": "REPOSITORY_ACTIVE_CONFLICT_RETIRED",
+                        "terminal": True,
+                        "duplicate_locked": True,
+                    }
+                )
+                retired = replace(
+                    signal,
+                    signal_stage="INVALIDATED",
+                    freshness="INVALIDATED",
+                    lifecycle=lifecycle,
+                    actionable=False,
+                )
+                self._connection.execute(
+                    """
+                    UPDATE signals SET
+                        updated_at=?, closed_at=?, stage='INVALIDATED',
+                        freshness='INVALIDATED', status='CLOSED',
+                        outcome='REPOSITORY_ACTIVE_CONFLICT', final_r=NULL,
+                        tp_sl_order='REPOSITORY_INVARIANT', payload_json=?
+                    WHERE signal_id=? AND status='ACTIVE'
+                    """,
+                    (
+                        retired_at,
+                        retired_at,
+                        json.dumps(_signal_payload(retired), ensure_ascii=False),
+                        row["signal_id"],
+                    ),
+                )
+                self._connection.execute(
+                    """
+                    INSERT INTO signal_events(
+                        signal_id, event_at, from_stage, to_stage,
+                        event_type, payload_json
+                    ) VALUES(?, ?, ?, 'INVALIDATED', ?, ?)
+                    """,
+                    (
+                        row["signal_id"],
+                        retired_at,
+                        row["stage"],
+                        "REPOSITORY_ACTIVE_CONFLICT_RETIRED",
+                        json.dumps(lifecycle, ensure_ascii=False),
+                    ),
+                )
 
     def load_story(self, inst_id: str, horizon: str) -> dict[str, Any] | None:
         with self._lock:
@@ -141,7 +232,7 @@ class SignalRepository:
             payload = json.loads(row["payload_json"]) if row else None
             active = self._connection.execute(
                 """
-                SELECT direction, stage, stop_price, signal_id
+                SELECT direction, stage, stop_price, signal_id, payload_json
                 FROM signals
                 WHERE inst_id=? AND horizon=? AND status='ACTIVE'
                 ORDER BY updated_at DESC LIMIT 1
@@ -152,16 +243,34 @@ class SignalRepository:
             return None
         output = dict(payload or {})
         if active is not None:
+            active_payload = json.loads(active["payload_json"])
+            active_lifecycle = active_payload.get("lifecycle", {})
             output.update(
                 {
                     "active_trigger_direction": active["direction"],
                     "active_stage": active["stage"],
                     "active_signal_id": active["signal_id"],
                     "invalidation_price": active["stop_price"],
+                    "last_evaluated_core_ts": int(
+                        active_lifecycle.get("last_evaluated_core_ts") or 0
+                    ),
                     "invalidated": False,
                 }
             )
         return output
+
+    def load_active_signal(self, inst_id: str, horizon: str) -> Signal | None:
+        """Return the one persisted active episode for an instrument/horizon.
+
+        Callers receive a detached model value, not a mutable repository row.
+        Direction is deliberately not part of this lookup: one horizon may
+        have only one formal main direction at a time.
+        """
+
+        row = self._active_episode_row(inst_id, horizon)
+        if row is None:
+            return None
+        return Signal.from_dict(json.loads(row["payload_json"]))
 
     def save_story(self, state: MarketState, updated_at: str) -> None:
         payload = {
@@ -175,7 +284,23 @@ class SignalRepository:
             "market_participation": state.market_participation,
             "closed_candle_ts": state.closed_candle_ts,
         }
-        with self._lock, self._connection:
+        with self._write_scope():
+            current = self._connection.execute(
+                "SELECT payload_json FROM story_state WHERE inst_id=? AND horizon=?",
+                (state.inst_id, state.radar_horizon),
+            ).fetchone()
+            if current is not None:
+                current_payload = json.loads(current["payload_json"])
+                current_core_ts = int(
+                    current_payload.get("closed_candle_ts") or 0
+                )
+                candidate_core_ts = int(
+                    state.market_metrics.get("core_timestamp")
+                    or state.closed_candle_ts
+                    or 0
+                )
+                if current_core_ts > 0 and candidate_core_ts <= current_core_ts:
+                    return
             self._connection.execute(
                 """
                 INSERT INTO story_state(inst_id, horizon, updated_at, payload_json)
@@ -199,41 +324,190 @@ class SignalRepository:
         completed_at: str,
         horizon: str,
     ) -> list[Signal]:
-        state_map = {
-            item.inst_id: item
-            for item in market_states
-            if item.radar_horizon == horizon
-        }
-        output: list[Signal] = []
-        seen_signal_ids: set[str] = set()
-        raw_keys: set[tuple[str, str]] = set()
-
-        for raw in raw_signals:
-            if raw.radar_horizon != horizon:
+        state_map: dict[str, MarketState] = {}
+        for item in market_states:
+            if item.radar_horizon != horizon:
                 continue
-            raw_keys.add((raw.inst_id, raw.direction))
+            existing_state = state_map.get(item.inst_id)
+            if (
+                existing_state is None
+                or _market_state_core_timestamp(item)
+                > _market_state_core_timestamp(existing_state)
+            ):
+                state_map[item.inst_id] = item
+        output_by_id: dict[str, Signal] = {}
+        seen_signal_ids: set[str] = set()
+        raw_by_slot: dict[tuple[str, str], list[tuple[int, Signal]]] = {}
+        slot_order: list[tuple[str, str]] = []
+        for index, item in enumerate(raw_signals):
+            if item.radar_horizon != horizon:
+                continue
+            slot = (item.inst_id, item.radar_horizon)
+            if slot not in raw_by_slot:
+                raw_by_slot[slot] = []
+                slot_order.append(slot)
+            raw_by_slot[slot].append((index, item))
+        ordered_raw = [
+            item
+            for slot in slot_order
+            for _index, item in sorted(
+                raw_by_slot[slot],
+                key=lambda pair: (_signal_core_timestamp(pair[1]), pair[0]),
+            )
+        ]
+
+        for raw in ordered_raw:
             current = self._reconcile_raw_signal(raw, completed_at)
             seen_signal_ids.add(current.trigger_id)
             if current.freshness not in ("COMPLETED", "INVALIDATED"):
-                output.append(current)
+                # Multiple raw candidates may resolve to the same active
+                # episode. Keep its last reconciled view once, without card
+                # duplication or intra-scan reordering.
+                if (
+                    current.lifecycle.get("transition")
+                    == "TERMINAL_REPLAY_IGNORED"
+                ):
+                    output_by_id.setdefault(current.trigger_id, current)
+                else:
+                    output_by_id[current.trigger_id] = current
+            else:
+                output_by_id.pop(current.trigger_id, None)
 
         for row in self._active_rows(horizon):
-            key = (row["inst_id"], row["direction"])
-            if key in raw_keys or row["signal_id"] in seen_signal_ids:
+            if row["signal_id"] in seen_signal_ids:
                 continue
             state = state_map.get(row["inst_id"])
-            if state is None:
-                continue
             stored = Signal.from_dict(json.loads(row["payload_json"]))
+            if state is None:
+                # Missing this symbol in the new scan must not erase its
+                # episode. Return a read-only last-known plan with an explicit
+                # hard data gate; do not mutate the persisted active plan.
+                unavailable = self._data_unavailable_projection(stored)
+                output_by_id[unavailable.trigger_id] = unavailable
+                seen_signal_ids.add(unavailable.trigger_id)
+                continue
             updated = self._advance_existing(stored, row, state.market_metrics, completed_at)
             if updated.freshness not in ("COMPLETED", "INVALIDATED"):
-                output.append(updated)
+                output_by_id[updated.trigger_id] = updated
                 seen_signal_ids.add(updated.trigger_id)
+            else:
+                output_by_id.pop(updated.trigger_id, None)
 
         for state in market_states:
             if state.radar_horizon == horizon:
                 self.save_story(state, completed_at)
-        return output
+        return list(output_by_id.values())
+
+    def reconcile_batch(
+        self,
+        batches: dict[str, tuple[list[Signal], list[MarketState]]],
+        completed_at: str,
+    ) -> dict[str, list[Signal]]:
+        """Atomically reconcile multiple horizons from one market scan.
+
+        A FULL scan must not commit a SHORT lifecycle update when LONG
+        reconciliation fails (or vice versa). Partial scans and on-demand
+        single-instrument scans continue to use their independent APIs.
+        """
+
+        normalized: list[tuple[str, list[Signal], list[MarketState]]] = []
+        seen_horizons: set[str] = set()
+        for horizon, payload in batches.items():
+            normalized_horizon = str(horizon or "").strip().upper()
+            if normalized_horizon not in {"SHORT", "LONG"}:
+                raise ValueError("batch horizon must be SHORT or LONG")
+            if normalized_horizon in seen_horizons:
+                raise ValueError("batch horizons must be unique")
+            try:
+                raw_signals, market_states = payload
+            except (TypeError, ValueError) as exc:
+                raise ValueError(
+                    "batch payload must contain raw signals and market states"
+                ) from exc
+            seen_horizons.add(normalized_horizon)
+            normalized.append(
+                (normalized_horizon, list(raw_signals), list(market_states))
+            )
+
+        if not normalized:
+            return {}
+
+        with self._lock:
+            self._transaction_depth += 1
+            try:
+                with self._connection:
+                    return {
+                        horizon: self.reconcile(
+                            raw_signals,
+                            market_states,
+                            completed_at,
+                            horizon,
+                        )
+                        for horizon, raw_signals, market_states in normalized
+                    }
+            finally:
+                self._transaction_depth -= 1
+
+    def reconcile_instrument(
+        self,
+        raw_signal: Signal | None,
+        state: MarketState | None,
+        updated_at: str,
+        horizon: str,
+    ) -> Signal | None:
+        """Reconcile exactly one instrument without touching the universe.
+
+        This is the durable path for on-demand single-coin scans. It shares the
+        same episode/tombstone invariants as a full scan but never interprets
+        other active instruments as missing merely because they were not part
+        of this request.
+        """
+
+        candidates = [
+            item.inst_id
+            for item in (raw_signal, state)
+            if item is not None
+        ]
+        if not candidates:
+            return None
+        inst_id = candidates[0]
+        if any(candidate != inst_id for candidate in candidates[1:]):
+            raise ValueError("raw signal and state must target one instrument")
+        if raw_signal is not None and raw_signal.radar_horizon != horizon:
+            raise ValueError("raw signal horizon does not match reconciliation")
+        if state is not None and state.radar_horizon != horizon:
+            raise ValueError("market state horizon does not match reconciliation")
+
+        if state is None:
+            row = self._active_episode_row(inst_id, horizon)
+            if row is None:
+                return None
+            stored = Signal.from_dict(json.loads(row["payload_json"]))
+            return self._data_unavailable_projection(stored)
+
+        if raw_signal is not None:
+            current = self._reconcile_raw_signal(raw_signal, updated_at)
+        else:
+            row = self._active_episode_row(inst_id, horizon)
+            if row is None:
+                current = None
+            else:
+                stored = Signal.from_dict(json.loads(row["payload_json"]))
+                current = self._advance_existing(
+                    stored,
+                    row,
+                    state.market_metrics,
+                    updated_at,
+                )
+
+        if state is not None:
+            self.save_story(state, updated_at)
+        if current is None or current.freshness in (
+            "COMPLETED",
+            "INVALIDATED",
+        ):
+            return None
+        return current
 
     def invalidate_preflight_plan(
         self,
@@ -252,13 +526,14 @@ class SignalRepository:
             return False
         with self._lock:
             row = self._connection.execute(
-                "SELECT stage, status FROM signals WHERE signal_id=?",
+                "SELECT * FROM signals WHERE signal_id=?",
                 (signal_id,),
             ).fetchone()
         if row is None or row["status"] != "ACTIVE":
             return False
 
-        lifecycle = dict(signal.lifecycle)
+        persisted = Signal.from_dict(json.loads(row["payload_json"]))
+        lifecycle = dict(persisted.lifecycle)
         lifecycle.update(
             {
                 "last_seen_at": observed_at,
@@ -270,13 +545,13 @@ class SignalRepository:
             }
         )
         updated = replace(
-            signal,
+            persisted,
             signal_stage="INVALIDATED",
             freshness="INVALIDATED",
             lifecycle=lifecycle,
             actionable=False,
         )
-        with self._lock, self._connection:
+        with self._write_scope():
             cursor = self._connection.execute(
                 """
                 UPDATE signals SET
@@ -284,13 +559,14 @@ class SignalRepository:
                     freshness='INVALIDATED', status='CLOSED',
                     outcome='PREFLIGHT_STOP_CROSSED', final_r=NULL,
                     tp_sl_order='UNKNOWN_FROM_LIVE_TICKER', payload_json=?
-                WHERE signal_id=? AND status='ACTIVE'
+                WHERE signal_id=? AND status='ACTIVE' AND payload_json=?
                 """,
                 (
                     observed_at,
                     observed_at,
                     json.dumps(_signal_payload(updated), ensure_ascii=False),
                     signal_id,
+                    row["payload_json"],
                 ),
             )
         if cursor.rowcount <= 0:
@@ -306,34 +582,106 @@ class SignalRepository:
         return True
 
     def _reconcile_raw_signal(self, raw: Signal, completed_at: str) -> Signal:
+        # The active lookup and possible insert form one repository operation.
+        # RLock keeps concurrent scans in this process from creating two main
+        # directions for the same instrument/horizon.
+        with self._lock:
+            return self._reconcile_raw_signal_locked(raw, completed_at)
+
+    def _reconcile_raw_signal_locked(
+        self,
+        raw: Signal,
+        completed_at: str,
+    ) -> Signal:
+        logical_event_ts = _signal_trigger_event_timestamp(raw)
         event_key = str(
             raw.market_story.get("trigger", {}).get("trigger_event_key")
-            or f"{raw.radar_horizon}:{raw.inst_id}:{raw.direction}:{raw.trigger_type}:{raw.data_timestamp}"
+            or f"{raw.radar_horizon}:{raw.inst_id}:{raw.direction}:{raw.trigger_type}:{logical_event_ts}"
         )
-        active = self._active_row(raw.inst_id, raw.radar_horizon, raw.direction)
+        active = self._active_episode_row(raw.inst_id, raw.radar_horizon)
+        active_claims_event = bool(
+            active is not None
+            and str(active["direction"]) == raw.direction
+            and self._row_claims_event(active, event_key)
+        )
+        terminal = self._closed_event_row(
+            raw.inst_id,
+            raw.radar_horizon,
+            event_key,
+        )
+        if (
+            terminal is not None
+            and active_claims_event
+            and terminal["outcome"] == "REPOSITORY_ACTIVE_CONFLICT"
+        ):
+            # The only safe same-key exception is a duplicate row retired by
+            # this repository's migration. A real historical terminal outcome
+            # always outranks an accidentally resurrected ACTIVE row.
+            terminal = None
+        if terminal is not None:
+            # Check the tombstone before looking at another active episode. A
+            # delayed replay of closed event A must never contaminate active B.
+            if active is not None:
+                active_signal = Signal.from_dict(
+                    json.loads(active["payload_json"])
+                )
+                unavailable = self._data_unavailable_projection(active_signal)
+                lifecycle = dict(unavailable.lifecycle)
+                lifecycle["transition"] = "TERMINAL_REPLAY_IGNORED"
+                return replace(unavailable, lifecycle=lifecycle)
+            return self._terminal_projection(terminal)
+
         if active is not None:
             existing = Signal.from_dict(json.loads(active["payload_json"]))
-            is_new_reentry = (
-                raw.trigger_type == "CONTINUATION"
-                and event_key != active["event_key"]
-                and raw.data_timestamp > int(active["event_ts"])
-                and raw.freshness in ("NEW", "REACTIVATED")
+            candidate_core_ts = _signal_core_timestamp(raw)
+            last_evaluated_core_ts = int(
+                existing.lifecycle.get("last_evaluated_core_ts")
+                or active["event_ts"]
+                or 0
             )
-            if not is_new_reentry:
-                merged = self._merge_signal(existing, raw)
+            if (
+                last_evaluated_core_ts > 0
+                and candidate_core_ts <= last_evaluated_core_ts
+            ):
+                # Score, evidence, context and execution facts belong to the
+                # same closed-core snapshot. A delayed/equal candidate cannot
+                # roll any part of the accepted episode backwards.
+                return self._unchanged_projection(existing)
+
+            if str(active["direction"]) != raw.direction:
+                # Opposite evidence may update the original plan's observed
+                # price path, but it is not a second formal direction while
+                # the current episode remains ACTIVE.
                 return self._advance_existing(
-                    merged,
+                    existing,
                     active,
                     raw.market_metrics,
                     completed_at,
                 )
-            self._close_row(
-                active["signal_id"],
+
+            # CONTINUATION / REENTRY while the same-direction episode remains
+            # active is a lifecycle update, not a new trade plan. _merge_signal
+            # intentionally keeps the original Entry / SL / TP and trigger.
+            merged = self._merge_signal(existing, raw)
+            return self._advance_existing(
+                merged,
+                active,
+                raw.market_metrics,
                 completed_at,
-                "REENTRY_REPLACED",
-                None,
-                "NEW_REENTRY",
             )
+
+        latest_closed = self._latest_closed_episode_row(
+            raw.inst_id,
+            raw.radar_horizon,
+        )
+        if (
+            latest_closed is not None
+            and logical_event_ts
+            <= self._closed_episode_watermark(latest_closed)
+        ):
+            # A renamed/different-key replay is still old if its logical
+            # trigger time did not advance beyond the terminal episode.
+            return self._terminal_projection(latest_closed)
 
         signal_id = str(uuid.uuid4())
         triggered_at = _iso_from_millis(raw.market_story.get("trigger", {}).get("event_ts")) or completed_at
@@ -346,6 +694,8 @@ class SignalRepository:
             "transition": "NEW",
             "duplicate_locked": True,
             "event_key": event_key,
+            "event_keys": [event_key],
+            "last_trigger_event_ts": logical_event_ts,
             "last_evaluated_core_ts": int(
                 raw.market_metrics.get("core_timestamp")
                 or raw.data_timestamp
@@ -358,7 +708,20 @@ class SignalRepository:
             lifecycle=lifecycle,
             generated_at=completed_at,
         )
-        self._insert_signal(created, event_key, triggered_at, completed_at)
+        inserted = self._insert_signal(
+            created,
+            event_key,
+            triggered_at,
+            completed_at,
+        )
+        if not inserted:
+            # A second repository/process may have committed the main episode
+            # after our lookup. Reconcile against that winner instead of
+            # surfacing an error or creating a second direction.
+            competing = self._active_episode_row(raw.inst_id, raw.radar_horizon)
+            if competing is not None:
+                return self._reconcile_raw_signal_locked(raw, completed_at)
+            raise RuntimeError("signal insert violated a repository invariant")
         self._append_event(
             signal_id,
             completed_at,
@@ -377,6 +740,7 @@ class SignalRepository:
         completed_at: str,
     ) -> Signal:
         stage_before = str(row["stage"])
+        persisted = Signal.from_dict(json.loads(row["payload_json"]))
         # Age advances with the latest closed core candle, not with the original
         # trigger timestamp (which intentionally remains stable for de-duplication).
         data_ts = int(
@@ -386,11 +750,19 @@ class SignalRepository:
             or 0
         )
         event_ts = int(row["event_ts"] or signal.market_story.get("trigger", {}).get("event_ts", 0) or 0)
-        previous_evaluated_core_ts = int(
-            signal.lifecycle.get("last_evaluated_core_ts")
-            or row["event_ts"]
-            or 0
+        previous_evaluated_core_ts = max(
+            int(persisted.lifecycle.get("last_evaluated_core_ts") or 0),
+            _signal_core_timestamp(persisted),
+            int(row["event_ts"] or 0),
         )
+        if (
+            previous_evaluated_core_ts > 0
+            and data_ts <= previous_evaluated_core_ts
+        ):
+            # State-only carryover goes through this method too. Never let an
+            # older/equal state mutate lifecycle, metrics, or invalidate a plan
+            # that was already evaluated on a newer closed core candle.
+            return self._unchanged_projection(persisted)
         same_core_snapshot = bool(
             data_ts
             and previous_evaluated_core_ts
@@ -490,13 +862,13 @@ class SignalRepository:
                 and stage in ("EARLY_SIGNAL", "CONFIRMED", "REENTRY")
             ),
         )
-        with self._lock, self._connection:
-            self._connection.execute(
+        with self._write_scope():
+            cursor = self._connection.execute(
                 """
                 UPDATE signals SET
                     updated_at=?, closed_at=?, stage=?, freshness=?, status=?,
                     mfe_r=?, mae_r=?, outcome=?, final_r=?, tp_sl_order=?, payload_json=?
-                WHERE signal_id=?
+                WHERE signal_id=? AND status='ACTIVE' AND payload_json=?
                 """,
                 (
                     completed_at,
@@ -511,8 +883,20 @@ class SignalRepository:
                     order,
                     json.dumps(_signal_payload(updated), ensure_ascii=False),
                     row["signal_id"],
+                    row["payload_json"],
                 ),
             )
+            if cursor.rowcount <= 0:
+                current = self._connection.execute(
+                    "SELECT * FROM signals WHERE signal_id=?",
+                    (row["signal_id"],),
+                ).fetchone()
+                if current is None:
+                    return self._terminal_projection(row)
+                accepted = Signal.from_dict(json.loads(current["payload_json"]))
+                if current["status"] != "ACTIVE":
+                    return accepted
+                return self._unchanged_projection(accepted)
         if stage != stage_before:
             self._append_event(
                 row["signal_id"],
@@ -538,21 +922,53 @@ class SignalRepository:
             "trigger_event_key",
             "zone_key",
             "entry_reference_price",
+            "entry_low",
+            "entry_high",
+            "invalidation_price",
+            "stop_price",
+            "stop_loss",
+            "tp1_price",
+            "tp2_price",
+            "take_profit_1",
+            "take_profit_2",
         ):
             if original_trigger.get(key) not in (None, ""):
                 refreshed_trigger[key] = original_trigger[key]
         if refreshed_trigger:
             market_story["trigger"] = refreshed_trigger
+        lifecycle = dict(existing.lifecycle)
+        event_keys = [
+            str(value)
+            for value in lifecycle.get("event_keys", [])
+            if str(value).strip()
+        ]
+        original_event_key = str(lifecycle.get("event_key") or "").strip()
+        candidate_event_key = str(
+            raw.market_story.get("trigger", {}).get("trigger_event_key") or ""
+        ).strip()
+        for value in (original_event_key, candidate_event_key):
+            if value and value not in event_keys:
+                event_keys.append(value)
+        if event_keys:
+            lifecycle["event_keys"] = event_keys
+        lifecycle["last_trigger_event_ts"] = max(
+            int(lifecycle.get("last_trigger_event_ts") or 0),
+            _signal_trigger_event_timestamp(existing),
+            _signal_trigger_event_timestamp(raw),
+        )
         return replace(
             existing,
             score=raw.score,
             evidence=raw.evidence,
+            spread_pct=raw.spread_pct,
+            quote_volume_24h=raw.quote_volume_24h,
+            closed_candle_ts=raw.closed_candle_ts,
+            regime=raw.regime,
             notes=raw.notes,
             factor_scores=raw.factor_scores,
             market_metrics=raw.market_metrics,
             trend_strength_label=raw.trend_strength_label,
             trend_strength_score=raw.trend_strength_score,
-            management_plan=raw.management_plan,
             readiness_score=raw.readiness_score,
             evidence_groups=raw.evidence_groups,
             timeframe_states=raw.timeframe_states,
@@ -567,7 +983,94 @@ class SignalRepository:
             execution_quality=raw.execution_quality,
             data_quality=raw.data_quality,
             market_story=market_story,
+            lifecycle=lifecycle,
             data_timestamp=raw.data_timestamp,
+            entry_eligibility=raw.entry_eligibility,
+            signal_stage=(
+                "REENTRY"
+                if raw.signal_stage == "REENTRY"
+                else existing.signal_stage
+            ),
+        )
+
+    @staticmethod
+    def _unchanged_projection(signal: Signal) -> Signal:
+        lifecycle = dict(signal.lifecycle)
+        lifecycle.update(
+            {
+                "previous_stage": signal.signal_stage,
+                "current_stage": signal.signal_stage,
+                "transition": "UNCHANGED",
+                "duplicate_locked": True,
+            }
+        )
+        return replace(signal, lifecycle=lifecycle)
+
+    @staticmethod
+    def _terminal_projection(row: sqlite3.Row) -> Signal:
+        signal = Signal.from_dict(json.loads(row["payload_json"]))
+        lifecycle = dict(signal.lifecycle)
+        lifecycle.update(
+            {
+                "previous_stage": signal.signal_stage,
+                "current_stage": "INVALIDATED",
+                "transition": "TERMINAL_EVENT_LOCKED",
+                "terminal": True,
+                "duplicate_locked": True,
+                "event_key": row["event_key"],
+            }
+        )
+        return replace(
+            signal,
+            signal_stage="INVALIDATED",
+            freshness="INVALIDATED",
+            lifecycle=lifecycle,
+            actionable=False,
+        )
+
+    @staticmethod
+    def _data_unavailable_projection(signal: Signal) -> Signal:
+        lifecycle = dict(signal.lifecycle)
+        lifecycle.update(
+            {
+                "previous_stage": signal.signal_stage,
+                "current_stage": signal.signal_stage,
+                "transition": "DATA_UNAVAILABLE",
+                "read_only": True,
+                "duplicate_locked": True,
+            }
+        )
+        data_quality = dict(signal.data_quality)
+        data_quality.update(
+            {
+                "status": "DATA_UNAVAILABLE",
+                "core": "UNAVAILABLE",
+                "reason": "本輪未取得此幣種最新資料；僅保留舊交易計畫供參考。",
+                "read_only": True,
+            }
+        )
+        entry_eligibility = dict(signal.entry_eligibility)
+        entry_eligibility.update(
+            {
+                "status": "DATA_UNAVAILABLE",
+                "label": "資料不足｜禁止進場",
+                "reason": "本輪沒有可驗證的最新資料，舊計畫只讀保留。",
+                "actionable": False,
+            }
+        )
+        market_metrics = dict(signal.market_metrics)
+        # The previous price remains part of history, but it must not be
+        # reusable as a live execution input by downstream eligibility code.
+        market_metrics["last_price"] = None
+        market_metrics["data_status"] = "DATA_UNAVAILABLE"
+        return replace(
+            signal,
+            freshness="DATA_UNAVAILABLE",
+            lifecycle=lifecycle,
+            actionable=False,
+            data_quality=data_quality,
+            entry_eligibility=entry_eligibility,
+            market_metrics=market_metrics,
         )
 
     def _outcome_update(
@@ -677,48 +1180,52 @@ class SignalRepository:
         event_key: str,
         triggered_at: str,
         updated_at: str,
-    ) -> None:
+    ) -> bool:
         entry_low = _number(signal.entry_low) or 0.0
         entry_high = _number(signal.entry_high) or 0.0
         entry = (entry_low + entry_high) / 2.0
         participation = signal.market_participation.get("state")
         quality = _number(signal.execution_quality.get("score"))
-        with self._lock, self._connection:
-            self._connection.execute(
-                """
-                INSERT INTO signals(
-                    signal_id, event_key, inst_id, horizon, direction, trigger_type,
-                    event_kind, triggered_at, event_ts, updated_at, stage, freshness,
-                    status, trigger_price, stop_price, tp1_price, tp2_price,
-                    risk_reward, participation_state, execution_quality, payload_json,
-                    strategy_version, feature_schema_version
-                ) VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'ACTIVE', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-                """,
-                (
-                    signal.trigger_id,
-                    event_key,
-                    signal.inst_id,
-                    signal.radar_horizon,
-                    signal.direction,
-                    signal.trigger_type,
-                    "REENTRY" if signal.signal_stage == "REENTRY" else "INITIAL",
-                    triggered_at,
-                    int(signal.market_story.get("trigger", {}).get("event_ts", signal.data_timestamp) or 0),
-                    updated_at,
-                    signal.signal_stage,
-                    signal.freshness,
-                    entry,
-                    _number(signal.stop_loss) or 0.0,
-                    _number(signal.take_profit_1) or 0.0,
-                    _number(signal.take_profit_2) or 0.0,
-                    signal.risk_reward,
-                    participation,
-                    quality,
-                    json.dumps(_signal_payload(signal), ensure_ascii=False),
-                    signal.strategy_version,
-                    signal.feature_schema_version,
-                ),
-            )
+        try:
+            with self._write_scope():
+                self._connection.execute(
+                    """
+                    INSERT INTO signals(
+                        signal_id, event_key, inst_id, horizon, direction, trigger_type,
+                        event_kind, triggered_at, event_ts, updated_at, stage, freshness,
+                        status, trigger_price, stop_price, tp1_price, tp2_price,
+                        risk_reward, participation_state, execution_quality, payload_json,
+                        strategy_version, feature_schema_version
+                    ) VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'ACTIVE', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    """,
+                    (
+                        signal.trigger_id,
+                        event_key,
+                        signal.inst_id,
+                        signal.radar_horizon,
+                        signal.direction,
+                        signal.trigger_type,
+                        "REENTRY" if signal.signal_stage == "REENTRY" else "INITIAL",
+                        triggered_at,
+                        int(signal.market_story.get("trigger", {}).get("event_ts", signal.data_timestamp) or 0),
+                        updated_at,
+                        signal.signal_stage,
+                        signal.freshness,
+                        entry,
+                        _number(signal.stop_loss) or 0.0,
+                        _number(signal.take_profit_1) or 0.0,
+                        _number(signal.take_profit_2) or 0.0,
+                        signal.risk_reward,
+                        participation,
+                        quality,
+                        json.dumps(_signal_payload(signal), ensure_ascii=False),
+                        signal.strategy_version,
+                        signal.feature_schema_version,
+                    ),
+                )
+        except sqlite3.IntegrityError:
+            return False
+        return True
 
     def _append_event(
         self,
@@ -729,7 +1236,7 @@ class SignalRepository:
         event_type: str,
         payload: dict[str, Any],
     ) -> None:
-        with self._lock, self._connection:
+        with self._write_scope():
             self._connection.execute(
                 """
                 INSERT INTO signal_events(
@@ -754,7 +1261,7 @@ class SignalRepository:
         final_r: float | None,
         order: str | None,
     ) -> None:
-        with self._lock, self._connection:
+        with self._write_scope():
             self._connection.execute(
                 """
                 UPDATE signals SET status='CLOSED', closed_at=?, updated_at=?,
@@ -764,16 +1271,124 @@ class SignalRepository:
                 (closed_at, closed_at, outcome, final_r, order, signal_id),
             )
 
+    @contextmanager
+    def _write_scope(self):
+        """Serialize a write and commit unless an atomic batch owns it."""
+
+        with self._lock:
+            if self._transaction_depth > 0:
+                yield
+            else:
+                with self._connection:
+                    yield
+
     def _active_row(self, inst_id: str, horizon: str, direction: str) -> sqlite3.Row | None:
+        row = self._active_episode_row(inst_id, horizon)
+        if row is None or str(row["direction"]) != direction:
+            return None
+        return row
+
+    def _active_episode_row(self, inst_id: str, horizon: str) -> sqlite3.Row | None:
         with self._lock:
             return self._connection.execute(
                 """
                 SELECT * FROM signals
-                WHERE inst_id=? AND horizon=? AND direction=? AND status='ACTIVE'
+                WHERE inst_id=? AND horizon=? AND status='ACTIVE'
                 ORDER BY updated_at DESC LIMIT 1
                 """,
-                (inst_id, horizon, direction),
+                (inst_id, horizon),
             ).fetchone()
+
+    def _closed_event_row(
+        self,
+        inst_id: str,
+        horizon: str,
+        event_key: str,
+    ) -> sqlite3.Row | None:
+        with self._lock:
+            exact = self._connection.execute(
+                """
+                SELECT * FROM signals
+                WHERE inst_id=? AND horizon=? AND event_key=? AND status='CLOSED'
+                ORDER BY
+                    CASE WHEN outcome='REPOSITORY_ACTIVE_CONFLICT' THEN 1 ELSE 0 END,
+                    updated_at DESC
+                LIMIT 1
+                """,
+                (inst_id, horizon, event_key),
+            ).fetchone()
+            if exact is not None:
+                return exact
+            rows = self._connection.execute(
+                """
+                SELECT * FROM signals
+                WHERE inst_id=? AND horizon=? AND status='CLOSED'
+                ORDER BY
+                    CASE WHEN outcome='REPOSITORY_ACTIVE_CONFLICT' THEN 1 ELSE 0 END,
+                    updated_at DESC
+                """,
+                (inst_id, horizon),
+            ).fetchall()
+        for row in rows:
+            try:
+                payload = json.loads(row["payload_json"])
+            except (TypeError, ValueError, json.JSONDecodeError):
+                continue
+            aliases = payload.get("lifecycle", {}).get("event_keys", [])
+            if event_key in {str(value) for value in aliases}:
+                return row
+        return None
+
+    @staticmethod
+    def _row_claims_event(row: sqlite3.Row, event_key: str) -> bool:
+        if str(row["event_key"]) == event_key:
+            return True
+        try:
+            payload = json.loads(row["payload_json"])
+        except (TypeError, ValueError, json.JSONDecodeError):
+            return False
+        aliases = payload.get("lifecycle", {}).get("event_keys", [])
+        return event_key in {str(value) for value in aliases}
+
+    def _latest_closed_episode_row(
+        self,
+        inst_id: str,
+        horizon: str,
+    ) -> sqlite3.Row | None:
+        with self._lock:
+            rows = self._connection.execute(
+                """
+                SELECT * FROM signals
+                WHERE inst_id=? AND horizon=? AND status='CLOSED'
+                """,
+                (inst_id, horizon),
+            ).fetchall()
+        return max(
+            rows,
+            key=self._closed_episode_watermark,
+            default=None,
+        )
+
+    @staticmethod
+    def _closed_episode_watermark(row: sqlite3.Row) -> int:
+        try:
+            payload = json.loads(row["payload_json"])
+        except (TypeError, ValueError, json.JSONDecodeError):
+            payload = {}
+        lifecycle = payload.get("lifecycle", {})
+        trigger = payload.get("market_story", {}).get("trigger", {})
+        values = (
+            lifecycle.get("last_trigger_event_ts"),
+            trigger.get("event_ts"),
+            row["event_ts"],
+        )
+        numeric: list[int] = []
+        for value in values:
+            try:
+                numeric.append(int(value or 0))
+            except (TypeError, ValueError):
+                continue
+        return max(numeric, default=0)
 
     def _active_rows(self, horizon: str) -> list[sqlite3.Row]:
         with self._lock:
@@ -785,19 +1400,94 @@ class SignalRepository:
             )
 
     def save_microstructure(self, context: MarketContext, updated_at: str) -> None:
+        timestamp_ms = _market_context_timestamp(context)
+        best_bid = _number(context.best_bid)
+        best_ask = _number(context.best_ask)
+        mid_price = (
+            (best_bid + best_ask) / 2.0
+            if best_bid is not None
+            and best_ask is not None
+            and best_bid > 0
+            and best_ask >= best_bid
+            else None
+        )
+        snapshot = {
+            "sampled_at": int(context.sampled_at or 0),
+            "timestamp_ms": timestamp_ms,
+            "mid_price": mid_price,
+            "open_interest_usd": context.open_interest_usd,
+            "taker_buy_ratio": context.taker_buy_ratio,
+            "funding_rate": context.funding_rate,
+            "bid_depth_usd": context.bid_depth_usd,
+            "ask_depth_usd": context.ask_depth_usd,
+            "order_book_imbalance": context.order_book_imbalance,
+        }
         payload = {
             "bid_depth_usd": context.bid_depth_usd,
             "ask_depth_usd": context.ask_depth_usd,
             "order_book_imbalance": context.order_book_imbalance,
             "taker_buy_ratio": context.taker_buy_ratio,
+            "open_interest_usd": context.open_interest_usd,
+            "funding_rate": context.funding_rate,
             "cvd": context.cvd,
             "sampled_at": context.sampled_at,
+            "timestamp_ms": timestamp_ms,
             "order_book_ts": context.source_timestamps.get("order_book"),
             "source_timestamps": dict(context.source_timestamps),
             "best_bid": context.best_bid,
             "best_ask": context.best_ask,
         }
         with self._lock, self._connection:
+            row = self._connection.execute(
+                "SELECT payload_json FROM microstructure_state WHERE inst_id=?",
+                (context.inst_id,),
+            ).fetchone()
+            previous = json.loads(row["payload_json"]) if row else {}
+            history = [
+                dict(item)
+                for item in previous.get("raw_history", [])
+                if isinstance(item, dict)
+            ]
+            if not history and previous:
+                legacy_ts = int(
+                    previous.get("timestamp_ms")
+                    or previous.get("sampled_at")
+                    or 0
+                )
+                if legacy_ts > 0:
+                    legacy_bid = _number(previous.get("best_bid"))
+                    legacy_ask = _number(previous.get("best_ask"))
+                    history.append(
+                        {
+                            "sampled_at": int(previous.get("sampled_at") or 0),
+                            "timestamp_ms": legacy_ts,
+                            "mid_price": (
+                                (legacy_bid + legacy_ask) / 2.0
+                                if legacy_bid is not None
+                                and legacy_ask is not None
+                                and legacy_bid > 0
+                                and legacy_ask >= legacy_bid
+                                else None
+                            ),
+                            "open_interest_usd": previous.get(
+                                "open_interest_usd"
+                            ),
+                            "taker_buy_ratio": previous.get("taker_buy_ratio"),
+                            "funding_rate": previous.get("funding_rate"),
+                            "bid_depth_usd": previous.get("bid_depth_usd"),
+                            "ask_depth_usd": previous.get("ask_depth_usd"),
+                            "order_book_imbalance": previous.get(
+                                "order_book_imbalance"
+                            ),
+                        }
+                    )
+            latest_ts = max(
+                (int(item.get("timestamp_ms") or 0) for item in history),
+                default=0,
+            )
+            if history and timestamp_ms <= latest_ts:
+                return
+            payload["raw_history"] = [*history, snapshot][-8:]
             self._connection.execute(
                 """
                 INSERT INTO microstructure_state(inst_id, updated_at, payload_json)
@@ -850,7 +1540,7 @@ class SignalRepository:
                 ),
             )
 
-    def performance(self, strategy_version: str = "V3.3_MASTER") -> dict[str, Any]:
+    def performance(self, strategy_version: str = "V3.4_CONTEXT") -> dict[str, Any]:
         with self._lock:
             rows = list(
                 self._connection.execute(
@@ -859,6 +1549,19 @@ class SignalRepository:
                            execution_quality, final_r
                     FROM signals
                     WHERE strategy_version=? AND final_r IS NOT NULL
+                    ORDER BY triggered_at
+                    """,
+                    (strategy_version,),
+                ).fetchall()
+            )
+            research_rows = list(
+                self._connection.execute(
+                    """
+                    SELECT horizon, trigger_type, mfe_r, mae_r, final_r,
+                           payload_json
+                    FROM signals
+                    WHERE strategy_version=? AND status='CLOSED'
+                      AND outcome!='REPOSITORY_ACTIVE_CONFLICT'
                     ORDER BY triggered_at
                     """,
                     (strategy_version,),
@@ -879,6 +1582,7 @@ class SignalRepository:
             "by_trigger_type": _group_performance(records, "trigger_type"),
             "by_participation": _group_performance(records, "participation_state"),
             "by_execution_quality": _quality_performance(records),
+            "research": _research_performance(research_rows),
         }
 
     def recent_history(
@@ -1056,6 +1760,56 @@ def _signal_payload(signal: Signal) -> dict[str, Any]:
     return payload
 
 
+def _signal_core_timestamp(signal: Signal) -> int:
+    try:
+        return int(
+            signal.market_metrics.get("core_timestamp")
+            or signal.data_timestamp
+            or 0
+        )
+    except (TypeError, ValueError):
+        return 0
+
+
+def _signal_trigger_event_timestamp(signal: Signal) -> int:
+    try:
+        return int(
+            signal.market_story.get("trigger", {}).get("event_ts")
+            or signal.data_timestamp
+            or signal.closed_candle_ts
+            or 0
+        )
+    except (TypeError, ValueError):
+        return 0
+
+
+def _market_state_core_timestamp(state: MarketState) -> int:
+    try:
+        return int(
+            state.market_metrics.get("core_timestamp")
+            or state.closed_candle_ts
+            or 0
+        )
+    except (TypeError, ValueError):
+        return 0
+
+
+def _market_context_timestamp(context: MarketContext) -> int:
+    try:
+        sampled_at = int(context.sampled_at or 0)
+    except (TypeError, ValueError):
+        sampled_at = 0
+    if sampled_at > 0:
+        return sampled_at
+    values: list[int] = []
+    for value in context.source_timestamps.values():
+        try:
+            values.append(int(value or 0))
+        except (TypeError, ValueError):
+            continue
+    return max(values, default=0)
+
+
 def _performance_bucket(records: list[dict[str, Any]]) -> dict[str, Any]:
     values = [float(item["final_r"]) for item in records if item.get("final_r") is not None]
     if not values:
@@ -1119,6 +1873,139 @@ def _quality_performance(records: list[dict[str, Any]]) -> dict[str, Any]:
         )
         groups[bucket].append(item)
     return {name: _performance_bucket(items) for name, items in groups.items()}
+
+
+def _research_performance(rows: list[sqlite3.Row]) -> dict[str, Any]:
+    records: list[dict[str, Any]] = []
+    for row in rows:
+        try:
+            payload = json.loads(row["payload_json"])
+        except (TypeError, ValueError, json.JSONDecodeError):
+            payload = {}
+        story_value = payload.get("market_story", {})
+        story = story_value if isinstance(story_value, dict) else {}
+        context_value = story.get("context", {})
+        context = context_value if isinstance(context_value, dict) else {}
+        sessions_value = context.get("sessions", {})
+        active_sessions = (
+            sessions_value.get("active", [])
+            if isinstance(sessions_value, dict)
+            else []
+        )
+        sessions = [
+            str(value)
+            for value in active_sessions
+            if isinstance(active_sessions, list) and str(value).strip()
+        ]
+        driver_value = context.get("market_driver", {})
+        driver = (
+            driver_value.get("key")
+            if isinstance(driver_value, dict)
+            else driver_value
+        )
+        records.append(
+            {
+                "horizon": str(row["horizon"] or "UNKNOWN"),
+                "trigger_type": str(row["trigger_type"] or "UNKNOWN"),
+                "mfe_r": float(row["mfe_r"] or 0.0),
+                "mae_r": float(row["mae_r"] or 0.0),
+                "final_r": row["final_r"],
+                "sessions": sessions or ["UNKNOWN"],
+                "market_driver": str(driver or "UNKNOWN"),
+                "higher_timeframe_alignment": _higher_timeframe_alignment(
+                    payload,
+                    context,
+                ),
+            }
+        )
+
+    def grouped(key: str) -> dict[str, dict[str, Any]]:
+        buckets: dict[str, list[dict[str, Any]]] = {}
+        for record in records:
+            values = record[key]
+            if isinstance(values, list):
+                labels = values
+            else:
+                labels = [values]
+            for label in labels:
+                buckets.setdefault(str(label), []).append(record)
+        return {
+            label: _research_bucket(items)
+            for label, items in sorted(buckets.items())
+        }
+
+    horizon_trigger: dict[str, list[dict[str, Any]]] = {}
+    for record in records:
+        key = f"{record['horizon']}:{record['trigger_type']}"
+        horizon_trigger.setdefault(key, []).append(record)
+    return {
+        "sample_size": len(records),
+        "avg_mfe_r": _average_metric(records, "mfe_r"),
+        "avg_mae_r": _average_metric(records, "mae_r"),
+        "minimum_group_sample": 5,
+        "read_only": True,
+        "auto_tuning": False,
+        "by_session": grouped("sessions"),
+        "by_market_driver": grouped("market_driver"),
+        "by_horizon_trigger": {
+            label: _research_bucket(items)
+            for label, items in sorted(horizon_trigger.items())
+        },
+        "by_higher_timeframe_alignment": grouped(
+            "higher_timeframe_alignment"
+        ),
+    }
+
+
+def _research_bucket(records: list[dict[str, Any]]) -> dict[str, Any]:
+    if len(records) < 5:
+        return {"sample_size": len(records)}
+    outcomes = [
+        {"final_r": record["final_r"]}
+        for record in records
+        if record.get("final_r") is not None
+    ]
+    if len(outcomes) < 5:
+        return {"sample_size": len(records)}
+    bucket = _performance_bucket(outcomes)
+    bucket["sample_size"] = len(records)
+    bucket["outcome_sample_size"] = len(outcomes)
+    bucket["avg_mfe_r"] = _average_metric(records, "mfe_r")
+    bucket["avg_mae_r"] = _average_metric(records, "mae_r")
+    return bucket
+
+
+def _average_metric(records: list[dict[str, Any]], key: str) -> float | None:
+    values = [float(record[key]) for record in records if record.get(key) is not None]
+    return round(sum(values) / len(values), 3) if values else None
+
+
+def _higher_timeframe_alignment(
+    payload: dict[str, Any],
+    context: dict[str, Any],
+) -> str:
+    explicit = context.get("counter_higher_timeframe")
+    if explicit is None:
+        explicit = payload.get("market_story", {}).get(
+            "counter_higher_timeframe"
+        )
+    if isinstance(explicit, bool):
+        return "COUNTER_HIGHER_TIMEFRAME" if explicit else "ALIGNED_OR_NEUTRAL"
+    alignment = str(
+        context.get("higher_timeframe_alignment")
+        or payload.get("market_story", {}).get("higher_timeframe_alignment")
+        or ""
+    ).upper()
+    if alignment in {"COUNTER", "OPPOSED", "CONFLICT"}:
+        return "COUNTER_HIGHER_TIMEFRAME"
+    conflicts = [str(value).upper() for value in payload.get("conflicts", [])]
+    if any(
+        ("4H" in value or "高週期" in value)
+        and ("衝突" in value or "反向" in value or "OPPOS" in value)
+        for value in conflicts
+    ):
+        return "COUNTER_HIGHER_TIMEFRAME"
+    return "ALIGNED_OR_NEUTRAL"
 
 
 def _stage_rank(stage: str) -> int:

@@ -8,8 +8,8 @@ from .indicators import TimeframeFeatures, atr, ema_series, features
 from .models import Candle, MarketContext
 
 
-STRATEGY_VERSION = "V3.3_MASTER"
-FEATURE_SCHEMA_VERSION = "3.3.0"
+STRATEGY_VERSION = "V3.4_CONTEXT"
+FEATURE_SCHEMA_VERSION = "3.4.0"
 
 
 @dataclass(frozen=True)
@@ -117,7 +117,7 @@ class StoryAssessment:
 
 
 class MarketStoryEngine:
-    """Price-first V3.3 engine.
+    """Price-first V3.4 engine.
 
     Scores in this module are explanatory telemetry.  A formal Trigger is
     created only from recorded price facts: a useful Zone, a meaningful attack
@@ -182,7 +182,7 @@ class MarketStoryEngine:
         previous_story: dict[str, Any] | None,
     ) -> StoryAssessment:
         if min(len(higher_candles), len(bias_candles), len(core_candles)) < 60:
-            raise ValueError("V3.3 requires at least 60 closed candles per core timeframe")
+            raise ValueError("V3.4 requires at least 60 closed candles per core timeframe")
         if timing_candles is not None and len(timing_candles) < 60:
             timing_candles = None
 
@@ -235,35 +235,180 @@ class MarketStoryEngine:
         event_ts = int(selected.get("event_ts", core_candles[-1].ts))
         event_age = int(selected.get("event_age_bars", 0))
 
-        prior_active = (previous_story or {}).get("active_trigger_direction")
-        prior_invalidated = bool((previous_story or {}).get("invalidated", False))
+        # Establish the logical event identity before applying lifecycle rules.
+        # A repeated scan of the same price fact must keep this exact key; it
+        # must not be relabelled as a fresh REENTRY merely because the latest
+        # candle is still close to the original event.
+        selected = dict(selected)
+        selected["trigger_event_key"] = _trigger_event_key(
+            horizon,
+            trigger_direction,
+            selected,
+        )
+
+        prior_story = previous_story or {}
+        prior_trigger = _previous_trigger(prior_story)
+        prior_active = prior_story.get("active_trigger_direction")
+        prior_invalidated = bool(prior_story.get("invalidated", False))
+        prior_stop = _number_or_none(prior_story.get("invalidation_price"))
+        prior_last_evaluated = int(
+            prior_story.get("last_evaluated_core_ts") or 0
+        )
+        prior_event_key = str(prior_trigger.get("trigger_event_key") or "").strip()
+        prior_trigger_watermark = max(
+            prior_last_evaluated,
+            _int_or_zero(prior_trigger.get("event_ts")),
+            _int_or_zero(prior_trigger.get("confirmation_ts")),
+        )
+        prior_crossed, prior_crossed_ts = _prior_plan_invalidation(
+            prior_active,
+            prior_stop,
+            core_candles,
+            prior_last_evaluated,
+        )
+        prior_terminal = prior_invalidated or prior_crossed
+
+        candidate_event_key = str(selected.get("trigger_event_key") or "").strip()
+        candidate_confirmation_ts = _int_or_zero(selected.get("confirmation_ts"))
+        valid_reentry_event = bool(
+            prior_event_key
+            and candidate_event_key
+            and candidate_event_key != prior_event_key
+            and prior_trigger_watermark > 0
+            and event_ts > prior_trigger_watermark
+            and candidate_confirmation_ts > prior_trigger_watermark
+        )
         if (
             bool(selected.get("triggered"))
             and selected.get("type") == "CONTINUATION"
             and event_age <= self.early_signal_max_age_bars
             and prior_active == trigger_direction
-            and not prior_invalidated
+            and not prior_terminal
+            and valid_reentry_event
         ):
-            selected = dict(selected)
             selected["stage"] = "REENTRY"
             selected["freshness"] = "REACTIVATED"
+            selected["same_episode_update"] = True
             stage = "REENTRY"
             freshness = "REACTIVATED"
+        elif (
+            bool(selected.get("triggered"))
+            and selected.get("type") == "CONTINUATION"
+            and prior_active == trigger_direction
+            and not prior_terminal
+        ):
+            # This is still the active episode, but there is no independently
+            # newer event plus confirmation. Keep it as an ordinary update and
+            # never manufacture REENTRY / REACTIVATED from the old event.
+            selected["same_episode_update"] = True
+            selected["freshness"] = "ACTIVE"
+            freshness = "ACTIVE"
         if (
             prior_active in ("LONG", "SHORT")
             and trigger_direction not in ("NEUTRAL", prior_active)
-            and not prior_invalidated
-            and not bool(selected.get("price_invalidated_previous"))
+            and not prior_terminal
         ):
-            selected = dict(selected)
-            selected["opposite_warning_only"] = True
-            selected["triggered"] = False
-            selected["stage"] = "NEAR_TRIGGER"
-            selected.setdefault("conflicts", []).append(
-                "原方向尚未被價格失效，反向變化先列警告"
+            opposite_candidate = _opposite_candidate_evidence(selected)
+            main_trigger = (
+                dict(prior_trigger)
+                if prior_trigger
+                and str(prior_trigger.get("direction") or prior_active).upper()
+                == str(prior_active)
+                else {
+                    "direction": str(prior_active),
+                    "triggered": False,
+                    "type": "ACTIVE_EPISODE",
+                    "stage": str(
+                        prior_story.get("active_stage") or "CONFIRMED"
+                    ),
+                    "freshness": "ACTIVE",
+                    "event_ts": _int_or_zero(
+                        prior_story.get("active_trigger_ts")
+                    ),
+                    "event_age_bars": 0,
+                    "zone_key": "NO_ZONE",
+                    "supporting": [],
+                    "conflicts": [],
+                    "neutral": [],
+                    "momentum_confirmation": {},
+                    "price_acceptance": {},
+                    "control_transfer": {},
+                    "invalidation_price": prior_stop,
+                }
             )
-            stage = "NEAR_TRIGGER"
-            freshness = "NONE"
+            main_trigger.update(
+                {
+                    "direction": str(prior_active),
+                    "triggered": False,
+                    "stage": str(
+                        prior_story.get("active_stage")
+                        or main_trigger.get("stage")
+                        or "CONFIRMED"
+                    ),
+                    "freshness": "ACTIVE",
+                    "opposite_warning_only": True,
+                    "active_episode_preserved": True,
+                    "opposite_candidate": opposite_candidate,
+                }
+            )
+            main_trigger.setdefault("conflicts", [])
+            main_trigger["conflicts"] = _unique(
+                [
+                    *main_trigger.get("conflicts", []),
+                    "原方向尚未被價格失效，反向變化先列警告",
+                ]
+            )
+            selected = main_trigger
+            trigger_direction = str(prior_active)
+            direction = str(prior_active)
+            direction_state = str(
+                prior_story.get("direction_state")
+                or ("BULLISH" if prior_active == "LONG" else "BEARISH")
+            )
+            direction_label = (
+                f"{_direction_cn(str(prior_active))}仍為正式主方向；反向證據僅列警告"
+            )
+            stage = str(selected.get("stage", "CONFIRMED"))
+            freshness = "ACTIVE"
+            event_ts = _int_or_zero(selected.get("event_ts"))
+            event_age = int(selected.get("event_age_bars", event_age) or 0)
+        elif (
+            prior_terminal
+            and bool(selected.get("triggered"))
+        ):
+            explicit_invalidation_ts = _invalidation_watermark(prior_story)
+            invalidated_at = int(prior_crossed_ts or explicit_invalidation_ts or 0)
+            distinct_from_prior = not (
+                prior_event_key
+                and candidate_event_key
+                and prior_event_key == candidate_event_key
+            )
+            new_event_after_terminal = invalidated_at > 0 and event_ts > invalidated_at
+            confirmed_after_terminal = (
+                str(selected.get("confirmation_level", "EARLY")) == "FULL"
+                and candidate_confirmation_ts > invalidated_at
+            )
+            if not (
+                distinct_from_prior
+                and new_event_after_terminal
+                and confirmed_after_terminal
+            ):
+                selected["triggered"] = False
+                selected["stage"] = "NEAR_TRIGGER"
+                selected["freshness"] = "NONE"
+                selected.setdefault("conflicts", []).append(
+                    (
+                        "原計畫已失效但缺少可信失效時間；禁止舊訊號復活"
+                        if invalidated_at <= 0
+                        else "原計畫已失效；等待失效後的新價格事件與後續收盤確認"
+                    )
+                )
+                stage = "NEAR_TRIGGER"
+                freshness = "NONE"
+        selected["previous_plan_invalidated"] = prior_terminal
+        selected["previous_invalidation_ts"] = int(
+            prior_crossed_ts or _invalidation_watermark(prior_story) or 0
+        )
 
         acceptance = dict(selected.get("price_acceptance", {}))
         control = dict(selected.get("control_transfer", {}))
@@ -336,13 +481,18 @@ class MarketStoryEngine:
             "core_high": core_candles[-1].high,
             "core_low": core_candles[-1].low,
             "core_atr": tf_core.atr14,
+            "core_range_atr": round(
+                (core_candles[-1].high - core_candles[-1].low)
+                / max(tf_core.atr14, 1e-9),
+                3,
+            ),
+            "core_volume_ratio": round(tf_core.volume_ratio, 3),
             "core_return_pct": _pct_change(core_candles[-1].close, core_candles[-2].close),
             "noise": selected.get("noise", {}),
         }
-        selected = dict(selected)
-        selected["trigger_event_key"] = (
-            f"{horizon}:{trigger_direction}:{selected.get('type', 'NONE')}:"
-            f"{event_ts}:{selected.get('zone_key', 'NO_ZONE')}"
+        selected.setdefault(
+            "trigger_event_key",
+            _trigger_event_key(horizon, trigger_direction, selected),
         )
         selected["strategy_version"] = STRATEGY_VERSION
         selected["feature_schema_version"] = FEATURE_SCHEMA_VERSION
@@ -380,6 +530,9 @@ class MarketStoryEngine:
                 "supporting": [],
                 "conflicts": [],
                 "neutral": ["深度資料尚未取得"],
+                "permission": "CONTEXT_ONLY_NEVER_CANCELS_TRIGGER",
+                "trigger_permission": "NEVER_CREATES_OR_CANCELS_TRIGGER",
+                "entry_permission": "MAY_BLOCK_NEW_ENTRY",
             },
             execution_quality={
                 "score": entry_location["score"],
@@ -407,7 +560,11 @@ def enrich_story_context(
     neutral: list[str] = []
     available: list[str] = []
     missing = list(context.failures)
-    price_move = float(story.raw.get("core_return_pct", 0.0) or 0.0)
+    # Missing price change is not a neutral zero. Context interpretation must
+    # explicitly remain unknown whenever the source fact is absent.
+    price_move = _number_or_none(story.raw.get("core_return_pct"))
+    if price_move is None:
+        missing.append("core_return")
     timeframe_states = {
         key: dict(value) for key, value in story.timeframe_states.items()
     }
@@ -417,7 +574,9 @@ def enrich_story_context(
         directional_taker = (
             context.taker_buy_ratio if direction == "LONG" else 1.0 - context.taker_buy_ratio
         )
-        if directional_taker >= 0.60 and price_move * sign > 0.02:
+        if price_move is None:
+            pass
+        elif directional_taker >= 0.60 and price_move * sign > 0.02:
             supporting.append("主動成交與價格成果同向")
         elif directional_taker >= 0.62 and price_move * sign <= 0.0:
             conflicts.append("主動成交很強但價格推不動，可能遭對手吸收")
@@ -431,7 +590,9 @@ def enrich_story_context(
     if context.open_interest_change_pct is not None:
         available.append("open_interest_change")
         oi_change = context.open_interest_change_pct
-        if oi_change >= 0.5 and price_move * sign > 0:
+        if price_move is None:
+            neutral.append("OI 變化可用，但核心價格變化未知，暫不判方向")
+        elif oi_change >= 0.5 and price_move * sign > 0:
             supporting.append("價格與持倉量同向增加，顯示新增部位參與")
         elif oi_change <= -0.8:
             neutral.append("持倉量下降，行情可能由平倉或回補推動")
@@ -476,7 +637,9 @@ def enrich_story_context(
 
     if context.cvd is not None:
         available.append("cvd")
-        if context.cvd * sign > 0 and price_move * sign > 0:
+        if price_move is None:
+            neutral.append("CVD 可用，但核心價格變化未知，暫不判方向")
+        elif context.cvd * sign > 0 and price_move * sign > 0:
             supporting.append("近期 CVD 與價格成果同向")
         elif context.cvd * sign > 0 and price_move * sign <= 0:
             conflicts.append("CVD 同向但價格未跟進，可能存在吸收")
@@ -506,13 +669,22 @@ def enrich_story_context(
         else:
             neutral.append("Timing 週期中性")
 
-    macro = market_bias or {"score": 50.0, "label": "中性"}
-    macro_score = float(macro.get("score", 50.0) or 50.0)
-    directional_macro = macro_score if direction == "LONG" else 100.0 - macro_score
-    if directional_macro < 30.0:
-        conflicts.append("全市場背景與 Trigger 方向相反（逆勢）")
-    elif directional_macro < 45.0:
-        neutral.append("全市場背景未支持此方向")
+    macro_score = (
+        _number_or_none(market_bias.get("score"))
+        if isinstance(market_bias, dict)
+        else None
+    )
+    if macro_score is None:
+        missing.append("market_bias")
+    else:
+        available.append("market_bias")
+        directional_macro = (
+            macro_score if direction == "LONG" else 100.0 - macro_score
+        )
+        if directional_macro < 30.0:
+            conflicts.append("全市場背景與 Trigger 方向相反（逆勢）")
+        elif directional_macro < 45.0:
+            neutral.append("全市場背景未支持此方向")
 
     if conflicts and supporting:
         state, label = "CONFLICT", "支持中帶反證"
@@ -532,8 +704,17 @@ def enrich_story_context(
         "neutral": _unique(neutral),
         "available_sources": sorted(set(available)),
         "missing_sources": sorted(set(missing)),
+        "core_return_pct": (
+            round(price_move, 6) if price_move is not None else None
+        ),
+        "market_bias_score": (
+            round(macro_score, 2) if macro_score is not None else None
+        ),
+        "market_bias_state": "AVAILABLE" if macro_score is not None else "UNKNOWN",
         "complete": context.complete,
         "permission": "CONTEXT_ONLY_NEVER_CANCELS_TRIGGER",
+        "trigger_permission": "NEVER_CREATES_OR_CANCELS_TRIGGER",
+        "entry_permission": "MAY_BLOCK_NEW_ENTRY",
     }
     groups = {key: dict(value) for key, value in story.groups.items()}
     participation_score = 70.0 if state == "SUPPORT" else 35.0 if state == "CONFLICT" else 50.0
@@ -1748,6 +1929,120 @@ def _context_conflicts(
     if horizon == "SHORT" and higher_score < 30.0:
         output.append("更高週期背景明顯反向；只列 Conflict，不取消核心 Trigger")
     return output
+
+
+def _number_or_none(value: Any) -> float | None:
+    try:
+        numeric = float(value)
+    except (TypeError, ValueError):
+        return None
+    return numeric if math.isfinite(numeric) else None
+
+
+def _int_or_zero(value: Any) -> int:
+    try:
+        numeric = int(value)
+    except (TypeError, ValueError, OverflowError):
+        return 0
+    return max(0, numeric)
+
+
+def _previous_trigger(previous_story: dict[str, Any]) -> dict[str, Any]:
+    direct = previous_story.get("trigger")
+    if isinstance(direct, dict) and direct:
+        return dict(direct)
+    nested_story = previous_story.get("market_story")
+    if isinstance(nested_story, dict):
+        nested = nested_story.get("trigger")
+        if isinstance(nested, dict):
+            return dict(nested)
+    return {}
+
+
+def _trigger_event_key(
+    horizon: str,
+    direction: str,
+    candidate: dict[str, Any],
+) -> str:
+    existing = str(candidate.get("trigger_event_key") or "").strip()
+    if existing:
+        return existing
+    return (
+        f"{horizon}:{direction}:{candidate.get('type', 'NONE')}:"
+        f"{_int_or_zero(candidate.get('event_ts'))}:"
+        f"{candidate.get('zone_key', 'NO_ZONE')}"
+    )
+
+
+def _invalidation_watermark(previous_story: dict[str, Any]) -> int:
+    """Return only an explicit, trustworthy terminal core timestamp.
+
+    ``last_evaluated_core_ts`` alone does not prove when invalidation happened,
+    so it is deliberately excluded. A terminal flag without one of these
+    timestamps fails closed and cannot authorize a replacement signal.
+    """
+
+    trigger = _previous_trigger(previous_story)
+    lifecycle = previous_story.get("lifecycle")
+    lifecycle = lifecycle if isinstance(lifecycle, dict) else {}
+    values = [
+        *(
+            _int_or_zero(previous_story.get(key))
+            for key in (
+                "invalidation_ts",
+                "invalidated_at_core_ts",
+                "terminal_core_ts",
+                "previous_invalidation_ts",
+            )
+        ),
+        *(
+            _int_or_zero(trigger.get(key))
+            for key in (
+                "invalidation_ts",
+                "invalidated_at_core_ts",
+                "terminal_core_ts",
+                "previous_invalidation_ts",
+            )
+        ),
+        _int_or_zero(lifecycle.get("invalidated_at_core_ts")),
+    ]
+    return max(values, default=0)
+
+
+def _opposite_candidate_evidence(candidate: dict[str, Any]) -> dict[str, Any]:
+    """Keep an opposite setup observable without making it a main signal."""
+
+    return {
+        "direction": candidate.get("direction", "NEUTRAL"),
+        "type": candidate.get("type", "NONE"),
+        "stage": candidate.get("stage", "WATCH"),
+        "event_ts": _int_or_zero(candidate.get("event_ts")),
+        "confirmation_ts": _int_or_zero(candidate.get("confirmation_ts")),
+        "trigger_event_key": candidate.get("trigger_event_key", ""),
+        "supporting": list(candidate.get("supporting", [])),
+        "conflicts": list(candidate.get("conflicts", [])),
+        "warning_only": True,
+    }
+
+
+def _prior_plan_invalidation(
+    direction: Any,
+    stop: float | None,
+    candles: list[Candle],
+    last_evaluated_ts: int,
+) -> tuple[bool, int]:
+    """Detect a prior plan stop only from newly closed core candles."""
+
+    normalized = str(direction or "").upper()
+    if normalized not in {"LONG", "SHORT"} or stop is None:
+        return False, 0
+    for candle in candles:
+        if not candle.confirmed or int(candle.ts) <= int(last_evaluated_ts or 0):
+            continue
+        crossed = candle.low <= stop if normalized == "LONG" else candle.high >= stop
+        if crossed:
+            return True, int(candle.ts)
+    return False, 0
 
 
 def _regime(tf: TimeframeFeatures) -> str:
