@@ -207,6 +207,10 @@ class PreflightTests(unittest.TestCase):
             self.assertEqual(payload["plan_state"]["status"], "ACTIVE")
             self.assertTrue(payload["plan_state"]["old_plan_reusable"])
             self.assertFalse(payload["plan_state"]["new_trigger_required"])
+            self.assertEqual(payload["signal_lifecycle"]["status"], "ACTIVE")
+            self.assertEqual(payload["signal_lifecycle"]["label"], "已觸發・有效中")
+            self.assertTrue(payload["plan_state"]["existing_position_plan_active"])
+            self.assertEqual(payload["plan_state"]["new_entry_status"], "READY")
             self.assertEqual(item.market_metrics, original_metrics)
             self.assertEqual(item.execution_quality, original_quality)
 
@@ -245,6 +249,9 @@ class PreflightTests(unittest.TestCase):
             self.assertFalse(payload["verdict"]["actionable"])
             self.assertEqual(payload["live"]["quality_score"], 0.0)
             self.assertEqual(payload["plan_state"]["status"], "INVALIDATED")
+            self.assertEqual(payload["signal_lifecycle"]["status"], "INVALIDATED")
+            self.assertEqual(payload["signal_lifecycle"]["label"], "已觸發・已失效")
+            self.assertFalse(payload["plan_state"]["existing_position_plan_active"])
             self.assertFalse(payload["plan_state"]["old_plan_reusable"])
             self.assertEqual(
                 payload["plan_state"]["direction_status"],
@@ -269,10 +276,105 @@ class PreflightTests(unittest.TestCase):
             self.assertEqual(payload["verdict"]["status"], "WAIT_RETEST")
             self.assertFalse(payload["verdict"]["actionable"])
             self.assertIn("接近失效", payload["verdict"]["label"])
+            self.assertEqual(payload["verdict"]["situation"], "NEAR_INVALIDATION")
+            self.assertEqual(payload["signal_lifecycle"]["status"], "ACTIVE")
             self.assertIsNone(payload["live"]["remaining_rr"])
             self.assertFalse(payload["live"]["remaining_rr_applicable"])
             self.assertEqual(item.entry_eligibility, original_entry)
             self.assertTrue(payload["safety"]["stored_trigger_unchanged"])
+
+    def test_small_adverse_move_keeps_trigger_active_with_retest_tolerance(self):
+        with tempfile.TemporaryDirectory() as directory:
+            item = make_signal()
+            runtime = RadarRuntime(
+                PreflightScanner(PreflightClient(price=99.4)),
+                AppConfig(data_dir=directory),
+            )
+            runtime._latest = make_report(item)
+
+            payload = runtime.preflight_dict(item.inst_id, "SHORT")
+
+            self.assertEqual(payload["verdict"]["status"], "WAIT_RETEST")
+            self.assertEqual(payload["verdict"]["situation"], "ADVERSE_TOLERANCE")
+            self.assertIn("容許回測中", payload["verdict"]["label"])
+            self.assertEqual(payload["signal_lifecycle"]["label"], "已觸發・有效中")
+            self.assertTrue(payload["plan_state"]["existing_position_plan_active"])
+            self.assertEqual(payload["plan_state"]["new_entry_status"], "WAIT")
+
+    def test_favorable_move_shows_active_trigger_and_waits_without_chasing(self):
+        with tempfile.TemporaryDirectory() as directory:
+            item = replace(
+                make_signal(),
+                direction="SHORT",
+                signal_stage="CONFIRMED",
+                entry_low="99.8",
+                entry_high="100.2",
+                stop_loss="102",
+                take_profit_1="92",
+                take_profit_2="90",
+            )
+            runtime = RadarRuntime(
+                PreflightScanner(PreflightClient(price=99.06)),
+                AppConfig(data_dir=directory),
+            )
+            runtime._latest = make_report(item)
+
+            payload = runtime.preflight_dict(item.inst_id, "SHORT")
+
+            self.assertEqual(payload["verdict"]["status"], "WAIT_RETEST")
+            self.assertEqual(payload["verdict"]["situation"], "FAVORABLE_AWAY")
+            self.assertIn("已離開最佳進場點", payload["verdict"]["label"])
+            self.assertEqual(payload["signal_lifecycle"]["label"], "已觸發・有效中")
+            self.assertTrue(payload["plan_state"]["existing_position_plan_active"])
+            self.assertFalse(payload["verdict"]["actionable"])
+
+    def test_favorable_move_beyond_entry_window_closes_only_new_entry(self):
+        with tempfile.TemporaryDirectory() as directory:
+            item = replace(
+                make_signal(),
+                direction="SHORT",
+                signal_stage="CONFIRMED",
+                entry_low="99.8",
+                entry_high="100.2",
+                stop_loss="102",
+                take_profit_1="92",
+                take_profit_2="90",
+            )
+            runtime = RadarRuntime(
+                PreflightScanner(PreflightClient(price=98.6)),
+                AppConfig(data_dir=directory),
+            )
+            runtime._latest = make_report(item)
+
+            payload = runtime.preflight_dict(item.inst_id, "SHORT")
+
+            self.assertEqual(payload["verdict"]["status"], "MISSED_ENTRY")
+            self.assertEqual(payload["verdict"]["situation"], "FAVORABLE_MISSED")
+            self.assertEqual(payload["signal_lifecycle"]["status"], "ACTIVE")
+            self.assertTrue(payload["plan_state"]["existing_position_plan_active"])
+            self.assertFalse(payload["plan_state"]["old_plan_reusable_for_new_entry"])
+            self.assertEqual(
+                payload["plan_state"]["direction_status"],
+                "ORIGINAL_BIAS_RETAINED",
+            )
+            self.assertIn("若已持倉", payload["plan_state"]["note"])
+
+    def test_reaching_target_completes_trigger_without_relabeling_it_untriggered(self):
+        with tempfile.TemporaryDirectory() as directory:
+            item = make_signal()
+            runtime = RadarRuntime(
+                PreflightScanner(PreflightClient(price=104.3)),
+                AppConfig(data_dir=directory),
+            )
+            runtime._latest = make_report(item)
+
+            payload = runtime.preflight_dict(item.inst_id, "SHORT")
+
+            self.assertEqual(payload["verdict"]["situation"], "TARGET_REACHED")
+            self.assertEqual(payload["signal_lifecycle"]["status"], "TARGET_REACHED")
+            self.assertEqual(payload["signal_lifecycle"]["label"], "已觸發・目標已達")
+            self.assertTrue(payload["signal_lifecycle"]["terminal"])
+            self.assertFalse(payload["plan_state"]["existing_position_plan_active"])
 
     def test_second_refresh_after_invalidation_publishes_a_new_plan(self):
         with tempfile.TemporaryDirectory() as directory:

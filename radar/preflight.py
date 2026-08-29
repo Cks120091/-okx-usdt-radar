@@ -99,7 +99,14 @@ def build_preflight_payload(
     verdict_status = eligibility["status"]
     verdict_label = eligibility["label"]
     verdict_reason = eligibility["reason"]
+    chase_atr = float(eligibility.get("chase_atr", 0.0) or 0.0)
+    adverse_atr = float(eligibility.get("adverse_atr", 0.0) or 0.0)
+    invalidation_progress_pct = float(
+        eligibility.get("invalidation_progress_pct", 0.0) or 0.0
+    )
+    entry_situation = "IN_ENTRY_AREA"
     if invalidated:
+        entry_situation = "INVALIDATED"
         verdict_status = "PLAN_INVALIDATED"
         verdict_label = "原交易計畫失效｜禁止沿用舊價位"
         verdict_reason = (
@@ -107,9 +114,61 @@ def build_preflight_payload(
             "這不等於原做多／做空方向已反轉，方向必須等待新 K 線與新 Trigger 重新判定。"
         )
     elif target_reached:
+        entry_situation = "TARGET_REACHED"
         verdict_status = "MISSED_ENTRY"
         verdict_label = "已到達第一目標｜禁止追價"
         verdict_reason = "最新價格已到達或越過原始 TP1，這個進場機會已經結束。"
+    elif adverse_atr > 0:
+        if invalidation_progress_pct >= 80.0:
+            entry_situation = "NEAR_INVALIDATION"
+            verdict_label = "接近失效｜暫停新進場"
+            verdict_reason = (
+                f"價格位於最佳進場點位不利側 {adverse_atr:.2f} ATR，"
+                f"已走過進場區至原始 SL 距離的 {invalidation_progress_pct:.1f}%；"
+                "原 Trigger 尚未失效，但禁止新進場。"
+            )
+        else:
+            entry_situation = "ADVERSE_TOLERANCE"
+            verdict_label = "容許回測中｜等待重新確認"
+            verdict_reason = (
+                f"價格位於最佳進場點位不利側 {adverse_atr:.2f} ATR，"
+                "但尚未越過原始 SL／失效位置；原 Trigger 仍有效，"
+                "新進場必須等待重新站回並確認。"
+            )
+    elif verdict_status == "WAIT_RETEST" and chase_atr > 0:
+        entry_situation = "FAVORABLE_AWAY"
+        verdict_label = "已離開最佳進場點｜等待回踩"
+        verdict_reason = (
+            f"價格已朝原訊號有利方向離開最佳進場點位 {chase_atr:.2f} ATR；"
+            "原 Trigger 仍有效，但尚未進場者現在不應追價。"
+        )
+    elif verdict_status == "MISSED_ENTRY" and chase_atr > 0:
+        entry_situation = "FAVORABLE_MISSED"
+        verdict_label = "已離開最佳進場點｜禁止追價"
+        verdict_reason = (
+            f"價格已朝原訊號有利方向離開最佳進場點位 {chase_atr:.2f} ATR；"
+            "原 Trigger 仍保留，但本次新進場機會已錯過。"
+        )
+    elif verdict_status == "WAIT_RETEST":
+        entry_situation = "WAIT_RETEST"
+    elif verdict_status == "MISSED_ENTRY":
+        entry_situation = "ENTRY_WINDOW_CLOSED"
+
+    if invalidated:
+        lifecycle_status = "INVALIDATED"
+        lifecycle_label = "已觸發・已失效"
+        lifecycle_note = "最新價格已越過原始 SL／失效位置；同一筆 Trigger 不會復活。"
+    elif target_reached:
+        lifecycle_status = "TARGET_REACHED"
+        lifecycle_label = "已觸發・目標已達"
+        lifecycle_note = "原始 TP1 已到達；本次新進場機會已結束。"
+    else:
+        lifecycle_status = "ACTIVE"
+        lifecycle_label = "已觸發・有效中"
+        lifecycle_note = (
+            "正式 Trigger 已成立；價格位置只改變目前進場資格，"
+            "不會把已觸發訊號改回未觸發。"
+        )
 
     if invalidated or target_reached:
         warning = "原交易計畫已失效" if invalidated else "原始第一目標已到達"
@@ -154,23 +213,46 @@ def build_preflight_payload(
         "signal_stage": signal.signal_stage,
         "verdict": {
             "status": verdict_status,
+            "situation": entry_situation,
             "label": verdict_label,
             "reason": verdict_reason,
             "actionable": verdict_status == "ENTRY_READY",
         },
+        "signal_lifecycle": {
+            "status": lifecycle_status,
+            "label": lifecycle_label,
+            "triggered": True,
+            "active": lifecycle_status == "ACTIVE",
+            "terminal": lifecycle_status in {"INVALIDATED", "TARGET_REACHED"},
+            "note": lifecycle_note,
+        },
         "plan_state": {
             "status": plan_status,
             "old_plan_reusable": not new_plan_required,
+            "old_plan_reusable_for_new_entry": not new_plan_required,
+            "existing_position_plan_active": lifecycle_status == "ACTIVE",
+            "new_entry_status": (
+                "READY"
+                if verdict_status == "ENTRY_READY"
+                else "WAIT"
+                if verdict_status == "WAIT_RETEST"
+                else "CLOSED"
+            ),
             "direction_status": (
                 "PENDING_REASSESSMENT"
-                if new_plan_required
+                if invalidated
                 else "ORIGINAL_BIAS_RETAINED"
             ),
             "new_trigger_required": new_plan_required,
             "note": (
                 "舊交易計畫失效不等於方向反轉；若行情重新成立，必須由新的 Trigger／REENTRY "
                 "建立全新的理想價格、SL 與 TP。"
-                if new_plan_required
+                if invalidated
+                else "原始 TP1 已到達；本次機會已完成，任何新進場都必須等待新的 Trigger。"
+                if target_reached
+                else "原 Trigger 仍保留作生命週期追蹤，但已不再提供新進場；"
+                "若已持倉，仍依原始 SL／TP 管理。"
+                if verdict_status == "MISSED_ENTRY"
                 else "原始方向偏向仍保留，但只有即時判定為目前可進時才具備進場資格。"
             ),
         },
