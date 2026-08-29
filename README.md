@@ -75,7 +75,7 @@ Deep Data 可回傳 `SUPPORT`、`NEUTRAL`、`CONFLICT` 或 `DATA_MISSING`。每�
 - 突破追價距離以突破邊界／Entry Zone 計算；從最近防守點累積的整段推進只作警告，避免把剛越過邊界的新 Trigger 誤判為已錯過。
 - Universe 只有兩類硬排除：24H 報價幣成交額不足，以及 Spread 達極端異常門檻。
 - OI 偏低／缺失、5m 反向、Funding 擁擠、Order Book Conflict 或 Execution Cost 都不取消有效的核心 Trigger。
-- Runtime 的 `SCANNING`、`ERROR` 與核心資料全失敗會遮蔽正式訊號。`STALE` 會保留上一輪短長線快照供查看，但明確標記資料已過期並維持 `actionable=false`，必須重新掃描全市場或只更新單一幣種後才能作為進場依據。
+- Runtime 的部分 `SCANNING` 只暫停正在更新的雷達；另一週期若曾完成掃描，會保留原訊號、完成時間與獨立過期狀態。從未完成過的週期明確顯示「尚未掃描」，不會以空清單冒充最新結果。部分掃描發生 `ERROR` 時也只停用失敗週期，不覆寫另一週期；全市場或核心資料全失敗才會遮蔽兩邊正式訊號。`STALE` 會保留上一輪短長線快照供查看，但明確標記資料已過期並維持 `actionable=false`。
 
 ## 訊號生命週期與排序
 
@@ -167,7 +167,7 @@ iPhone／iPad 的背景通知需先用 Safari 將雷達「加入主畫面」，�
 - `GET /api/report/latest.md`：中文文字報告
 - `GET /api/stats`：SQLite 真實樣本統計
 
-`BOOTING`、`SCANNING`、`FRESH`、`STALE`、`ERROR` 為 Runtime 狀態。掃描期間舊正式訊號會被遮蔽，但 4H／1H／15m 短線核心分析完成後會立即由 `CORE_PREVIEW` 發布，1D、長線與 Deep Data 改為同輪後補。同一輪短長雷達會安全重用 1D／4H／1H，15m 每輪重抓；報告發布後會清除暫存 K 線。超過 `stale_after_seconds` 時，上一輪正式訊號快照仍會顯示並標記已過期，但 `actionable=false`；最新完整掃描失敗且快照尚未過期時仍會遮蔽正式訊號。服務啟動會先還原 `data/latest.json`；開啟或重新整理首頁只讀取狀態與既有報告，即使尚無報告、資料過期或掃描失敗，也只顯示手動掃描按鈕，不會由瀏覽器自動送出 `POST /api/scan`。
+`BOOTING`、`SCANNING`、`FRESH`、`STALE`、`ERROR` 為 Runtime 狀態。15m 與 4H 使用獨立完成槽：第一次只掃其中一邊時，另一邊維持「尚未掃描」；兩邊都完成過後，單獨重掃其中一邊不會清除另一邊。15m 核心分析完成後會立即由 `CORE_PREVIEW` 發布；若本輪只掃 15m，既有 4H 仍原樣保留，若為全市場掃描則 4H 與 Deep Data 會在同輪後補。同一輪短長雷達會安全重用 1D／4H／1H，15m 每輪重抓；報告發布後會清除暫存 K 線。各週期超過 `stale_after_seconds` 時，自己的快照仍會顯示並標記已過期，但不可作為進場依據。服務啟動會先還原 `data/latest.json`；開啟或重新整理首頁只讀取狀態與既有報告，不會由瀏覽器自動送出 `POST /api/scan`。
 
 ## 設定
 

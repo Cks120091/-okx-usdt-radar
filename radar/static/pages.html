@@ -564,56 +564,64 @@
       if(scanning){const p=status.progress||{};$('#scanMessage').textContent=p.message||`${status.scan_mode_label||'市場掃描'}執行中`;const bar=$('#scanProgress');const has=Number.isFinite(Number(p.percent));bar.classList.toggle('indeterminate',!has);bar.querySelector('i').style.width=has?`${Math.max(3,Math.min(100,Number(p.percent)))}%`:'35%'}
       const danger=$('#dangerNotice');let warning='';
       if(key==='STALE'||status.data_status==='STALE')warning=`資料已過期，禁止依此進場。上一輪快照會繼續顯示，但已超過 30 分鐘；請更新全市場或只更新單一幣種。${status.last_error?' 最新掃描失敗：'+status.last_error:''}`;
-      if(key==='ERROR')warning=`最新掃描失敗，舊正式訊號已停用。${status.last_error?' '+status.last_error:''}`;
+      if(key==='ERROR')warning=`本次${status.scan_mode_label||'市場掃描'}失敗；失敗的週期已停用，其他已完成週期保持原資料。${status.last_error?' '+status.last_error:''}`;
       danger.textContent=warning;danger.classList.toggle('show',Boolean(warning));
       const showingCorePreview=scanning&&state.report?.runtime_status==='CORE_PREVIEW';
-      if(scanning&&!showingCorePreview){const message='正在掃描最新市場，舊正式訊號已暫停使用。';renderUnavailable(message);renderOverviewUnavailable(message)}
+      if(scanning&&!showingCorePreview){const mode=status.scan_mode||state.scanRequestedMode||'FULL',message=`${status.scan_mode_label||'市場掃描'}執行中；只暫停正在更新的週期。`;renderScanPending(mode,message)}
       else if(key==='BOOTING'){const message='尚無市場報告，請選擇上方掃描範圍。';renderUnavailable(message);renderOverviewUnavailable(message)}
       else if(key==='STALE'&&!state.report){renderUnavailable('資料已過期，正在載入上一輪保留快照。');renderOverviewUnavailable('資料已過期，正在載入上一輪候選快照。')}
-      else if(key==='ERROR'){renderUnavailable('最新掃描異常，目前沒有可使用的正式訊號。');renderOverviewUnavailable('最新掃描異常，候選排行已停用。')}
+      else if(key==='ERROR'&&!state.report){renderUnavailable('最新掃描異常，目前沒有可使用的正式訊號。');renderOverviewUnavailable('最新掃描異常，候選排行已停用。')}
+    }
+
+    function horizonSnapshot(report,horizon){
+      const explicit=report?.horizon_freshness?.[horizon];if(explicit&&typeof explicit.available==='boolean')return explicit;
+      if(!report)return {available:false,completed_at:null,age_seconds:null,expired:false};
+      const field=horizon==='LONG'?'long_completed_at':'short_completed_at',mode=String(report.scan_mode||'FULL').toUpperCase(),completedAt=report[field]||((mode==='FULL'||mode===horizon)?report.completed_at||report.generated_at:null),available=Boolean(completedAt);
+      return {available,completed_at:completedAt,age_seconds:null,expired:available&&(report.snapshot_expired===true||report.runtime_status==='STALE')}
+    }
+
+    function renderHorizonUnavailable(horizon,message){
+      const selectors=horizon==='LONG'?['#longSignalsBox','#longEarlySignalsBox','#longReadySignalsBox','#longWaitRetestBox','#longMissedSignalsBox','#longWatchBox']:['#fifteenAllBox','#earlySignalsBox','#signalsBox','#waitRetestBox','#missedSignalsBox','#watchBox'];
+      selectors.forEach(selector=>{$(selector).innerHTML=`<div class="empty">${esc(message)}</div>`});
+      const statusLabel=message.includes('執行中')||message.includes('掃描中')?'掃描中':message.includes('失敗')?'更新失敗':'尚未掃描';
+      if(horizon==='LONG'){$('#longSignalCount').textContent=statusLabel;return}
+      $('#signalCount').textContent=statusLabel;$('#nearCount').textContent='—';$('#marketBias').textContent='—';$('#mapBox').innerHTML=`<div class="empty">${esc(message)}</div>`;$('#favoritesBox').innerHTML=`<div class="empty">${esc(message)}</div>`
+    }
+
+    function renderScanPending(mode,message){
+      const normalized=['SHORT','LONG','FULL'].includes(String(mode).toUpperCase())?String(mode).toUpperCase():'FULL',shortAvailable=horizonSnapshot(state.report,'SHORT').available,longAvailable=horizonSnapshot(state.report,'LONG').available;
+      if(normalized==='SHORT'||normalized==='FULL'){renderHorizonUnavailable('SHORT',message);renderOverviewUnavailable(message)}else if(!shortAvailable){const unavailable='尚未執行 15m 掃描；完成 15m 或全市場掃描後才會顯示短線資料。';renderHorizonUnavailable('SHORT',unavailable);renderOverviewUnavailable(unavailable)}
+      if(normalized==='LONG'||normalized==='FULL')renderHorizonUnavailable('LONG',message);else if(!longAvailable)renderHorizonUnavailable('LONG','尚未執行 4H 掃描；完成 4H 或全市場掃描後才會顯示長線資料。')
     }
 
     function renderUnavailable(message){
-      $('#fifteenAllBox').innerHTML=`<div class="empty">${esc(message)}</div>`;
-      $('#earlySignalsBox').innerHTML=`<div class="empty">${esc(message)}</div>`;
-      $('#signalsBox').innerHTML=`<div class="empty">${esc(message)}</div>`;
-      $('#waitRetestBox').innerHTML=`<div class="empty">${esc(message)}</div>`;
-      $('#missedSignalsBox').innerHTML=`<div class="empty">${esc(message)}</div>`;
-      $('#longSignalsBox').innerHTML=`<div class="empty">${esc(message)}</div>`;
-      $('#longEarlySignalsBox').innerHTML=`<div class="empty">${esc(message)}</div>`;
-      $('#longReadySignalsBox').innerHTML=`<div class="empty">${esc(message)}</div>`;
-      $('#longWaitRetestBox').innerHTML=`<div class="empty">${esc(message)}</div>`;
-      $('#longMissedSignalsBox').innerHTML=`<div class="empty">${esc(message)}</div>`;
-      $('#signalCount').textContent='— / 20';
-      $('#longSignalCount').textContent='— / 20';
-      $('#nearCount').textContent='—';
-      $('#marketBias').textContent='—';
+      renderHorizonUnavailable('SHORT',message);renderHorizonUnavailable('LONG',message);
       $('#contextCount').textContent='—';
     }
 
     function renderOverviewUnavailable(message){
       $('#rankingBox').innerHTML=`<div class="empty">${esc(message)}</div>`;
-      $('#overviewAnomalies').innerHTML='<div class="empty">等待本輪掃描完成。</div>';
-      $('#anomalyBox').innerHTML='<div class="empty">等待本輪掃描完成。</div>';
-      $('#marketStrip').innerHTML=['BTC','ETH'].map(symbol=>`<div class="pulse-card"><div class="pulse-head"><strong>${symbol}</strong><span>掃描中</span></div><div class="pulse-price">—</div><div class="change flat">最新資料取得中</div></div>`).join('');
+      $('#overviewAnomalies').innerHTML=`<div class="empty">${esc(message)}</div>`;
+      $('#anomalyBox').innerHTML=`<div class="empty">${esc(message)}</div>`;
+      const scanning=message.includes('執行中')||message.includes('掃描中'),label=scanning?'掃描中':message.includes('失敗')?'更新失敗':'尚未掃描';$('#marketStrip').innerHTML=['BTC','ETH'].map(symbol=>`<div class="pulse-card"><div class="pulse-head"><strong>${symbol}</strong><span>${label}</span></div><div class="pulse-price">—</div><div class="change flat">${esc(message)}</div></div>`).join('');
     }
 
     function signalSortComparator(a,b){const entryPriority={ENTRY_READY:3,WAIT_RETEST:2,MISSED_ENTRY:1},freshnessPriority={NEW:8,REACTIVATED:7,NONE:6,ACTIVE:4,NO_FOLLOW_THROUGH:2,EXTENDED:1,INVALIDATED:0,COMPLETED:0};const statusDiff=(entryPriority[b.entry_eligibility?.status]||0)-(entryPriority[a.entry_eligibility?.status]||0);if(statusDiff)return statusDiff;const qualityDiff=(metricNumber(b.execution_quality?.score)||0)-(metricNumber(a.execution_quality?.score)||0);if(qualityDiff)return qualityDiff;const freshDiff=(freshnessPriority[b.freshness]||0)-(freshnessPriority[a.freshness]||0);if(freshDiff)return freshDiff;const ageDiff=(metricNumber(a.lifecycle?.age_bars)||0)-(metricNumber(b.lifecycle?.age_bars)||0);if(ageDiff)return ageDiff;const rrDiff=(metricNumber(b.entry_eligibility?.remaining_rr)??metricNumber(b.risk_reward)??0)-(metricNumber(a.entry_eligibility?.remaining_rr)??metricNumber(a.risk_reward)??0);if(rrDiff)return rrDiff;const slip=item=>{const key=item.direction==='LONG'?'buy_slippage_pct':'sell_slippage_pct';return metricNumber(item.market_metrics?.[key])??metricNumber(item.spread_pct)??Number.POSITIVE_INFINITY};const slipDiff=slip(a)-slip(b);if(slipDiff)return slipDiff;return (metricNumber(b.quote_volume_24h)||0)-(metricNumber(a.quote_volume_24h)||0)}
 
     function renderReport(report){
-      state.report=report;const preview=report.runtime_status==='CORE_PREVIEW',actionable=report.actionable===true&&(report.runtime_status==='FRESH'||preview),expiredSnapshot=report.snapshot_expired===true||report.runtime_status==='STALE',displaySnapshot=actionable||expiredSnapshot;
+      state.report=report;const preview=report.runtime_status==='CORE_PREVIEW',scanFailed=report.runtime_status==='ERROR',activeScanMode=report.scan_request_mode||state.status?.scan_mode||state.scanRequestedMode||'FULL',blockedHorizons=new Set([...(report.scan_in_progress_horizons||[]),...(report.scan_unavailable_horizons||[])]),shortState=horizonSnapshot(report,'SHORT'),longState=horizonSnapshot(report,'LONG'),shortPending=blockedHorizons.has('SHORT'),longPending=blockedHorizons.has('LONG')||(preview&&activeScanMode==='FULL'),shortAvailable=shortState.available&&!shortPending,longAvailable=longState.available&&!longPending;
       const allShort=[...(report.signals||[])].sort(signalSortComparator),ready=allShort.filter(x=>x.entry_eligibility?.status==='ENTRY_READY'),early=ready.filter(x=>x.signal_stage==='EARLY_SIGNAL'),waiting=allShort.filter(x=>x.entry_eligibility?.status==='WAIT_RETEST'),missed=allShort.filter(x=>x.entry_eligibility?.status==='MISSED_ENTRY');
       const allLong=[...(report.long_signals||[])].sort(signalSortComparator),longReady=allLong.filter(x=>x.entry_eligibility?.status==='ENTRY_READY'),longEarly=longReady.filter(x=>x.signal_stage==='EARLY_SIGNAL'),longWaiting=allLong.filter(x=>x.entry_eligibility?.status==='WAIT_RETEST'),longMissed=allLong.filter(x=>x.entry_eligibility?.status==='MISSED_ENTRY');
-      const shortExpired=expiredSnapshot||report.horizon_freshness?.SHORT?.expired===true,longExpired=expiredSnapshot||report.horizon_freshness?.LONG?.expired===true;
+      const shortExpired=shortState.expired===true,longExpired=longState.expired===true;
       $('#updatedAt').textContent=taiwanTime(report.completed_at||report.generated_at);
-      $('#signalCount').textContent=shortExpired?`${ready.length} / ${num(report.max_signals||20,0)}（過期）`:`${actionable?ready.length:0} / ${num(report.max_signals||20,0)}`;
-      $('#longSignalCount').textContent=preview?'補充中':longExpired?`${longReady.length} / ${num(report.max_signals||20,0)}（過期）`:`${actionable?longReady.length:0} / ${num(report.max_signals||20,0)}`;
-      $('#nearCount').textContent=num((report.watchlist||[]).filter(x=>x.status==='NEAR_TRIGGER').length,0);
-      const bias=report.market_bias||{};$('#marketBias').textContent=`${esc(bias.label||'中性')} ${num(bias.score,0)}`;
+      $('#signalCount').textContent=shortPending?'掃描中':!shortAvailable?'尚未掃描':shortExpired?`${ready.length} / ${num(report.max_signals||20,0)}（過期）`:`${ready.length} / ${num(report.max_signals||20,0)}`;
+      $('#longSignalCount').textContent=longPending?'補充中':!longAvailable?'尚未掃描':longExpired?`${longReady.length} / ${num(report.max_signals||20,0)}（過期）`:`${longReady.length} / ${num(report.max_signals||20,0)}`;
+      $('#nearCount').textContent=shortAvailable?num((report.watchlist||[]).filter(x=>x.status==='NEAR_TRIGGER').length,0):'—';
+      const bias=report.market_bias||{};$('#marketBias').textContent=shortAvailable?`${esc(bias.label||'中性')} ${num(bias.score,0)}`:'—';
       $('#contextCount').textContent=preview?'補充中':`${num(report.context_enriched_count,0)} / ${num(report.context_target_count,0)}`;
-      if(!displaySnapshot){renderUnavailable(report.runtime_status==='SCANNING'?'正在掃描最新市場，舊正式訊號已暫停使用。':'最新掃描異常，目前沒有可使用的正式訊號。')}
-      else{const longPending='15m 核心結果已先發布；長線與深度資料補充中。';renderSignals(allShort,'#fifteenAllBox','本輪沒有 15m 正式訊號。');renderSignals(early,'#earlySignalsBox','本輪沒有剛觸發且仍在合理進場區的早期訊號。');renderSignals(ready,'#signalsBox','目前沒有仍在合理進場區的訊號。');renderSignals(waiting,'#waitRetestBox','目前沒有等待回踩的訊號。');renderSignals(missed,'#missedSignalsBox','目前沒有已錯過的訊號。');renderSignals(allLong,'#longSignalsBox',preview?longPending:'目前沒有長線訊號。');renderSignals(longEarly,'#longEarlySignalsBox',preview?longPending:'目前沒有長線早期可進訊號。');renderSignals(longReady,'#longReadySignalsBox',preview?longPending:'目前沒有仍在合理進場區的長線訊號。');renderSignals(longWaiting,'#longWaitRetestBox',preview?longPending:'目前沒有等待回踩的長線訊號。');renderSignals(longMissed,'#longMissedSignalsBox',preview?longPending:'目前沒有已錯過的長線訊號。');renderOverview({...report,signals:ready});if(preview){$('#scanNotice').classList.add('show');$('#scanMessage').textContent='15m 核心結果已發布；正在補 Funding（資金費率）、OI（未平倉量）、Order Book（委託簿）與長線資料'}}
-      renderWatchlist(report.watchlist||[],'#watchBox');renderWatchlist(report.long_watchlist||[],'#longWatchBox');renderMap(report.market_map||[],$('#mapSearch').value);renderFavorites();renderStats(report.historical_performance||{});
+      if(shortPending){const message=scanFailed?'本次 15m 更新失敗；原短線快照未被改寫，請稍後再試。':'15m 掃描執行中；既有 4H 結果保持不變。';renderHorizonUnavailable('SHORT',message);renderOverviewUnavailable(message)}else if(!shortAvailable){const message='尚未執行 15m 掃描；完成 15m 或全市場掃描後才會顯示短線資料。';renderHorizonUnavailable('SHORT',message);renderOverviewUnavailable(message)}else{renderSignals(allShort,'#fifteenAllBox','本輪沒有 15m 正式訊號。');renderSignals(early,'#earlySignalsBox','本輪沒有剛觸發且仍在合理進場區的早期訊號。');renderSignals(ready,'#signalsBox','目前沒有仍在合理進場區的訊號。');renderSignals(waiting,'#waitRetestBox','目前沒有等待回踩的訊號。');renderSignals(missed,'#missedSignalsBox','目前沒有已錯過的訊號。');renderWatchlist(report.watchlist||[],'#watchBox');renderMap(report.market_map||[],$('#mapSearch').value);renderFavorites();renderOverview({...report,signals:ready})}
+      if(longPending)renderHorizonUnavailable('LONG',scanFailed?'本次 4H 更新失敗；原長線快照未被改寫，請稍後再試。':preview?'全市場掃描中；4H 長線結果正在補充。':'4H 掃描執行中；既有 15m 結果保持不變。');else if(!longAvailable)renderHorizonUnavailable('LONG','尚未執行 4H 掃描；完成 4H 或全市場掃描後才會顯示長線資料。');else{renderSignals(allLong,'#longSignalsBox','目前沒有長線訊號。');renderSignals(longEarly,'#longEarlySignalsBox','目前沒有長線早期可進訊號。');renderSignals(longReady,'#longReadySignalsBox','目前沒有仍在合理進場區的長線訊號。');renderSignals(longWaiting,'#longWaitRetestBox','目前沒有等待回踩的長線訊號。');renderSignals(longMissed,'#longMissedSignalsBox','目前沒有已錯過的長線訊號。');renderWatchlist(report.long_watchlist||[],'#longWatchBox')}
+      if(preview){$('#scanNotice').classList.add('show');$('#scanMessage').textContent=activeScanMode==='SHORT'?'15m 核心結果已發布；原有 4H 結果保持不變，正在補 Funding（資金費率）、OI（未平倉量）與 Order Book（委託簿）':'15m 核心結果已發布；正在補 Funding（資金費率）、OI（未平倉量）、Order Book（委託簿）與 4H 長線資料'}renderStats(report.historical_performance||{});
     }
 
     function renderOverview(report){
@@ -694,7 +702,7 @@
     function tradePlanText(item){return `${displaySymbol(item.inst_id)}｜${directionName[item.direction]||item.direction}\n現價：${price(item.market_metrics?.last_price)}\n最佳進場點位：${price(item.entry_low)} ～ ${price(item.entry_high)}\nSL（止損）：${price(item.stop_loss)}\nTP1（第一止盈目標）：${price(item.take_profit_1)}\nTP2（第二止盈目標）：${price(item.take_profit_2)}`}
     function signalTriggerTime(item,status){const value=item.lifecycle?.triggered_at;if(!value||(status!=='ENTRY_READY'&&status!=='MISSED_ENTRY'))return '';return `<div class="signal-trigger-time">訊號觸發時間（台灣）：${esc(taiwanTime(value))}</div>`}
     function decisionPanel(item,showPreflight=false,includeInstrument=true){
-      const entry=item.entry_eligibility||{},status=entry.status||'UNKNOWN',expired=isExpiredSnapshot(item),cls=expired?'expired':status==='ENTRY_READY'?'ready':status==='WAIT_RETEST'?'wait':'missed',age=item.lifecycle?.age_bars??item.market_story?.trigger?.event_age_bars,frame=item.radar_horizon==='LONG'?'4H':'15m',plan=encodeURIComponent(tradePlanText(item)),canPreflight=showPreflight&&state.report?.runtime_status==='FRESH'&&!expired,updateLabel=status==='WAIT_RETEST'?'↻ 更新現狀':'⚡ 進場前更新';
+      const entry=item.entry_eligibility||{},status=entry.status||'UNKNOWN',expired=isExpiredSnapshot(item),cls=expired?'expired':status==='ENTRY_READY'?'ready':status==='WAIT_RETEST'?'wait':'missed',age=item.lifecycle?.age_bars??item.market_story?.trigger?.event_age_bars,horizon=item.radar_horizon==='LONG'?'LONG':'SHORT',frame=horizon==='LONG'?'4H':'15m',plan=encodeURIComponent(tradePlanText(item)),canPreflight=showPreflight&&!expired&&(state.report?.runtime_status==='FRESH'||state.report?.safety?.horizon_actionable?.[horizon]===true),updateLabel=status==='WAIT_RETEST'?'↻ 更新現狀':'⚡ 進場前更新';
       const primaryAction=expired?`<button class="preflight-link" type="button" data-instrument-refresh-id="${esc(item.inst_id)}" data-instrument-horizon="${esc(item.radar_horizon||'SHORT')}">↻ 只更新這一個幣</button>`:showPreflight?`<button class="preflight-link" type="button" data-preflight-id="${esc(item.inst_id)}" data-preflight-horizon="${esc(item.radar_horizon||'SHORT')}" ${canPreflight?'':'disabled'}>${canPreflight?updateLabel:'對應週期更新後可檢查'}</button>`:'';
       const decisionLabel=expired?`資料已過期｜原快照：${entry.label||'進場狀態待確認'}`:entry.label||'進場狀態待確認',decisionReason=expired?'這張卡只保留供查看，已超過 30 分鐘；禁止依舊快照進場。請更新全市場或只更新這一個幣。':entry.reason||'等待距離與風報資料',copyAction=expired?'':`<button class="copy-plan" type="button" data-copy-plan="${plan}">複製最佳進場點位／SL（止損）／TP（止盈）</button>`;
       return `<div class="decision-panel ${cls}"><div class="decision-top"><div><div class="decision-state">${tech(decisionLabel)}</div><span class="decision-reason">${tech(decisionReason)}</span></div><div class="decision-price"><span>${expired?'快照價格':'目前價格'}</span><b>${price(item.market_metrics?.last_price)}</b></div></div><div class="decision-grid"><div class="decision-item primary"><span>最佳進場點位</span><b>${price(item.entry_low)} ～ ${price(item.entry_high)}</b></div><div class="decision-item"><span>SL（止損）</span><b>${price(item.stop_loss)}</b></div><div class="decision-item"><span>TP1（第一止盈目標）</span><b>${price(item.take_profit_1)}</b></div></div><div class="decision-meta"><span>觸發 ${num(age,0)} 根 ${frame} K</span><span>${entryDistance(entry)}</span><span>剩餘 R:R（風險報酬比）${remainingR(entry)}</span></div>${signalTriggerTime(item,status)}<div class="decision-actions">${primaryAction}${includeInstrument&&!expired?instrumentButton(item.inst_id,'幣種掃描',item.radar_horizon||'SHORT'):''}<a class="quick-link" href="${tvUrl(item.inst_id)}" target="_blank" rel="noopener noreferrer">TradingView（技術圖表）↗</a>${copyAction}</div></div>`
@@ -834,7 +842,7 @@
     async function startScan(mode='FULL'){
       const normalizedMode=['SHORT','LONG','FULL'].includes(String(mode).toUpperCase())?String(mode).toUpperCase():'FULL',modeLabel={SHORT:'15m 掃描',LONG:'4H 掃描',FULL:'全市場掃描（15m＋4H）'}[normalizedMode];state.scanRequestedMode=normalizedMode;
       syncScanControls('SCANNING');
-      state.report=null;$('#scanNotice').classList.add('show');$('#scanMessage').textContent=`正在啟動${modeLabel}`;renderUnavailable(`${modeLabel}執行中，舊正式訊號已暫停使用。`);renderOverviewUnavailable(`${modeLabel}執行中，舊候選排行已暫停使用。`);
+      $('#scanNotice').classList.add('show');$('#scanMessage').textContent=`正在啟動${modeLabel}`;renderScanPending(normalizedMode,`${modeLabel}執行中；只更新所選週期，另一週期保持不變。`);
       try{
         let subscription=null;if(state.pushEnabled){try{await loadPushConfig();subscription=await ensurePushSubscription()}catch(error){state.pushSubscription=null;setPushPreference(false);renderPushState(`本輪不會通知：${error.message||error}`)}}
         const request=pushSubscription=>{const body={scan_mode:normalizedMode};if(pushSubscription)body.push_subscription=pushSubscription.toJSON();return api('/api/scan',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(body)})};
@@ -854,8 +862,8 @@
     $$('.filter-tab').forEach(button=>button.addEventListener('click',()=>activateTab(button.dataset.tab)));
     $$('[data-scan-mode]').forEach(button=>button.addEventListener('click',()=>startScan(button.dataset.scanMode||'FULL')));
     $('#pushButton').addEventListener('click',togglePushNotifications);
-    $('#mapSearch').addEventListener('input',event=>renderMap(state.report?.market_map||[],event.target.value));
-    $('#globalSearchForm').addEventListener('submit',event=>{event.preventDefault();const query=$('#globalSearch').value.trim(),instId=normalizeInstrumentQuery(query);if(instId){openInstrument(instId);return}$('#mapSearch').value=query;activateTab('map');renderMap(state.report?.market_map||[],query);$('#mapSearch').focus()});
+    $('#mapSearch').addEventListener('input',event=>{if(horizonSnapshot(state.report,'SHORT').available)renderMap(state.report?.market_map||[],event.target.value);else $('#mapBox').innerHTML='<div class="empty">尚未執行 15m 掃描；市場地圖目前沒有短線資料。</div>'});
+    $('#globalSearchForm').addEventListener('submit',event=>{event.preventDefault();const query=$('#globalSearch').value.trim(),instId=normalizeInstrumentQuery(query);if(instId){openInstrument(instId);return}$('#mapSearch').value=query;activateTab('map');if(horizonSnapshot(state.report,'SHORT').available)renderMap(state.report?.market_map||[],query);else $('#mapBox').innerHTML='<div class="empty">尚未執行 15m 掃描；市場地圖目前沒有短線資料。</div>';$('#mapSearch').focus()});
     document.addEventListener('click',event=>{const button=event.target.closest?.('[data-instrument-id]');if(!button)return;openInstrument(button.dataset.instrumentId,{horizon:button.dataset.instrumentHorizon||'BOTH'})});
     document.addEventListener('click',event=>{const button=event.target.closest?.('[data-instrument-refresh-id]');if(!button)return;openInstrument(button.dataset.instrumentRefreshId,{horizon:button.dataset.instrumentHorizon||'BOTH'})});
     document.addEventListener('click',event=>{const button=event.target.closest?.('[data-preflight-id]');if(!button||button.disabled)return;openPreflight(button.dataset.preflightId,button.dataset.preflightHorizon||'SHORT')});

@@ -8,7 +8,7 @@ from types import SimpleNamespace
 
 from radar.config import AppConfig
 from radar.models import MarketState, RadarReport, Signal
-from radar.reporting import save_report
+from radar.reporting import load_latest_report, save_report
 from radar.service import PreflightError, RadarRuntime, _single_scan_failure_message
 
 
@@ -171,6 +171,15 @@ class SingleInstrumentScanner(ImmediateScanner):
 class FailingScanner:
     def scan_once(self, progress=None, scan_id=None):
         raise RuntimeError("fixture scan failure")
+
+
+class IncompleteModeScanner:
+    def scan_once(self, progress=None, scan_id=None, scan_mode="FULL"):
+        current = report()
+        current.status = "DATA_INCOMPLETE"
+        current.message = f"fixture {scan_mode} data unavailable"
+        current.scan_mode = scan_mode
+        return current
 
 
 class FakePushNotifier:
@@ -441,6 +450,120 @@ class RuntimeSafetyTests(unittest.TestCase):
             )
             self.assertEqual(runtime.status()["scan_mode"], "SHORT")
 
+    def test_first_partial_scan_exposes_only_the_requested_horizon(self):
+        with tempfile.TemporaryDirectory() as directory:
+            runtime = RadarRuntime(
+                ModeAwareScanner(),
+                AppConfig(data_dir=directory),
+            )
+
+            short_only = runtime.scan_blocking("SHORT")
+            short_payload = runtime.latest_dict()
+
+            self.assertEqual(short_only.long_signals, [])
+            self.assertEqual(short_only.long_watchlist, [])
+            self.assertEqual(short_only.long_market_map, [])
+            self.assertEqual(short_only.long_completed_at, "")
+            self.assertTrue(short_payload["horizon_freshness"]["SHORT"]["available"])
+            self.assertFalse(short_payload["horizon_freshness"]["LONG"]["available"])
+
+        with tempfile.TemporaryDirectory() as directory:
+            runtime = RadarRuntime(
+                ModeAwareScanner(),
+                AppConfig(data_dir=directory),
+            )
+
+            long_only = runtime.scan_blocking("LONG")
+            long_payload = runtime.latest_dict()
+
+            self.assertEqual(long_only.signals, [])
+            self.assertEqual(long_only.watchlist, [])
+            self.assertEqual(long_only.market_map, [])
+            self.assertEqual(long_only.market_regime_counts, {})
+            self.assertEqual(long_only.market_bias, {})
+            self.assertEqual(long_only.short_completed_at, "")
+            self.assertFalse(long_payload["horizon_freshness"]["SHORT"]["available"])
+            self.assertTrue(long_payload["horizon_freshness"]["LONG"]["available"])
+
+    def test_alternating_partial_scans_keep_each_completed_horizon(self):
+        with tempfile.TemporaryDirectory() as directory:
+            runtime = RadarRuntime(
+                ModeAwareScanner(),
+                AppConfig(data_dir=directory),
+            )
+
+            short_first = runtime.scan_blocking("SHORT")
+            first_short_stamp = short_first.short_completed_at
+            short_signal_ids = [item.inst_id for item in short_first.signals]
+
+            long_second = runtime.scan_blocking("LONG")
+            first_long_stamp = long_second.long_completed_at
+
+            self.assertEqual(long_second.short_completed_at, first_short_stamp)
+            self.assertEqual(
+                [item.inst_id for item in long_second.signals],
+                short_signal_ids,
+            )
+            self.assertEqual(len(long_second.long_signals), 1)
+
+            short_third = runtime.scan_blocking("SHORT")
+
+            self.assertEqual(short_third.long_completed_at, first_long_stamp)
+            self.assertEqual(len(short_third.long_signals), 1)
+            self.assertTrue(runtime.latest_dict()["horizon_freshness"]["SHORT"]["available"])
+            self.assertTrue(runtime.latest_dict()["horizon_freshness"]["LONG"]["available"])
+
+    def test_partial_merge_does_not_revive_an_unscanned_phantom_horizon(self):
+        with tempfile.TemporaryDirectory() as directory:
+            runtime = RadarRuntime(
+                ModeAwareScanner(),
+                AppConfig(data_dir=directory),
+            )
+            previous = report()
+            phantom = signal()
+            phantom.radar_horizon = "LONG"
+            previous.scan_mode = "SHORT"
+            previous.short_completed_at = previous.completed_at
+            previous.long_completed_at = ""
+            previous.long_signals = [phantom]
+            runtime._latest = previous
+
+            completed = runtime.scan_blocking("SHORT")
+
+            self.assertEqual(completed.long_signals, [])
+            self.assertEqual(completed.long_completed_at, "")
+            self.assertFalse(
+                runtime.latest_dict()["horizon_freshness"]["LONG"]["available"]
+            )
+
+    def test_failed_partial_scan_keeps_unrequested_completed_horizon(self):
+        with tempfile.TemporaryDirectory() as directory:
+            previous = report()
+            previous_long = signal()
+            previous_long.radar_horizon = "LONG"
+            previous.long_signals = [previous_long]
+            previous.short_completed_at = previous.completed_at
+            previous.long_completed_at = previous.completed_at
+            save_report(previous, directory)
+            runtime = RadarRuntime(
+                IncompleteModeScanner(),
+                AppConfig(data_dir=directory),
+            )
+
+            failed_attempt = runtime.scan_blocking("SHORT")
+            payload = runtime.latest_dict()
+            persisted = load_latest_report(directory)
+
+            self.assertEqual(failed_attempt.status, "DATA_INCOMPLETE")
+            self.assertEqual(payload["runtime_status"], "ERROR")
+            self.assertEqual(payload["signals"], [])
+            self.assertEqual(len(payload["long_signals"]), 1)
+            self.assertEqual(payload["scan_unavailable_horizons"], ["SHORT"])
+            self.assertFalse(payload["safety"]["horizon_actionable"]["SHORT"])
+            self.assertTrue(payload["safety"]["horizon_actionable"]["LONG"])
+            self.assertEqual(len(persisted.long_signals), 1)
+            self.assertEqual(persisted.completed_at, previous.completed_at)
+
     def test_per_horizon_freshness_marks_only_old_preserved_radar_expired(self):
         with tempfile.TemporaryDirectory() as directory:
             runtime = RadarRuntime(
@@ -519,6 +642,35 @@ class RuntimeSafetyTests(unittest.TestCase):
             self.assertIsNone(runtime.preview_dict())
             self.assertEqual(runtime.status()["system_status"], "FRESH")
 
+    def test_short_preview_keeps_the_existing_long_horizon_visible(self):
+        with tempfile.TemporaryDirectory() as directory:
+            scanner = PreviewScanner()
+            runtime = RadarRuntime(scanner, AppConfig(data_dir=directory))
+            previous = report()
+            previous_long = signal()
+            previous_long.radar_horizon = "LONG"
+            previous.long_signals = [previous_long]
+            previous.short_completed_at = previous.completed_at
+            previous.long_completed_at = previous.completed_at
+            runtime._latest = previous
+
+            self.assertTrue(runtime.trigger_scan(scan_mode="SHORT"))
+            self.assertTrue(scanner.preview_ready.wait(1))
+            preview = runtime.preview_dict()
+
+            self.assertEqual(preview["scan_request_mode"], "SHORT")
+            self.assertEqual(len(preview["long_signals"]), 1)
+            self.assertEqual(
+                preview["horizon_freshness"]["LONG"]["completed_at"],
+                previous.long_completed_at,
+            )
+            self.assertTrue(preview["safety"]["horizon_actionable"]["LONG"])
+
+            scanner.release.set()
+            deadline = time.time() + 2
+            while runtime.status()["running"] and time.time() < deadline:
+                time.sleep(0.01)
+
     def test_scan_lock_joins_existing_scan(self):
         with tempfile.TemporaryDirectory() as directory:
             scanner = BlockingScanner()
@@ -534,16 +686,34 @@ class RuntimeSafetyTests(unittest.TestCase):
             self.assertEqual(scanner.calls, 1)
             self.assertEqual(runtime.status()["system_status"], "FRESH")
 
-    def test_scanning_masks_previous_formal_signals(self):
+    def test_partial_scanning_masks_only_the_requested_horizon(self):
         with tempfile.TemporaryDirectory() as directory:
             runtime = RadarRuntime(ImmediateScanner(), AppConfig(data_dir=directory))
-            runtime._latest = report()
+            previous = report()
+            previous_long = signal()
+            previous_long.radar_horizon = "LONG"
+            previous.long_signals = [previous_long]
+            previous.short_completed_at = previous.completed_at
+            previous.long_completed_at = previous.completed_at
+            runtime._latest = previous
             runtime._running = True
+            runtime._scan_mode = "SHORT"
             payload = runtime.latest_dict()
             self.assertEqual(payload["runtime_status"], "SCANNING")
             self.assertFalse(payload["actionable"])
             self.assertEqual(payload["signals"], [])
+            self.assertEqual(len(payload["long_signals"]), 1)
             self.assertEqual(payload["historical_signal_count"], 1)
+            self.assertFalse(payload["safety"]["horizon_actionable"]["SHORT"])
+            self.assertTrue(payload["safety"]["horizon_actionable"]["LONG"])
+            self.assertEqual(payload["scan_in_progress_horizons"], ["SHORT"])
+
+            runtime._scan_mode = "LONG"
+            payload = runtime.latest_dict()
+            self.assertEqual(len(payload["signals"]), 1)
+            self.assertEqual(payload["long_signals"], [])
+            self.assertTrue(payload["safety"]["horizon_actionable"]["SHORT"])
+            self.assertFalse(payload["safety"]["horizon_actionable"]["LONG"])
 
     def test_report_older_than_thirty_minutes_is_retained_as_expired_snapshot(self):
         with tempfile.TemporaryDirectory() as directory:

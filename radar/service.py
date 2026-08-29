@@ -50,6 +50,12 @@ _SCAN_MODE_LABELS = {
     "FULL": "全市場掃描（15m＋4H）",
 }
 
+_SCAN_MODE_HORIZONS = {
+    "SHORT": frozenset({"SHORT"}),
+    "LONG": frozenset({"LONG"}),
+    "FULL": frozenset({"SHORT", "LONG"}),
+}
+
 
 def _single_scan_failure_message(exc: Exception) -> str:
     messages: list[str] = []
@@ -162,6 +168,10 @@ class RadarRuntime:
     def status(self) -> dict[str, Any]:
         with self._state_lock:
             system_status, age_seconds, stale = self._system_status_locked()
+            horizon_freshness = {
+                horizon: self._horizon_freshness_locked(horizon)
+                for horizon in ("SHORT", "LONG")
+            }
             return {
                 "running": self._running,
                 "system_status": system_status,
@@ -181,6 +191,7 @@ class RadarRuntime:
                 "scan_started_at": self._scan_started_at,
                 "scan_mode": self._scan_mode,
                 "scan_mode_label": _SCAN_MODE_LABELS[self._scan_mode],
+                "horizon_freshness": horizon_freshness,
                 "progress": dict(self._progress),
                 "analysis_only": True,
                 "auto_ordering": False,
@@ -198,16 +209,55 @@ class RadarRuntime:
             }
             actionable = system_status == "FRESH" and self._latest.status != "DATA_INCOMPLETE"
             snapshot_expired = system_status == "STALE"
+            unavailable_horizons = (
+                _SCAN_MODE_HORIZONS[self._scan_mode]
+                if system_status == "SCANNING"
+                or (
+                    system_status == "ERROR"
+                    and self._last_attempt_status == "ERROR"
+                )
+                else frozenset()
+            )
+            horizon_actionable = {
+                horizon: (
+                    self._latest.status != "DATA_INCOMPLETE"
+                    and item["available"]
+                    and not item["expired"]
+                    and (
+                        system_status == "FRESH"
+                        or (
+                            system_status in {"SCANNING", "ERROR"}
+                            and horizon not in unavailable_horizons
+                        )
+                    )
+                )
+                for horizon, item in horizon_freshness.items()
+            }
             payload["runtime_status"] = system_status
             payload["actionable"] = actionable
             payload["snapshot_expired"] = snapshot_expired
             payload["latest_age_seconds"] = age_seconds
             payload["horizon_freshness"] = horizon_freshness
             payload["max_signals"] = self.config.max_signals
-            payload["safety"]["horizon_actionable"] = {
-                horizon: actionable and item["available"] and not item["expired"]
-                for horizon, item in horizon_freshness.items()
-            }
+            payload["safety"]["horizon_actionable"] = horizon_actionable
+            payload["scan_in_progress_horizons"] = (
+                sorted(unavailable_horizons) if system_status == "SCANNING" else []
+            )
+            payload["scan_unavailable_horizons"] = (
+                sorted(unavailable_horizons) if system_status == "ERROR" else []
+            )
+            # Availability is the hard boundary. Even a malformed legacy partial
+            # report cannot leak an array from a horizon that has no completion
+            # timestamp.
+            if not horizon_freshness["SHORT"]["available"]:
+                payload["signals"] = []
+                payload["watchlist"] = []
+                payload["market_map"] = []
+                payload["market_regime_counts"] = {}
+                payload["market_bias"] = {}
+            if not horizon_freshness["LONG"]["available"]:
+                payload["long_signals"] = []
+                payload["long_watchlist"] = []
             if not actionable:
                 payload["historical_signal_count"] = len(payload.get("signals", []))
                 payload["historical_long_signal_count"] = len(
@@ -220,9 +270,35 @@ class RadarRuntime:
                     # for a current entry opportunity.
                     payload["signals_suppressed_reason"] = None
                     payload["signals_read_only_reason"] = "STALE"
+                elif system_status == "SCANNING":
+                    # A partial scan invalidates only the horizon currently being
+                    # recalculated. The other radar remains visible and usable at
+                    # its own timestamp instead of disappearing with the request.
+                    if "SHORT" in unavailable_horizons:
+                        payload["signals"] = []
+                        payload["watchlist"] = []
+                        payload["market_map"] = []
+                    if "LONG" in unavailable_horizons:
+                        payload["long_signals"] = []
+                        payload["long_watchlist"] = []
+                    payload["signals_suppressed_reason"] = "SCANNING"
+                    payload["signals_read_only_reason"] = None
+                elif system_status == "ERROR" and unavailable_horizons:
+                    if "SHORT" in unavailable_horizons:
+                        payload["signals"] = []
+                        payload["watchlist"] = []
+                        payload["market_map"] = []
+                    if "LONG" in unavailable_horizons:
+                        payload["long_signals"] = []
+                        payload["long_watchlist"] = []
+                    payload["signals_suppressed_reason"] = "ERROR"
+                    payload["signals_read_only_reason"] = None
                 else:
                     payload["signals"] = []
+                    payload["watchlist"] = []
+                    payload["market_map"] = []
                     payload["long_signals"] = []
+                    payload["long_watchlist"] = []
                     payload["signals_suppressed_reason"] = system_status
                     payload["signals_read_only_reason"] = None
             else:
@@ -235,12 +311,22 @@ class RadarRuntime:
             if not self._running or self._preview is None:
                 return None
             payload = public_report_payload(self._preview)
+            horizon_freshness = {
+                horizon: self._report_horizon_freshness(self._preview, horizon)
+                for horizon in ("SHORT", "LONG")
+            }
             payload["runtime_status"] = "CORE_PREVIEW"
             payload["actionable"] = True
             payload["preliminary"] = True
             payload["deep_data_pending"] = True
+            payload["scan_request_mode"] = self._scan_mode
+            payload["horizon_freshness"] = horizon_freshness
             payload["signals_suppressed_reason"] = None
             payload["safety"]["actionable"] = True
+            payload["safety"]["horizon_actionable"] = {
+                horizon: item["available"] and not item["expired"]
+                for horizon, item in horizon_freshness.items()
+            }
             return payload
 
     def statistics(self) -> dict[str, Any]:
@@ -788,6 +874,30 @@ class RadarRuntime:
                     max_signals=self.config.max_signals,
                     scan_mode=scan_mode,
                 )
+                if report.status == "DATA_INCOMPLETE" and previous_report is not None:
+                    # A failed refresh is an attempt state, not a new market
+                    # snapshot. Keep the last completed horizon slots on disk and
+                    # in memory; the requested slot is disabled by latest_dict(),
+                    # while an untouched slot remains available at its own age.
+                    with self._state_lock:
+                        self._preview = None
+                        self._last_error = report.message
+                        self._last_attempt_status = "ERROR"
+                        self._progress = {
+                            "phase": "COMPLETED",
+                            "completed": 1,
+                            "total": 1,
+                            "percent": 100.0,
+                            "message": f"{_SCAN_MODE_LABELS[scan_mode]}失敗",
+                        }
+                    LOGGER.info(
+                        "Scan attempt failed without replacing completed snapshot: "
+                        "id=%s mode=%s status=%s",
+                        scan_id,
+                        scan_mode,
+                        report.status,
+                    )
+                    return report
                 save_report(report, self.config.data_dir)
                 with self._state_lock:
                     self._latest = report
@@ -842,8 +952,8 @@ class RadarRuntime:
         timestamp = str(getattr(report, field_name, "") or "").strip()
         if timestamp:
             return timestamp
-        mode = getattr(report, "scan_mode", "FULL")
-        if mode == "FULL" or (mode == "SHORT") == (horizon == "SHORT"):
+        mode = str(getattr(report, "scan_mode", "FULL") or "FULL").upper()
+        if mode == "FULL" or mode == horizon:
             return report.completed_at or report.generated_at
         return ""
 
@@ -864,9 +974,17 @@ class RadarRuntime:
             )
         quality = deepcopy(report.data_quality)
         if scan_mode == "SHORT":
-            if previous is None:
+            previous_long_completed_at = (
+                self._previous_horizon_timestamp(previous, "LONG")
+                if previous is not None
+                else ""
+            )
+            if not previous_long_completed_at:
                 return replace(
                     report,
+                    long_signals=[],
+                    long_watchlist=[],
+                    long_market_map=[],
                     short_completed_at=completed_at,
                     long_completed_at="",
                 )
@@ -879,14 +997,24 @@ class RadarRuntime:
                 long_signals=previous.long_signals,
                 long_watchlist=previous.long_watchlist,
                 long_market_map=previous.long_market_map,
-                long_completed_at=self._previous_horizon_timestamp(previous, "LONG"),
+                long_completed_at=previous_long_completed_at,
                 short_completed_at=completed_at,
                 data_quality=quality,
                 message=f"{report.message} 4H 沿用上一輪資料。",
             )
-        if previous is None:
+        previous_short_completed_at = (
+            self._previous_horizon_timestamp(previous, "SHORT")
+            if previous is not None
+            else ""
+        )
+        if not previous_short_completed_at:
             return replace(
                 report,
+                signals=[],
+                watchlist=[],
+                market_map=[],
+                market_regime_counts={},
+                market_bias={},
                 short_completed_at="",
                 long_completed_at=completed_at,
             )
@@ -901,7 +1029,7 @@ class RadarRuntime:
             market_map=previous.market_map,
             market_regime_counts=previous.market_regime_counts,
             market_bias=previous.market_bias,
-            short_completed_at=self._previous_horizon_timestamp(previous, "SHORT"),
+            short_completed_at=previous_short_completed_at,
             long_completed_at=completed_at,
             data_quality=quality,
             message=f"{report.message} 15m 沿用上一輪資料。",
@@ -963,13 +1091,24 @@ class RadarRuntime:
         with self._state_lock:
             if not self._running or report.scan_id != self._scan_id:
                 return
+            if self._scan_mode == "SHORT":
+                report = self._merge_partial_report(
+                    report,
+                    self._latest,
+                    "SHORT",
+                    report.short_completed_at or report.generated_at,
+                )
             self._preview = report
             self._progress = {
                 "phase": "CORE_PREVIEW",
                 "completed": 1,
                 "total": 1,
                 "percent": 100.0,
-                "message": "15m 核心結果已發布，正在補深度資料與長線雷達",
+                "message": (
+                    "15m 核心結果已發布；既有 4H 結果保持不變，正在補深度資料"
+                    if self._scan_mode == "SHORT"
+                    else "15m 核心結果已發布，正在補深度資料與 4H 長線雷達"
+                ),
             }
 
     def _update_progress(
@@ -1026,19 +1165,24 @@ class RadarRuntime:
     def _horizon_completed_at_locked(self, horizon: str) -> str | None:
         if self._latest is None:
             return None
-        field_name = "long_completed_at" if horizon == "LONG" else "short_completed_at"
-        value = str(getattr(self._latest, field_name, "") or "").strip()
-        if value:
-            return value
-        # Reports created before per-horizon timestamps were introduced were
-        # always full scans. Partial reports intentionally leave the unscanned
-        # horizon blank so it cannot be presented as newly refreshed.
-        if getattr(self._latest, "scan_mode", "FULL") == "FULL":
-            return self._latest.completed_at or self._latest.generated_at or None
-        return None
+        return self._previous_horizon_timestamp(self._latest, horizon) or None
 
     def _horizon_freshness_locked(self, horizon: str) -> dict[str, Any]:
-        completed_at = self._horizon_completed_at_locked(horizon)
+        if self._latest is None:
+            return {
+                "available": False,
+                "completed_at": None,
+                "age_seconds": None,
+                "expired": False,
+            }
+        return self._report_horizon_freshness(self._latest, horizon)
+
+    def _report_horizon_freshness(
+        self,
+        report: RadarReport,
+        horizon: str,
+    ) -> dict[str, Any]:
+        completed_at = self._previous_horizon_timestamp(report, horizon)
         if not completed_at:
             return {
                 "available": False,
