@@ -82,11 +82,12 @@ class V33ContractTests(unittest.TestCase):
         self.assertIn("function isExpiredSnapshot(item)", html)
         self.assertIn("⏱ 資料已過期", html)
         self.assertIn("資料已過期｜原快照", html)
-        self.assertIn("data-instrument-refresh-id", html)
-        self.assertIn("↻ 只更新這一個幣", html)
+        self.assertIn("label='幣種掃描（更新判定）'", html)
         self.assertIn("reportBecameStale", html)
         self.assertIn("overflow-x:hidden", html)
         self.assertIn("env(safe-area-inset-bottom)", html)
+        self.assertIn("env(safe-area-inset-left)", html)
+        self.assertIn("env(safe-area-inset-right)", html)
         self.assertIn("height:100dvh", html)
         self.assertIn("max-width:100vw", html)
         self.assertIn("grid-template-columns:minmax(0,1fr)", html)
@@ -100,9 +101,17 @@ class V33ContractTests(unittest.TestCase):
         self.assertIn(".primary-nav{grid-row:5;position:relative", html)
         self.assertIn("grid-template-columns:repeat(4,minmax(0,1fr))", html)
         self.assertIn(".decision-actions{display:grid;grid-template-columns:repeat(2,minmax(0,1fr))", html)
-        self.assertIn("okx-radar-shell-v3.4-context-race-safe-1", service_worker)
+        self.assertIn("okx-radar-shell-v3.4-round-isolation-2", service_worker)
         self.assertIn("--primary-nav-safe-bottom", html)
         self.assertIn(".action-wrap{display:none;grid-row:4;position:relative", html)
+        self.assertIn("@media(orientation:landscape) and (max-height:520px)", html)
+        self.assertIn('class="preflight-action-bar"', html)
+        self.assertLess(
+            html.index('id="preflightContent"'), html.index('id="preflightRefresh"')
+        )
+        self.assertLess(
+            html.index('id="instrumentContent"'), html.index('id="instrumentScan"')
+        )
         self.assertIn("$('.shell').scrollTo({top:0", html)
         self.assertLess(html.index('<header class="top">'), html.index('<main class="shell">'))
         self.assertLess(html.index('id="filterShell"'), html.index('<main class="shell">'))
@@ -132,8 +141,7 @@ class V33ContractTests(unittest.TestCase):
         self.assertIn("function renderHorizonUnavailable(horizon,message)", html)
         self.assertIn("function renderScanPending(mode,message)", html)
         self.assertIn("只更新所選週期，另一週期保持不變", html)
-        self.assertIn("既有 4H 結果保持不變", html)
-        self.assertIn("既有 15m 結果保持不變", html)
+        self.assertIn("只更新所選週期，另一週期保持不變", html)
         self.assertIn("尚未執行 15m 掃描", html)
         self.assertIn("尚未執行 4H 掃描", html)
         start_scan = html.split("async function startScan(mode='FULL'){", 1)[1].split(
@@ -176,10 +184,10 @@ class V33ContractTests(unittest.TestCase):
         self.assertIn("function signalTriggerTime(item,status)", html)
         self.assertIn("訊號觸發時間（台灣）", html)
         self.assertIn("status!=='ENTRY_READY'&&status!=='MISSED_ENTRY'", html)
-        self.assertIn("okx-radar-shell-v3.4-context-race-safe-1", service_worker)
+        self.assertIn("okx-radar-shell-v3.4-round-isolation-2", service_worker)
         self.assertIn("$('#preflightRefresh').addEventListener('click',loadPreflight)", html)
         self.assertIn("'#waitRetestBox','#longWaitRetestBox'", html)
-        self.assertIn("updateLabel='↻ 幣種掃描（更新判定）'", html)
+        self.assertIn("scanAction=includeInstrument", html)
         self.assertNotIn("/api/preflight/reanalyze", html)
         self.assertNotIn("reanalyzeMode", html)
         self.assertIn("ORIGINAL_DIRECTION_STABLE", html)
@@ -211,7 +219,10 @@ class V33ContractTests(unittest.TestCase):
         self.assertIn("@keyframes radarSweep", html)
         self.assertIn("每次按下都重新取得最新公開資料", html)
         self.assertNotIn("<canvas", html)
-        self.assertIn("function instrumentButton(instId,label='幣種掃描',horizon='BOTH')", html)
+        self.assertIn(
+            "function instrumentButton(instId,label='幣種掃描（更新判定）',horizon='BOTH')",
+            html,
+        )
         self.assertIn("data-instrument-horizon", html)
         self.assertIn("function instrumentPayloadState(payload)", html)
         self.assertIn("function instrumentOverallVerdict(shortPayload,longPayload)", html)
@@ -236,6 +247,12 @@ class V33ContractTests(unittest.TestCase):
         self.assertIn("Spread（買賣價差）", html)
         self.assertIn("R:R（風險報酬比）", html)
         self.assertIn("Order Book（委託簿）", html)
+        self.assertIn("Order Book（訂單簿）", html)
+        self.assertIn("(?:（(?:委託簿|訂單簿)）)*", html)
+        self.assertIn("Trade Quality（交易品質）", html)
+        self.assertIn("Execution Quality（執行品質，不是勝率）", html)
+        self.assertIn("quality.combined_score", html)
+        self.assertIn("'分層判讀'", html)
         self.assertIn("function technicalText(value)", html)
         self.assertIn('data-scan-mode="SHORT"', html)
         self.assertIn('data-scan-mode="LONG"', html)
@@ -253,7 +270,26 @@ class V33ContractTests(unittest.TestCase):
         self.assertIn('data-tab="manual"', html)
         self.assertIn('id="manual"', html)
         self.assertIn("使用手冊", html)
+        self.assertIn('<details class="manual-card">', html)
+        self.assertIn("Signal Episode（訊號生命週期）", html)
+        self.assertIn("Trade Quality（交易品質）／Confidence（信心）", html)
+        self.assertIn("禁止追價／交易計畫失效", html)
+        self.assertIn("多空衝突／轉弱與翻向", html)
+        self.assertIn("三大交易時段", html)
+        self.assertIn("詳細數據", html)
+        self.assertIn("歷史訊號", html)
+        self.assertIn("COMPLETED:'交易計畫完成'", html)
+        self.assertIn("stage==='EXTENDED'||stage==='TRENDING'||stage==='COMPLETED'", html)
+        self.assertIn("該週期先不顯示上一輪卡片", html)
+        self.assertIn("另一週期若仍是 Fresh（最新）就照常有效", html)
+        self.assertIn("STALE（超過 30 分鐘）", html)
         self.assertIn("底層仍執行完整多週期驗證", html)
+        self.assertIn('id="contextCountLabel">深度資料完整', html)
+        self.assertIn('id="contextSourceCoverage">來源完整率 —', html)
+        self.assertIn("function renderContextCoverage(report,transient=null,preview=false)", html)
+        self.assertIn("quality.deep_complete_count", html)
+        self.assertIn("quality.deep_source_completeness_pct", html)
+        self.assertIn("五項來源完整率", html)
         self.assertIn(
             "horizon==='LONG'?null:isolatedInstrumentSide(data.short,'SHORT')",
             html,
@@ -265,7 +301,7 @@ class V33ContractTests(unittest.TestCase):
         self.assertIn("@media(prefers-reduced-motion:reduce)", html)
         self.assertNotIn("<canvas", html)
 
-    def test_retained_horizon_cards_stay_mounted_as_read_only_references(self):
+    def test_scan_round_hides_requested_horizons_but_stale_cards_are_retained(self):
         html = (Path(__file__).parents[1] / "radar" / "static" / "pages.html").read_text(
             encoding="utf-8"
         )
@@ -273,8 +309,19 @@ class V33ContractTests(unittest.TestCase):
         self.assertIn("function horizonReadOnlyReason(report,horizon)", html)
         self.assertIn("function readOnlyReferenceBanner(reason,horizon)", html)
         self.assertIn("function itemDisplayEntryStatus(item)", html)
-        self.assertIn("掃描中｜上一輪結果只供參考", html)
-        self.assertIn("更新失敗｜上一輪結果只供參考", html)
+        stored_status = html.split("function itemStoredEntryStatus(item)", 1)[1].split(
+            "function itemDisplayEntryStatus", 1
+        )[0]
+        self.assertIn("original_final_status", stored_status)
+        self.assertIn("eligibility.original_status", stored_status)
+        self.assertIn("status=originalFinal||", stored_status)
+        self.assertNotIn("includes(originalEligibility)", stored_status)
+        self.assertNotIn("eligibility.status==='WAIT_RETEST'", stored_status)
+        self.assertNotIn("掃描中｜上一輪結果只供參考", html)
+        self.assertNotIn("更新失敗｜上一輪結果只供參考", html)
+        self.assertNotIn("下方保留上一輪", html)
+        self.assertIn("正在掃描本輪資料；完成後會直接顯示最新結果", html)
+        self.assertIn("掃描失敗；此週期目前不顯示訊號", html)
         self.assertIn("下方快照只供回看，更新確認前不可進場", html)
         self.assertIn("class=\"read-only-reference", html)
 
@@ -286,6 +333,32 @@ class V33ContractTests(unittest.TestCase):
             pending,
         )
 
+        readonly_reason = html.split(
+            "function horizonReadOnlyReason(report,horizon){", 1
+        )[1].split("function itemReadOnlyReason", 1)[0]
+        self.assertLess(
+            readonly_reason.index("const currentRuntime="),
+            readonly_reason.index("const explicit="),
+        )
+        self.assertIn("scanModeIncludesHorizon(currentMode,horizon)", readonly_reason)
+        self.assertIn("reportHasCurrentPreview", readonly_reason)
+        self.assertIn("if(snapshot.available&&snapshot.expired)return 'STALE'", readonly_reason)
+        self.assertIn("return null", readonly_reason)
+
+        transient = html.split("function horizonTransientState(report,horizon){", 1)[
+            1
+        ].split("function horizonTransientMessage", 1)[0]
+        self.assertIn("['SCANNING','ERROR'].includes(runtime)", transient)
+        self.assertIn("scanModeIncludesHorizon(mode,horizon)", transient)
+        self.assertIn("if(runtime==='ERROR')return 'ERROR'", transient)
+        self.assertIn("reportHasCurrentPreview(report,horizon,mode)", transient)
+        preview_scope = html.split(
+            "function reportHasCurrentPreview(report,horizon", 1
+        )[1].split("function horizonTransientState", 1)[0]
+        self.assertIn("mode==='SHORT'||mode==='FULL'", preview_scope)
+        self.assertIn("return mode==='LONG'", preview_scope)
+        self.assertIn("state.currentPreviewGeneratedAt!==report.generated_at", preview_scope)
+
         report = html.split("function renderReport(report){", 1)[1].split(
             "function renderOverview(report)", 1
         )[0]
@@ -293,11 +366,37 @@ class V33ContractTests(unittest.TestCase):
         self.assertIn("longAvailable=longState.available", report)
         self.assertIn("shortReadOnlyReason=horizonReadOnlyReason(report,'SHORT')", report)
         self.assertIn("longReadOnlyReason=horizonReadOnlyReason(report,'LONG')", report)
+        self.assertIn("shortTransient=horizonTransientState(report,'SHORT')", report)
+        self.assertIn("longTransient=horizonTransientState(report,'LONG')", report)
+        self.assertIn(
+            "shortTransient?(shortTransient==='ERROR'?'更新失敗':'掃描中')",
+            report,
+        )
+        self.assertIn(
+            "longTransient?(longTransient==='ERROR'?'更新失敗':'掃描中')",
+            report,
+        )
+        self.assertIn("if(shortTransient)", report)
+        self.assertIn("if(longTransient)", report)
+        coverage = html.split(
+            "function renderContextCoverage(report,transient=null,preview=false){", 1
+        )[1].split("function reportRenderFingerprint", 1)[0]
+        self.assertIn("transient==='ERROR'?'更新失敗':'掃描中'", coverage)
         self.assertIn("itemDisplayEntryStatus(x)==='ENTRY_READY'", report)
         self.assertIn("true,shortReadOnlyReason", report)
         self.assertIn("true,longReadOnlyReason", report)
-        self.assertNotIn("shortAvailable=shortState.available&&!shortPending", report)
-        self.assertNotIn("if(shortPending)", report)
+        self.assertIn(
+            "renderContextCoverage(report,shortTransient||longTransient,preview)", report
+        )
+
+        comparator = html.split("function signalSortComparator(a,b){", 1)[1].split(
+            "function renderContextCoverage", 1
+        )[0]
+        self.assertIn("item.data_timestamp", comparator)
+        self.assertIn("item.closed_candle_ts", comparator)
+        self.assertLess(comparator.index("qualityDiff"), comparator.index("dataTimeDiff"))
+        self.assertLess(comparator.index("dataTimeDiff"), comparator.index("freshDiff"))
+        self.assertLess(comparator.index("freshDiff"), comparator.index("rrDiff"))
 
         decision = html.split("function decisionContextStatus(item,payload={})", 1)[1].split(
             "function itemEntryStatus", 1
@@ -306,15 +405,52 @@ class V33ContractTests(unittest.TestCase):
         final_panel = html.split("function finalDecisionPanel", 1)[1].split(
             "function entryBadge", 1
         )[0]
-        self.assertIn("canPreflight=showPreflight&&!expired&&!readOnlyReason", final_panel)
+        self.assertIn("instrumentButton(item.inst_id,'幣種掃描（更新判定）'", final_panel)
+        self.assertNotIn('data-preflight-id=', final_panel)
         self.assertIn(
             "copyAction=status==='ENTRY_READY'&&!expired&&!readOnlyReason", final_panel
         )
-        self.assertNotIn("longAwaitingFullPreview", report)
-        self.assertIn(
-            "if(mode==='FULL')return horizon==='SHORT'", html
+        self.assertIn("function reportRenderFingerprint(report)", html)
+        self.assertIn("function captureReportUiState()", html)
+        self.assertIn("function restoreReportUiState(saved)", html)
+        self.assertIn("if(state.reportRenderKey===renderKey)return", report)
+        preview_tail = report.split("if(preview){", 1)[1]
+        self.assertLess(
+            preview_tail.index("}"), preview_tail.index("state.reportRenderKey=renderKey")
         )
-        self.assertIn("目前沒有上一輪 4H 卡片可保留", report)
+        self.assertLess(
+            preview_tail.index("}"), preview_tail.index("restoreReportUiState(savedUi)")
+        )
+        poll = html.split("async function pollUntilComplete()", 1)[1].split(
+            "function showConnectionError", 1
+        )[0]
+        self.assertIn(
+            "state.scanStarting=false;state.currentPreviewGeneratedAt=null;await loadReport()",
+            poll,
+        )
+        self.assertNotIn("longAwaitingFullPreview", report)
+        self.assertIn("if(mode==='FULL')return horizon==='SHORT'", html)
+        start_scan = html.split("async function startScan(mode='FULL'){", 1)[1].split(
+            "async function pollUntilComplete", 1
+        )[0]
+        self.assertLess(
+            start_scan.index("state.currentPreviewGeneratedAt=null"),
+            start_scan.index("renderScanPending(normalizedMode,pendingMessage)"),
+        )
+        load_preview = html.split("async function loadPreview(){", 1)[1].split(
+            "async function refreshStatus", 1
+        )[0]
+        self.assertLess(
+            load_preview.index("state.currentPreviewGeneratedAt=report.generated_at"),
+            load_preview.index("renderReport(report)"),
+        )
+        connection_error = html.split("function showConnectionError(error){", 1)[1].split(
+            "async function bootstrap", 1
+        )[0]
+        self.assertIn(
+            "scan_mode:state.scanRequestedMode||state.status?.scan_mode||'FULL'",
+            connection_error,
+        )
 
     def test_pwa_never_caches_live_market_api(self):
         root = Path(__file__).parents[1] / "radar" / "static"

@@ -923,6 +923,141 @@ class ScannerTests(unittest.TestCase):
             ],
         )
 
+    def test_signal_sort_uses_actual_data_timestamp_before_lifecycle_label(self):
+        def candidate(inst_id, timestamp, freshness, age_bars):
+            signal = qualified_signal(inst_id)
+            return replace(
+                signal,
+                closed_candle_ts=timestamp,
+                data_timestamp=timestamp,
+                freshness=freshness,
+                lifecycle={**signal.lifecycle, "age_bars": age_bars},
+                decision_context={
+                    "final": {
+                        "status": "ENTER",
+                        "new_entry_allowed": True,
+                    }
+                },
+            )
+
+        newer_data = candidate("NEWER-DATA", 2_000, "ACTIVE", 9)
+        older_labelled_new = candidate("OLDER-LABEL", 1_000, "NEW", 0)
+
+        ordered = sorted(
+            [older_labelled_new, newer_data],
+            key=MarketScanner._signal_sort_key,
+            reverse=True,
+        )
+
+        self.assertIs(ordered[0], newer_data)
+
+    def test_zero_remaining_rr_does_not_fall_back_to_original_plan_rr(self):
+        def candidate(inst_id, remaining_rr, original_rr):
+            signal = qualified_signal(inst_id)
+            return replace(
+                signal,
+                risk_reward=original_rr,
+                entry_eligibility={
+                    **signal.entry_eligibility,
+                    "remaining_rr": remaining_rr,
+                },
+                decision_context={
+                    "final": {
+                        "status": "ENTER",
+                        "new_entry_allowed": True,
+                    }
+                },
+            )
+
+        exhausted = candidate("ZERO-REMAINING", 0.0, 9.0)
+        still_positive = candidate("POSITIVE-REMAINING", 1.0, 1.0)
+
+        ordered = sorted(
+            [exhausted, still_positive],
+            key=MarketScanner._signal_sort_key,
+            reverse=True,
+        )
+
+        self.assertIs(ordered[0], still_positive)
+
+    def test_formal_top_twenty_uses_final_permission_before_raw_entry_status(self):
+        def candidate(inst_id, *, allowed, quality):
+            signal = qualified_signal(inst_id)
+            return replace(
+                signal,
+                execution_quality={**signal.execution_quality, "score": quality},
+                # Deliberately keep every raw position ENTRY_READY.  The
+                # canonical final decision is the only permission source.
+                entry_eligibility={
+                    **signal.entry_eligibility,
+                    "status": "ENTRY_READY",
+                    "new_entry_allowed": allowed,
+                },
+                actionable=allowed,
+                decision_context={
+                    "final": {
+                        "status": "ENTER" if allowed else "WAIT",
+                        "new_entry_allowed": allowed,
+                    }
+                },
+            )
+
+        permitted = candidate(
+            "ACTUALLY-ENTER-USDT-SWAP",
+            allowed=True,
+            quality=10.0,
+        )
+        blocked = [
+            candidate(
+                f"BLOCKED-{index:02d}-USDT-SWAP",
+                allowed=False,
+                quality=100.0 - index,
+            )
+            for index in range(20)
+        ]
+
+        top_twenty = sorted(
+            [*blocked, permitted],
+            key=MarketScanner._signal_sort_key,
+            reverse=True,
+        )[:20]
+
+        self.assertIs(top_twenty[0], permitted)
+        self.assertIn(permitted, top_twenty)
+        self.assertEqual(sum(not item.actionable for item in top_twenty), 19)
+
+    def test_attach_decision_synchronizes_true_severe_chase_status(self):
+        scanner = MarketScanner(
+            FakeClient(),
+            ScannerConfig(min_quote_volume_24h=0),
+        )
+        signal = qualified_signal()
+        signal = replace(
+            signal,
+            entry_eligibility={
+                **signal.entry_eligibility,
+                "status": "ENTRY_READY",
+                "label": "目前可進｜仍在合理區",
+                "chase_atr": 2.1,
+            },
+        )
+
+        attached = scanner._attach_decision_context(signal)
+
+        self.assertEqual(
+            attached.decision_context["final"]["status"],
+            "NO_CHASE",
+        )
+        self.assertFalse(attached.actionable)
+        self.assertEqual(attached.entry_eligibility["status"], "MISSED_ENTRY")
+        self.assertEqual(attached.entry_eligibility["chase_atr"], 2.1)
+        self.assertEqual(
+            attached.entry_eligibility["wait_reason_code"],
+            "PRICE_TOO_FAR",
+        )
+        self.assertIn("CHASE", attached.entry_eligibility["hard_blockers"])
+        self.assertEqual(attached.market_metrics["entry_status"], "MISSED_ENTRY")
+
     def test_one_symbol_failure_is_isolated_and_surviving_signal_remains(self):
         scanner = MarketScanner(
             FakeClient("BBB-USDT-SWAP"),

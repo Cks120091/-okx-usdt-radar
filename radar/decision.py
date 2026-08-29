@@ -353,35 +353,92 @@ def _hard_gate(
             "目前尚未形成包含 Entry／SL／TP 的正式交易計畫。",
         )
 
-    chase_atr = _number(
-        entry.get("chase_atr")
-        if entry.get("chase_atr") is not None
-        else metrics.get("entry_chase_atr")
-    )
-    entry_key = str(
-        _read(item, "entry_quality", {}).get("key", "")
-        if isinstance(_read(item, "entry_quality", {}), Mapping)
-        else ""
-    ).upper()
+    # The live Entry eligibility is the canonical execution-distance source.
+    # ``entry_quality`` describes the setup's original EMA/structure extension
+    # and can legitimately be stale after price returns to the immutable Entry
+    # zone.  Mixing the two used to produce an impossible result such as
+    # ``ENTRY_READY`` / ``0.00 ATR`` while the hidden historical quality key
+    # independently blocked the trade as severe chase.
+    quality = _mapping(_read(item, "entry_quality", {}))
+    eligibility_chase_atr = _number(entry.get("chase_atr"))
+    metrics_chase_atr = _number(metrics.get("entry_chase_atr"))
+    quality_extension_atr = _number(quality.get("extension_atr"))
+    if eligibility_chase_atr is not None:
+        chase_source = "entry_eligibility.chase_atr"
+        chase_atr = eligibility_chase_atr
+        live_chase_available = True
+    elif metrics_chase_atr is not None:
+        chase_source = "market_metrics.entry_chase_atr"
+        chase_atr = metrics_chase_atr
+        live_chase_available = True
+    else:
+        chase_source = "live_chase_unavailable"
+        chase_atr = None
+        live_chase_available = False
     entry_status = str(entry.get("status", "")).upper()
     entry_label = str(entry.get("label", ""))
-    severe_chase = bool(
-        entry_key in {"SEVERE_CHASE", "HIGHLY_EXTENDED"}
-        or (chase_atr is not None and chase_atr > limits["severe_entry_extension_atr"])
-        or (
-            entry_status == "MISSED_ENTRY"
-            and any(token in entry_label for token in ("追價", "離開最佳"))
-        )
+    missed_for_chase = entry_status == "MISSED_ENTRY" and any(
+        token in entry_label for token in ("追價", "離開最佳")
     )
+    if live_chase_available:
+        severe_live_chase = bool(
+            chase_atr is not None
+            and chase_atr > limits["severe_entry_extension_atr"]
+        )
+        chase_status = "BLOCKED" if severe_live_chase else "PASSED"
+    elif (
+        quality_extension_atr is not None
+        and quality_extension_atr > limits["severe_entry_extension_atr"]
+    ):
+        # A legacy setup extension is never sufficient to grant permission.
+        # It may only conservatively block when its numeric value is already
+        # beyond the same severe threshold.
+        chase_source = "entry_quality.extension_atr"
+        chase_atr = quality_extension_atr
+        chase_status = "BLOCKED"
+    elif missed_for_chase:
+        chase_source = "entry_eligibility.status"
+        chase_status = "BLOCKED"
+    else:
+        chase_status = "UNKNOWN"
+    chase_value = {
+        "source": chase_source,
+        "chase_atr": round(chase_atr, 6) if chase_atr is not None else None,
+        "threshold_atr": round(limits["severe_entry_extension_atr"], 6),
+        "entry_status": entry_status or "UNKNOWN",
+        "entry_quality_key": str(quality.get("key") or "").upper() or None,
+        "entry_quality_extension_atr": (
+            round(quality_extension_atr, 6)
+            if quality_extension_atr is not None
+            else None
+        ),
+    }
+    if chase_status == "BLOCKED" and chase_atr is not None:
+        chase_reason = (
+            f"價格偏離 {chase_atr:.2f} ATR，超過嚴重追價門檻 "
+            f"{limits['severe_entry_extension_atr']:.2f} ATR"
+            f"（來源：{chase_source}）。"
+        )
+    elif chase_status == "BLOCKED":
+        chase_reason = "即時進場狀態已標記禁止追價（來源：entry_eligibility.status）。"
+    elif chase_status == "PASSED" and chase_atr is not None:
+        chase_reason = (
+            f"價格偏離 {chase_atr:.2f} ATR，未達嚴重追價門檻 "
+            f"{limits['severe_entry_extension_atr']:.2f} ATR"
+            f"（來源：{chase_source}）。"
+        )
+    else:
+        chase_reason = (
+            "未取得本輪 live 追價偏離值；舊 setup 的延伸資料不能作為"
+            "目前可進的放行依據。"
+        )
     _add_check(
         checks,
         "chase",
         "價格未構成嚴重追價",
-        "BLOCKED" if severe_chase else "PASSED",
-        chase_atr,
-        "方向可能仍有效，但目前屬嚴重追價。"
-        if severe_chase
-        else "未達嚴重追價門檻。",
+        chase_status,
+        chase_value,
+        chase_reason,
     )
 
     blocked = [row for row in checks if row["status"] == "BLOCKED"]
@@ -709,6 +766,20 @@ def _final_layer(
     entry_status = str(entry.get("status") or "UNKNOWN").upper()
     entry_label = str(entry.get("label") or "")
     entry_reason = str(entry.get("reason") or "")
+    entry_chase_atr = _number(entry.get("chase_atr"))
+    missed_chase_limit = _number(entry.get("missed_chase_atr"))
+    explicit_no_chase = any(
+        token in f"{entry_label} {entry_reason}"
+        for token in ("追價", "離開最佳")
+    )
+    beyond_missed_limit = bool(
+        entry_chase_atr is not None
+        and missed_chase_limit is not None
+        and entry_chase_atr > missed_chase_limit
+    )
+    missed_entry_no_chase = entry_status == "MISSED_ENTRY" and (
+        explicit_no_chase or beyond_missed_limit
+    )
     stage = episode["source_stage"]
     active_trigger = plan_present and stage in _FORMAL_STAGES and not target_completed
     severe_chase = "chase" in blockers
@@ -732,6 +803,19 @@ def _final_layer(
         status, label = "NO_EDGE", "風險報酬不值得"
         wait_code = "RISK_REWARD" if "risk_reward" in blockers else "STOP_LOSS"
         wait_label = "等待新的合理交易計畫"
+    elif missed_entry_no_chase and blockers == {"entry_permission"}:
+        # ``new_entry_allowed=False`` is the expected positional permission
+        # for an already-missed Entry.  When every actual data/execution/risk
+        # gate passed, retain the precise no-chase meaning instead of replacing
+        # it with a generic Hard-Gate WAIT label.
+        status, label = "NO_CHASE", "已離開合理進場區｜禁止追價"
+        wait_code, wait_label = "PRICE_TOO_FAR", "等待新的進場機會"
+    elif entry_status == "MISSED_ENTRY" and blockers == {"entry_permission"}:
+        status, label = "WAIT", "進場窗口已關閉｜禁止新進場"
+        wait_code, wait_label = (
+            "ENTRY_WINDOW_CLOSED",
+            "等待新的 Trigger／REENTRY",
+        )
     elif not plan_present or direction == "NEUTRAL":
         if stage == "NEAR_TRIGGER":
             status, label = "WAIT", "訊號形成中｜等待正式 Trigger"
@@ -751,9 +835,15 @@ def _final_layer(
     elif entry_status == "WAIT_RETEST":
         status, label = "WAIT", "等待回踩／重新確認"
         wait_code, wait_label = "ENTRY_RETEST", "等待重新站回合理進場區"
-    elif entry_status == "MISSED_ENTRY":
+    elif missed_entry_no_chase:
         status, label = "NO_CHASE", "已離開合理進場區｜禁止追價"
         wait_code, wait_label = "PRICE_TOO_FAR", "等待新的進場機會"
+    elif entry_status == "MISSED_ENTRY":
+        status, label = "WAIT", "進場窗口已關閉｜禁止新進場"
+        wait_code, wait_label = (
+            "ENTRY_WINDOW_CLOSED",
+            "等待新的 Trigger／REENTRY",
+        )
     elif stage in {"NEAR_TRIGGER", "WATCH", "NONE", ""}:
         status, label = "WAIT", "訊號形成中｜等待正式 Trigger"
         wait_code, wait_label = "SIGNAL_FORMING", "等待價格觸發與收盤確認"
@@ -784,10 +874,30 @@ def _final_layer(
         reasons.extend(hard_gate["reasons"])
         reasons.append("不知道就顯示不知道，不使用替代值硬算")
     elif status == "NO_CHASE":
+        hard_chase_reason = next(
+            (
+                str(check.get("reason") or "")
+                for check in hard_gate.get("checks", [])
+                if check.get("key") == "chase"
+                and check.get("status") == "BLOCKED"
+            ),
+            "",
+        )
         reasons.extend(
             [
-                entry_reason or entry_label or "價格已離開合理進場位置",
+                hard_chase_reason
+                or entry_reason
+                or entry_label
+                or "價格已離開合理進場位置",
                 "禁止追價不等於原方向失效",
+            ]
+        )
+    elif wait_code == "ENTRY_WINDOW_CLOSED":
+        reasons.extend(
+            [
+                entry_reason or entry_label or "原訊號的進場窗口已關閉",
+                "這不是價格追價判定；目前仍禁止新進場",
+                "等待新的 Trigger／REENTRY 建立新計畫",
             ]
         )
     elif status == "NO_EDGE":

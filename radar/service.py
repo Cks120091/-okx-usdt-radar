@@ -325,10 +325,42 @@ def _canonical_single_decision(
     plan = dict(preflight.get("plan_state", {}) or {})
     status = str(verdict.get("status", "DATA_UNAVAILABLE")).upper()
     situation = str(verdict.get("situation", "")).upper()
+    lifecycle_status = str(lifecycle.get("status", "")).upper()
+    plan_status = str(plan.get("status", "")).upper()
     direction = str(preflight.get("direction") or final.get("direction") or "NEUTRAL")
+    explicitly_invalidated = (
+        status in {"PLAN_INVALIDATED", "INVALIDATED"}
+        or situation in {"PLAN_INVALIDATED", "INVALIDATED"}
+        or lifecycle_status == "INVALIDATED"
+        or plan_status == "INVALIDATED"
+    )
+    target_completed = not explicitly_invalidated and (
+        status in {"TARGET_REACHED", "COMPLETED"}
+        or situation in {"TARGET_REACHED", "COMPLETED"}
+        or lifecycle_status in {"TARGET_REACHED", "COMPLETED"}
+        or plan_status in {"TARGET_REACHED", "COMPLETED"}
+    )
+    closed_unknown = not explicitly_invalidated and not target_completed and (
+        status == "CLOSED_UNKNOWN"
+        or situation == "CLOSED_UNKNOWN"
+        or lifecycle_status == "CLOSED_UNKNOWN"
+        or plan_status == "CLOSED_UNKNOWN"
+    )
+    # A generic terminal flag remains fail-closed, except when the repository
+    # explicitly says the TP/SL order is unknown. Reaching TP is completion,
+    # while unknown closure is data-unavailable; neither can reuse the plan.
+    terminal_invalidation = explicitly_invalidated or (
+        bool(lifecycle.get("terminal"))
+        and not target_completed
+        and not closed_unknown
+    )
     mapped_status = (
         "INVALIDATED"
-        if status == "PLAN_INVALIDATED" or lifecycle.get("terminal")
+        if terminal_invalidation
+        else "COMPLETED"
+        if target_completed
+        else "DATA_UNAVAILABLE"
+        if closed_unknown
         else "ENTER"
         if status == "ENTRY_READY" and verdict.get("actionable") is True
         else "DATA_UNAVAILABLE"
@@ -336,8 +368,8 @@ def _canonical_single_decision(
         else "ANOMALY"
         if status == "ANOMALY"
         else "NO_CHASE"
-        if status == "MISSED_ENTRY"
-        and situation in {"FAVORABLE_MISSED", "TARGET_REACHED", "ENTRY_WINDOW_CLOSED"}
+    if status == "MISSED_ENTRY"
+        and situation in {"FAVORABLE_MISSED", "PRICE_TOO_FAR"}
         else "NO_EDGE"
         if status == "HARD_GATE_BLOCKED"
         and "RR_INSUFFICIENT" in set(verdict.get("hard_blockers", []) or [])
@@ -345,6 +377,7 @@ def _canonical_single_decision(
     )
     labels = {
         "INVALIDATED": "交易計畫已失效｜等待全新 Trigger",
+        "COMPLETED": "目標已達｜本次交易計畫完成",
         "ENTER": "目前可進｜完整風控已通過",
         "DATA_UNAVAILABLE": "資料不足｜禁止新進場",
         "ANOMALY": "異常行情｜等待穩定",
@@ -361,6 +394,7 @@ def _canonical_single_decision(
     reasons.extend(existing_reasons)
     wait_codes = {
         "INVALIDATED": ("NEW_TRIGGER_REQUIRED", "等待新的 Trigger／REENTRY"),
+        "COMPLETED": ("TARGET_REACHED", "本次機會已完成｜等待全新 Trigger"),
         "DATA_UNAVAILABLE": ("DATA_MISSING", "等待最新完整資料"),
         "ANOMALY": ("ANOMALY", "等待市場恢復穩定"),
         "NO_CHASE": ("PRICE_TOO_FAR", "等待回到合理進場區或新事件"),
@@ -382,8 +416,16 @@ def _canonical_single_decision(
                 None
                 if mapped_status == "ENTER"
                 else {
-                    "code": wait_codes[mapped_status][0],
-                    "label": wait_codes[mapped_status][1],
+                    "code": (
+                        "CLOSED_UNKNOWN"
+                        if closed_unknown
+                        else wait_codes[mapped_status][0]
+                    ),
+                    "label": (
+                        "舊計畫已關閉｜等待最新完整資料與全新 Trigger"
+                        if closed_unknown
+                        else wait_codes[mapped_status][1]
+                    ),
                 }
             ),
             "invalidation_condition": (
@@ -396,12 +438,136 @@ def _canonical_single_decision(
     decision["final"] = final
     decision["episode_plan_state"] = {
         "status": plan.get("status"),
-        "terminal": bool(lifecycle.get("terminal")),
+        "terminal": terminal_invalidation or target_completed or closed_unknown,
+        "completed": target_completed,
+        "invalidated": terminal_invalidation,
+        "closed_unknown": closed_unknown,
         "old_plan_reusable_for_new_entry": bool(
             plan.get("old_plan_reusable_for_new_entry")
+            and not terminal_invalidation
+            and not target_completed
+            and not closed_unknown
         ),
     }
     return decision
+
+
+def _preflight_terminal_kind(payload: dict[str, Any] | None) -> str | None:
+    """Return the durable terminal outcome represented by one preflight."""
+
+    if not isinstance(payload, dict):
+        return None
+    verdict = dict(payload.get("verdict", {}) or {})
+    lifecycle = dict(payload.get("signal_lifecycle", {}) or {})
+    plan = dict(payload.get("plan_state", {}) or {})
+    values = {
+        str(verdict.get("status") or "").upper(),
+        str(verdict.get("situation") or "").upper(),
+        str(lifecycle.get("status") or "").upper(),
+        str(plan.get("status") or "").upper(),
+    }
+    if values & {"PLAN_INVALIDATED", "INVALIDATED"}:
+        return "INVALIDATED"
+    if values & {"TARGET_REACHED", "COMPLETED"}:
+        return "COMPLETED"
+    if values & {"CLOSED_UNKNOWN"}:
+        return "CLOSED_UNKNOWN"
+    return None
+
+
+def _project_persisted_preflight_terminal(
+    payload: dict[str, Any],
+    terminal_kind: str,
+) -> None:
+    """Make the response agree with the terminal outcome that won the CAS.
+
+    A closed-candle repository update can race the live ticker check.  The
+    durable exact-episode outcome always wins; mutating this request-local
+    payload prevents a TP-looking response from masking an already persisted
+    stop invalidation (and vice versa).
+    """
+
+    verdict = payload.setdefault("verdict", {})
+    lifecycle = payload.setdefault("signal_lifecycle", {})
+    plan = payload.setdefault("plan_state", {})
+    if terminal_kind == "COMPLETED":
+        verdict.update(
+            {
+                "status": "COMPLETED",
+                "situation": "TARGET_REACHED",
+                "label": "目標已達｜本次交易計畫完成",
+                "reason": "原始 TP1 已到達；舊計畫不可重新進場，請等待新的 Trigger。",
+                "actionable": False,
+            }
+        )
+        lifecycle.update(
+            {
+                "status": "TARGET_REACHED",
+                "label": "已觸發・目標已達",
+                "active": False,
+                "terminal": True,
+                "note": "本次交易計畫已完成；價格回到原 Entry 也不會復活舊訊號。",
+            }
+        )
+        plan_status = "TARGET_REACHED"
+        direction_still_valid = True
+    elif terminal_kind == "INVALIDATED":
+        verdict.update(
+            {
+                "status": "PLAN_INVALIDATED",
+                "situation": "INVALIDATED",
+                "label": "交易計畫已失效｜等待全新 Trigger",
+                "reason": "原始 SL／失效位已被突破；同一筆訊號永久結束。",
+                "actionable": False,
+            }
+        )
+        lifecycle.update(
+            {
+                "status": "INVALIDATED",
+                "label": "已觸發・已失效",
+                "active": False,
+                "terminal": True,
+                "note": "原交易計畫永久失效；必須等待新的 Trigger／REENTRY。",
+            }
+        )
+        plan_status = "INVALIDATED"
+        direction_still_valid = False
+    else:
+        verdict.update(
+            {
+                "status": "DATA_UNAVAILABLE",
+                "situation": "CLOSED_UNKNOWN",
+                "label": "資料狀態未知｜舊計畫已關閉",
+                "reason": (
+                    "訊號資料庫已終止舊計畫，但現有資料無法證明 TP／SL 先後；"
+                    "不可沿用舊價位。"
+                ),
+                "actionable": False,
+            }
+        )
+        lifecycle.update(
+            {
+                "status": "CLOSED_UNKNOWN",
+                "label": "已觸發・終局未知",
+                "active": False,
+                "terminal": True,
+                "note": "結果未知；保留歷史紀錄，但禁止重用舊交易計畫。",
+            }
+        )
+        plan_status = "CLOSED_UNKNOWN"
+        direction_still_valid = False
+    plan.update(
+        {
+            "status": plan_status,
+            "old_plan_reusable": False,
+            "old_plan_reusable_for_new_entry": False,
+            "existing_position_plan_active": False,
+            "new_entry_status": "CLOSED",
+            "new_entry_allowed": False,
+            "direction_still_valid": direction_still_valid,
+            "new_trigger_required": True,
+        }
+    )
 
 
 _HORIZON_CANDIDATE_ARRAYS = {
@@ -464,6 +630,25 @@ def _project_horizon_read_only(
                 eligibility["new_entry_allowed"] = False
 
 
+def _suppress_horizon_projection(
+    payload: dict[str, Any],
+    horizon: str,
+) -> None:
+    """Hide a requested horizon's previous snapshot from one API response.
+
+    The saved report and Signal Repository remain untouched.  This only keeps
+    an in-flight or failed scan from presenting last round's candidates and
+    market ranking as if they belonged to the newly requested round.
+    """
+
+    for field_name in _HORIZON_CANDIDATE_ARRAYS[horizon]:
+        payload[field_name] = []
+    if horizon == "SHORT":
+        payload["market_map"] = []
+        payload["market_regime_counts"] = {}
+        payload["market_bias"] = {}
+
+
 def _read_only_reasons(
     system_status: str,
     freshness: dict[str, dict[str, Any]],
@@ -513,8 +698,12 @@ class RadarRuntime:
         self._invalidated_preflight_signals: dict[
             tuple[str, str, str], Any
         ] = {}
+        self._terminal_preflight_outcomes: dict[
+            tuple[str, str, str], str
+        ] = {}
         self._preflight_cache_ttl_seconds = 12.0
         self._latest: RadarReport | None = load_latest_report(config.data_dir)
+        self._prune_restored_terminal_cards()
         restored_runtime = load_runtime_state(config.data_dir)
         self._preview: RadarReport | None = None
         self._running = False
@@ -546,6 +735,61 @@ class RadarRuntime:
         self._max_scan_push_subscriptions = 8
         self._single_inflight: set[tuple[str, str]] = set()
         self._progress: dict[str, Any] = self._idle_progress()
+
+    def _prune_restored_terminal_cards(self) -> None:
+        """Remove exact CLOSED episodes accidentally retained in latest.json.
+
+        SQLite owns the Signal Episode lifecycle.  A prior report-file write
+        can fail after the terminal CAS succeeds, so startup reconciles only
+        exact trigger identities and never removes a newer episode or the
+        unrelated horizon.
+        """
+
+        report = self._latest
+        repository = getattr(self.scanner, "repository", None)
+        terminal_loader = getattr(repository, "preflight_terminal_kind", None)
+        if report is None or not callable(terminal_loader):
+            return
+
+        changed = False
+
+        def retained(items: list[Any]) -> list[Any]:
+            nonlocal changed
+            output: list[Any] = []
+            for item in items:
+                try:
+                    terminal_kind = str(terminal_loader(item) or "").upper()
+                except Exception:
+                    LOGGER.exception(
+                        "Failed to reconcile restored terminal episode %s",
+                        getattr(item, "trigger_id", ""),
+                    )
+                    output.append(item)
+                    continue
+                if terminal_kind in {
+                    "COMPLETED",
+                    "INVALIDATED",
+                    "CLOSED_UNKNOWN",
+                }:
+                    changed = True
+                    continue
+                output.append(item)
+            return output
+
+        updated_report = replace(
+            report,
+            signals=retained(list(report.signals)),
+            long_signals=retained(list(report.long_signals)),
+        )
+        if not changed:
+            return
+        self._latest = updated_report
+        try:
+            save_report(updated_report, self.config.data_dir)
+        except Exception:
+            # Keep the authoritative in-memory projection clean.  The next
+            # restart repeats the exact repository reconciliation.
+            LOGGER.exception("Failed to persist restored terminal-card cleanup")
 
     def stop(self) -> None:
         return
@@ -681,6 +925,19 @@ class RadarRuntime:
             payload["safety"]["horizon_read_only_reasons"] = deepcopy(
                 read_only_reasons
             )
+            suppressed_reasons: dict[str, str | None] = {
+                horizon: (
+                    system_status
+                    if system_status in {"SCANNING", "ERROR"}
+                    and horizon in unavailable_horizons
+                    else None
+                )
+                for horizon in ("SHORT", "LONG")
+            }
+            payload["horizon_suppressed_reasons"] = suppressed_reasons
+            payload["safety"]["horizon_suppressed_reasons"] = deepcopy(
+                suppressed_reasons
+            )
             payload["scan_in_progress_horizons"] = (
                 sorted(unavailable_horizons) if system_status == "SCANNING" else []
             )
@@ -702,6 +959,9 @@ class RadarRuntime:
             for horizon, reason in read_only_reasons.items():
                 if reason:
                     _project_horizon_read_only(payload, horizon, reason)
+            for horizon, reason in suppressed_reasons.items():
+                if reason:
+                    _suppress_horizon_projection(payload, horizon)
             if not actionable:
                 payload["historical_signal_count"] = len(payload.get("signals", []))
                 payload["historical_long_signal_count"] = len(
@@ -715,33 +975,20 @@ class RadarRuntime:
                     payload["signals_suppressed_reason"] = None
                     payload["signals_read_only_reason"] = "STALE"
                 elif system_status == "SCANNING":
-                    # Keep the last completed requested horizons mounted while the
-                    # replacement is running. They are reference-only projections;
-                    # the untouched horizon can remain actionable at its own age.
-                    payload["signals_suppressed_reason"] = None
-                    payload["signals_read_only_reason"] = (
-                        "SCANNING"
-                        if all(
-                            not item["available"]
-                            or read_only_reasons[horizon] == "SCANNING"
-                            for horizon, item in horizon_freshness.items()
-                        )
-                        else None
-                    )
+                    # The explicitly requested horizon has no current result yet,
+                    # so its previous cards stay hidden.  An untouched horizon may
+                    # remain visible and actionable at its own completion time.
+                    payload["signals_suppressed_reason"] = suppressed_reasons[
+                        "SHORT"
+                    ]
+                    payload["signals_read_only_reason"] = None
                 elif system_status == "ERROR" and unavailable_horizons:
-                    # A failed attempt must not erase the last completed cards.
-                    # Only the requested horizon is disabled; the other horizon
-                    # retains its independent timestamp and permission.
-                    payload["signals_suppressed_reason"] = None
-                    payload["signals_read_only_reason"] = (
-                        "ERROR"
-                        if all(
-                            not item["available"]
-                            or read_only_reasons[horizon] == "ERROR"
-                            for horizon, item in horizon_freshness.items()
-                        )
-                        else None
-                    )
+                    # A failed attempt does not delete the completed snapshot, but
+                    # the requested slot is withheld from this public projection.
+                    payload["signals_suppressed_reason"] = suppressed_reasons[
+                        "SHORT"
+                    ]
+                    payload["signals_read_only_reason"] = None
                 else:
                     payload["signals"] = []
                     payload["watchlist"] = []
@@ -753,6 +1000,7 @@ class RadarRuntime:
             else:
                 payload["signals_suppressed_reason"] = None
                 payload["signals_read_only_reason"] = None
+            payload["long_signals_suppressed_reason"] = suppressed_reasons["LONG"]
             return payload
 
     def preview_dict(self) -> dict[str, Any] | None:
@@ -764,6 +1012,16 @@ class RadarRuntime:
                 horizon: self._report_horizon_freshness(self._preview, horizon)
                 for horizon in ("SHORT", "LONG")
             }
+            # A FULL core preview is the current round's 15m core result.  The
+            # current 4H pass has not completed yet and must not inherit a
+            # timestamp merely because the report itself is marked FULL.
+            if self._scan_mode == "FULL" and not self._preview.long_completed_at:
+                horizon_freshness["LONG"] = {
+                    "available": False,
+                    "completed_at": None,
+                    "age_seconds": None,
+                    "expired": False,
+                }
             payload["runtime_status"] = "CORE_PREVIEW"
             payload["actionable"] = False
             payload["preliminary"] = True
@@ -794,10 +1052,27 @@ class RadarRuntime:
             payload["safety"]["horizon_read_only_reasons"] = deepcopy(
                 read_only_reasons
             )
+            suppressed_reasons = {
+                horizon: (
+                    "CORE_PREVIEW"
+                    if horizon in requested and not item.get("available")
+                    else None
+                )
+                for horizon, item in horizon_freshness.items()
+            }
+            payload["horizon_suppressed_reasons"] = suppressed_reasons
+            payload["safety"]["horizon_suppressed_reasons"] = deepcopy(
+                suppressed_reasons
+            )
             for horizon, reason in read_only_reasons.items():
                 if reason:
                     _project_horizon_read_only(payload, horizon, reason)
-            payload["signals_read_only_reason"] = "CORE_PREVIEW"
+            for horizon, reason in suppressed_reasons.items():
+                if reason:
+                    _suppress_horizon_projection(payload, horizon)
+            payload["signals_suppressed_reason"] = suppressed_reasons["SHORT"]
+            payload["long_signals_suppressed_reason"] = suppressed_reasons["LONG"]
+            payload["signals_read_only_reason"] = read_only_reasons["SHORT"]
             return payload
 
     def statistics(self) -> dict[str, Any]:
@@ -988,7 +1263,6 @@ class RadarRuntime:
                 )
             repository = getattr(self.scanner, "repository", None)
             active_loader = getattr(repository, "load_active_signal", None)
-            repository_active_ids: set[str] = set()
             if callable(active_loader):
                 for stored_horizon in ("SHORT", "LONG"):
                     if (
@@ -999,8 +1273,6 @@ class RadarRuntime:
                     active_signal = active_loader(normalized_id, stored_horizon)
                     if active_signal is not None:
                         stored_signals[stored_horizon] = active_signal
-                        if active_signal.trigger_id:
-                            repository_active_ids.add(active_signal.trigger_id)
             try:
                 analyzer_parameters = inspect.signature(analyzer).parameters
                 analyzer_args: dict[str, Any] = {}
@@ -1064,63 +1336,21 @@ class RadarRuntime:
                     preflight["cached"] = False
                     preflight["cache_age_seconds"] = 0.0
                     preflight["cache_ttl_seconds"] = 0.0
-                    if preflight.get("verdict", {}).get("status") == "PLAN_INVALIDATED":
-                        repository = getattr(self.scanner, "repository", None)
-                        invalidator = getattr(repository, "invalidate_preflight_plan", None)
-                        invalidated = False
-                        if callable(invalidator):
-                            invalidated = bool(
-                                invalidator(stored_signal, analysis.analyzed_at)
-                            )
-                            # The scanner may already have closed this exact
-                            # repository-backed episode from the newest closed
-                            # candle. That is safe to reflect, but a legacy or
-                            # newer active episode must never be deleted merely
-                            # because compare-and-set returned False.
-                            if (
-                                not invalidated
-                                and stored_signal.trigger_id in repository_active_ids
-                                and callable(active_loader)
-                            ):
-                                active_now = active_loader(normalized_id, horizon)
-                                invalidated = active_now is None
-                        if invalidated:
-                            cache_key = (
-                                horizon_timestamps[horizon] or analysis.analyzed_at,
-                                horizon,
-                                normalized_id,
-                            )
-                            with self._state_lock:
-                                self._invalidated_preflight_signals[cache_key] = deepcopy(
-                                    stored_signal
-                                )
-                                current_report = self._latest
-                                if current_report is not None:
-                                    if horizon == "LONG":
-                                        report_to_save = replace(
-                                            current_report,
-                                            long_signals=[
-                                                item
-                                                for item in current_report.long_signals
-                                                if item.trigger_id
-                                                != stored_signal.trigger_id
-                                            ],
-                                        )
-                                    else:
-                                        report_to_save = replace(
-                                            current_report,
-                                            signals=[
-                                                item
-                                                for item in current_report.signals
-                                                if item.trigger_id
-                                                != stored_signal.trigger_id
-                                            ],
-                                        )
-                                    # Keep memory and latest.json on the same
-                                    # commit while the full single-scan lock is
-                                    # still held.
-                                    save_report(report_to_save, self.config.data_dir)
-                                    self._latest = report_to_save
+                    terminal_kind = _preflight_terminal_kind(preflight)
+                    if terminal_kind is not None:
+                        cache_key = (
+                            horizon_timestamps[horizon] or analysis.analyzed_at,
+                            horizon,
+                            normalized_id,
+                        )
+                        self._persist_preflight_terminal(
+                            repository=getattr(self.scanner, "repository", None),
+                            signal=stored_signal,
+                            payload=preflight,
+                            observed_at=analysis.analyzed_at,
+                            horizon=horizon,
+                            cache_key=cache_key,
+                        )
                 except (TypeError, ValueError) as exc:
                     confirmation = {
                         "status": "DATA_UNAVAILABLE",
@@ -1268,6 +1498,7 @@ class RadarRuntime:
                     HTTPStatus.NOT_FOUND,
                     "最新報告中沒有這個週期的正式 Trigger；候選尚不能進行進場檢查",
                 )
+            repository = getattr(self.scanner, "repository", None)
             cache_key = (report_generated_at, normalized_horizon, normalized_id)
             cached = self._cached_preflight_locked(cache_key)
             if cached is not None:
@@ -1313,6 +1544,28 @@ class RadarRuntime:
                         HTTPStatus.CONFLICT,
                         "市場報告已更新，請回到訊號頁重新選擇",
                     )
+            terminal_kind = _preflight_terminal_kind(payload)
+            persisted_terminal = self._persist_preflight_terminal(
+                repository=repository,
+                signal=signal,
+                payload=payload,
+                observed_at=(
+                    str(payload.get("live", {}).get("sampled_at") or "")
+                    or datetime.now(timezone.utc).isoformat()
+                ),
+                horizon=normalized_horizon,
+                cache_key=cache_key,
+            )
+            with self._state_lock:
+                if (
+                    self._latest is None
+                    or self._horizon_completed_at_locked(normalized_horizon)
+                    != report_generated_at
+                ):
+                    raise PreflightError(
+                        HTTPStatus.CONFLICT,
+                        "市場報告已更新，請回到訊號頁重新選擇",
+                    )
                 cached_payload = deepcopy(payload)
                 cached_payload["cached"] = False
                 cached_payload["cache_age_seconds"] = 0.0
@@ -1321,7 +1574,13 @@ class RadarRuntime:
                     time.monotonic(),
                     cached_payload,
                 )
-                if payload.get("verdict", {}).get("status") == "PLAN_INVALIDATED":
+                if (
+                    terminal_kind == "INVALIDATED"
+                    and persisted_terminal is None
+                    and repository is None
+                ):
+                    # Compatibility-only scanners have no durable repository;
+                    # retain the legacy explicit reanalysis hand-off.
                     self._invalidated_preflight_signals[cache_key] = deepcopy(signal)
                 return deepcopy(cached_payload)
 
@@ -1453,6 +1712,7 @@ class RadarRuntime:
                 self._preflight_cache.pop(cache_key, None)
                 if new_signal is not None:
                     self._invalidated_preflight_signals.pop(cache_key, None)
+                    self._terminal_preflight_outcomes.pop(cache_key, None)
 
             save_report(updated_report, self.config.data_dir)
 
@@ -1539,6 +1799,7 @@ class RadarRuntime:
         self._preview = None
         self._preflight_cache.clear()
         self._invalidated_preflight_signals.clear()
+        self._terminal_preflight_outcomes.clear()
         self._scan_push_subscriptions.clear()
         self._progress = {
             "phase": "STARTING",
@@ -1840,12 +2101,23 @@ class RadarRuntime:
         with self._state_lock:
             if not self._running or report.scan_id != self._scan_id:
                 return
-            if self._scan_mode in {"SHORT", "FULL"}:
+            if self._scan_mode == "SHORT":
                 report = self._merge_partial_report(
                     report,
                     self._latest,
                     "SHORT",
                     report.short_completed_at or report.generated_at,
+                )
+            elif self._scan_mode == "FULL" and not report.long_completed_at:
+                # The scanner publishes 15m core before the full 4H pass.  Never
+                # inject the previous round's 4H cards into this round's preview.
+                report = replace(
+                    report,
+                    long_signals=[],
+                    long_watchlist=[],
+                    long_market_map=[],
+                    long_market_bias={},
+                    long_completed_at="",
                 )
             self._preview = report
             self._progress = {
@@ -1969,6 +2241,92 @@ class RadarRuntime:
         result["cached"] = True
         result["cache_age_seconds"] = round(age, 3)
         return result
+
+    def _persist_preflight_terminal(
+        self,
+        *,
+        repository: Any,
+        signal: Any,
+        payload: dict[str, Any],
+        observed_at: str,
+        horizon: str,
+        cache_key: tuple[str, str, str],
+    ) -> str | None:
+        """Persist and project one exact terminal preflight outcome.
+
+        Repository compare-and-set owns the durable lifecycle boundary.  The
+        in-memory/latest.json removal happens only after that exact episode was
+        closed (or was observed closed by the same in-flight transaction).
+        """
+
+        terminal_kind = _preflight_terminal_kind(payload)
+        if terminal_kind is None or repository is None:
+            return None
+        persisted_kind = None
+        if terminal_kind in {"COMPLETED", "INVALIDATED"}:
+            closer_name = (
+                "complete_preflight_plan"
+                if terminal_kind == "COMPLETED"
+                else "invalidate_preflight_plan"
+            )
+            closer = getattr(repository, closer_name, None)
+            if callable(closer) and bool(closer(signal, observed_at)):
+                persisted_kind = terminal_kind
+        if persisted_kind is None:
+            # The scanner may have advanced the same episode while the live
+            # preflight was running.  Absence of an ACTIVE row is not enough:
+            # query the exact CLOSED outcome so SL and TP races cannot be
+            # mislabeled as whichever live price happened to be observed last.
+            terminal_loader = getattr(repository, "preflight_terminal_kind", None)
+            if callable(terminal_loader):
+                observed_kind = str(terminal_loader(signal) or "").upper()
+                if observed_kind in {
+                    "COMPLETED",
+                    "INVALIDATED",
+                    "CLOSED_UNKNOWN",
+                }:
+                    persisted_kind = observed_kind
+        if persisted_kind is None:
+            return None
+
+        _project_persisted_preflight_terminal(payload, persisted_kind)
+
+        with self._state_lock:
+            self._terminal_preflight_outcomes[cache_key] = persisted_kind
+            if persisted_kind == "INVALIDATED":
+                self._invalidated_preflight_signals[cache_key] = deepcopy(signal)
+            else:
+                self._invalidated_preflight_signals.pop(cache_key, None)
+            current_report = self._latest
+            if current_report is None:
+                return persisted_kind
+            field_name = "long_signals" if horizon == "LONG" else "signals"
+            current_items = list(getattr(current_report, field_name))
+            retained_items = [
+                item
+                for item in current_items
+                if item.trigger_id != signal.trigger_id
+            ]
+            if len(retained_items) == len(current_items):
+                return persisted_kind
+            updated_report = replace(
+                current_report,
+                **{field_name: retained_items},
+            )
+            # SQLite has already committed the terminal CAS, so the public
+            # in-memory view must stop exposing this card even if the report
+            # file write fails. Startup performs the same exact-episode prune
+            # against SQLite before publishing a restored latest.json.
+            self._latest = updated_report
+            try:
+                save_report(updated_report, self.config.data_dir)
+            except Exception:
+                LOGGER.exception(
+                    "Failed to persist terminal-card cleanup for %s %s",
+                    signal.inst_id,
+                    horizon,
+                )
+        return persisted_kind
 
     @staticmethod
     def _idle_progress() -> dict[str, Any]:

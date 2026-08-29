@@ -193,6 +193,158 @@ class DecisionContextTests(unittest.TestCase):
         self.assertFalse(result["final"]["new_entry_allowed"])
         self.assertNotEqual(result["episode"]["status"], "INVALIDATED")
 
+    def test_missed_entry_below_severe_threshold_is_no_chase_not_severe_gate(self):
+        item = complete_signal()
+        item["entry_eligibility"].update(
+            {
+                "status": "MISSED_ENTRY",
+                "label": "已錯過｜禁止追價",
+                "reason": "價格已離開最佳進場區。",
+                "chase_atr": 1.27,
+                "remaining_rr": 2.0,
+                "actionable": False,
+                "new_entry_allowed": False,
+            }
+        )
+
+        result = build_decision_context(item)
+        chase = next(
+            check
+            for check in result["hard_gate"]["checks"]
+            if check["key"] == "chase"
+        )
+
+        self.assertEqual(chase["status"], "PASSED")
+        self.assertEqual(chase["value"]["chase_atr"], 1.27)
+        self.assertNotIn("超過嚴重追價門檻", chase["reason"])
+        self.assertEqual(result["hard_gate"]["blockers"], ["entry_permission"])
+        self.assertEqual(result["final"]["status"], "NO_CHASE")
+        self.assertFalse(result["final"]["new_entry_allowed"])
+
+    def test_missed_entry_with_real_execution_blocker_keeps_gate_priority(self):
+        item = complete_signal()
+        item["entry_eligibility"].update(
+            {
+                "status": "MISSED_ENTRY",
+                "label": "已錯過｜禁止追價",
+                "reason": "價格已離開最佳進場區。",
+                "chase_atr": 1.27,
+                "remaining_rr": 2.0,
+                "actionable": False,
+                "new_entry_allowed": False,
+            }
+        )
+        item["spread_pct"] = 0.2
+
+        result = build_decision_context(item)
+
+        self.assertIn("entry_permission", result["hard_gate"]["blockers"])
+        self.assertIn("spread", result["hard_gate"]["blockers"])
+        self.assertEqual(result["final"]["status"], "WAIT")
+        self.assertFalse(result["final"]["new_entry_allowed"])
+
+    def test_live_entry_distance_overrides_stale_hidden_entry_quality(self):
+        item = complete_signal()
+        item["entry_eligibility"].update(
+            {
+                "status": "ENTRY_READY",
+                "label": "目前可進｜仍在合理區",
+                "chase_atr": 0.0,
+            }
+        )
+        item["market_metrics"]["entry_chase_atr"] = 2.4
+        item["entry_quality"] = {
+            "key": "SEVERE_CHASE",
+            "label": "嚴重追價",
+            "extension_atr": 2.4,
+        }
+
+        result = build_decision_context(item)
+        chase = next(
+            check
+            for check in result["hard_gate"]["checks"]
+            if check["key"] == "chase"
+        )
+
+        self.assertEqual(chase["status"], "PASSED")
+        self.assertEqual(chase["value"]["source"], "entry_eligibility.chase_atr")
+        self.assertEqual(chase["value"]["chase_atr"], 0.0)
+        self.assertEqual(chase["value"]["entry_quality_key"], "SEVERE_CHASE")
+        self.assertEqual(result["final"]["status"], "ENTER")
+        self.assertTrue(result["final"]["new_entry_allowed"])
+
+    def test_true_live_severe_chase_reports_source_value_and_blocks(self):
+        item = complete_signal()
+        item["entry_eligibility"].update(
+            {
+                "status": "ENTRY_READY",
+                "label": "目前可進｜仍在合理區",
+                "chase_atr": 2.1,
+            }
+        )
+
+        result = build_decision_context(item)
+        chase = next(
+            check
+            for check in result["hard_gate"]["checks"]
+            if check["key"] == "chase"
+        )
+
+        self.assertEqual(chase["status"], "BLOCKED")
+        self.assertEqual(chase["value"]["source"], "entry_eligibility.chase_atr")
+        self.assertEqual(chase["value"]["chase_atr"], 2.1)
+        self.assertEqual(chase["value"]["threshold_atr"], 1.8)
+        self.assertIn("2.10 ATR", chase["reason"])
+        self.assertEqual(result["final"]["status"], "NO_CHASE")
+        self.assertFalse(result["final"]["new_entry_allowed"])
+        self.assertIn("2.10 ATR", result["final"]["reasons"][0])
+        self.assertNotIn("仍在最佳進場", result["final"]["reasons"][0])
+
+    def test_legacy_episode_uses_numeric_quality_extension_as_chase_fallback(self):
+        item = complete_signal()
+        item["entry_eligibility"].pop("chase_atr")
+        item["entry_quality"] = {
+            "key": "SEVERE_CHASE",
+            "label": "嚴重追價",
+            "extension_atr": 2.2,
+        }
+
+        result = build_decision_context(item)
+        chase = next(
+            check
+            for check in result["hard_gate"]["checks"]
+            if check["key"] == "chase"
+        )
+
+        self.assertEqual(chase["status"], "BLOCKED")
+        self.assertEqual(chase["value"]["source"], "entry_quality.extension_atr")
+        self.assertEqual(chase["value"]["chase_atr"], 2.2)
+        self.assertEqual(result["final"]["status"], "NO_CHASE")
+
+    def test_missing_live_chase_with_nonsevere_legacy_value_is_unknown(self):
+        item = complete_signal()
+        item["entry_eligibility"].pop("chase_atr")
+        item["entry_quality"] = {
+            "key": "ACCEPTABLE",
+            "label": "可以接受",
+            "extension_atr": 0.4,
+        }
+
+        result = build_decision_context(item)
+        chase = next(
+            check
+            for check in result["hard_gate"]["checks"]
+            if check["key"] == "chase"
+        )
+
+        self.assertEqual(chase["status"], "UNKNOWN")
+        self.assertEqual(chase["value"]["source"], "live_chase_unavailable")
+        self.assertIsNone(chase["value"]["chase_atr"])
+        self.assertEqual(chase["value"]["entry_quality_extension_atr"], 0.4)
+        self.assertIn("chase", result["hard_gate"]["unknowns"])
+        self.assertEqual(result["final"]["status"], "DATA_UNAVAILABLE")
+        self.assertFalse(result["final"]["new_entry_allowed"])
+
     def test_terminal_invalidation_has_highest_priority_and_cannot_revive(self):
         item = complete_signal()
         item["lifecycle"].update(
@@ -353,10 +505,10 @@ class DecisionContextTests(unittest.TestCase):
 
     def test_wait_retest_and_missed_entry_are_not_terminal_states(self):
         cases = (
-            ("WAIT_RETEST", "WAIT"),
-            ("MISSED_ENTRY", "NO_CHASE"),
+            ("WAIT_RETEST", "WAIT", "ENTRY_RETEST"),
+            ("MISSED_ENTRY", "WAIT", "ENTRY_WINDOW_CLOSED"),
         )
-        for entry_status, expected_final in cases:
+        for entry_status, expected_final, expected_wait_code in cases:
             with self.subTest(entry_status=entry_status):
                 item = complete_signal()
                 item["entry_eligibility"].update(
@@ -371,8 +523,51 @@ class DecisionContextTests(unittest.TestCase):
                 result = build_decision_context(item)
 
                 self.assertEqual(result["final"]["status"], expected_final)
+                self.assertEqual(
+                    result["final"]["wait_reason"]["code"],
+                    expected_wait_code,
+                )
                 self.assertTrue(result["final"]["trigger_preserved"])
                 self.assertFalse(result["episode"]["terminal"])
+
+    def test_inactive_lifecycle_window_is_not_mislabeled_as_price_chase(self):
+        item = complete_signal()
+        item["lifecycle"].update(
+            {
+                "current_stage": "TRENDING",
+                "transition": "UNCHANGED",
+                "terminal": False,
+            }
+        )
+        item["entry_eligibility"].update(
+            {
+                "status": "MISSED_ENTRY",
+                "label": "已錯過｜生命週期已離開進場階段",
+                "reason": "訊號仍保留作追蹤，但目前階段不再提供新進場。",
+                "chase_atr": 0.0,
+                "missed_chase_atr": 0.5,
+                "actionable": False,
+                "new_entry_allowed": False,
+            }
+        )
+
+        result = build_decision_context(item)
+
+        self.assertEqual(result["hard_gate"]["blockers"], ["entry_permission"])
+        self.assertEqual(result["final"]["status"], "WAIT")
+        self.assertEqual(
+            result["final"]["wait_reason"]["code"],
+            "ENTRY_WINDOW_CLOSED",
+        )
+        self.assertNotIn("追價", result["final"]["label"])
+        self.assertTrue(
+            any(
+                "不是價格追價判定" in reason
+                for reason in result["final"]["reasons"]
+            )
+        )
+        self.assertFalse(result["final"]["new_entry_allowed"])
+        self.assertTrue(result["final"]["trigger_preserved"])
 
     def test_low_rr_is_no_edge_instead_of_moving_stop(self):
         item = complete_signal()

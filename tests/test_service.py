@@ -5,6 +5,7 @@ import time
 import unittest
 from datetime import datetime, timedelta, timezone
 from types import SimpleNamespace
+from unittest.mock import patch
 
 from radar.config import AppConfig
 from radar.models import MarketContext, MarketState, RadarReport, Signal, Ticker
@@ -12,6 +13,7 @@ from radar.reporting import load_latest_report, save_report
 from radar.service import (
     PreflightError,
     RadarRuntime,
+    _canonical_single_decision,
     _latest_confirmation,
     _merge_preflight_confirmation,
     _single_scan_failure_message,
@@ -304,6 +306,97 @@ class StopCrossedSingleScanner(SingleInstrumentScanner):
         return analysis
 
 
+class RecordingCompletionRepository:
+    def __init__(self, active_signal):
+        self.active_signal = active_signal
+        self.complete_calls = 0
+        self.terminal_kinds = {}
+
+    def load_active_signal(self, inst_id, horizon):
+        active = self.active_signal
+        if (
+            active is not None
+            and active.inst_id == inst_id
+            and active.radar_horizon == horizon
+        ):
+            return active
+        return None
+
+    def complete_preflight_plan(self, signal_item, observed_at):
+        self.complete_calls += 1
+        active = self.active_signal
+        if (
+            active is None
+            or active.trigger_id != signal_item.trigger_id
+            or active.direction != signal_item.direction
+            or active.radar_horizon != signal_item.radar_horizon
+        ):
+            return False
+        self.terminal_kinds[signal_item.trigger_id] = "COMPLETED"
+        self.active_signal = None
+        return True
+
+    def preflight_terminal_kind(self, signal_item):
+        return self.terminal_kinds.get(signal_item.trigger_id)
+
+
+class ExistingTerminalRepository:
+    def __init__(self, signal_item, terminal_kind):
+        self.signal_id = signal_item.trigger_id
+        self.terminal_kind = terminal_kind
+        self.complete_calls = 0
+        self.invalidate_calls = 0
+
+    def load_active_signal(self, inst_id, horizon):
+        return None
+
+    def complete_preflight_plan(self, signal_item, observed_at):
+        self.complete_calls += 1
+        return False
+
+    def invalidate_preflight_plan(self, signal_item, observed_at):
+        self.invalidate_calls += 1
+        return False
+
+    def preflight_terminal_kind(self, signal_item):
+        if signal_item.trigger_id == self.signal_id:
+            return self.terminal_kind
+        return None
+
+
+class TargetReachedSingleScanner(SingleInstrumentScanner):
+    def __init__(self, active_signal):
+        super().__init__()
+        self.repository = RecordingCompletionRepository(active_signal)
+        self.price = 106.0
+
+    def scan_instrument(
+        self,
+        inst_id,
+        market_bias,
+        long_market_bias=None,
+        btc_bias="NEUTRAL",
+        long_btc_bias="NEUTRAL",
+        requested_horizon="BOTH",
+    ):
+        analysis = super().scan_instrument(
+            inst_id,
+            market_bias,
+            long_market_bias,
+            btc_bias,
+            long_btc_bias,
+            requested_horizon,
+        )
+        analysis.ticker = Ticker(
+            analysis.inst_id,
+            self.price,
+            self.price - 0.01,
+            self.price + 0.01,
+            int(time.time() * 1000),
+        )
+        return analysis
+
+
 class FailingScanner:
     def scan_once(self, progress=None, scan_id=None):
         raise RuntimeError("fixture scan failure")
@@ -352,6 +445,149 @@ class FailingPushNotifier(FakePushNotifier):
 
 
 class RuntimeSafetyTests(unittest.TestCase):
+    def test_canonical_single_decision_separates_target_completion_from_invalidation(self):
+        item = allow_entry(signal())
+        completed = _canonical_single_decision(
+            item,
+            {
+                "direction": "LONG",
+                "verdict": {
+                    "status": "MISSED_ENTRY",
+                    "situation": "TARGET_REACHED",
+                    "label": "已到達第一目標｜禁止追價",
+                    "reason": "最新價格已到達原始 TP1。",
+                    "actionable": False,
+                },
+                "signal_lifecycle": {
+                    "status": "TARGET_REACHED",
+                    "terminal": True,
+                },
+                "plan_state": {
+                    "status": "TARGET_REACHED",
+                    # Contradictory upstream permission must never revive a
+                    # completed episode.
+                    "old_plan_reusable_for_new_entry": True,
+                },
+                "original": {"stop_loss": 98.0},
+            },
+            None,
+        )
+
+        self.assertEqual(completed["final"]["status"], "COMPLETED")
+        self.assertIn("目標已達", completed["final"]["label"])
+        self.assertFalse(completed["final"]["new_entry_allowed"])
+        self.assertTrue(completed["final"]["trigger_preserved"])
+        self.assertEqual(
+            completed["final"]["wait_reason"]["code"],
+            "TARGET_REACHED",
+        )
+        self.assertTrue(completed["episode_plan_state"]["terminal"])
+        self.assertTrue(completed["episode_plan_state"]["completed"])
+        self.assertFalse(completed["episode_plan_state"]["invalidated"])
+        self.assertFalse(
+            completed["episode_plan_state"]["old_plan_reusable_for_new_entry"]
+        )
+
+        invalidated = _canonical_single_decision(
+            item,
+            {
+                "direction": "LONG",
+                "verdict": {
+                    "status": "PLAN_INVALIDATED",
+                    "situation": "INVALIDATED",
+                    "label": "原交易計畫失效",
+                    "actionable": False,
+                },
+                "signal_lifecycle": {
+                    "status": "INVALIDATED",
+                    "terminal": True,
+                },
+                "plan_state": {
+                    "status": "INVALIDATED",
+                    "old_plan_reusable_for_new_entry": True,
+                },
+                "original": {"stop_loss": 98.0},
+            },
+            None,
+        )
+
+        self.assertEqual(invalidated["final"]["status"], "INVALIDATED")
+        self.assertFalse(invalidated["final"]["new_entry_allowed"])
+        self.assertFalse(invalidated["final"]["trigger_preserved"])
+        self.assertTrue(invalidated["episode_plan_state"]["terminal"])
+        self.assertFalse(invalidated["episode_plan_state"]["completed"])
+        self.assertTrue(invalidated["episode_plan_state"]["invalidated"])
+        self.assertFalse(
+            invalidated["episode_plan_state"]["old_plan_reusable_for_new_entry"]
+        )
+
+        explicit_completed = _canonical_single_decision(
+            item,
+            {
+                "verdict": {"status": "COMPLETED", "actionable": False},
+                "signal_lifecycle": {},
+                "plan_state": {"old_plan_reusable_for_new_entry": True},
+            },
+            None,
+        )
+        self.assertEqual(explicit_completed["final"]["status"], "COMPLETED")
+        self.assertTrue(explicit_completed["episode_plan_state"]["terminal"])
+        self.assertFalse(
+            explicit_completed["episode_plan_state"][
+                "old_plan_reusable_for_new_entry"
+            ]
+        )
+
+        explicit_invalidated = _canonical_single_decision(
+            item,
+            {
+                "verdict": {
+                    "status": "WAIT_RETEST",
+                    "situation": "INVALIDATED",
+                    "actionable": False,
+                },
+                "signal_lifecycle": {},
+                "plan_state": {"old_plan_reusable_for_new_entry": True},
+            },
+            None,
+        )
+        self.assertEqual(explicit_invalidated["final"]["status"], "INVALIDATED")
+        self.assertTrue(explicit_invalidated["episode_plan_state"]["terminal"])
+        self.assertFalse(
+            explicit_invalidated["episode_plan_state"][
+                "old_plan_reusable_for_new_entry"
+            ]
+        )
+
+    def test_canonical_entry_window_closed_is_wait_not_no_chase(self):
+        decision = _canonical_single_decision(
+            allow_entry(signal()),
+            {
+                "direction": "LONG",
+                "verdict": {
+                    "status": "MISSED_ENTRY",
+                    "situation": "ENTRY_WINDOW_CLOSED",
+                    "label": "進場窗口已關閉",
+                    "actionable": False,
+                },
+                "signal_lifecycle": {
+                    "status": "ACTIVE",
+                    "terminal": False,
+                },
+                "plan_state": {
+                    "status": "MISSED",
+                    "old_plan_reusable_for_new_entry": False,
+                },
+            },
+            None,
+        )
+
+        self.assertEqual(decision["final"]["status"], "WAIT")
+        self.assertEqual(
+            decision["final"]["wait_reason"]["code"],
+            "ENTRY_WINDOW_CLOSED",
+        )
+
     def test_latest_confirmation_keeps_same_direction_without_requiring_new_trigger(self):
         state = MarketState(
             inst_id="AAA-USDT-SWAP",
@@ -551,6 +787,222 @@ class RuntimeSafetyTests(unittest.TestCase):
             )
             self.assertEqual(runtime._invalidated_preflight_signals, {})
 
+    def test_target_preflight_durably_completes_and_never_revives_old_card(self):
+        with tempfile.TemporaryDirectory() as directory:
+            current = report()
+            active = allow_entry(current.signals[0])
+            active.trigger_id = "short-episode-old"
+            long_signal = allow_entry(signal())
+            long_signal.trigger_id = "long-episode-untouched"
+            long_signal.radar_horizon = "LONG"
+            current.long_signals = [long_signal]
+            save_report(current, directory)
+
+            scanner = TargetReachedSingleScanner(active)
+            runtime = RadarRuntime(scanner, AppConfig(data_dir=directory))
+
+            # Simulate latest.json failing after SQLite's exact terminal CAS.
+            with patch("radar.service.save_report", side_effect=OSError("disk full")):
+                payload = runtime.scan_instrument_dict("AAA", "SHORT")
+
+            preflight = payload["short"]["preflight"]
+            self.assertEqual(preflight["verdict"]["status"], "COMPLETED")
+            self.assertEqual(preflight["verdict"]["situation"], "TARGET_REACHED")
+            self.assertEqual(
+                payload["short"]["decision_context"]["final"]["status"],
+                "COMPLETED",
+            )
+            self.assertEqual(scanner.repository.complete_calls, 1)
+            self.assertEqual(runtime._latest.signals, [])
+            self.assertEqual(
+                runtime._latest.long_signals[0].trigger_id,
+                "long-episode-untouched",
+            )
+            # The failed file write intentionally leaves the old card on disk.
+            self.assertEqual(
+                load_latest_report(directory).signals[0].trigger_id,
+                "short-episode-old",
+            )
+
+            # Startup reconciles exact repository tombstones and repairs the
+            # stale file without touching the other horizon.
+            restored = RadarRuntime(scanner, AppConfig(data_dir=directory))
+            self.assertEqual(restored._latest.signals, [])
+            self.assertEqual(
+                restored._latest.long_signals[0].trigger_id,
+                "long-episode-untouched",
+            )
+            self.assertEqual(load_latest_report(directory).signals, [])
+
+            scanner.price = 100.5
+            refreshed = restored.scan_instrument_dict("AAA", "SHORT")
+            self.assertIsNone(refreshed["short"]["preflight"])
+            self.assertEqual(scanner.repository.complete_calls, 1)
+
+    def test_durable_invalidation_wins_over_concurrent_live_target(self):
+        with tempfile.TemporaryDirectory() as directory:
+            current = report()
+            active = allow_entry(current.signals[0])
+            active.trigger_id = "episode-race-invalidated"
+            scanner = TargetReachedSingleScanner(active)
+            scanner.repository = ExistingTerminalRepository(active, "INVALIDATED")
+            runtime = RadarRuntime(scanner, AppConfig(data_dir=directory))
+            runtime._latest = current
+
+            payload = runtime.scan_instrument_dict("AAA", "SHORT")
+            preflight = payload["short"]["preflight"]
+
+            self.assertEqual(preflight["verdict"]["status"], "PLAN_INVALIDATED")
+            self.assertEqual(preflight["signal_lifecycle"]["status"], "INVALIDATED")
+            self.assertEqual(
+                payload["short"]["decision_context"]["final"]["status"],
+                "INVALIDATED",
+            )
+            self.assertEqual(
+                set(runtime._terminal_preflight_outcomes.values()),
+                {"INVALIDATED"},
+            )
+            self.assertEqual(len(runtime._invalidated_preflight_signals), 1)
+
+    def test_durable_completion_wins_over_concurrent_live_stop(self):
+        with tempfile.TemporaryDirectory() as directory:
+            current = report()
+            active = allow_entry(current.signals[0])
+            active.trigger_id = "episode-race-completed"
+            scanner = StopCrossedSingleScanner(active)
+            scanner.repository = ExistingTerminalRepository(active, "COMPLETED")
+            runtime = RadarRuntime(scanner, AppConfig(data_dir=directory))
+            runtime._latest = current
+
+            payload = runtime.scan_instrument_dict("AAA", "SHORT")
+            preflight = payload["short"]["preflight"]
+
+            self.assertEqual(preflight["verdict"]["status"], "COMPLETED")
+            self.assertEqual(preflight["verdict"]["situation"], "TARGET_REACHED")
+            self.assertEqual(
+                payload["short"]["decision_context"]["final"]["status"],
+                "COMPLETED",
+            )
+            self.assertEqual(
+                set(runtime._terminal_preflight_outcomes.values()),
+                {"COMPLETED"},
+            )
+            self.assertEqual(runtime._invalidated_preflight_signals, {})
+
+    def test_unknown_repository_closure_never_fabricates_live_tp_or_sl(self):
+        with tempfile.TemporaryDirectory() as directory:
+            current = report()
+            active = allow_entry(current.signals[0])
+            active.trigger_id = "episode-race-data-gap"
+            scanner = TargetReachedSingleScanner(active)
+            scanner.repository = ExistingTerminalRepository(
+                active,
+                "CLOSED_UNKNOWN",
+            )
+            runtime = RadarRuntime(scanner, AppConfig(data_dir=directory))
+            runtime._latest = current
+
+            payload = runtime.scan_instrument_dict("AAA", "SHORT")
+            preflight = payload["short"]["preflight"]
+            decision = payload["short"]["decision_context"]
+
+            self.assertEqual(preflight["verdict"]["status"], "DATA_UNAVAILABLE")
+            self.assertEqual(preflight["verdict"]["situation"], "CLOSED_UNKNOWN")
+            self.assertNotIn("SL／失效位已被突破", preflight["verdict"]["reason"])
+            self.assertEqual(decision["final"]["status"], "DATA_UNAVAILABLE")
+            self.assertEqual(
+                decision["final"]["wait_reason"]["code"],
+                "CLOSED_UNKNOWN",
+            )
+            self.assertTrue(decision["episode_plan_state"]["terminal"])
+            self.assertTrue(decision["episode_plan_state"]["closed_unknown"])
+            self.assertFalse(decision["episode_plan_state"]["invalidated"])
+            self.assertFalse(decision["episode_plan_state"]["completed"])
+            self.assertEqual(runtime._latest.signals, [])
+            self.assertEqual(runtime._invalidated_preflight_signals, {})
+            self.assertEqual(
+                set(runtime._terminal_preflight_outcomes.values()),
+                {"CLOSED_UNKNOWN"},
+            )
+
+    def test_closed_unknown_payload_never_calls_invalidation_mutator(self):
+        with tempfile.TemporaryDirectory() as directory:
+            active = allow_entry(signal())
+            active.trigger_id = "episode-closed-unknown"
+            current = report()
+            current.signals = [active]
+            scanner = ImmediateScanner()
+            scanner.repository = ExistingTerminalRepository(
+                active,
+                "CLOSED_UNKNOWN",
+            )
+            runtime = RadarRuntime(scanner, AppConfig(data_dir=directory))
+            runtime._latest = current
+            payload = {
+                "verdict": {
+                    "status": "DATA_UNAVAILABLE",
+                    "situation": "CLOSED_UNKNOWN",
+                    "actionable": False,
+                },
+                "signal_lifecycle": {
+                    "status": "CLOSED_UNKNOWN",
+                    "terminal": True,
+                },
+                "plan_state": {"status": "CLOSED_UNKNOWN"},
+            }
+
+            result = runtime._persist_preflight_terminal(
+                repository=scanner.repository,
+                signal=active,
+                payload=payload,
+                observed_at=datetime.now(timezone.utc).isoformat(),
+                horizon="SHORT",
+                cache_key=(current.completed_at, "SHORT", active.inst_id),
+            )
+
+            self.assertEqual(result, "CLOSED_UNKNOWN")
+            self.assertEqual(scanner.repository.complete_calls, 0)
+            self.assertEqual(scanner.repository.invalidate_calls, 0)
+            self.assertEqual(runtime._latest.signals, [])
+
+    def test_stale_terminal_cleanup_cannot_remove_newer_trigger(self):
+        with tempfile.TemporaryDirectory() as directory:
+            old_signal = allow_entry(signal())
+            old_signal.trigger_id = "episode-old"
+            new_signal = allow_entry(signal())
+            new_signal.trigger_id = "episode-new"
+            current = report()
+            current.signals = [new_signal]
+            scanner = ImmediateScanner()
+            scanner.repository = ExistingTerminalRepository(
+                old_signal,
+                "COMPLETED",
+            )
+            runtime = RadarRuntime(scanner, AppConfig(data_dir=directory))
+            runtime._latest = current
+            terminal_payload = {
+                "verdict": {
+                    "status": "MISSED_ENTRY",
+                    "situation": "TARGET_REACHED",
+                    "actionable": False,
+                },
+                "signal_lifecycle": {"status": "TARGET_REACHED", "terminal": True},
+                "plan_state": {"status": "TARGET_REACHED"},
+            }
+
+            result = runtime._persist_preflight_terminal(
+                repository=scanner.repository,
+                signal=old_signal,
+                payload=terminal_payload,
+                observed_at=datetime.now(timezone.utc).isoformat(),
+                horizon="SHORT",
+                cache_key=(current.completed_at, "SHORT", old_signal.inst_id),
+            )
+
+            self.assertEqual(result, "COMPLETED")
+            self.assertEqual(len(runtime._latest.signals), 1)
+            self.assertEqual(runtime._latest.signals[0].trigger_id, "episode-new")
+
     def test_push_config_is_exposed_without_a_private_key(self):
         with tempfile.TemporaryDirectory() as directory:
             notifier = FakePushNotifier()
@@ -720,6 +1172,29 @@ class RuntimeSafetyTests(unittest.TestCase):
             )
             current.market_map = [market]
             current.long_market_map = [market]
+            current.context_target_count = 83
+            current.context_enriched_count = 83
+            current.data_quality = {
+                "deep_target_count": 83,
+                "deep_enriched_count": 83,
+                "deep_complete_count": 77,
+                "deep_completeness_pct": 92.77,
+                "deep_source_completeness_pct": 96.14,
+                "source_success": {
+                    "funding": 83,
+                    "order_book": 77,
+                    "trades": 81,
+                    "timing": 83,
+                    "open_interest": 75,
+                },
+                "source_missing": {
+                    "order_book": 6,
+                    "trades": 2,
+                    "open_interest": 8,
+                },
+                "context_failure_count": 8,
+                "internal_failure_details": "not-public",
+            }
             runtime = RadarRuntime(ImmediateScanner(), AppConfig(data_dir=directory))
             runtime._latest = current
 
@@ -730,7 +1205,30 @@ class RuntimeSafetyTests(unittest.TestCase):
             self.assertNotIn("target_instruments", payload)
             self.assertNotIn("api_metrics", payload)
             self.assertNotIn("long_market_map", payload)
+            self.assertEqual(payload["context_enriched_count"], 83)
+            self.assertEqual(payload["data_quality"]["deep_target_count"], 83)
+            self.assertEqual(
+                payload["data_quality"]["deep_complete_count"],
+                77,
+            )
+            self.assertEqual(
+                payload["data_quality"]["deep_source_completeness_pct"],
+                96.14,
+            )
+            self.assertEqual(
+                payload["data_quality"]["source_missing"]["order_book"],
+                6,
+            )
+            self.assertNotIn("internal_failure_details", payload["data_quality"])
             self.assertNotIn("raw_indicators", payload["signals"][0]["market_metrics"])
+            self.assertEqual(
+                payload["signals"][0]["data_timestamp"],
+                current.signals[0].data_timestamp,
+            )
+            self.assertEqual(
+                payload["signals"][0]["closed_candle_ts"],
+                current.signals[0].closed_candle_ts,
+            )
             self.assertEqual(
                 payload["signals"][0]["market_metrics"]["order_book_sequence"],
                 {"reason": "已累積時間序列"},
@@ -878,6 +1376,20 @@ class RuntimeSafetyTests(unittest.TestCase):
                 short_signal_ids,
             )
             self.assertEqual(len(long_second.long_signals), 1)
+            after_long_payload = runtime.latest_dict()
+            self.assertEqual(
+                after_long_payload["horizon_read_only_reasons"],
+                {"SHORT": None, "LONG": None},
+            )
+            self.assertTrue(
+                after_long_payload["safety"]["horizon_actionable"]["SHORT"]
+            )
+            self.assertTrue(
+                after_long_payload["safety"]["horizon_actionable"]["LONG"]
+            )
+            self.assertIsNone(after_long_payload["signals_read_only_reason"])
+            self.assertIsNone(after_long_payload["signals_suppressed_reason"])
+            self.assertIsNone(after_long_payload["long_signals_suppressed_reason"])
 
             short_third = runtime.scan_blocking("SHORT")
 
@@ -930,32 +1442,23 @@ class RuntimeSafetyTests(unittest.TestCase):
 
             self.assertEqual(failed_attempt.status, "DATA_INCOMPLETE")
             self.assertEqual(payload["runtime_status"], "ERROR")
-            self.assertEqual(len(payload["signals"]), 1)
+            self.assertEqual(payload["signals"], [])
+            self.assertEqual(payload["watchlist"], [])
+            self.assertEqual(payload["market_map"], [])
+            self.assertEqual(payload["market_regime_counts"], {})
+            self.assertEqual(payload["market_bias"], {})
             self.assertEqual(len(payload["long_signals"]), 1)
             self.assertEqual(payload["scan_unavailable_horizons"], ["SHORT"])
             self.assertFalse(payload["safety"]["horizon_actionable"]["SHORT"])
             self.assertTrue(payload["safety"]["horizon_actionable"]["LONG"])
             self.assertEqual(payload["horizon_read_only_reasons"]["SHORT"], "ERROR")
             self.assertIsNone(payload["horizon_read_only_reasons"]["LONG"])
-            self.assertFalse(payload["signals"][0]["actionable"])
-            self.assertFalse(
-                payload["signals"][0]["decision_context"]["final"][
-                    "new_entry_allowed"
-                ]
-            )
             self.assertEqual(
-                payload["signals"][0]["decision_context"]["final"]["status"],
-                "UPDATE_FAILED",
+                payload["horizon_suppressed_reasons"],
+                {"SHORT": "ERROR", "LONG": None},
             )
-            self.assertEqual(
-                payload["signals"][0]["decision_context"]["final"][
-                    "original_final_status"
-                ],
-                "ENTER",
-            )
-            self.assertFalse(
-                payload["signals"][0]["entry_eligibility"]["new_entry_allowed"]
-            )
+            self.assertEqual(payload["signals_suppressed_reason"], "ERROR")
+            self.assertIsNone(payload["long_signals_suppressed_reason"])
             self.assertTrue(
                 payload["long_signals"][0]["decision_context"]["final"][
                     "new_entry_allowed"
@@ -965,8 +1468,43 @@ class RuntimeSafetyTests(unittest.TestCase):
             self.assertTrue(
                 previous.signals[0].decision_context["final"]["new_entry_allowed"]
             )
+            self.assertEqual(len(persisted.signals), 1)
             self.assertEqual(len(persisted.long_signals), 1)
             self.assertEqual(persisted.completed_at, previous.completed_at)
+
+    def test_failed_full_scan_hides_both_previous_horizons_without_deleting_them(self):
+        with tempfile.TemporaryDirectory() as directory:
+            previous = report()
+            previous.signals[0] = allow_entry(previous.signals[0])
+            previous_long = allow_entry(signal())
+            previous_long.radar_horizon = "LONG"
+            previous.long_signals = [previous_long]
+            previous.short_completed_at = previous.completed_at
+            previous.long_completed_at = previous.completed_at
+            save_report(previous, directory)
+            runtime = RadarRuntime(
+                IncompleteModeScanner(),
+                AppConfig(data_dir=directory),
+            )
+
+            runtime.scan_blocking("FULL")
+            payload = runtime.latest_dict()
+            persisted = load_latest_report(directory)
+
+            self.assertEqual(payload["runtime_status"], "ERROR")
+            self.assertEqual(payload["signals"], [])
+            self.assertEqual(payload["watchlist"], [])
+            self.assertEqual(payload["market_map"], [])
+            self.assertEqual(payload["market_bias"], {})
+            self.assertEqual(payload["long_signals"], [])
+            self.assertEqual(payload["long_watchlist"], [])
+            self.assertEqual(
+                payload["horizon_suppressed_reasons"],
+                {"SHORT": "ERROR", "LONG": "ERROR"},
+            )
+            self.assertEqual(payload["scan_unavailable_horizons"], ["LONG", "SHORT"])
+            self.assertEqual(len(persisted.signals), 1)
+            self.assertEqual(len(persisted.long_signals), 1)
 
     def test_per_horizon_freshness_marks_only_old_preserved_radar_expired(self):
         with tempfile.TemporaryDirectory() as directory:
@@ -1087,7 +1625,7 @@ class RuntimeSafetyTests(unittest.TestCase):
             while runtime.status()["running"] and time.time() < deadline:
                 time.sleep(0.01)
 
-    def test_full_preview_keeps_previous_long_reference_but_disables_both_horizons(self):
+    def test_full_preview_shows_current_short_core_without_previous_long_cards(self):
         with tempfile.TemporaryDirectory() as directory:
             scanner = PreviewScanner()
             runtime = RadarRuntime(scanner, AppConfig(data_dir=directory))
@@ -1105,20 +1643,20 @@ class RuntimeSafetyTests(unittest.TestCase):
             preview = runtime.preview_dict()
 
             self.assertEqual(len(preview["signals"]), 1)
-            self.assertEqual(len(preview["long_signals"]), 1)
+            self.assertEqual(preview["long_signals"], [])
+            self.assertEqual(preview["long_watchlist"], [])
+            self.assertFalse(preview["horizon_freshness"]["LONG"]["available"])
             self.assertFalse(preview["safety"]["horizon_actionable"]["SHORT"])
             self.assertFalse(preview["safety"]["horizon_actionable"]["LONG"])
             self.assertEqual(
                 preview["horizon_read_only_reasons"],
-                {"SHORT": "CORE_PREVIEW", "LONG": "CORE_PREVIEW"},
+                {"SHORT": "CORE_PREVIEW", "LONG": None},
+            )
+            self.assertEqual(
+                preview["horizon_suppressed_reasons"],
+                {"SHORT": None, "LONG": "CORE_PREVIEW"},
             )
             self.assertFalse(preview["signals"][0]["actionable"])
-            self.assertFalse(preview["long_signals"][0]["actionable"])
-            self.assertFalse(
-                preview["long_signals"][0]["decision_context"]["final"][
-                    "new_entry_allowed"
-                ]
-            )
             self.assertTrue(
                 previous_long.decision_context["final"]["new_entry_allowed"]
             )
@@ -1143,7 +1681,7 @@ class RuntimeSafetyTests(unittest.TestCase):
             self.assertEqual(scanner.calls, 1)
             self.assertEqual(runtime.status()["system_status"], "FRESH")
 
-    def test_partial_scanning_keeps_requested_horizon_visible_but_read_only(self):
+    def test_scanning_hides_only_the_requested_previous_horizon(self):
         with tempfile.TemporaryDirectory() as directory:
             runtime = RadarRuntime(ImmediateScanner(), AppConfig(data_dir=directory))
             previous = report()
@@ -1151,6 +1689,23 @@ class RuntimeSafetyTests(unittest.TestCase):
             previous_long = allow_entry(signal())
             previous_long.radar_horizon = "LONG"
             previous.long_signals = [previous_long]
+            previous_state = MarketState(
+                inst_id="BBB-USDT-SWAP",
+                regime="TREND",
+                direction="LONG",
+                preferred_strategy="fixture",
+                readiness_score=70.0,
+                status="NEAR_TRIGGER",
+                missing_conditions=[],
+                spread_pct=0.01,
+                quote_volume_24h=10_000_000,
+                closed_candle_ts=1,
+            )
+            previous.watchlist = [previous_state]
+            previous.long_watchlist = [previous_state]
+            previous.market_map = [previous_state]
+            previous.market_regime_counts = {"TREND": 1}
+            previous.market_bias = {"label": "上一輪偏多"}
             previous.short_completed_at = previous.completed_at
             previous.long_completed_at = previous.completed_at
             runtime._latest = previous
@@ -1159,9 +1714,14 @@ class RuntimeSafetyTests(unittest.TestCase):
             payload = runtime.latest_dict()
             self.assertEqual(payload["runtime_status"], "SCANNING")
             self.assertFalse(payload["actionable"])
-            self.assertEqual(len(payload["signals"]), 1)
+            self.assertEqual(payload["signals"], [])
+            self.assertEqual(payload["watchlist"], [])
+            self.assertEqual(payload["market_map"], [])
+            self.assertEqual(payload["market_regime_counts"], {})
+            self.assertEqual(payload["market_bias"], {})
             self.assertEqual(len(payload["long_signals"]), 1)
-            self.assertEqual(payload["historical_signal_count"], 1)
+            self.assertEqual(len(payload["long_watchlist"]), 1)
+            self.assertEqual(payload["historical_signal_count"], 0)
             self.assertFalse(payload["safety"]["horizon_actionable"]["SHORT"])
             self.assertTrue(payload["safety"]["horizon_actionable"]["LONG"])
             self.assertEqual(payload["scan_in_progress_horizons"], ["SHORT"])
@@ -1169,22 +1729,11 @@ class RuntimeSafetyTests(unittest.TestCase):
                 payload["horizon_read_only_reasons"],
                 {"SHORT": "SCANNING", "LONG": None},
             )
-            self.assertFalse(payload["signals"][0]["actionable"])
-            self.assertFalse(
-                payload["signals"][0]["decision_context"]["final"][
-                    "new_entry_allowed"
-                ]
-            )
             self.assertEqual(
-                payload["signals"][0]["decision_context"]["final"]["status"],
-                "WAIT",
+                payload["horizon_suppressed_reasons"],
+                {"SHORT": "SCANNING", "LONG": None},
             )
-            self.assertEqual(
-                payload["signals"][0]["decision_context"]["final"][
-                    "original_final_status"
-                ],
-                "ENTER",
-            )
+            self.assertEqual(payload["signals_suppressed_reason"], "SCANNING")
             self.assertTrue(
                 payload["long_signals"][0]["decision_context"]["final"][
                     "new_entry_allowed"
@@ -1197,11 +1746,16 @@ class RuntimeSafetyTests(unittest.TestCase):
             runtime._scan_mode = "LONG"
             payload = runtime.latest_dict()
             self.assertEqual(len(payload["signals"]), 1)
-            self.assertEqual(len(payload["long_signals"]), 1)
+            self.assertEqual(payload["long_signals"], [])
+            self.assertEqual(payload["long_watchlist"], [])
             self.assertTrue(payload["safety"]["horizon_actionable"]["SHORT"])
             self.assertFalse(payload["safety"]["horizon_actionable"]["LONG"])
             self.assertEqual(
                 payload["horizon_read_only_reasons"],
+                {"SHORT": None, "LONG": "SCANNING"},
+            )
+            self.assertEqual(
+                payload["horizon_suppressed_reasons"],
                 {"SHORT": None, "LONG": "SCANNING"},
             )
             self.assertTrue(
@@ -1209,11 +1763,24 @@ class RuntimeSafetyTests(unittest.TestCase):
                     "new_entry_allowed"
                 ]
             )
-            self.assertFalse(payload["long_signals"][0]["actionable"])
-            self.assertFalse(
-                payload["long_signals"][0]["decision_context"]["final"][
-                    "new_entry_allowed"
-                ]
+
+            runtime._scan_mode = "FULL"
+            payload = runtime.latest_dict()
+            self.assertEqual(payload["signals"], [])
+            self.assertEqual(payload["watchlist"], [])
+            self.assertEqual(payload["market_map"], [])
+            self.assertEqual(payload["long_signals"], [])
+            self.assertEqual(payload["long_watchlist"], [])
+            self.assertEqual(
+                payload["horizon_suppressed_reasons"],
+                {"SHORT": "SCANNING", "LONG": "SCANNING"},
+            )
+            self.assertEqual(payload["scan_in_progress_horizons"], ["LONG", "SHORT"])
+            self.assertTrue(
+                previous.signals[0].decision_context["final"]["new_entry_allowed"]
+            )
+            self.assertTrue(
+                previous_long.decision_context["final"]["new_entry_allowed"]
             )
 
     def test_report_older_than_thirty_minutes_is_retained_as_expired_snapshot(self):
@@ -1233,6 +1800,10 @@ class RuntimeSafetyTests(unittest.TestCase):
             self.assertEqual(payload["signals"][0]["inst_id"], "AAA-USDT-SWAP")
             self.assertIsNone(payload["signals_suppressed_reason"])
             self.assertEqual(payload["signals_read_only_reason"], "STALE")
+            self.assertEqual(
+                payload["horizon_suppressed_reasons"],
+                {"SHORT": None, "LONG": None},
+            )
             self.assertFalse(payload["safety"]["actionable"])
             self.assertFalse(payload["signals"][0]["actionable"])
             self.assertFalse(

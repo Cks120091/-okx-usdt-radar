@@ -1963,6 +1963,16 @@ class MarketScanner:
             "WAIT_RETEST": 2,
             "MISSED_ENTRY": 1,
         }
+        final_priority = {
+            "ENTER": 8,
+            "WAIT": 7,
+            "NO_CHASE": 6,
+            "NO_EDGE": 5,
+            "DATA_UNAVAILABLE": 4,
+            "ANOMALY": 3,
+            "COMPLETED": 2,
+            "INVALIDATED": 0,
+        }
         freshness_priority = {
             "NEW": 8,
             "REACTIVATED": 7,
@@ -1983,12 +1993,23 @@ class MarketScanner:
             "NO_FOLLOW_THROUGH": 1,
             "INVALIDATED": 0,
         }
-        execution_score = _finite_number(signal.execution_quality.get("score")) or 0.0
-        remaining_rr = (
-            _finite_number(signal.entry_eligibility.get("remaining_rr"))
-            or _finite_number(signal.risk_reward)
-            or 0.0
+        execution_score = _finite_number(signal.execution_quality.get("score"))
+        execution_score = execution_score if execution_score is not None else 0.0
+        remaining_rr = _finite_number(
+            signal.entry_eligibility.get("remaining_rr")
         )
+        if remaining_rr is None:
+            remaining_rr = _finite_number(signal.risk_reward)
+        remaining_rr = remaining_rr if remaining_rr is not None else 0.0
+        freshness_timestamps = [
+            value
+            for value in (
+                _finite_number(signal.data_timestamp),
+                _finite_number(signal.closed_candle_ts),
+            )
+            if value is not None and value > 0
+        ]
+        freshness_timestamp = max(freshness_timestamps, default=0.0)
         slippage_key = (
             "buy_slippage_pct" if signal.direction == "LONG" else "sell_slippage_pct"
         )
@@ -1996,9 +2017,45 @@ class MarketScanner:
         if slippage is None:
             slippage = _finite_number(signal.spread_pct)
         slippage = slippage if slippage is not None else float("inf")
+        decision = (
+            signal.decision_context
+            if isinstance(signal.decision_context, dict)
+            else {}
+        )
+        final = decision.get("final", {})
+        final = final if isinstance(final, dict) else {}
+        final_status = str(final.get("status") or "").upper()
+        if final:
+            # Canonical five-layer decision must outrank the raw positional
+            # eligibility.  A Hard-Gate-blocked signal may still carry the
+            # original ``ENTRY_READY`` position, but it must never displace an
+            # actually permitted signal when the formal list is truncated.
+            permission_priority = int(
+                final.get("new_entry_allowed") is True
+                and final_status == "ENTER"
+            )
+            status_priority = final_priority.get(final_status, 1)
+        else:
+            # Some internal pre-commit callers rank a Signal before the
+            # decision projection is attached.  Preserve their deterministic
+            # positional ordering without treating it as a formal permission.
+            permission_priority = int(
+                signal.entry_eligibility.get("new_entry_allowed") is True
+                or (
+                    "new_entry_allowed" not in signal.entry_eligibility
+                    and signal.actionable
+                    and signal.entry_eligibility.get("status") == "ENTRY_READY"
+                )
+            )
+            status_priority = entry_priority.get(
+                signal.entry_eligibility.get("status"),
+                0,
+            )
         return (
-            entry_priority.get(signal.entry_eligibility.get("status"), 0),
+            permission_priority,
+            status_priority,
             execution_score,
+            freshness_timestamp,
             freshness_priority.get(signal.freshness, 0),
             -int(signal.lifecycle.get("age_bars", 0) or 0),
             remaining_rr,
@@ -2168,16 +2225,54 @@ class MarketScanner:
                 "direction_still_valid",
                 str(final.get("status")) != "INVALIDATED",
             )
-            eligibility.setdefault(
-                "hard_blockers",
-                list(decision.get("hard_gate", {}).get("blockers", [])),
+            decision_blockers = list(
+                decision.get("hard_gate", {}).get("blockers", [])
             )
+            upstream_blockers = list(eligibility.get("hard_blockers", []) or [])
+            if "chase" in decision_blockers:
+                upstream_blockers.append("CHASE")
+            eligibility["hard_blockers"] = _unique_strings(upstream_blockers)
             wait_reason = final.get("wait_reason")
             if isinstance(wait_reason, dict):
-                eligibility.setdefault("wait_reason_code", wait_reason.get("code"))
+                eligibility["wait_reason_code"] = wait_reason.get("code")
+            metrics = dict(item.market_metrics)
+            if final.get("status") == "NO_CHASE" and "chase" in decision_blockers:
+                # Keep the public positional status aligned with the same live
+                # value that caused the Hard Gate.  This prevents a card from
+                # saying both ``ENTRY_READY`` and ``禁止追價``.
+                eligibility.setdefault("position_status", eligibility.get("status"))
+                chase_check = next(
+                    (
+                        check
+                        for check in decision.get("hard_gate", {}).get("checks", [])
+                        if check.get("key") == "chase"
+                    ),
+                    {},
+                )
+                chase_check_value = chase_check.get("value", {})
+                canonical_chase_atr = (
+                    chase_check_value.get("chase_atr")
+                    if isinstance(chase_check_value, dict)
+                    else None
+                )
+                eligibility.update(
+                    {
+                        "status": "MISSED_ENTRY",
+                        "label": "已錯過｜禁止追價",
+                        "reason": str(chase_check.get("reason") or "")
+                        or "價格已離開合理進場區，禁止追價。",
+                        "chase_atr": canonical_chase_atr,
+                        "actionable": False,
+                        "new_entry_allowed": False,
+                        "wait_reason_code": "PRICE_TOO_FAR",
+                    }
+                )
+                metrics["entry_status"] = "MISSED_ENTRY"
+                metrics["entry_chase_atr"] = canonical_chase_atr
             return replace(
                 item,
                 actionable=allowed,
+                market_metrics=metrics,
                 entry_eligibility=eligibility,
                 decision_context=decision,
             )

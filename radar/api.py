@@ -15,7 +15,17 @@ from .models import Candle, Instrument, MarketContext, Ticker
 
 
 class OKXAPIError(RuntimeError):
-    pass
+    """An OKX transport or application error with an optional exact code.
+
+    ``code`` is intentionally absent for mixed/uncertain failures.  Callers
+    must never infer a semantic result (for example, "instrument not found")
+    merely because one host's text appears somewhere inside an aggregate
+    network error.
+    """
+
+    def __init__(self, message: str, *, code: str | None = None):
+        super().__init__(message)
+        self.code = str(code) if code is not None else None
 
 
 class SlidingWindowRateLimiter:
@@ -147,6 +157,7 @@ class OKXPublicClient:
                     self._metric("cache_hits")
                     return deepcopy(cached[1])
         last_error: Exception | None = None
+        attempt_errors: list[Exception] = []
         host_errors: dict[str, str] = {}
         for attempt in range(self.retries + 1):
             request_base_url = self.base_urls[attempt % len(self.base_urls)]
@@ -170,8 +181,10 @@ class OKXPublicClient:
                 with urlopen(request, timeout=self.timeout_seconds) as response:
                     payload = json.loads(response.read().decode("utf-8"))
                 if str(payload.get("code")) != "0":
+                    response_code = str(payload.get("code"))
                     raise OKXAPIError(
-                        f"OKX code={payload.get('code')}: {payload.get('msg', 'unknown error')}"
+                        f"OKX code={response_code}: {payload.get('msg', 'unknown error')}",
+                        code=response_code,
                     )
                 data = payload.get("data")
                 if not isinstance(data, list):
@@ -199,6 +212,7 @@ class OKXPublicClient:
                     self._metric("rate_limit_errors")
                     limiter.penalize(2.05)
                 last_error = exc
+                attempt_errors.append(exc)
                 host_errors[urlparse(request_base_url).hostname or request_base_url] = str(exc)
                 if attempt >= self.retries:
                     break
@@ -206,9 +220,23 @@ class OKXPublicClient:
                 delay = (0.45 * (2**attempt)) + random.uniform(0.0, 0.15)
                 time.sleep(delay)
         attempted = "; ".join(f"{host}: {error}" for host, error in host_errors.items())
+        # Only expose a semantic OKX code when every attempt independently
+        # returned that exact application error.  A 51001 from one official
+        # host mixed with a timeout/502 from the other remains an uncertain API
+        # failure and must not be relabelled as a nonexistent symbol.
+        exact_code = (
+            "51001"
+            if attempt_errors
+            and all(
+                isinstance(error, OKXAPIError) and error.code == "51001"
+                for error in attempt_errors
+            )
+            else None
+        )
         raise OKXAPIError(
             f"GET {path} failed after retries across official endpoints: "
-            f"{attempted or last_error}"
+            f"{attempted or last_error}",
+            code=exact_code,
         )
 
     def get_usdt_swap_instruments(self) -> list[Instrument]:
@@ -230,7 +258,15 @@ class OKXPublicClient:
                 "/api/v5/public/instruments",
                 {"instType": "SWAP", "instId": inst_id},
             )
-        except OKXAPIError:
+        except OKXAPIError as exc:
+            # OKX answers an unknown ``instId`` with application error 51001
+            # instead of an empty successful list.  This is a user/input
+            # result, not a temporary market-data outage.  Returning ``None``
+            # lets the single-symbol scanner produce its existing explicit
+            # "live contract not found" validation error (HTTP 422), rather
+            # than incorrectly presenting a retryable HTTP 502.
+            if exc.code == "51001":
+                return None
             cached = self._instrument_meta.get(inst_id)
             if cached is not None:
                 return cached

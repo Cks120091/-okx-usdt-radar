@@ -418,12 +418,12 @@ class SignalRepositoryTests(unittest.TestCase):
 
     def test_missing_core_interval_closes_without_fabricating_performance(self):
         raw = signal_fixture("GAP-USDT-SWAP")
-        self.repository.reconcile(
+        created = self.repository.reconcile(
             [raw],
             [state_fixture(raw, raw.data_timestamp)],
             "2026-08-20T00:00:00+00:00",
             "SHORT",
-        )
+        )[0]
         later_ts = raw.data_timestamp + 2 * 900_000
         state = state_fixture(raw, later_ts, core_high=121.0, core_low=89.0)
         state.market_metrics["_core_path"] = [[later_ts, 121.0, 89.0, 100.0]]
@@ -435,7 +435,7 @@ class SignalRepositoryTests(unittest.TestCase):
             "SHORT",
         )
         row = self.repository._connection.execute(
-            "SELECT outcome, final_r, tp_sl_order, status FROM signals WHERE inst_id=?",
+            "SELECT stage, outcome, final_r, tp_sl_order, status FROM signals WHERE inst_id=?",
             (raw.inst_id,),
         ).fetchone()
 
@@ -444,7 +444,12 @@ class SignalRepositoryTests(unittest.TestCase):
         self.assertIsNone(row["final_r"])
         self.assertEqual(row["tp_sl_order"], "DATA_GAP")
         self.assertEqual(row["status"], "CLOSED")
+        self.assertEqual(row["stage"], "CLOSED_UNKNOWN")
         self.assertFalse(self.repository.performance()["available"])
+        self.assertEqual(
+            self.repository.preflight_terminal_kind(created),
+            "CLOSED_UNKNOWN",
+        )
 
     def test_preflight_stop_closes_exact_plan_without_fabricating_tp_sl_order(self):
         raw = signal_fixture("PREFLIGHT-USDT-SWAP")
@@ -468,6 +473,12 @@ class SignalRepositoryTests(unittest.TestCase):
         ).fetchone()
 
         self.assertTrue(closed)
+        self.assertFalse(
+            self.repository.invalidate_preflight_plan(
+                created,
+                "2026-08-20T00:06:00+00:00",
+            )
+        )
         self.assertEqual(row["stage"], "INVALIDATED")
         self.assertEqual(row["freshness"], "INVALIDATED")
         self.assertEqual(row["status"], "CLOSED")
@@ -475,6 +486,214 @@ class SignalRepositoryTests(unittest.TestCase):
         self.assertIsNone(row["final_r"])
         self.assertEqual(row["tp_sl_order"], "UNKNOWN_FROM_LIVE_TICKER")
         self.assertFalse(self.repository.performance()["available"])
+        self.assertEqual(
+            self.repository.preflight_terminal_kind(created),
+            "INVALIDATED",
+        )
+        events = self.repository._connection.execute(
+            "SELECT to_stage, event_type FROM signal_events WHERE signal_id=?",
+            (created.trigger_id,),
+        ).fetchall()
+        self.assertEqual(
+            [
+                tuple(event)
+                for event in events
+                if event["event_type"] == "PREFLIGHT_PLAN_INVALIDATED"
+            ],
+            [("INVALIDATED", "PREFLIGHT_PLAN_INVALIDATED")],
+        )
+
+    def test_ambiguous_same_bar_is_closed_unknown_not_a_fabricated_stop(self):
+        raw = signal_fixture("AMBIGUOUS-USDT-SWAP")
+        created = self.repository.reconcile(
+            [raw],
+            [state_fixture(raw, raw.data_timestamp)],
+            "2026-08-20T00:00:00+00:00",
+            "SHORT",
+        )[0]
+        next_ts = raw.data_timestamp + 900_000
+        refreshed = replace(
+            raw,
+            data_timestamp=next_ts,
+            closed_candle_ts=next_ts,
+            market_metrics={
+                **raw.market_metrics,
+                "core_timestamp": next_ts,
+                "core_high": 121.0,
+                "core_low": 89.0,
+                "_core_path": [[next_ts, 121.0, 89.0, 100.0]],
+            },
+        )
+
+        self.assertEqual(
+            self.repository.reconcile(
+                [refreshed],
+                [state_fixture(refreshed, next_ts, 121.0, 89.0)],
+                "2026-08-20T00:15:00+00:00",
+                "SHORT",
+            ),
+            [],
+        )
+        row = self.repository._connection.execute(
+            "SELECT stage, outcome, status FROM signals WHERE signal_id=?",
+            (created.trigger_id,),
+        ).fetchone()
+        self.assertEqual(row["outcome"], "AMBIGUOUS_SAME_BAR")
+        self.assertEqual(row["status"], "CLOSED")
+        self.assertEqual(row["stage"], "CLOSED_UNKNOWN")
+        self.assertEqual(
+            self.repository.preflight_terminal_kind(created),
+            "CLOSED_UNKNOWN",
+        )
+
+    def test_preflight_target_completion_is_terminal_without_fabricating_performance(self):
+        raw = signal_fixture("PREFLIGHT-TP-USDT-SWAP")
+        created = self.repository.reconcile(
+            [raw],
+            [state_fixture(raw, raw.data_timestamp)],
+            "2026-08-20T00:00:00+00:00",
+            "SHORT",
+        )[0]
+
+        completed = self.repository.complete_preflight_plan(
+            created,
+            "2026-08-20T00:05:00+00:00",
+        )
+        row = self.repository._connection.execute(
+            """
+            SELECT stage, freshness, status, outcome, final_r, tp_sl_order,
+                   payload_json
+            FROM signals WHERE signal_id=?
+            """,
+            (created.trigger_id,),
+        ).fetchone()
+        stored = Signal.from_dict(json.loads(row["payload_json"]))
+        history = self.repository.recent_history(10)
+        performance = self.repository.performance()
+
+        self.assertTrue(completed)
+        self.assertFalse(
+            self.repository.complete_preflight_plan(
+                created,
+                "2026-08-20T00:06:00+00:00",
+            )
+        )
+        self.assertEqual(row["stage"], "COMPLETED")
+        self.assertEqual(row["freshness"], "COMPLETED")
+        self.assertEqual(row["status"], "CLOSED")
+        self.assertEqual(row["outcome"], "PREFLIGHT_TARGET_REACHED")
+        self.assertIsNone(row["final_r"])
+        self.assertEqual(row["tp_sl_order"], "UNKNOWN_FROM_LIVE_TICKER")
+        self.assertEqual(
+            self.repository.preflight_terminal_kind(created),
+            "COMPLETED",
+        )
+        self.assertTrue(stored.lifecycle["terminal"])
+        self.assertEqual(stored.signal_stage, "COMPLETED")
+        self.assertEqual(stored.lifecycle["current_stage"], "COMPLETED")
+        self.assertEqual(stored.lifecycle["status"], "COMPLETED")
+        self.assertEqual(stored.entry_eligibility["status"], "COMPLETED")
+        self.assertFalse(stored.entry_eligibility["new_entry_allowed"])
+        self.assertEqual(history[0]["outcome"], "PREFLIGHT_TARGET_REACHED")
+        self.assertIsNone(history[0]["final_r"])
+        self.assertFalse(performance["available"])
+        self.assertEqual(performance["overall"]["sample_size"], 0)
+        self.assertIsNone(performance["overall"]["win_rate_pct"])
+        self.assertEqual(performance["research"]["sample_size"], 0)
+        events = self.repository._connection.execute(
+            "SELECT to_stage, event_type FROM signal_events WHERE signal_id=?",
+            (created.trigger_id,),
+        ).fetchall()
+        self.assertEqual(
+            [tuple(event) for event in events if event["event_type"] == "PREFLIGHT_PLAN_COMPLETED"],
+            [("COMPLETED", "PREFLIGHT_PLAN_COMPLETED")],
+        )
+
+    def test_completed_preflight_episode_cannot_revive_or_close_a_new_episode(self):
+        raw = signal_fixture("PREFLIGHT-TP-CAS-USDT-SWAP")
+        created = self.repository.reconcile(
+            [raw],
+            [state_fixture(raw, raw.data_timestamp)],
+            "2026-08-20T00:00:00+00:00",
+            "SHORT",
+        )[0]
+        self.assertTrue(
+            self.repository.complete_preflight_plan(
+                created,
+                "2026-08-20T00:05:00+00:00",
+            )
+        )
+
+        returned_ts = raw.data_timestamp + 900_000
+        returned_to_entry = replace(
+            raw,
+            data_timestamp=returned_ts,
+            closed_candle_ts=returned_ts,
+            market_metrics={
+                **raw.market_metrics,
+                "core_timestamp": returned_ts,
+                "core_high": 101.0,
+                "core_low": 99.0,
+                "core_close": 100.0,
+            },
+        )
+        terminal_projection = self.repository._reconcile_raw_signal(
+            returned_to_entry,
+            "2026-08-20T00:15:00+00:00",
+        )
+        self.assertEqual(terminal_projection.signal_stage, "COMPLETED")
+        self.assertEqual(terminal_projection.freshness, "COMPLETED")
+        self.assertEqual(
+            terminal_projection.lifecycle["status"],
+            "COMPLETED",
+        )
+        self.assertFalse(terminal_projection.actionable)
+        replay = self.repository.reconcile(
+            [returned_to_entry],
+            [state_fixture(returned_to_entry, returned_ts)],
+            "2026-08-20T00:15:00+00:00",
+            "SHORT",
+        )
+        self.assertEqual(replay, [])
+        self.assertIsNone(
+            self.repository.load_active_signal(raw.inst_id, "SHORT")
+        )
+
+        new_event_ts = returned_ts + 900_000
+        new_trigger = replace(
+            raw,
+            data_timestamp=new_event_ts,
+            closed_candle_ts=new_event_ts,
+            market_metrics={
+                **raw.market_metrics,
+                "core_timestamp": new_event_ts,
+            },
+            market_story={
+                "trigger": {
+                    "event_ts": new_event_ts,
+                    "trigger_event_key": (
+                        f"SHORT:LONG:BREAKOUT:{new_event_ts}:ZONE-NEW"
+                    ),
+                }
+            },
+        )
+        new_episode = self.repository.reconcile(
+            [new_trigger],
+            [state_fixture(new_trigger, new_event_ts)],
+            "2026-08-20T00:30:00+00:00",
+            "SHORT",
+        )[0]
+
+        self.assertNotEqual(new_episode.trigger_id, created.trigger_id)
+        self.assertFalse(
+            self.repository.complete_preflight_plan(
+                created,
+                "2026-08-20T00:31:00+00:00",
+            )
+        )
+        active = self.repository.load_active_signal(raw.inst_id, "SHORT")
+        self.assertIsNotNone(active)
+        self.assertEqual(active.trigger_id, new_episode.trigger_id)
 
     def test_closed_event_tombstone_survives_repository_restart(self):
         raw = signal_fixture("TOMBSTONE-USDT-SWAP")
@@ -1511,15 +1730,24 @@ class SignalRepositoryTests(unittest.TestCase):
             "SHORT",
         )
         row = self.repository._connection.execute(
-            "SELECT outcome, final_r, tp_sl_order, status FROM signals WHERE inst_id=?",
+            """
+            SELECT stage, freshness, outcome, final_r, tp_sl_order, status,
+                   payload_json
+            FROM signals WHERE inst_id=?
+            """,
             (raw.inst_id,),
         ).fetchone()
+        stored = Signal.from_dict(json.loads(row["payload_json"]))
 
         self.assertEqual(active_output, [])
         self.assertEqual(row["outcome"], "TP1_FIRST")
         self.assertEqual(row["final_r"], 2.0)
         self.assertEqual(row["tp_sl_order"], "TP_FIRST")
         self.assertEqual(row["status"], "CLOSED")
+        self.assertEqual(row["stage"], "COMPLETED")
+        self.assertEqual(row["freshness"], "COMPLETED")
+        self.assertEqual(stored.signal_stage, "COMPLETED")
+        self.assertEqual(stored.lifecycle["status"], "COMPLETED")
 
     def test_order_book_requires_time_sequence_before_support_label(self):
         current = MarketContext(

@@ -569,17 +569,213 @@ class SignalRepository:
                     row["payload_json"],
                 ),
             )
+            if cursor.rowcount > 0:
+                self._connection.execute(
+                    """
+                    INSERT INTO signal_events(
+                        signal_id, event_at, from_stage, to_stage,
+                        event_type, payload_json
+                    ) VALUES(?, ?, ?, ?, ?, ?)
+                    """,
+                    (
+                        signal_id,
+                        observed_at,
+                        str(row["stage"]),
+                        "INVALIDATED",
+                        "PREFLIGHT_PLAN_INVALIDATED",
+                        json.dumps(lifecycle, ensure_ascii=False),
+                    ),
+                )
         if cursor.rowcount <= 0:
             return False
-        self._append_event(
-            signal_id,
-            observed_at,
-            str(row["stage"]),
-            "INVALIDATED",
-            "PREFLIGHT_PLAN_INVALIDATED",
-            lifecycle,
-        )
         return True
+
+    def complete_preflight_plan(
+        self,
+        signal: Signal,
+        observed_at: str,
+    ) -> bool:
+        """Close one exact plan after a live ticker reaches its first target.
+
+        A live snapshot proves that TP1 is currently reached, but it cannot
+        prove whether TP1 or SL traded first between closed-candle checks.
+        Therefore this creates a durable completion tombstone without
+        inventing ``final_r`` or a TP/SL ordering for performance statistics.
+        """
+
+        signal_id = str(signal.trigger_id or "").strip()
+        inst_id = str(signal.inst_id or "").strip()
+        horizon = str(signal.radar_horizon or "").strip().upper()
+        direction = str(signal.direction or "").strip().upper()
+        if not all((signal_id, inst_id, horizon, direction)):
+            return False
+        with self._lock:
+            row = self._connection.execute(
+                """
+                SELECT * FROM signals
+                WHERE signal_id=? AND inst_id=? AND horizon=? AND direction=?
+                """,
+                (signal_id, inst_id, horizon, direction),
+            ).fetchone()
+        if row is None or row["status"] != "ACTIVE":
+            return False
+
+        # ``signal_id`` is unique, while the event-key check also protects a
+        # stale/corrupt caller from closing a different logical episode that
+        # happens to carry mismatched payload identity.
+        supplied_event_keys = {
+            str(value)
+            for value in (
+                signal.lifecycle.get("event_key"),
+                *list(signal.lifecycle.get("event_keys", []) or []),
+                signal.market_story.get("trigger", {}).get("trigger_event_key"),
+            )
+            if str(value or "").strip()
+        }
+        if supplied_event_keys and not any(
+            self._row_claims_event(row, event_key)
+            for event_key in supplied_event_keys
+        ):
+            return False
+
+        persisted = Signal.from_dict(json.loads(row["payload_json"]))
+        lifecycle = dict(persisted.lifecycle)
+        lifecycle.update(
+            {
+                "last_seen_at": observed_at,
+                "previous_stage": row["stage"],
+                "current_stage": "COMPLETED",
+                "status": "COMPLETED",
+                "terminal_status": "COMPLETED",
+                "transition": "PREFLIGHT_PLAN_COMPLETED",
+                "outcome": "PREFLIGHT_TARGET_REACHED",
+                "tp_sl_order": "UNKNOWN_FROM_LIVE_TICKER",
+                "terminal": True,
+                "duplicate_locked": True,
+            }
+        )
+        entry_eligibility = dict(persisted.entry_eligibility)
+        entry_eligibility.update(
+            {
+                "status": "COMPLETED",
+                "label": "目標已達｜本次交易計畫完成",
+                "reason": "最新價格已到達原始 TP1；舊計畫不可重新進場。",
+                "actionable": False,
+                "new_entry_allowed": False,
+            }
+        )
+        decision_context = dict(persisted.decision_context)
+        final = dict(decision_context.get("final", {}) or {})
+        final.update(
+            {
+                "status": "COMPLETED",
+                "label": "目標已達｜本次交易計畫完成",
+                "new_entry_allowed": False,
+                "trigger_preserved": True,
+                "wait_reason": {
+                    "code": "TARGET_REACHED",
+                    "label": "等待新的 Trigger／REENTRY",
+                },
+            }
+        )
+        decision_context["final"] = final
+        updated = replace(
+            persisted,
+            signal_stage="COMPLETED",
+            freshness="COMPLETED",
+            lifecycle=lifecycle,
+            actionable=False,
+            entry_eligibility=entry_eligibility,
+            decision_context=decision_context,
+        )
+        with self._write_scope():
+            cursor = self._connection.execute(
+                """
+                UPDATE signals SET
+                    updated_at=?, closed_at=?, stage='COMPLETED',
+                    freshness='COMPLETED',
+                    status='CLOSED', outcome='PREFLIGHT_TARGET_REACHED', final_r=NULL,
+                    tp_sl_order='UNKNOWN_FROM_LIVE_TICKER', payload_json=?
+                WHERE signal_id=? AND inst_id=? AND horizon=? AND direction=?
+                  AND status='ACTIVE' AND payload_json=?
+                """,
+                (
+                    observed_at,
+                    observed_at,
+                    json.dumps(_signal_payload(updated), ensure_ascii=False),
+                    signal_id,
+                    inst_id,
+                    horizon,
+                    direction,
+                    row["payload_json"],
+                ),
+            )
+            if cursor.rowcount > 0:
+                # Keep the terminal tombstone and its audit event atomic. A
+                # process crash must not leave a CLOSED episode without the
+                # transition that explains why it was closed.
+                self._connection.execute(
+                    """
+                    INSERT INTO signal_events(
+                        signal_id, event_at, from_stage, to_stage,
+                        event_type, payload_json
+                    ) VALUES(?, ?, ?, ?, ?, ?)
+                    """,
+                    (
+                        signal_id,
+                        observed_at,
+                        str(row["stage"]),
+                        "COMPLETED",
+                        "PREFLIGHT_PLAN_COMPLETED",
+                        json.dumps(lifecycle, ensure_ascii=False),
+                    ),
+                )
+        if cursor.rowcount <= 0:
+            return False
+        return True
+
+    def preflight_terminal_kind(self, signal: Signal) -> str | None:
+        """Return the durable terminal kind for one exact episode identity."""
+
+        signal_id = str(signal.trigger_id or "").strip()
+        if not signal_id:
+            return None
+        with self._lock:
+            row = self._connection.execute(
+                """
+                SELECT status, freshness, outcome
+                FROM signals
+                WHERE signal_id=? AND inst_id=? AND horizon=? AND direction=?
+                """,
+                (
+                    signal_id,
+                    signal.inst_id,
+                    signal.radar_horizon,
+                    signal.direction,
+                ),
+            ).fetchone()
+        if row is None or row["status"] != "CLOSED":
+            return None
+        freshness = str(row["freshness"] or "").upper()
+        outcome = str(row["outcome"] or "").upper()
+        if outcome in {
+            "COMPLETED",
+            "TARGET_REACHED",
+            "PREFLIGHT_TARGET_REACHED",
+            "TP1_FIRST",
+        } or (not outcome and freshness == "COMPLETED"):
+            return "COMPLETED"
+        if outcome in {
+            "INVALIDATED",
+            "PREFLIGHT_STOP_CROSSED",
+            "SL_FIRST",
+            "PRICE_INVALIDATED",
+        } or (not outcome and freshness == "INVALIDATED"):
+            return "INVALIDATED"
+        # DATA_GAP and repository-maintenance closures are terminal, but are
+        # neither a proven target completion nor a proven stop invalidation.
+        # Do not let a concurrent live price relabel those unknown outcomes.
+        return "CLOSED_UNKNOWN"
 
     def _reconcile_raw_signal(self, raw: Signal, completed_at: str) -> Signal:
         # The active lookup and possible insert form one repository operation.
@@ -790,15 +986,15 @@ class SignalRepository:
             )
         )
         if outcome == "DATA_GAP":
-            stage = "INVALIDATED"
+            stage = "CLOSED_UNKNOWN"
             freshness = "INVALIDATED"
             status = "CLOSED"
         elif outcome == "AMBIGUOUS_SAME_BAR":
-            stage = "INVALIDATED"
+            stage = "CLOSED_UNKNOWN"
             freshness = "INVALIDATED"
             status = "CLOSED"
         elif outcome in ("TP1_FIRST", "SL_FIRST"):
-            stage = "INVALIDATED" if outcome == "SL_FIRST" else "CONFIRMED"
+            stage = "INVALIDATED" if outcome == "SL_FIRST" else "COMPLETED"
             freshness = "INVALIDATED" if outcome == "SL_FIRST" else "COMPLETED"
             status = "CLOSED"
         elif invalidated:
@@ -833,6 +1029,10 @@ class SignalRepository:
                 "transition": (
                     "INVALIDATED"
                     if stage == "INVALIDATED"
+                    else "CLOSED_UNKNOWN"
+                    if stage == "CLOSED_UNKNOWN"
+                    else "COMPLETED"
+                    if stage == "COMPLETED"
                     else "UPGRADED"
                     if _stage_rank(stage) > _stage_rank(stage_before)
                     else "DOWNGRADED"
@@ -848,6 +1048,22 @@ class SignalRepository:
                 "last_evaluated_core_ts": last_evaluated_core_ts,
             }
         )
+        if stage == "COMPLETED":
+            lifecycle.update(
+                {
+                    "status": "COMPLETED",
+                    "terminal_status": "COMPLETED",
+                    "terminal": True,
+                }
+            )
+        elif stage == "CLOSED_UNKNOWN":
+            lifecycle.update(
+                {
+                    "status": "CLOSED_UNKNOWN",
+                    "terminal_status": "CLOSED_UNKNOWN",
+                    "terminal": True,
+                }
+            )
         merged_metrics = dict(signal.market_metrics)
         merged_metrics.update(metrics)
         updated = replace(
@@ -897,15 +1113,23 @@ class SignalRepository:
                 if current["status"] != "ACTIVE":
                     return accepted
                 return self._unchanged_projection(accepted)
-        if stage != stage_before:
-            self._append_event(
-                row["signal_id"],
-                completed_at,
-                stage_before,
-                stage,
-                lifecycle["transition"],
-                lifecycle,
-            )
+            if stage != stage_before:
+                self._connection.execute(
+                    """
+                    INSERT INTO signal_events(
+                        signal_id, event_at, from_stage, to_stage,
+                        event_type, payload_json
+                    ) VALUES(?, ?, ?, ?, ?, ?)
+                    """,
+                    (
+                        row["signal_id"],
+                        completed_at,
+                        stage_before,
+                        stage,
+                        lifecycle["transition"],
+                        json.dumps(lifecycle, ensure_ascii=False),
+                    ),
+                )
         return updated
 
     @staticmethod
@@ -1009,11 +1233,42 @@ class SignalRepository:
     @staticmethod
     def _terminal_projection(row: sqlite3.Row) -> Signal:
         signal = Signal.from_dict(json.loads(row["payload_json"]))
+        freshness = str(row["freshness"] or "").upper()
+        outcome = str(row["outcome"] or "").upper()
+        completed = bool(
+            outcome
+            in {
+                "COMPLETED",
+                "TARGET_REACHED",
+                "PREFLIGHT_TARGET_REACHED",
+                "TP1_FIRST",
+            }
+            or (not outcome and freshness == "COMPLETED")
+        )
+        invalidated = bool(
+            outcome
+            in {
+                "INVALIDATED",
+                "PREFLIGHT_STOP_CROSSED",
+                "SL_FIRST",
+                "PRICE_INVALIDATED",
+            }
+            or (not outcome and freshness == "INVALIDATED")
+        )
+        terminal_stage = (
+            "COMPLETED"
+            if completed
+            else "INVALIDATED"
+            if invalidated
+            else "CLOSED_UNKNOWN"
+        )
         lifecycle = dict(signal.lifecycle)
         lifecycle.update(
             {
                 "previous_stage": signal.signal_stage,
-                "current_stage": "INVALIDATED",
+                "current_stage": terminal_stage,
+                "status": terminal_stage,
+                "terminal_status": terminal_stage,
                 "transition": "TERMINAL_EVENT_LOCKED",
                 "terminal": True,
                 "duplicate_locked": True,
@@ -1022,8 +1277,8 @@ class SignalRepository:
         )
         return replace(
             signal,
-            signal_stage="INVALIDATED",
-            freshness="INVALIDATED",
+            signal_stage=terminal_stage,
+            freshness=("INVALIDATED" if terminal_stage == "CLOSED_UNKNOWN" else terminal_stage),
             lifecycle=lifecycle,
             actionable=False,
         )
@@ -1562,6 +1817,7 @@ class SignalRepository:
                     FROM signals
                     WHERE strategy_version=? AND status='CLOSED'
                       AND outcome!='REPOSITORY_ACTIVE_CONFLICT'
+                      AND COALESCE(tp_sl_order, '')!='UNKNOWN_FROM_LIVE_TICKER'
                     ORDER BY triggered_at
                     """,
                     (strategy_version,),
@@ -2017,6 +2273,8 @@ def _stage_rank(stage: str) -> int:
         "CONFIRMED": 4,
         "TRENDING": 5,
         "EXTENDED": 6,
+        "COMPLETED": 7,
+        "CLOSED_UNKNOWN": -1,
         "NO_FOLLOW_THROUGH": 1,
         "INVALIDATED": -1,
     }.get(stage, 0)

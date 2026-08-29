@@ -69,6 +69,7 @@ def report_markdown(report: RadarReport) -> str:
         "REENTRY": "回踩再發動",
         "EXTENDED": "已延伸",
         "NO_FOLLOW_THROUGH": "未獲延續",
+        "COMPLETED": "交易計畫完成",
         "INVALIDATED": "訊號失效",
     }
     lines = [

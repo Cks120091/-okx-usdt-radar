@@ -48,6 +48,10 @@ _SIGNAL_FIELDS = (
     "radar_horizon",
     "trigger_type",
     "freshness",
+    # Safe scalar timestamps used only to keep the browser's tie-break order
+    # identical to the backend (quality -> actual data freshness -> R:R).
+    "data_timestamp",
+    "closed_candle_ts",
 )
 
 _WATCH_FIELDS = (
@@ -97,6 +101,27 @@ _MAP_METRIC_FIELDS = frozenset(
     }
 )
 
+_PUBLIC_REPORT_DATA_QUALITY_FIELDS = (
+    # Keep the legacy summary fields for older clients.
+    "core",
+    "core_status",
+    "deep",
+    "deep_status",
+    "missing_sources",
+    # ``deep_enriched_count`` only means that at least one optional context
+    # source was available.  Publish the real completeness counters as well so
+    # the UI never has to present that number as full depth coverage.
+    "deep_candidate_limit",
+    "deep_target_count",
+    "deep_enriched_count",
+    "deep_complete_count",
+    "deep_completeness_pct",
+    "deep_source_completeness_pct",
+    "source_success",
+    "source_missing",
+    "context_failure_count",
+)
+
 
 def public_report_payload(report: Any) -> dict[str, Any]:
     """Build the mobile/API projection without copying developer-only data.
@@ -119,7 +144,7 @@ def public_report_payload(report: Any) -> dict[str, Any]:
             payload["market_bias"][key] = dict(value)
     payload["data_quality"] = _select(
         _read(report, "data_quality", {}),
-        ("core", "core_status", "deep", "deep_status", "missing_sources"),
+        _PUBLIC_REPORT_DATA_QUALITY_FIELDS,
     )
     payload["historical_performance"] = _public_performance(
         _read(report, "historical_performance", {})

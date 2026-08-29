@@ -1,7 +1,8 @@
 import unittest
-from unittest.mock import patch
+from unittest.mock import MagicMock, patch
+from urllib.error import URLError
 
-from radar.api import OKXPublicClient, SlidingWindowRateLimiter
+from radar.api import OKXAPIError, OKXPublicClient, SlidingWindowRateLimiter
 
 
 class FixtureClient(OKXPublicClient):
@@ -58,6 +59,13 @@ class RouteFixtureClient(OKXPublicClient):
 
 
 class APITests(unittest.TestCase):
+    @staticmethod
+    def _json_response(payload: bytes):
+        response = MagicMock()
+        response.__enter__.return_value = response
+        response.read.return_value = payload
+        return response
+
     def test_official_rest_hosts_use_current_primary_and_fallback(self):
         client = OKXPublicClient(retries=0)
         self.assertEqual(client.base_url, "https://openapi.okx.com")
@@ -152,6 +160,94 @@ class APITests(unittest.TestCase):
         self.assertEqual(instrument.inst_id, "BTC-USDT-SWAP")
         self.assertEqual(open_interest, 25_000_000.0)
         self.assertEqual(client._open_interest_timestamps["BTC-USDT-SWAP"], 999)
+
+    def test_unknown_targeted_instrument_is_not_misreported_as_api_outage(self):
+        class UnknownInstrumentClient(OKXPublicClient):
+            def __init__(self):
+                self._instrument_meta = {}
+
+            def _get(self, path, params):
+                raise OKXAPIError(
+                    "OKX code=51001: Instrument ID does not exist.",
+                    code="51001",
+                )
+
+        client = UnknownInstrumentClient()
+
+        self.assertIsNone(
+            client.get_usdt_swap_instrument("GRESS-USDT-SWAP")
+        )
+
+    def test_other_targeted_instrument_errors_remain_retryable_failures(self):
+        class UnavailableClient(OKXPublicClient):
+            def __init__(self):
+                self._instrument_meta = {}
+
+            def _get(self, path, params):
+                raise OKXAPIError("GET failed after retries: timed out")
+
+        client = UnavailableClient()
+
+        with self.assertRaisesRegex(OKXAPIError, "timed out"):
+            client.get_usdt_swap_instrument("BTC-USDT-SWAP")
+
+    def test_mixed_unknown_instrument_and_transport_error_is_not_not_found(self):
+        class MixedFailureClient(OKXPublicClient):
+            def __init__(self):
+                self._instrument_meta = {}
+
+            def _get(self, path, params):
+                raise OKXAPIError(
+                    "openapi.okx.com: OKX code=51001; www.okx.com: timed out"
+                )
+
+        with self.assertRaisesRegex(OKXAPIError, "timed out"):
+            MixedFailureClient().get_usdt_swap_instrument("BTC-USDT-SWAP")
+
+    def test_similar_but_different_okx_code_is_not_not_found(self):
+        class DifferentCodeClient(OKXPublicClient):
+            def __init__(self):
+                self._instrument_meta = {}
+
+            def _get(self, path, params):
+                raise OKXAPIError(
+                    "OKX code=510010: different application error",
+                    code="510010",
+                )
+
+        with self.assertRaisesRegex(OKXAPIError, "510010"):
+            DifferentCodeClient().get_usdt_swap_instrument("BTC-USDT-SWAP")
+
+    def test_get_aggregates_mixed_host_failures_without_semantic_51001(self):
+        unknown = self._json_response(
+            b'{"code":"51001","msg":"Instrument ID does not exist","data":[]}'
+        )
+        client = OKXPublicClient(retries=1)
+        with patch("radar.api.urlopen", side_effect=[unknown, URLError("timed out")]), patch(
+            "radar.api.time.sleep",
+            return_value=None,
+        ):
+            with self.assertRaises(OKXAPIError) as raised:
+                client.get_usdt_swap_instrument("BTC-USDT-SWAP")
+
+        self.assertIsNone(raised.exception.code)
+        self.assertIn("timed out", str(raised.exception))
+
+    def test_get_only_marks_51001_when_every_host_attempt_agrees(self):
+        first = self._json_response(
+            b'{"code":"51001","msg":"Instrument ID does not exist","data":[]}'
+        )
+        second = self._json_response(
+            b'{"code":"51001","msg":"Instrument ID does not exist","data":[]}'
+        )
+        client = OKXPublicClient(retries=1)
+        with patch("radar.api.urlopen", side_effect=[first, second]), patch(
+            "radar.api.time.sleep",
+            return_value=None,
+        ):
+            self.assertIsNone(
+                client.get_usdt_swap_instrument("GRESS-USDT-SWAP")
+            )
 
 
 if __name__ == "__main__":

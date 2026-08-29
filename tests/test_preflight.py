@@ -381,6 +381,21 @@ class PreflightTests(unittest.TestCase):
             self.assertEqual(payload["signal_lifecycle"]["label"], "已觸發・目標已達")
             self.assertTrue(payload["signal_lifecycle"]["terminal"])
             self.assertFalse(payload["plan_state"]["existing_position_plan_active"])
+            self.assertEqual(payload["plan_state"]["status"], "TARGET_REACHED")
+            self.assertFalse(payload["plan_state"]["old_plan_reusable"])
+            self.assertFalse(payload["plan_state"]["old_plan_reusable_for_new_entry"])
+            self.assertTrue(payload["plan_state"]["new_trigger_required"])
+
+            # A completed episode remains distinct from a stopped-out plan.
+            stopped = RadarRuntime(
+                PreflightScanner(PreflightClient(price=97.5)),
+                AppConfig(data_dir=directory),
+            )
+            stopped._latest = make_report(item)
+            invalidated = stopped.preflight_dict(item.inst_id, "SHORT")
+            self.assertEqual(invalidated["verdict"]["situation"], "INVALIDATED")
+            self.assertEqual(invalidated["signal_lifecycle"]["status"], "INVALIDATED")
+            self.assertEqual(invalidated["plan_state"]["status"], "INVALIDATED")
 
     def test_second_refresh_after_invalidation_publishes_a_new_plan(self):
         with tempfile.TemporaryDirectory() as directory:
