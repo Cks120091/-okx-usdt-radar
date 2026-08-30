@@ -269,7 +269,7 @@ class StrategyTests(unittest.TestCase):
         stop_distance_pct = (plan.entry - plan.stop) / plan.entry * 100.0
         target_distance_pct = (plan.tp1 - plan.entry) / plan.entry * 100.0
         self.assertGreaterEqual(stop_distance_pct, 0.4999)
-        self.assertGreaterEqual(target_distance_pct, 0.7499)
+        self.assertGreaterEqual(target_distance_pct, 0.9999)
         self.assertEqual(plan.management_plan["stop_floor_pct"], 0.50)
 
     def test_v33_realized_volatility_expands_percentage_floor(self):
@@ -323,11 +323,35 @@ class StrategyTests(unittest.TestCase):
 
         plan = engine._v33_plan(story, core)
 
-        self.assertGreaterEqual(plan.rr, 1.50)
+        self.assertGreaterEqual(plan.rr, 2.00)
         self.assertGreater(plan.tp1, 100.5)
         self.assertEqual(plan.management_plan["structural_target_price"], 100.5)
         self.assertIn("部分減倉", plan.management_plan["first_obstacle_action"])
         self.assertTrue(plan.management_plan["frozen_at_trigger"])
+
+    def test_v33_targets_restore_2_to_4r_market_range_and_7r_structure(self):
+        engine = AdaptiveStrategyEngine(StrategyConfig(minimum_rr=1.8))
+        story = SimpleNamespace(
+            trigger_direction="LONG",
+            trigger_type="REVERSAL",
+            horizon="SHORT",
+            trigger={},
+            groups={},
+            raw={},
+            timeframe_states={},
+        )
+
+        profile = engine._v33_market_plan_profile(story)
+        market_rr = float(profile["tp1_model_rr"])
+        nearby_rr, nearby_method = engine._v33_tp1_rr(1.20, market_rr)
+        structural_rr, structural_method = engine._v33_tp1_rr(7.00, market_rr)
+
+        self.assertGreaterEqual(market_rr, 2.00)
+        self.assertLessEqual(market_rr, 4.00)
+        self.assertEqual(nearby_rr, market_rr)
+        self.assertIn("未滿 2R", nearby_method)
+        self.assertEqual(structural_rr, 7.00)
+        self.assertIn("結構目標", structural_method)
 
     def test_v33_recent_range_and_wicks_expand_stop_floor(self):
         engine = AdaptiveStrategyEngine(StrategyConfig(minimum_rr=1.8))
@@ -705,7 +729,7 @@ class StrategyTests(unittest.TestCase):
             float(strong.signal.take_profit_1),
             float(weak.signal.take_profit_1),
         )
-        self.assertGreaterEqual(weak.signal.risk_reward, 1.50)
+        self.assertGreaterEqual(weak.signal.risk_reward, 2.00)
         self.assertTrue(strong.signal.management_plan["adaptive_market_plan"])
         self.assertTrue(strong.signal.management_plan["frozen_at_trigger"])
         self.assertIn(

@@ -43,6 +43,10 @@ class StrategyConfig:
     long_stop_floor_atr: float = 1.80
     short_stop_floor_pct: float = 0.45
     long_stop_floor_pct: float = 0.90
+    minimum_tp1_rr: float = 2.00
+    market_tp1_ceiling_rr: float = 4.00
+    structural_tp1_ceiling_rr: float = 7.00
+    tp2_ceiling_rr: float = 8.00
 
 
 @dataclass
@@ -552,26 +556,26 @@ class AdaptiveStrategyEngine:
         ):
             historical_tp1_rr = _clamp(
                 historical_mfe_p60_pct / stop_distance_pct,
-                1.35,
-                3.0 if story.horizon == "SHORT" else 3.5,
+                self.config.minimum_tp1_rr,
+                self.config.structural_tp1_ceiling_rr,
             )
             target_model_rr = _clamp(
                 target_model_rr * (1.0 - target_history_confidence)
                 + historical_tp1_rr * target_history_confidence,
-                1.50,
-                2.75 if story.horizon == "SHORT" else 3.10,
+                self.config.minimum_tp1_rr,
+                self.config.structural_tp1_ceiling_rr,
             )
             if historical_mfe_p80_pct > 0:
                 historical_tp2_rr = _clamp(
                     historical_mfe_p80_pct / stop_distance_pct,
                     historical_tp1_rr + 0.50,
-                    4.0 if story.horizon == "SHORT" else 4.8,
+                    self.config.tp2_ceiling_rr,
                 )
                 tp2_model_rr = _clamp(
                     tp2_model_rr * (1.0 - target_history_confidence)
                     + historical_tp2_rr * target_history_confidence,
                     target_model_rr + 0.70,
-                    4.0 if story.horizon == "SHORT" else 4.8,
+                    self.config.tp2_ceiling_rr,
                 )
         rr, target_method = self._v33_tp1_rr(
             structural_rr,
@@ -579,7 +583,10 @@ class AdaptiveStrategyEngine:
         )
         if historical_tp1_rr is not None:
             target_method += "＋歷史 MFE 自動學習"
-        tp2_rr = max(tp2_model_rr, rr + 0.70)
+        tp2_rr = min(
+            self.config.tp2_ceiling_rr,
+            max(tp2_model_rr, rr + 0.70),
+        )
         tp1 = entry + risk * rr if is_long else entry - risk * rr
         tp2 = entry + risk * tp2_rr if is_long else entry - risk * tp2_rr
         strength_score = float(market_profile["strength_score"])
@@ -661,7 +668,8 @@ class AdaptiveStrategyEngine:
             ),
             "first_obstacle_action": (
                 "近端結構只列為部分減倉／突破觀察，不直接結束交易計畫。"
-                if structural_rr is not None and 0 < structural_rr < 1.50
+                if structural_rr is not None
+                and 0 < structural_rr < self.config.minimum_tp1_rr
                 else "依自動市場目標管理。"
             ),
         }
@@ -823,22 +831,26 @@ class AdaptiveStrategyEngine:
         strength_score = _clamp(strength_score, 25.0, 90.0)
 
         base_rr = {
-            "BREAKOUT": 1.70,
-            "CONTINUATION": 1.60,
-            "REVERSAL": 1.50,
-        }.get(str(getattr(story, "trigger_type", "")), 1.55)
-        target_adjustment = (strength_score - 50.0) / 50.0 * 0.45
+            "BREAKOUT": 2.40,
+            "CONTINUATION": 2.20,
+            "REVERSAL": 2.00,
+        }.get(str(getattr(story, "trigger_type", "")), 2.10)
+        target_adjustment = (strength_score - 50.0) / 50.0 * 2.00
         current_range_atr = _safe_float(
             volatility.get("current_range_atr", raw.get("core_range_atr")),
             0.0,
         )
         if current_range_atr >= 1.45 and strength_score >= 60.0:
-            target_adjustment += min(0.12, (current_range_atr - 1.45) * 0.08)
-        tp1_model_rr = _clamp(base_rr + target_adjustment, 1.50, 2.25)
+            target_adjustment += min(0.25, (current_range_atr - 1.45) * 0.16)
+        tp1_model_rr = _clamp(
+            base_rr + target_adjustment,
+            self.config.minimum_tp1_rr,
+            self.config.market_tp1_ceiling_rr,
+        )
         tp2_model_rr = _clamp(
-            tp1_model_rr + 0.70 + strength_score / 100.0 * 0.55,
-            2.20,
-            3.55,
+            tp1_model_rr + 0.85 + strength_score / 100.0 * 0.80,
+            3.00,
+            min(6.00, self.config.tp2_ceiling_rr),
         )
         strength_label = (
             "強" if strength_score >= 72.0 else "中等" if strength_score >= 52.0 else "偏弱"
@@ -851,18 +863,26 @@ class AdaptiveStrategyEngine:
             "sources": _unique(sources),
         }
 
-    @staticmethod
     def _v33_tp1_rr(
+        self,
         structural_rr: float | None,
         model_rr: float,
     ) -> tuple[float, str]:
-        adaptive_rr = _clamp(float(model_rr), 1.50, 3.10)
-        if structural_rr is not None and structural_rr >= 1.50:
-            selected = min(float(structural_rr), adaptive_rr)
-            return selected, "有效市場結構＋波動／力度自動目標"
+        adaptive_rr = _clamp(
+            float(model_rr),
+            self.config.minimum_tp1_rr,
+            self.config.structural_tp1_ceiling_rr,
+        )
+        if structural_rr is not None and structural_rr >= self.config.minimum_tp1_rr:
+            selected = _clamp(
+                float(structural_rr),
+                self.config.minimum_tp1_rr,
+                self.config.structural_tp1_ceiling_rr,
+            )
+            return selected, "實際支撐／壓力結構目標（最高保留 7R）"
         if structural_rr is not None and structural_rr > 0:
-            return adaptive_rr, "近端結構列為部分減倉；正式 TP 由市場力度推算"
-        return adaptive_rr, "波動＋成交力度自動目標（無近端有效結構）"
+            return adaptive_rr, "近端未滿 2R 結構列為部分減倉；正式 TP 維持 2～4R 自動目標"
+        return adaptive_rr, "波動＋成交力度 2～4R 自動目標（無近端有效結構）"
 
     def _adapt_v33_plan_to_market(
         self,
@@ -896,8 +916,8 @@ class AdaptiveStrategyEngine:
             target_model_rr = _clamp(
                 target_model_rr * (1.0 - history_confidence)
                 + history_rr * history_confidence,
-                1.50,
-                3.10,
+                self.config.minimum_tp1_rr,
+                self.config.structural_tp1_ceiling_rr,
             )
         history_tp2_value = management.get("historical_tp2_rr")
         history_tp2_rr = (
@@ -910,7 +930,7 @@ class AdaptiveStrategyEngine:
                 tp2_model_rr * (1.0 - history_confidence)
                 + history_tp2_rr * history_confidence,
                 target_model_rr + 0.70,
-                4.8,
+                self.config.tp2_ceiling_rr,
             )
         rr, target_method = self._v33_tp1_rr(
             structural_rr,
@@ -918,7 +938,10 @@ class AdaptiveStrategyEngine:
         )
         if history_rr is not None and history_rr > 0:
             target_method += "＋歷史 MFE 自動學習"
-        tp2_rr = max(tp2_model_rr, rr + 0.70)
+        tp2_rr = min(
+            self.config.tp2_ceiling_rr,
+            max(tp2_model_rr, rr + 0.70),
+        )
         risk = abs(plan.entry - plan.stop)
         if risk <= 0:
             return plan
