@@ -580,7 +580,162 @@ class DecisionContextTests(unittest.TestCase):
         self.assertIn("risk_reward", result["hard_gate"]["blockers"])
         self.assertFalse(result["final"]["new_entry_allowed"])
 
-    def test_high_conflict_waits_but_never_creates_opposite_direction(self):
+    def test_execution_cost_uses_warning_band_before_hard_limit(self):
+        for cost in (13.5, 15.0):
+            with self.subTest(cost=cost):
+                item = complete_signal()
+                item["market_metrics"]["execution_cost_to_risk_pct"] = cost
+                item["execution_quality"]["execution_cost_to_risk_pct"] = cost
+
+                result = build_decision_context(item)
+
+                self.assertNotIn("execution_cost", result["hard_gate"]["blockers"])
+                self.assertEqual(result["final"]["status"], "ENTER")
+                self.assertTrue(result["final"]["new_entry_allowed"])
+                self.assertTrue(
+                    any("高於 10.0% 建議線" in value for value in result["hard_gate"]["warnings"])
+                )
+                self.assertFalse(
+                    any(value == "Execution Cost（交易成本）10% 建議線" for value in result["hard_gate"]["warnings"])
+                )
+
+        blocked = complete_signal()
+        blocked["market_metrics"]["execution_cost_to_risk_pct"] = 15.1
+        blocked["execution_quality"]["execution_cost_to_risk_pct"] = 15.1
+
+        result = build_decision_context(blocked)
+
+        self.assertIn("execution_cost", result["hard_gate"]["blockers"])
+        self.assertEqual(result["final"]["status"], "WAIT")
+        self.assertFalse(result["final"]["new_entry_allowed"])
+
+    def test_correlated_countertrend_context_does_not_cancel_formal_trigger(self):
+        item = complete_signal()
+        item["conflicts"] = [
+            "1H 背景反向，屬逆勢 Trigger",
+            "更高週期背景明顯反向；只列 Conflict，不取消核心 Trigger",
+            "全市場背景與 Trigger 方向相反（逆勢）",
+        ]
+        # Compatibility case for an episode produced before macro context was
+        # separated from Participation（市場參與）.
+        item["evidence_groups"]["participation_flow"]["stance"] = "CONFLICT"
+
+        result = build_decision_context(item)
+
+        self.assertEqual(result["conflict"]["level"], "MEDIUM")
+        self.assertTrue(result["conflict"]["countertrend"])
+        self.assertFalse(result["conflict"]["blocks_entry"])
+        self.assertEqual(
+            [row["key"] for row in result["conflict"]["domains"]],
+            ["CONTEXT_COUNTERTREND"],
+        )
+        self.assertEqual(result["final"]["status"], "ENTER")
+        self.assertTrue(result["final"]["new_entry_allowed"])
+        self.assertEqual(result["confidence"]["key"], "MEDIUM")
+        self.assertFalse(result["conflict"]["opposite_signal_created"])
+
+    def test_boundary_cost_and_correlated_context_preserve_formal_entry(self):
+        """Regression for the DASH-like case that disappeared from 可進."""
+        item = complete_signal()
+        item["market_metrics"]["execution_cost_to_risk_pct"] = 13.5
+        item["execution_quality"]["execution_cost_to_risk_pct"] = 13.5
+        item["conflicts"] = [
+            "1H 背景反向，屬逆勢 Trigger",
+            "更高週期背景明顯反向；只列 Conflict，不取消核心 Trigger",
+            "全市場背景與 Trigger 方向相反（逆勢）",
+        ]
+        item["evidence_groups"]["participation_flow"]["stance"] = "CONFLICT"
+
+        result = build_decision_context(item)
+
+        self.assertEqual(result["hard_gate"]["status"], "PASSED")
+        self.assertTrue(result["hard_gate"]["warnings"])
+        self.assertEqual(result["conflict"]["level"], "MEDIUM")
+        self.assertFalse(result["conflict"]["blocks_entry"])
+        self.assertEqual(result["final"]["status"], "ENTER")
+        self.assertTrue(result["final"]["new_entry_allowed"])
+        self.assertTrue(result["final"]["warnings"])
+
+    def test_duplicate_flow_conflict_counts_as_one_domain(self):
+        item = complete_signal()
+        reason = "主動成交與價格反應明顯反向"
+        item["conflicts"] = [reason]
+        item["evidence_groups"]["participation_flow"].update(
+            {"stance": "CONFLICT", "conflicts": [reason]}
+        )
+        item["market_participation"] = {
+            "state": "CONFLICT",
+            "label": "存在反向證據",
+            "conflicts": [reason],
+        }
+
+        result = build_decision_context(item)
+
+        self.assertEqual(result["conflict"]["items"], [reason])
+        self.assertEqual(
+            [row["key"] for row in result["conflict"]["domains"]],
+            ["TAKER_FLOW"],
+        )
+        self.assertFalse(result["conflict"]["blocks_entry"])
+        self.assertEqual(result["final"]["status"], "ENTER")
+
+    def test_two_conflicting_evidence_groups_do_not_cancel_formal_trigger(self):
+        item = complete_signal()
+        item["conflicts"] = ["價格仍在壓縮中段", "攻擊效率未改善"]
+        item["evidence_groups"]["position_structure"].update(
+            {
+                "stance": "CONFLICT",
+                "score": 30,
+                "conflicts": ["價格仍在壓縮中段"],
+            }
+        )
+        item["evidence_groups"]["trend_momentum"].update(
+            {
+                "stance": "CONFLICT",
+                "score": 35,
+                "conflicts": ["攻擊效率未改善"],
+            }
+        )
+
+        result = build_decision_context(item)
+
+        self.assertEqual(
+            [row["key"] for row in result["conflict"]["domains"]],
+            ["POSITION_STRUCTURE", "TREND_MOMENTUM"],
+        )
+        self.assertFalse(result["conflict"]["blocks_entry"])
+        self.assertEqual(result["conflict"]["blocking_domains"], [])
+        self.assertEqual(result["conflict"]["level"], "HIGH")
+        self.assertEqual(result["final"]["status"], "ENTER")
+        self.assertTrue(result["final"]["new_entry_allowed"])
+
+    def test_countertrend_plus_live_flow_is_advisory_not_entry_veto(self):
+        item = complete_signal()
+        item["conflicts"] = [
+            "4H 背景反向，屬逆勢 Trigger",
+            "主動成交與價格反應明顯反向",
+        ]
+
+        result = build_decision_context(item)
+
+        self.assertEqual(result["conflict"]["level"], "HIGH")
+        self.assertFalse(result["conflict"]["blocks_entry"])
+        self.assertEqual(result["final"]["status"], "ENTER")
+        self.assertTrue(result["final"]["new_entry_allowed"])
+
+    def test_context_relaxation_never_overrides_a_real_hard_gate(self):
+        item = complete_signal()
+        item["conflicts"] = ["4H 背景反向，屬逆勢 Trigger"]
+        item["spread_pct"] = 0.2
+
+        result = build_decision_context(item)
+
+        self.assertFalse(result["conflict"]["blocks_entry"])
+        self.assertIn("spread", result["hard_gate"]["blockers"])
+        self.assertEqual(result["final"]["status"], "WAIT")
+        self.assertFalse(result["final"]["new_entry_allowed"])
+
+    def test_high_conflict_lowers_confidence_but_never_changes_entry_or_direction(self):
         item = complete_signal()
         item["conflicts"] = [
             "4H 背景反向，屬逆勢 Trigger",
@@ -595,7 +750,9 @@ class DecisionContextTests(unittest.TestCase):
         self.assertTrue(result["conflict"]["countertrend"])
         self.assertEqual(result["conflict"]["main_direction"], "LONG")
         self.assertFalse(result["conflict"]["opposite_signal_created"])
-        self.assertEqual(result["final"]["status"], "WAIT")
+        self.assertFalse(result["conflict"]["blocks_entry"])
+        self.assertEqual(result["final"]["status"], "ENTER")
+        self.assertTrue(result["final"]["new_entry_allowed"])
         self.assertEqual(result["confidence"]["key"], "LOW")
 
     def test_episode_transition_maps_to_strengthening_and_weakening(self):

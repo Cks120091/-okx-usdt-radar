@@ -383,7 +383,7 @@ class ScannerTests(unittest.TestCase):
             ScannerConfig(
                 min_quote_volume_24h=0,
                 max_slippage_pct=0.15,
-                max_execution_cost_to_risk_pct=12.0,
+                max_execution_cost_to_risk_pct=15.0,
             ),
         )
         cases = {
@@ -437,6 +437,98 @@ class ScannerTests(unittest.TestCase):
                     returned_to_entry.entry_eligibility["status"],
                     "ENTRY_READY",
                 )
+
+    def test_execution_cost_warning_band_remains_entry_ready_end_to_end(self):
+        scanner = MarketScanner(
+            FakeClient(),
+            ScannerConfig(
+                min_quote_volume_24h=0,
+                max_execution_cost_to_risk_pct=15.0,
+            ),
+        )
+        signal = qualified_signal()
+        signal = replace(
+            signal,
+            take_profit_1="106",
+            market_metrics={
+                **signal.market_metrics,
+                "execution_cost_to_risk_pct": 13.5,
+            },
+            execution_quality={
+                **signal.execution_quality,
+                "execution_cost_to_risk_pct": 13.5,
+            },
+            safety_checks=[
+                *signal.safety_checks,
+                {
+                    "key": "execution_cost_warning",
+                    "label": "Execution Cost（交易成本）10% 建議線",
+                    "passed": False,
+                    "value": 13.5,
+                    "hard": False,
+                },
+            ],
+        )
+
+        refreshed = scanner._refresh_entry_eligibility(signal)
+        decided = scanner._attach_decision_context(refreshed)
+
+        self.assertEqual(refreshed.entry_eligibility["status"], "ENTRY_READY")
+        self.assertNotIn(
+            "EXECUTION_COST_TOO_HIGH",
+            refreshed.entry_eligibility["hard_blockers"],
+        )
+        self.assertTrue(decided.actionable)
+        self.assertTrue(decided.entry_eligibility["new_entry_allowed"])
+        self.assertEqual(decided.decision_context["final"]["status"], "ENTER")
+        self.assertTrue(
+            any(
+                check["key"] == "execution_cost_warning"
+                and check["hard"] is False
+                and check["passed"] is False
+                for check in decided.safety_checks
+            )
+        )
+
+    def test_reference_conflicts_do_not_remove_a_hard_gate_passed_signal(self):
+        scanner = MarketScanner(
+            FakeClient(),
+            ScannerConfig(min_quote_volume_24h=0),
+        )
+        signal = qualified_signal()
+        signal = replace(
+            signal,
+            take_profit_1="106",
+            conflicts=[
+                "位置結構仍有不一致資料",
+                "資金參與與價格反應不同步",
+            ],
+            evidence_groups={
+                **signal.evidence_groups,
+                "position_structure": {
+                    "label": "位置／價格行為",
+                    "score": 35,
+                    "stance": "CONFLICT",
+                    "reasons": ["位置結構仍有不一致資料"],
+                },
+                "participation_flow": {
+                    "label": "市場參與",
+                    "score": 35,
+                    "stance": "CONFLICT",
+                    "reasons": ["資金參與與價格反應不同步"],
+                },
+            },
+        )
+
+        refreshed = scanner._refresh_entry_eligibility(signal)
+        decided = scanner._attach_decision_context(refreshed)
+
+        self.assertEqual(refreshed.entry_eligibility["status"], "ENTRY_READY")
+        self.assertEqual(decided.decision_context["conflict"]["level"], "HIGH")
+        self.assertFalse(decided.decision_context["conflict"]["blocks_entry"])
+        self.assertEqual(decided.decision_context["final"]["status"], "ENTER")
+        self.assertTrue(decided.entry_eligibility["new_entry_allowed"])
+        self.assertTrue(decided.actionable)
 
     def test_single_symbol_horizon_fetches_only_required_candles(self):
         class HorizonClient(ContextFakeClient):

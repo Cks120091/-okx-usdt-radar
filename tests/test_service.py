@@ -228,6 +228,88 @@ class SingleInstrumentScanner(ImmediateScanner):
         return 1
 
 
+class OppositeSignalSingleScanner(SingleInstrumentScanner):
+    def scan_instrument(
+        self,
+        inst_id,
+        market_bias,
+        long_market_bias=None,
+        btc_bias="NEUTRAL",
+        long_btc_bias="NEUTRAL",
+        requested_horizon="BOTH",
+    ):
+        analysis = super().scan_instrument(
+            inst_id,
+            market_bias,
+            long_market_bias,
+            btc_bias,
+            long_btc_bias,
+            requested_horizon,
+        )
+        opposite = allow_entry(signal())
+        opposite.direction = "SHORT"
+        opposite.market_story = {
+            "raw": {"core_atr": 2.0},
+            "trigger": {"event_index": 8, "confirmation_index": 9},
+        }
+        analysis.short_result = SimpleNamespace(
+            signal=opposite,
+            market_state=analysis.short_result.market_state,
+            reason="signal_found",
+        )
+        return analysis
+
+
+class SameDirectionSignalSingleScanner(SingleInstrumentScanner):
+    def scan_instrument(
+        self,
+        inst_id,
+        market_bias,
+        long_market_bias=None,
+        btc_bias="NEUTRAL",
+        long_btc_bias="NEUTRAL",
+        requested_horizon="BOTH",
+    ):
+        analysis = super().scan_instrument(
+            inst_id,
+            market_bias,
+            long_market_bias,
+            btc_bias,
+            long_btc_bias,
+            requested_horizon,
+        )
+        current = allow_entry(signal())
+        current.entry_low = "200"
+        current.entry_high = "201"
+        current.stop_loss = "195"
+        current.take_profit_1 = "210"
+        current.trigger_id = "fresh-trigger-must-not-replace-episode"
+        current.summary = "NEW summary"
+        current.supporting_evidence = ["NEW evidence"]
+        current.safety_checks = [
+            {
+                "key": "new_context",
+                "label": "NEW safety",
+                "passed": True,
+                "hard": False,
+            }
+        ]
+        current.timeframe_states = {
+            "15m": {"label": "NEW timeframe"},
+        }
+        current.lifecycle = {"age_bars": 1, "triggered_at": "NEW"}
+        current.market_story = {
+            "raw": {"core_atr": 2.0},
+            "trigger": {"event_index": 99, "confirmation_index": 100},
+        }
+        analysis.short_result = SimpleNamespace(
+            signal=current,
+            market_state=analysis.short_result.market_state,
+            reason="signal_found",
+        )
+        return analysis
+
+
 class BlockingSingleInstrumentScanner(SingleInstrumentScanner):
     def __init__(self):
         super().__init__()
@@ -610,7 +692,26 @@ class RuntimeSafetyTests(unittest.TestCase):
         self.assertEqual(confirmation["status"], "ORIGINAL_DIRECTION_STABLE")
         self.assertFalse(confirmation["new_entry_allowed"])
 
-    def test_opposite_direction_requires_two_step_confirmation_before_invalidation(self):
+    def test_latest_confirmation_treats_unspecified_safety_check_as_hard(self):
+        current = allow_entry(signal())
+        current.safety_checks = [
+            {
+                "key": "spread",
+                "label": "Spread（買賣價差）超過上限",
+                "passed": False,
+            }
+        ]
+
+        confirmation = _latest_confirmation(
+            SimpleNamespace(signal=current, market_state=None),
+            "LONG",
+        )
+
+        self.assertEqual(confirmation["status"], "HARD_GATE_BLOCKED")
+        self.assertIn("spread", confirmation["hard_blockers"])
+        self.assertFalse(confirmation["new_entry_allowed"])
+
+    def test_opposite_direction_is_only_original_direction_not_reconfirmed(self):
         state = MarketState(
             inst_id="AAA-USDT-SWAP",
             regime="TREND",
@@ -628,7 +729,11 @@ class RuntimeSafetyTests(unittest.TestCase):
             SimpleNamespace(signal=None, market_state=state),
             "LONG",
         )
-        self.assertEqual(warning["status"], "OPPOSITE_WARNING")
+        self.assertEqual(
+            warning["status"],
+            "ORIGINAL_DIRECTION_NOT_RECONFIRMED",
+        )
+        self.assertIn("不建立反向判定", warning["message"])
 
         opposite_signal = signal()
         opposite_signal.direction = "SHORT"
@@ -639,11 +744,89 @@ class RuntimeSafetyTests(unittest.TestCase):
             SimpleNamespace(signal=opposite_signal, market_state=state),
             "LONG",
         )
-        self.assertEqual(confirmed["status"], "OPPOSITE_WARNING")
+        self.assertEqual(
+            confirmed["status"],
+            "ORIGINAL_DIRECTION_NOT_RECONFIRMED",
+        )
         self.assertFalse(confirmed["two_step_reversal_confirmed"])
         self.assertFalse(confirmed["new_entry_allowed"])
 
-    def test_confirmation_merge_blocks_warning_but_does_not_close_existing_plan(self):
+    def test_opposite_candidate_hard_failure_cannot_block_original_plan(self):
+        opposite = allow_entry(signal())
+        opposite.direction = "SHORT"
+        opposite.safety_checks = [
+            {
+                "key": "rr",
+                "label": "相反候選 R:R 不足",
+                "passed": False,
+            }
+        ]
+        opposite.decision_context = {
+            "hard_gate": {
+                "blocked": True,
+                "unknown": False,
+                "blockers": ["safety_checks", "risk_reward"],
+            },
+            "final": {"status": "NO_EDGE", "new_entry_allowed": False},
+        }
+
+        confirmation = _latest_confirmation(
+            SimpleNamespace(signal=opposite, market_state=None),
+            "LONG",
+        )
+
+        self.assertEqual(
+            confirmation["status"],
+            "ORIGINAL_DIRECTION_NOT_RECONFIRMED",
+        )
+        self.assertIn("只供參考", confirmation["label"])
+        self.assertNotEqual(confirmation["status"], "HARD_GATE_BLOCKED")
+
+    def test_opposite_candidate_still_respects_shared_anomaly_hard_gate(self):
+        for key, label in (
+            ("anomalous_market", "異常行情"),
+            ("liquidity", "流動性不足"),
+            ("future_hard_gate", "未來新增的硬性風控"),
+        ):
+            with self.subTest(key=key):
+                opposite = allow_entry(signal())
+                opposite.direction = "SHORT"
+                opposite.safety_checks = [
+                    {
+                        "key": key,
+                        "label": label,
+                        "passed": False,
+                        "hard": True,
+                    }
+                ]
+
+                confirmation = _latest_confirmation(
+                    SimpleNamespace(signal=opposite, market_state=None),
+                    "LONG",
+                )
+
+                self.assertEqual(confirmation["status"], "HARD_GATE_BLOCKED")
+                self.assertIn(key, confirmation["hard_blockers"])
+                self.assertFalse(confirmation["new_entry_allowed"])
+
+        opposite = allow_entry(signal())
+        opposite.direction = "SHORT"
+        opposite.decision_context = {
+            "hard_gate": {
+                "blocked": False,
+                "unknown": True,
+                "unknowns": ["safety_integrity"],
+            },
+            "final": {"status": "DATA_UNAVAILABLE", "new_entry_allowed": False},
+        }
+        confirmation = _latest_confirmation(
+            SimpleNamespace(signal=opposite, market_state=None),
+            "LONG",
+        )
+        self.assertEqual(confirmation["status"], "HARD_GATE_BLOCKED")
+        self.assertIn("safety_integrity", confirmation["hard_blockers"])
+
+    def test_confirmation_merge_ignores_direction_difference_without_closing_plan(self):
         payload = {
             "verdict": {"status": "ENTRY_READY", "actionable": True},
             "signal_lifecycle": {
@@ -659,16 +842,173 @@ class RuntimeSafetyTests(unittest.TestCase):
         merged = _merge_preflight_confirmation(
             payload,
             {
-                "status": "OPPOSITE_WARNING",
-                "message": "反向證據尚未二次確認",
+                "status": "ORIGINAL_DIRECTION_NOT_RECONFIRMED",
+                "message": "最新未延續原方向",
             },
         )
 
-        self.assertEqual(merged["verdict"]["status"], "WAIT_RETEST")
-        self.assertFalse(merged["verdict"]["actionable"])
+        self.assertEqual(merged["verdict"]["status"], "ENTRY_READY")
+        self.assertTrue(merged["verdict"]["actionable"])
         self.assertTrue(merged["signal_lifecycle"]["active"])
         self.assertTrue(merged["plan_state"]["existing_position_plan_active"])
-        self.assertFalse(merged["latest_confirmation"]["new_entry_allowed"])
+        self.assertNotIn("direction_status", merged["plan_state"])
+        self.assertTrue(merged["latest_confirmation"]["new_entry_allowed"])
+
+    def test_confirmation_merge_preserves_real_hard_and_data_blocks(self):
+        for status in ("HARD_GATE_BLOCKED", "DATA_UNAVAILABLE"):
+            with self.subTest(status=status):
+                merged = _merge_preflight_confirmation(
+                    {
+                        "verdict": {"status": "ENTRY_READY", "actionable": True},
+                        "signal_lifecycle": {
+                            "status": "ACTIVE",
+                            "active": True,
+                            "terminal": False,
+                        },
+                        "plan_state": {
+                            "status": "ACTIVE",
+                            "existing_position_plan_active": True,
+                        },
+                    },
+                    {
+                        "status": status,
+                        "message": "fixture safety block",
+                        "hard_blockers": ["fixture_hard_gate"],
+                    },
+                )
+
+                self.assertEqual(merged["verdict"]["status"], status)
+                self.assertFalse(merged["verdict"]["actionable"])
+                self.assertIn(
+                    "fixture_hard_gate",
+                    merged["verdict"]["hard_blockers"],
+                )
+                self.assertFalse(merged["latest_confirmation"]["new_entry_allowed"])
+                self.assertTrue(merged["signal_lifecycle"]["active"])
+
+    def test_legacy_reverse_status_cannot_invalidate_episode(self):
+        payload = {
+            "verdict": {"status": "ENTRY_READY", "actionable": True},
+            "signal_lifecycle": {
+                "status": "ACTIVE",
+                "active": True,
+                "terminal": False,
+            },
+            "plan_state": {
+                "status": "ACTIVE",
+                "existing_position_plan_active": True,
+            },
+        }
+
+        merged = _merge_preflight_confirmation(
+            payload,
+            {
+                "status": "CONFIRMED_REVERSAL",
+                "message": "舊版反向判定",
+            },
+        )
+
+        self.assertEqual(merged["verdict"]["status"], "ENTRY_READY")
+        self.assertTrue(merged["verdict"]["actionable"])
+        self.assertFalse(merged["signal_lifecycle"]["terminal"])
+        self.assertTrue(merged["signal_lifecycle"]["active"])
+        self.assertEqual(merged["plan_state"]["status"], "ACTIVE")
+        self.assertTrue(merged["plan_state"]["existing_position_plan_active"])
+        self.assertEqual(
+            merged["latest_confirmation"]["status"],
+            "ORIGINAL_DIRECTION_NOT_RECONFIRMED",
+        )
+
+    def test_opposite_scan_does_not_remove_original_ready_preflight(self):
+        with tempfile.TemporaryDirectory() as directory:
+            scanner = OppositeSignalSingleScanner()
+            runtime = RadarRuntime(scanner, AppConfig(data_dir=directory))
+            current = report()
+            current.signals[0] = allow_entry(current.signals[0])
+            runtime._latest = current
+
+            payload = runtime.scan_instrument_dict("AAA", "SHORT")["short"]
+
+            self.assertEqual(payload["kind"], "SIGNAL")
+            self.assertEqual(payload["item"]["direction"], "LONG")
+            self.assertEqual(
+                payload["latest_confirmation"]["status"],
+                "ORIGINAL_DIRECTION_NOT_RECONFIRMED",
+            )
+            self.assertEqual(payload["preflight"]["verdict"]["status"], "ENTRY_READY")
+            self.assertTrue(payload["preflight"]["verdict"]["actionable"])
+            self.assertEqual(payload["decision_context"]["final"]["status"], "ENTER")
+            self.assertEqual(payload["preflight"]["direction"], "LONG")
+            self.assertEqual(payload["decision_context"]["final"]["direction"], "LONG")
+            self.assertEqual(payload["item"]["entry_low"], "100")
+            self.assertEqual(payload["item"]["market_metrics"]["last_price"], 100.5)
+
+    def test_same_direction_scan_updates_context_but_keeps_episode_plan(self):
+        with tempfile.TemporaryDirectory() as directory:
+            scanner = SameDirectionSignalSingleScanner()
+            runtime = RadarRuntime(scanner, AppConfig(data_dir=directory))
+            current = report()
+            current.signals[0] = allow_entry(current.signals[0])
+            current.signals[0].trigger_id = "stored-episode"
+            current.signals[0].summary = "OLD summary"
+            current.signals[0].supporting_evidence = ["OLD evidence"]
+            current.signals[0].safety_checks = [
+                {
+                    "key": "old_context",
+                    "label": "OLD safety",
+                    "passed": True,
+                    "hard": False,
+                }
+            ]
+            current.signals[0].lifecycle = {
+                "age_bars": 4,
+                "triggered_at": "STORED",
+            }
+            runtime._latest = current
+
+            payload = runtime.scan_instrument_dict("AAA", "SHORT")["short"]
+
+            self.assertEqual(payload["item"]["direction"], "LONG")
+            self.assertEqual(payload["item"]["summary"], "NEW summary")
+            self.assertEqual(payload["item"]["supporting_evidence"], ["NEW evidence"])
+            self.assertEqual(payload["item"]["safety_checks"][0]["key"], "new_context")
+            self.assertEqual(
+                payload["item"]["timeframe_states"]["15m"]["label"],
+                "NEW timeframe",
+            )
+            self.assertEqual(payload["item"]["entry_low"], "100")
+            self.assertEqual(payload["item"]["entry_high"], "101")
+            self.assertEqual(payload["item"]["stop_loss"], "98")
+            self.assertEqual(payload["item"]["take_profit_1"], "105")
+            self.assertEqual(payload["item"]["lifecycle"]["age_bars"], 4)
+            self.assertEqual(payload["item"]["lifecycle"]["triggered_at"], "STORED")
+
+    def test_malformed_stored_plan_stays_data_unavailable_during_opposite_scan(self):
+        with tempfile.TemporaryDirectory() as directory:
+            scanner = OppositeSignalSingleScanner()
+            runtime = RadarRuntime(scanner, AppConfig(data_dir=directory))
+            current = report()
+            current.signals[0] = allow_entry(current.signals[0])
+            current.signals[0].entry_low = "invalid-price"
+            runtime._latest = current
+
+            payload = runtime.scan_instrument_dict("AAA", "SHORT")["short"]
+
+            self.assertEqual(payload["item"]["direction"], "LONG")
+            self.assertEqual(
+                payload["preflight"]["verdict"]["status"],
+                "DATA_UNAVAILABLE",
+            )
+            self.assertFalse(payload["preflight"]["verdict"]["actionable"])
+            self.assertEqual(
+                payload["decision_context"]["final"]["status"],
+                "DATA_UNAVAILABLE",
+            )
+            self.assertFalse(
+                payload["decision_context"]["final"]["new_entry_allowed"]
+            )
+            self.assertIsNone(payload["item"]["entry_low"])
+            self.assertIsNone(payload["item"]["stop_loss"])
 
     def test_single_scan_and_preflight_share_one_same_direction_decision(self):
         with tempfile.TemporaryDirectory() as directory:
@@ -684,7 +1024,11 @@ class RuntimeSafetyTests(unittest.TestCase):
             )
             self.assertEqual(
                 payload["short"]["preflight"]["verdict"]["status"],
-                "WAIT_RETEST",
+                "ENTRY_READY",
+            )
+            self.assertEqual(
+                payload["short"]["decision_context"]["final"]["status"],
+                "ENTER",
             )
             self.assertTrue(payload["short"]["preflight"]["safety"]["unified_single_scan"])
 

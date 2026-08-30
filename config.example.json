@@ -24,7 +24,7 @@
   "context_candidates": 100,
   "execution_notional_usdt": 1000,
   "estimated_taker_fee_pct": 0.05,
-  "max_execution_cost_to_risk_pct": 12,
+  "max_execution_cost_to_risk_pct": 15,
   "max_slippage_pct": 0.15,
   "max_entry_extension_atr": 0.8,
   "severe_entry_extension_atr": 1.8,

@@ -7,6 +7,7 @@ from types import SimpleNamespace
 
 from radar.config import AppConfig
 from radar.models import MarketContext, RadarReport, Signal, Ticker
+from radar.preflight import build_preflight_payload
 from radar.service import PreflightError, RadarRuntime
 
 
@@ -184,6 +185,60 @@ def make_new_short_signal() -> Signal:
 
 
 class PreflightTests(unittest.TestCase):
+    def test_execution_cost_warning_band_is_not_a_hard_block(self):
+        signal = make_signal()
+        client = PreflightClient(price=100.0)
+        ticker = client.get_ticker(signal.inst_id)
+        base_context = client.get_execution_context(signal.inst_id)
+        config = AppConfig(max_execution_cost_to_risk_pct=15.0)
+
+        warning = build_preflight_payload(
+            signal,
+            ticker,
+            replace(
+                base_context,
+                buy_slippage_pct=0.08,
+                sell_slippage_pct=0.08,
+            ),
+            config,
+            report_generated_at=datetime.now(timezone.utc).isoformat(),
+        )
+
+        self.assertGreater(
+            warning["execution"]["execution_cost_to_risk_pct"],
+            10.0,
+        )
+        self.assertLessEqual(
+            warning["execution"]["execution_cost_to_risk_pct"],
+            15.0,
+        )
+        self.assertEqual(warning["verdict"]["status"], "ENTRY_READY")
+        self.assertTrue(warning["verdict"]["actionable"])
+        self.assertEqual(warning["verdict"]["hard_blockers"], [])
+        self.assertTrue(any("偏高" in value for value in warning["warnings"]))
+
+        blocked = build_preflight_payload(
+            signal,
+            ticker,
+            replace(
+                base_context,
+                buy_slippage_pct=0.11,
+                sell_slippage_pct=0.11,
+            ),
+            config,
+            report_generated_at=datetime.now(timezone.utc).isoformat(),
+        )
+
+        self.assertGreater(
+            blocked["execution"]["execution_cost_to_risk_pct"],
+            15.0,
+        )
+        self.assertEqual(blocked["verdict"]["status"], "HARD_GATE_BLOCKED")
+        self.assertIn(
+            "EXECUTION_COST_TOO_HIGH",
+            blocked["verdict"]["hard_blockers"],
+        )
+
     def test_refreshes_one_signal_and_keeps_stored_trigger_unchanged(self):
         with tempfile.TemporaryDirectory() as directory:
             item = make_signal()

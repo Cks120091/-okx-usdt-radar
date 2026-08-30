@@ -131,8 +131,26 @@ def _latest_confirmation(result: Any, original_direction: str) -> dict[str, Any]
     failed_hard_checks = [
         str(check.get("key") or check.get("label") or "hard_gate")
         for check in list(getattr(item, "safety_checks", []) or [])
-        if check.get("hard") and check.get("passed") is False
+        if check.get("hard", True) is not False
+        and check.get("passed") is False
     ] if item is not None else []
+    direction_dependent_safety_keys = {
+        "chase",
+        "entry_eligibility",
+        "entry_permission",
+        "execution_cost",
+        "major_conflict",
+        "risk_reward",
+        "rr",
+        "stop_distance",
+        "stop_loss",
+        "structural_headroom",
+    }
+    shared_failed_hard_checks = [
+        key
+        for key in failed_hard_checks
+        if key.strip().lower() not in direction_dependent_safety_keys
+    ]
     reason_code = str(getattr(result, "reason", "") or "").lower()
     reason_hard_blocked = any(
         token in reason_code
@@ -140,6 +158,58 @@ def _latest_confirmation(result: Any, original_direction: str) -> dict[str, Any]
             "data", "liquidity", "spread", "slippage", "execution",
             "insufficient", "stop_distance", "structural_headroom", "risk_reward",
         )
+    )
+    reason_shared_hard_blocked = any(
+        token in reason_code
+        for token in (
+            "anomal",
+            "api_data",
+            "context_data",
+            "core_data",
+            "deep_data",
+            "liquidity",
+            "order_book",
+            "spread",
+            "slippage",
+        )
+    )
+    hard_gate_blockers = [
+        str(value) for value in list(hard_gate.get("blockers", []) or [])
+    ]
+    hard_gate_unknowns = [
+        str(value) for value in list(hard_gate.get("unknowns", []) or [])
+    ]
+    direction_dependent_decision_keys = {
+        "chase",
+        "entry_permission",
+        "execution_cost",
+        "execution_cost_too_high",
+        "plan_invalidation",
+        "plan_terminal",
+        "risk_reward",
+        "rr_insufficient",
+        "stop_distance",
+        "stop_loss",
+        "structural_headroom",
+        "trade_plan",
+    }
+    shared_decision_failures: list[str] = []
+    for key in [*hard_gate_blockers, *hard_gate_unknowns]:
+        normalized_key = key.strip().lower()
+        if normalized_key in direction_dependent_decision_keys:
+            continue
+        if normalized_key == "safety_checks" and not shared_failed_hard_checks:
+            # The aggregate safety row may represent only a candidate's own
+            # RR/SL/chase failure.  Those are re-evaluated by preflight for the
+            # stored direction, so do not double-count them here.
+            continue
+        # Unknown/future Hard Gate keys default to shared and fail closed.
+        shared_decision_failures.append(key)
+    shared_hard_blocked = bool(
+        shared_failed_hard_checks
+        or shared_decision_failures
+        or reason_shared_hard_blocked
+        or final.get("status") in {"DATA_UNAVAILABLE", "ANOMALY"}
     )
     hard_blocked = bool(
         hard_gate.get("blocked")
@@ -150,19 +220,33 @@ def _latest_confirmation(result: Any, original_direction: str) -> dict[str, Any]
         or final.get("status") in {"DATA_UNAVAILABLE", "ANOMALY", "NO_EDGE"}
     )
 
-    if hard_blocked:
+    if shared_hard_blocked:
+        # Data integrity, liquidity and abnormal-market protection apply to
+        # both directions. Removing reverse judgement must never weaken these
+        # shared Hard Gates.
+        status = "HARD_GATE_BLOCKED"
+        label = "方向訊號保留・共同風控未通過"
+        message = (
+            "最新資料、流動性、Spread、Slippage 或異常行情風控未完整通過；"
+            "原 Signal Episode 保留追蹤，但禁止新進場。"
+        )
+    elif opposite:
+        # The fresh opposite candidate is not the stored plan.  Its
+        # direction-dependent R:R, SL or entry checks must never veto an
+        # otherwise valid original Episode. Shared Hard Gates were handled
+        # above, so this direction comparison remains informational only.
+        status = "ORIGINAL_DIRECTION_NOT_RECONFIRMED"
+        label = "方向比較只供參考"
+        message = (
+            "最新掃描沒有延續原方向；這項方向比較只供參考，不建立反向判定、"
+            "不改寫進場資格，也不終止舊 Episode。"
+        )
+    elif hard_blocked:
         status = "HARD_GATE_BLOCKED"
         label = "方向訊號保留・執行風控未通過"
         message = (
             "最新資料、流動性、滑價、R:R 或結構風控未完整通過；"
             "原 Signal Episode 保留追蹤，但禁止新進場。"
-        )
-    elif opposite:
-        status = "OPPOSITE_WARNING"
-        label = "反向證據增加・尚未確認轉向"
-        message = (
-            "舊 Episode 尚未正式終止，反向變化只能列警告；"
-            "必須先越過原 Invalidation，再由更新事件建立新方向。"
         )
     elif noise.get("high"):
         status = "HIGH_NOISE"
@@ -204,7 +288,13 @@ def _latest_confirmation(result: Any, original_direction: str) -> dict[str, Any]
         "stage": stage,
         "formal_trigger": formal,
         "two_step_reversal_confirmed": False,
-        "hard_blockers": list(hard_gate.get("blockers", [])) or failed_hard_checks,
+        "hard_blockers": (
+            [*shared_decision_failures, *shared_failed_hard_checks]
+            if opposite and shared_hard_blocked
+            else []
+            if opposite
+            else hard_gate_blockers or failed_hard_checks
+        ),
         "closed_candle_ts": getattr(state, "closed_candle_ts", None),
         "group_stances": {
             key: str((value or {}).get("stance", "NEUTRAL"))
@@ -225,76 +315,57 @@ def _merge_preflight_confirmation(
     lifecycle = merged.setdefault("signal_lifecycle", {})
     plan = merged.setdefault("plan_state", {})
     terminal = verdict.get("status") == "PLAN_INVALIDATED" or lifecycle.get("terminal")
-    status = confirmation.get("status")
+    status = str(confirmation.get("status") or "UNKNOWN").upper()
+    if status in {"OPPOSITE_WARNING", "CONFIRMED_REVERSAL"}:
+        # Backward compatibility for an in-memory/cached V3.4 response.  A
+        # direction comparison is no longer allowed to create a reversal
+        # verdict or terminate a Signal Episode; only the original SL/TP
+        # terminal checks own that transition.
+        status = "ORIGINAL_DIRECTION_NOT_RECONFIRMED"
+        confirmation = deepcopy(confirmation)
+        confirmation.update(
+            {
+                "status": status,
+                "label": "方向比較只供參考",
+                "message": (
+                    "最新掃描沒有延續原方向；這項方向比較只供參考，不建立"
+                    "反向判定、不改寫進場資格，也不終止舊 Episode。"
+                ),
+                "two_step_reversal_confirmed": False,
+            }
+        )
 
-    if not terminal and status == "CONFIRMED_REVERSAL":
-        verdict.update(
-            {
-                "status": "PLAN_INVALIDATED",
-                "situation": "CONFIRMED_REVERSAL",
-                "label": "原方向失效・新方向已確認",
-                "reason": confirmation.get("message"),
-                "actionable": False,
-            }
-        )
-        lifecycle.update(
-            {
-                "status": "INVALIDATED",
-                "label": "已觸發・結構轉向失效",
-                "active": False,
-                "terminal": True,
-                "note": confirmation.get("message"),
-            }
-        )
-        plan.update(
-            {
-                "status": "INVALIDATED",
-                "old_plan_reusable": False,
-                "old_plan_reusable_for_new_entry": False,
-                "existing_position_plan_active": False,
-                "new_entry_status": "CLOSED",
-                "direction_status": "CONFIRMED_REVERSAL",
-                "new_trigger_required": True,
-            }
-        )
-    elif not terminal and status in {
-        "OPPOSITE_WARNING",
-        "HIGH_NOISE",
-        "NO_FORMAL_TRIGGER",
-        "DATA_UNAVAILABLE",
-        "HARD_GATE_BLOCKED",
-        "SAME_DIRECTION_WAIT",
-        "ORIGINAL_DIRECTION_STABLE",
-    }:
+    if not terminal and status in {"DATA_UNAVAILABLE", "HARD_GATE_BLOCKED"}:
         labels = {
-            "OPPOSITE_WARNING": "反向證據增加｜暫停新進場",
-            "HIGH_NOISE": "疑似假突破｜等待收盤確認",
-            "NO_FORMAL_TRIGGER": "最新確認不足｜暫停新進場",
-            "DATA_UNAVAILABLE": "最新資料不足｜暫停新進場",
+            "DATA_UNAVAILABLE": "最新資料不足｜禁止新進場",
             "HARD_GATE_BLOCKED": "執行風控未通過｜暫停新進場",
-            "SAME_DIRECTION_WAIT": "原方向仍有效｜目前等待",
-            "ORIGINAL_DIRECTION_STABLE": "方向未反轉｜等待正式確認",
         }
         verdict.update(
             {
-                "status": "WAIT_RETEST",
+                "status": status,
                 "situation": status,
                 "label": labels[status],
                 "reason": confirmation.get("message"),
                 "actionable": False,
+                "hard_blockers": list(
+                    confirmation.get("hard_blockers", [])
+                    or verdict.get("hard_blockers", [])
+                    or []
+                ),
             }
         )
         plan.update(
             {
                 "old_plan_reusable_for_new_entry": False,
                 "new_entry_status": "WAIT",
-                "direction_status": (
-                    "OPPOSITE_WARNING"
-                    if status == "OPPOSITE_WARNING"
-                    else "ORIGINAL_BIAS_RETAINED"
-                ),
+                "direction_status": "ORIGINAL_BIAS_RETAINED",
             }
         )
+    # Direction/noise/formal-Trigger comparisons are context only. They do
+    # not overwrite the current Entry/SL/TP preflight verdict. This restores
+    # the simple behaviour from before reverse judgement: one scan updates the
+    # active Episode, while only a real Hard Gate or terminal plan state can
+    # remove its current entry permission.
 
     confirmation["new_entry_allowed"] = bool(verdict.get("actionable"))
     merged["latest_confirmation"] = deepcopy(confirmation)
@@ -1352,12 +1423,74 @@ class RadarRuntime:
                             cache_key=cache_key,
                         )
                 except (TypeError, ValueError) as exc:
+                    failure_message = f"無法安全核對舊交易計畫：{exc}"
                     confirmation = {
                         "status": "DATA_UNAVAILABLE",
                         "label": "舊計畫資料不足",
-                        "message": f"無法安全核對舊交易計畫：{exc}",
+                        "message": failure_message,
                         "new_entry_allowed": False,
                     }
+                    # Keep the response fail-closed even when malformed legacy
+                    # plan values prevent a normal Preflight build.  Without a
+                    # structured DATA_UNAVAILABLE verdict the fresh candidate
+                    # (including an opposite-direction candidate) could leak
+                    # through as ENTER in the single-coin page.
+                    stored_lifecycle = dict(
+                        getattr(stored_signal, "lifecycle", {}) or {}
+                    )
+                    lifecycle_status = str(
+                        stored_lifecycle.get("status") or "ACTIVE"
+                    ).upper()
+                    lifecycle_terminal = lifecycle_status in {
+                        "INVALIDATED",
+                        "COMPLETED",
+                        "TARGET_REACHED",
+                    }
+                    preflight = _merge_preflight_confirmation(
+                        {
+                            "inst_id": normalized_id,
+                            "horizon": horizon,
+                            "horizon_label": (
+                                "4H 長線" if horizon == "LONG" else "15m 短線"
+                            ),
+                            "direction": str(
+                                getattr(stored_signal, "direction", "NEUTRAL")
+                            ),
+                            "verdict": {
+                                "status": "DATA_UNAVAILABLE",
+                                "situation": "DATA_UNAVAILABLE",
+                                "label": "舊計畫資料不足｜禁止新進場",
+                                "reason": failure_message,
+                                "actionable": False,
+                                "hard_blockers": ["STORED_PLAN_DATA_UNAVAILABLE"],
+                            },
+                            "signal_lifecycle": {
+                                "status": lifecycle_status,
+                                "label": "已觸發・核對資料不足",
+                                "triggered": True,
+                                "active": not lifecycle_terminal,
+                                "terminal": lifecycle_terminal,
+                                "note": "舊 Episode 保留，但資料恢復前禁止新進場。",
+                            },
+                            "plan_state": {
+                                "status": "ACTIVE_ENTRY_BLOCKED",
+                                "old_plan_reusable": False,
+                                "old_plan_reusable_for_new_entry": False,
+                                "existing_position_plan_active": not lifecycle_terminal,
+                                "new_entry_status": "WAIT",
+                                "new_entry_allowed": False,
+                                "new_trigger_required": False,
+                            },
+                            "original": {},
+                            "live": {},
+                            "execution": {},
+                            "data_quality": {
+                                "status": "UNAVAILABLE",
+                                "missing_sources": ["stored_signal_plan"],
+                            },
+                        },
+                        confirmation,
+                    )
             if result is None:
                 canonical_decision = _canonical_single_decision(
                     stored_signal,
@@ -1375,14 +1508,219 @@ class RadarRuntime:
                     "latest_confirmation": confirmation,
                     "decision_context": canonical_decision,
                 }
-            signal = result.signal
-            item = signal or result.market_state
+            fresh_signal = result.signal
+            fresh_item = fresh_signal or result.market_state
+            item = fresh_item
+            is_signal_item = fresh_signal is not None
+            if stored_signal is not None and preflight is not None:
+                # A live Signal Episode owns its direction and original
+                # Entry/SL/TP until terminal invalidation/completion.  A fresh
+                # opposite candidate is reference evidence only; never attach
+                # the original plan's verdict to that candidate's direction
+                # or prices in the response.
+                stored_direction = str(
+                    getattr(stored_signal, "direction", "") or "NEUTRAL"
+                )
+                fresh_direction = str(
+                    getattr(fresh_item, "direction", "") or "NEUTRAL"
+                )
+                same_direction = (
+                    fresh_item is not None
+                    and fresh_direction == stored_direction
+                )
+
+                if same_direction and fresh_signal is not None:
+                    # A same-direction Trigger is the newest reading of the
+                    # existing Episode, not a second trade plan.  Keep its
+                    # fresh evidence/summary while restoring the immutable
+                    # Entry, SL, TP and Trigger identity from the Episode.
+                    item = deepcopy(fresh_signal)
+                    for field in (
+                        "direction",
+                        "strategy",
+                        "entry_low",
+                        "entry_high",
+                        "stop_loss",
+                        "take_profit_1",
+                        "take_profit_2",
+                        "risk_reward",
+                        "invalidation",
+                        "radar_horizon",
+                        "trigger_id",
+                        "trigger_type",
+                        "signal_stage",
+                        "freshness",
+                        "generated_at",
+                    ):
+                        setattr(item, field, deepcopy(getattr(stored_signal, field)))
+                    fresh_story = dict(getattr(item, "market_story", {}) or {})
+                    stored_story = dict(
+                        getattr(stored_signal, "market_story", {}) or {}
+                    )
+                    fresh_story["trigger"] = deepcopy(
+                        stored_story.get("trigger", {})
+                    )
+                    item.market_story = fresh_story
+                elif same_direction:
+                    # No new formal Trigger was created, but the newest
+                    # same-direction Market State still refreshes the Episode
+                    # explanation and real Hard Gate evidence.
+                    item = deepcopy(stored_signal)
+                    for field in (
+                        "spread_pct",
+                        "quote_volume_24h",
+                        "closed_candle_ts",
+                        "regime",
+                        "readiness_score",
+                        "factor_scores",
+                        "evidence_groups",
+                        "timeframe_states",
+                        "supporting_evidence",
+                        "conflicts",
+                        "neutral_evidence",
+                        "safety_checks",
+                        "entry_quality",
+                        "summary",
+                        "direction_state",
+                        "market_participation",
+                        "execution_quality",
+                        "data_quality",
+                    ):
+                        if hasattr(fresh_item, field):
+                            setattr(item, field, deepcopy(getattr(fresh_item, field)))
+                    fresh_story = dict(
+                        getattr(fresh_item, "market_story", {}) or {}
+                    )
+                    stored_story = dict(
+                        getattr(stored_signal, "market_story", {}) or {}
+                    )
+                    fresh_story["trigger"] = deepcopy(
+                        stored_story.get("trigger", {})
+                    )
+                    item.market_story = fresh_story
+                else:
+                    # Opposite-direction output is not a replacement plan.
+                    # Keep the active Episode intact and update only neutral
+                    # live-market/execution observations below.
+                    item = deepcopy(stored_signal)
+                is_signal_item = True
+                fresh_metrics = dict(
+                    getattr(fresh_item, "market_metrics", {}) or {}
+                )
+                merged_metrics = dict(getattr(item, "market_metrics", {}) or {})
+                if same_direction:
+                    merged_metrics.update(fresh_metrics)
+                else:
+                    neutral_metric_keys = {
+                        "last_price",
+                        "price_change_5m_pct",
+                        "price_change_15m_pct",
+                        "price_change_1h_pct",
+                        "price_change_4h_pct",
+                        "price_change_24h_pct",
+                        "quote_volume_24h",
+                        "volume_ratio_5m",
+                        "volume_ratio_15m",
+                        "open_interest_usd",
+                        "open_interest_change_pct",
+                        "oi_flow_state",
+                        "funding_rate_pct",
+                        "order_book_imbalance_pct",
+                        "taker_buy_pct",
+                        "taker_buy_volume",
+                        "taker_sell_volume",
+                        "cvd",
+                        "bid_depth_usd",
+                        "ask_depth_usd",
+                        "buy_slippage_pct",
+                        "sell_slippage_pct",
+                        "best_bid",
+                        "best_ask",
+                        "spread_pct",
+                        "execution_quality_complete",
+                        "context_sampled_at",
+                    }
+                    merged_metrics.update(
+                        {
+                            key: value
+                            for key, value in fresh_metrics.items()
+                            if key in neutral_metric_keys
+                        }
+                    )
+                live = dict(preflight.get("live", {}) or {})
+                live_price = live.get("price")
+                merged_metrics["last_price"] = (
+                    live_price if live_price is not None else analysis.ticker.last
+                )
+                item.market_metrics = merged_metrics
+                if fresh_item is not None:
+                    for field in ("spread_pct", "quote_volume_24h"):
+                        value = getattr(fresh_item, field, None)
+                        if value is not None:
+                            setattr(item, field, value)
+                item.data_timestamp = int(
+                    getattr(fresh_item, "data_timestamp", 0)
+                    or getattr(analysis.ticker, "ts", 0)
+                    or getattr(item, "data_timestamp", 0)
+                )
+                fresh_closed_candle = getattr(fresh_item, "closed_candle_ts", 0)
+                if fresh_closed_candle:
+                    item.closed_candle_ts = int(fresh_closed_candle)
+
+                verdict = dict(preflight.get("verdict", {}) or {})
+                eligibility = dict(getattr(item, "entry_eligibility", {}) or {})
+                eligibility.update(
+                    {
+                        "status": verdict.get("status", "DATA_UNAVAILABLE"),
+                        "label": verdict.get("label", "進場資格待確認"),
+                        "reason": verdict.get("reason", "等待最新完整資料"),
+                        "actionable": verdict.get("actionable") is True,
+                        "new_entry_allowed": verdict.get("actionable") is True,
+                        "hard_blockers": list(
+                            verdict.get("hard_blockers", []) or []
+                        ),
+                    }
+                )
+                for key in (
+                    "chase_atr",
+                    "adverse_atr",
+                    "invalidation_progress_pct",
+                    "remaining_rr",
+                    "remaining_rr_applicable",
+                ):
+                    if key in live:
+                        eligibility[key] = live[key]
+                item.entry_eligibility = eligibility
+                item.actionable = verdict.get("actionable") is True
+
+                lifecycle = dict(preflight.get("signal_lifecycle", {}) or {})
+                item.lifecycle = {
+                    **dict(getattr(stored_signal, "lifecycle", {}) or {}),
+                    **{
+                        key: value
+                        for key, value in lifecycle.items()
+                        if value is not None
+                    },
+                }
+                if "STORED_PLAN_DATA_UNAVAILABLE" in set(
+                    verdict.get("hard_blockers", []) or []
+                ):
+                    for field in (
+                        "entry_low",
+                        "entry_high",
+                        "stop_loss",
+                        "take_profit_1",
+                        "take_profit_2",
+                    ):
+                        setattr(item, field, None)
+                    item.invalidation = "舊交易計畫資料不足，禁止沿用舊價位。"
+
             canonical_decision = _canonical_single_decision(
                 item,
                 preflight,
                 confirmation,
             )
-            if signal is not None:
+            if is_signal_item:
                 message = str(
                     canonical_decision.get("final", {}).get("label")
                     or "已使用最新資料更新同一個 Signal Episode。"
@@ -1405,7 +1743,7 @@ class RadarRuntime:
                 "message": message,
                 "item": (
                     {
-                        **public_candidate_payload(item, signal=signal is not None),
+                        **public_candidate_payload(item, signal=is_signal_item),
                         "decision_context": canonical_decision,
                     }
                     if item is not None

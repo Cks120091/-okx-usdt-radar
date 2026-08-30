@@ -9,7 +9,8 @@ DEFAULT_THRESHOLDS: dict[str, float] = {
     "min_quote_volume_24h": 5_000_000.0,
     "max_spread_pct": 0.10,
     "max_slippage_pct": 0.15,
-    "max_execution_cost_to_risk_pct": 12.0,
+    "execution_cost_warning_to_risk_pct": 10.0,
+    "max_execution_cost_to_risk_pct": 15.0,
     "minimum_rr": 1.8,
     "max_stop_pct": 5.0,
     "severe_entry_extension_atr": 1.8,
@@ -151,6 +152,15 @@ def _hard_gate(
     anomalies: list[str],
 ) -> dict[str, Any]:
     checks: list[dict[str, Any]] = []
+    warnings = _unique(
+        [
+            str(row.get("label") or row.get("key") or "執行條件提醒")
+            for row in safety_checks
+            if row.get("hard") is False
+            and row.get("passed") is False
+            and str(row.get("key") or "") != "execution_cost_warning"
+        ]
+    )
 
     _add_check(
         checks,
@@ -314,6 +324,19 @@ def _hard_gate(
         missing_reason="缺少交易成本占風險資料，不能安全執行。",
         blocked_reason="交易成本占原始風險過高。",
     )
+    warning_limit = min(
+        limits["execution_cost_warning_to_risk_pct"],
+        limits["max_execution_cost_to_risk_pct"],
+    )
+    if (
+        cost_to_risk is not None
+        and warning_limit < cost_to_risk <= limits["max_execution_cost_to_risk_pct"]
+    ):
+        warnings.append(
+            "Execution Cost（交易成本）占原始風險 "
+            f"{cost_to_risk:.1f}%，高於 {warning_limit:.1f}% 建議線，"
+            f"但仍低於 {limits['max_execution_cost_to_risk_pct']:.1f}% 硬性上限。"
+        )
 
     if plan_present:
         rr = _number(
@@ -453,6 +476,7 @@ def _hard_gate(
         "blockers": [row["key"] for row in blocked],
         "unknowns": [row["key"] for row in unknown],
         "reasons": _unique([row["reason"] for row in [*blocked, *unknown]])[:6],
+        "warnings": _unique(warnings)[:4],
         "thresholds": dict(limits),
         "trigger_preserved": True,
     }
@@ -599,39 +623,116 @@ def _conflict_layer(
     direction: str,
     groups: dict[str, Any],
 ) -> dict[str, Any]:
-    items = _strings(_read(item, "conflicts", []))
-    for value in groups.values():
+    item_conflicts = _strings(_read(item, "conflicts", []))
+    group_conflicts: dict[str, list[str]] = {}
+    for key, value in groups.items():
         if isinstance(value, Mapping):
-            items.extend(_strings(value.get("conflicts", [])))
+            group_conflicts[str(key)] = _strings(value.get("conflicts", []))
     participation = _mapping(_read(item, "market_participation", {}))
-    items.extend(_strings(participation.get("conflicts", [])))
-    items = _unique(items)
+    participation_conflicts = _strings(participation.get("conflicts", []))
+    items = _unique(
+        [
+            *item_conflicts,
+            *(text for values in group_conflicts.values() for text in values),
+            *participation_conflicts,
+        ]
+    )
+
+    domain_items: dict[str, list[str]] = {}
+    conflict_group_reasons = {
+        text
+        for key, value in groups.items()
+        if isinstance(value, Mapping)
+        and str(value.get("stance", "")).upper() == "CONFLICT"
+        for text in group_conflicts.get(str(key), [])
+    }
+    # Aggregate story conflicts also contain the group conflicts.  Classify
+    # only the standalone reasons here; a conflicting group is assigned its
+    # canonical evidence domain below so vague wording cannot bypass it.
+    for text in [*item_conflicts, *participation_conflicts]:
+        if text in conflict_group_reasons:
+            continue
+        domain = _conflict_domain(text)
+        domain_items.setdefault(domain, []).append(text)
+
+    # Position and trend groups always retain their canonical domain.  Their
+    # real-world reasons can be deliberately concise (for example, "價格仍在
+    # 壓縮中段" or "攻擊效率未改善") and must not be downgraded to OTHER.
+    # Participation keeps the more specific Taker/OI/Book/Volume domains.
+    for key, value in groups.items():
+        if not isinstance(value, Mapping):
+            continue
+        group = _mapping(value)
+        if str(group.get("stance", "")).upper() != "CONFLICT":
+            continue
+        group_key = str(key)
+        group_reasons = group_conflicts.get(group_key, [])
+        canonical_domain = _group_conflict_domain(group_key)
+        if canonical_domain in {"POSITION_STRUCTURE", "TREND_MOMENTUM"}:
+            domain_items.setdefault(canonical_domain, []).extend(
+                group_reasons or [str(group.get("label") or group_key)]
+            )
+        elif group_reasons:
+            for text in group_reasons:
+                domain = _conflict_domain(text)
+                if domain == "OTHER":
+                    domain = canonical_domain
+                domain_items.setdefault(domain, []).append(text)
+        else:
+            if (
+                group_key == "participation_flow"
+                and items
+                and all(
+                    _conflict_domain(text)
+                    in {"CONTEXT_COUNTERTREND", "TIMING_WARNING"}
+                    for text in items
+                )
+            ):
+                # Compatibility for episodes created before the participation
+                # split: their public group stance may still say CONFLICT even
+                # though every retained reason is only macro/Timing context.
+                continue
+            domain_items.setdefault(canonical_domain, []).append(
+                str(group.get("label") or group_key)
+            )
+
+    domain_items = {
+        key: _unique(values)
+        for key, values in domain_items.items()
+        if values
+    }
+    domains = set(domain_items)
+    immediate_domains = domains & {
+        "POSITION_STRUCTURE",
+        "TREND_MOMENTUM",
+        "TAKER_FLOW",
+        "ORDER_BOOK",
+        "DERIVATIVES",
+        "PARTICIPATION_VOLUME",
+    }
+    context_countertrend = "CONTEXT_COUNTERTREND" in domains
+    multiple_conflict_domains = len(immediate_domains) >= 2 or (
+        context_countertrend and bool(immediate_domains)
+    )
     explicit_severity = _number(
         _mapping(_read(item, "market_metrics", {})).get("conflict_severity")
     )
-    conflict_stances = sum(
-        str(_mapping(value).get("stance", "")).upper() == "CONFLICT"
-        for value in groups.values()
-        if isinstance(value, Mapping)
-    )
-    if explicit_severity is not None:
-        level = (
-            "HIGH"
-            if explicit_severity >= 70.0
-            else "MEDIUM"
-            if explicit_severity >= 40.0
-            else "LOW"
-            if explicit_severity > 0
-            else "NONE"
-        )
+    if not domains and not (explicit_severity and explicit_severity > 0):
+        level = "NONE"
+    elif multiple_conflict_domains:
+        level = "HIGH"
+    elif context_countertrend:
+        # 1H／4H／全市場背景反向是同一個情境域。它可以降低品質，
+        # 但不能靠重複文案自行變成第二個正式方向或一票否決 Trigger。
+        level = "MEDIUM" if len(items) >= 2 or (explicit_severity or 0) >= 40 else "LOW"
+    elif len(immediate_domains) == 1:
+        level = "HIGH" if (explicit_severity or 0) >= 70 else "MEDIUM"
+    elif "TIMING_WARNING" in domains:
+        level = "MEDIUM" if (explicit_severity or 0) >= 40 else "LOW"
+    elif explicit_severity is not None:
+        level = "HIGH" if explicit_severity >= 70 else "MEDIUM" if explicit_severity >= 40 else "LOW"
     else:
-        weight = len(items) + conflict_stances
-        level = "HIGH" if weight >= 4 else "MEDIUM" if weight >= 2 else "LOW" if weight else "NONE"
-    countertrend = any(
-        token in text.lower()
-        for text in items
-        for token in ("逆勢", "高週期", "4h", "1d", "背景反向", "countertrend")
-    )
+        level = "LOW"
     return {
         "main_direction": direction,
         "level": level,
@@ -642,7 +743,18 @@ def _conflict_layer(
             "HIGH": "高度衝突",
         }[level],
         "items": items[:6],
-        "countertrend": countertrend,
+        "domains": [
+            {"key": key, "items": values[:3]}
+            for key, values in sorted(domain_items.items())
+        ],
+        # Conflict is explanatory telemetry only.  A core price Trigger that
+        # already passed the real Hard Gate must not disappear because a
+        # second interpretation layer counted contrary evidence.  The same
+        # domains still lower confidence and remain visible in the details.
+        "blocking_domains": [],
+        "blocks_entry": False,
+        "severity_score": explicit_severity,
+        "countertrend": context_countertrend,
         "opposite_signal_created": False,
     }
 
@@ -826,9 +938,6 @@ def _final_layer(
     elif hard_gate["blocked"]:
         status, label = "WAIT", "Hard Gate 未通過｜暫停進場"
         wait_code, wait_label = _hard_wait_reason(blockers)
-    elif conflict["level"] == "HIGH":
-        status, label = "WAIT", "多空衝突過高｜等待確認"
-        wait_code, wait_label = "CONFLICT", "等待衝突降低"
     elif entry_status == "ENTRY_READY" and active_trigger and hard_gate["passed"]:
         status, label = "ENTER", "目前可進｜風控條件已通過"
         wait_code, wait_label = "NONE", ""
@@ -856,10 +965,10 @@ def _final_layer(
         reasons.extend(
             [
                 f"主方向：{_direction_label(direction)}",
-                f"方向品質：{quality['direction']['label']}",
                 entry_label or "價格仍在合理進場區",
             ]
         )
+        reasons.append(f"方向品質：{quality['direction']['label']}")
     elif status == "INVALIDATED":
         reasons.extend(
             [
@@ -942,8 +1051,65 @@ def _final_layer(
         "weakening_conditions": _unique(weakening)[:3],
         "invalidation_condition": _invalidation_condition(item),
         "confidence": dict(confidence),
-        "warnings": list(anomaly_warnings),
+        "warnings": _unique(
+            [
+                *anomaly_warnings,
+                *hard_gate.get("warnings", []),
+                *(
+                    [f"{conflict['label']}：請核對反向證據"]
+                    if status == "ENTER" and conflict["level"] != "NONE"
+                    else []
+                ),
+            ]
+        )[:5],
     }
+
+
+def _conflict_domain(text: str) -> str:
+    value = str(text or "").lower()
+    if any(
+        token in value
+        for token in (
+            "逆勢",
+            "高週期",
+            "1h",
+            "4h",
+            "1d",
+            "背景反向",
+            "全市場",
+            "大盤",
+            "btc",
+            "market bias",
+            "countertrend",
+        )
+    ):
+        return "CONTEXT_COUNTERTREND"
+    if any(token in value for token in ("taker", "主動成交", "主動買", "主動賣", "cvd")):
+        return "TAKER_FLOW"
+    if any(token in value for token in ("order book", "委託簿", "訂單簿", "深度", "假牆", "撤單")):
+        return "ORDER_BOOK"
+    if any(token in value for token in ("funding", "open interest", "oi ", "oi（", "持倉量")):
+        return "DERIVATIVES"
+    if any(token in value for token in ("volume", "成交量", "量能", "市場參與", "資金流")):
+        return "PARTICIPATION_VOLUME"
+    if any(token in value for token in ("timing", "5m", "進場時機", "短線降速")):
+        return "TIMING_WARNING"
+    if any(token in value for token in ("結構", "支撐", "壓力", "突破", "跌破", "高低點")):
+        return "POSITION_STRUCTURE"
+    if any(token in value for token in ("趨勢", "動能", "macd", "均線", "rsi")):
+        return "TREND_MOMENTUM"
+    return "OTHER"
+
+
+def _group_conflict_domain(key: str) -> str:
+    normalized = key.strip().lower()
+    if normalized == "position_structure":
+        return "POSITION_STRUCTURE"
+    if normalized == "trend_momentum":
+        return "TREND_MOMENTUM"
+    if normalized == "participation_flow":
+        return "PARTICIPATION_VOLUME"
+    return "OTHER"
 
 
 def _numeric_limit_check(

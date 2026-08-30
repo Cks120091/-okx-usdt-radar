@@ -342,7 +342,18 @@ def _public_decision_context(decision: Any) -> dict[str, Any]:
     )
     payload["conflict"] = _select(
         _read(decision, "conflict", {}),
-        ("main_direction", "level", "label", "items", "countertrend", "opposite_signal_created"),
+        (
+            "main_direction",
+            "level",
+            "label",
+            "items",
+            "domains",
+            "blocking_domains",
+            "blocks_entry",
+            "severity_score",
+            "countertrend",
+            "opposite_signal_created",
+        ),
     )
     payload["quality"] = _select(
         _read(decision, "quality", {}),
@@ -358,7 +369,7 @@ def _public_decision_context(decision: Any) -> dict[str, Any]:
     )
     payload["final"] = _select(
         _read(decision, "final", {}),
-        ("status", "label", "direction", "direction_label", "new_entry_allowed", "trigger_preserved", "reasons", "wait_reason", "weakening_conditions", "invalidation_condition", "confidence"),
+        ("status", "label", "direction", "direction_label", "new_entry_allowed", "trigger_preserved", "reasons", "wait_reason", "weakening_conditions", "invalidation_condition", "confidence", "warnings"),
     )
     return payload
 

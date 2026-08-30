@@ -646,6 +646,16 @@ def enrich_story_context(
         else:
             neutral.append("CVD 未提供額外支持")
 
+    # Participation（市場參與）只描述真正的資金／成交／委託簿證據。
+    # Timing 與全市場背景屬於情境層；若把它們塞進 Participation，
+    # 同一個「逆高週期」理由會先污染資金流分數，之後又在衝突層
+    # 被重複計算，造成已成立的價格 Trigger 被過度否決。
+    participation_supporting = _unique(supporting)
+    participation_conflicts = _unique(conflicts)
+    participation_neutral = _unique(neutral)
+    participation_available = sorted(set(available))
+    participation_missing = sorted(set(missing))
+
     if timing is not None:
         timing_score = _direction_score(timing)
         timing_direction, _, timing_label = _direction_state(timing_score)
@@ -686,24 +696,31 @@ def enrich_story_context(
         elif directional_macro < 45.0:
             neutral.append("全市場背景未支持此方向")
 
-    if conflicts and supporting:
+    if participation_conflicts and participation_supporting:
         state, label = "CONFLICT", "支持中帶反證"
-    elif conflicts:
+    elif participation_conflicts:
         state, label = "CONFLICT", "存在反向證據"
-    elif supporting:
+    elif participation_supporting:
         state, label = "SUPPORT", "支持"
-    elif available:
+    elif participation_available:
         state, label = "NEUTRAL", "中性"
     else:
         state, label = "DATA_MISSING", "資料暫缺"
     participation = {
         "state": state,
         "label": label,
-        "supporting": _unique(supporting),
-        "conflicts": _unique(conflicts),
-        "neutral": _unique(neutral),
-        "available_sources": sorted(set(available)),
-        "missing_sources": sorted(set(missing)),
+        "supporting": participation_supporting,
+        "conflicts": participation_conflicts,
+        "neutral": participation_neutral,
+        "available_sources": participation_available,
+        "missing_sources": sorted(
+            set(
+                [
+                    *participation_missing,
+                    *(["market_bias"] if macro_score is None else []),
+                ]
+            )
+        ),
         "core_return_pct": (
             round(price_move, 6) if price_move is not None else None
         ),
@@ -722,10 +739,10 @@ def enrich_story_context(
         "participation_flow",
         "市場參與",
         participation_score,
-        supporting,
-        conflicts,
-        neutral,
-        confidence=min(100.0, 25.0 + len(set(available)) * 15.0),
+        participation_supporting,
+        participation_conflicts,
+        participation_neutral,
+        confidence=min(100.0, 25.0 + len(participation_available) * 15.0),
     )
     data_quality = dict(story.data_quality)
     data_quality.update(
@@ -755,7 +772,7 @@ def execution_quality(
     risk_reward: float,
     context: MarketContext | None,
     target_rr: float = 1.8,
-    max_cost_to_risk_pct: float = 12.0,
+    max_cost_to_risk_pct: float = 15.0,
     max_spread_pct: float = 0.10,
     max_slippage_pct: float = 0.15,
     estimated_taker_fee_pct: float = 0.05,
@@ -795,8 +812,11 @@ def execution_quality(
             100.0,
         )
         score += cost_score * 0.10
-        if execution_to_risk is not None and execution_to_risk > max_cost_to_risk_pct:
-            warnings.append("交易成本占原始風險偏高")
+        if execution_to_risk is not None:
+            if execution_to_risk > max_cost_to_risk_pct:
+                warnings.append("交易成本占原始風險超過硬性上限")
+            elif execution_to_risk > 10.0:
+                warnings.append("交易成本占原始風險偏高，但仍低於硬性上限")
         if max(float(entry_slippage or 0.0), float(exit_slippage or 0.0)) > max_slippage_pct:
             warnings.append("估算滑價偏高")
     else:

@@ -3,6 +3,9 @@ import unittest
 from pathlib import Path
 
 from radar.config import AppConfig
+from radar.decision import DEFAULT_THRESHOLDS
+from radar.scanner import ScannerConfig
+from radar.strategy import StrategyConfig
 
 
 class V33ContractTests(unittest.TestCase):
@@ -18,6 +21,13 @@ class V33ContractTests(unittest.TestCase):
         self.assertEqual(config.early_signal_max_age_bars, 2)
         self.assertEqual(config.entry_ready_max_chase_atr, 0.15)
         self.assertEqual(config.entry_missed_chase_atr, 0.50)
+        self.assertEqual(config.max_execution_cost_to_risk_pct, 15.0)
+        self.assertEqual(ScannerConfig().max_execution_cost_to_risk_pct, 15.0)
+        self.assertEqual(StrategyConfig().max_execution_cost_to_risk_pct, 15.0)
+        self.assertEqual(
+            DEFAULT_THRESHOLDS["max_execution_cost_to_risk_pct"],
+            15.0,
+        )
         self.assertFalse(config.require_micro_volume_anomaly)
         with tempfile.TemporaryDirectory() as directory:
             path = Path(directory) / "bad.json"
@@ -101,7 +111,21 @@ class V33ContractTests(unittest.TestCase):
         self.assertIn(".primary-nav{grid-row:5;position:relative", html)
         self.assertIn("grid-template-columns:repeat(4,minmax(0,1fr))", html)
         self.assertIn(".decision-actions{display:grid;grid-template-columns:repeat(2,minmax(0,1fr))", html)
-        self.assertIn("okx-radar-shell-v3.4-round-isolation-2", service_worker)
+        self.assertIn("okx-radar-shell-v3.4-simple-verdict-1", service_worker)
+        self.assertIn("<title>OKX 雷達 V3.4</title>", html)
+        self.assertIn("OKX 雷達 <span>V3.4</span>", html)
+        self.assertNotIn('data-tab="pendingSignals"', html)
+        self.assertNotIn('data-tab="longPendingSignals"', html)
+        self.assertNotIn('id="pendingSignalsBox"', html)
+        self.assertNotIn('id="longPendingSignalsBox"', html)
+        self.assertNotIn("function isPendingConfirmationSignal(item)", html)
+        self.assertNotIn("function itemDecisionContext", html)
+        self.assertNotIn("function decisionContextStatus", html)
+        self.assertNotIn("function finalDecisionPanel", html)
+        self.assertNotIn("唯一 Final Decision", html)
+        self.assertNotIn("Conflict（反向證據）", html)
+        self.assertNotIn("Confidence（信心）", html)
+        self.assertNotIn("二次反轉確認", html)
         self.assertIn("--primary-nav-safe-bottom", html)
         self.assertIn(".action-wrap{display:none;grid-row:4;position:relative", html)
         self.assertIn("@media(orientation:landscape) and (max-height:520px)", html)
@@ -133,6 +157,9 @@ class V33ContractTests(unittest.TestCase):
             "const tabGroups", 1
         )[0]
         self.assertNotIn("startScan", freshness_poll)
+        self.assertIn("horizonFreshnessChanged", freshness_poll)
+        self.assertIn("status.horizon_freshness?.[horizon]", freshness_poll)
+        self.assertIn("reportBecameStale||horizonFreshnessChanged", freshness_poll)
         self.assertNotIn("autoStarted", html)
         self.assertIn("$$('[data-scan-mode]').forEach", html)
         self.assertIn("scan_mode:normalizedMode", html)
@@ -173,25 +200,29 @@ class V33ContractTests(unittest.TestCase):
         self.assertIn("判定依據（簡要）", html)
         self.assertIn("現在怎麼做", html)
         self.assertIn("訊號含義", html)
-        self.assertIn("失效與方向", html)
+        self.assertIn("失效條件", html)
+        self.assertNotIn("失效與方向", html)
         self.assertIn("等待價格回到最佳進場點位", html)
         self.assertIn("CONTINUATION:'趨勢延續'", html)
         self.assertIn("status==='ENTRY_READY'", html)
         self.assertIn("status==='WAIT_RETEST'", html)
         self.assertIn("status==='PLAN_INVALIDATED'", html)
-        self.assertIn("舊計畫失效；方向不會自動變成", html)
+        self.assertIn("舊計畫失效。", html)
+        self.assertNotIn("舊計畫失效；方向不會自動變成", html)
         self.assertIn("status==='MISSED_ENTRY'", html)
         self.assertIn("function signalTriggerTime(item,status)", html)
         self.assertIn("訊號觸發時間（台灣）", html)
         self.assertIn("status!=='ENTRY_READY'&&status!=='MISSED_ENTRY'", html)
-        self.assertIn("okx-radar-shell-v3.4-round-isolation-2", service_worker)
+        self.assertIn("okx-radar-shell-v3.4-simple-verdict-1", service_worker)
         self.assertIn("$('#preflightRefresh').addEventListener('click',loadPreflight)", html)
         self.assertIn("'#waitRetestBox','#longWaitRetestBox'", html)
         self.assertIn("scanAction=includeInstrument", html)
         self.assertNotIn("/api/preflight/reanalyze", html)
         self.assertNotIn("reanalyzeMode", html)
-        self.assertIn("ORIGINAL_DIRECTION_STABLE", html)
-        self.assertIn("最新多週期確認", html)
+        self.assertNotIn("ORIGINAL_DIRECTION_STABLE", html)
+        self.assertNotIn("OPPOSITE_WARNING", html)
+        self.assertNotIn("CONFIRMED_REVERSAL", html)
+        self.assertNotIn("二次反轉確認", html)
         self.assertIn("同時核對舊訊號、最新收盤與成交條件", html)
         self.assertIn("訊號觸發時間（台灣）", html)
         self.assertIn("15m 短線歷史", html)
@@ -249,10 +280,10 @@ class V33ContractTests(unittest.TestCase):
         self.assertIn("Order Book（委託簿）", html)
         self.assertIn("Order Book（訂單簿）", html)
         self.assertIn("(?:（(?:委託簿|訂單簿)）)*", html)
-        self.assertIn("Trade Quality（交易品質）", html)
+        self.assertNotIn("Trade Quality（交易品質）", html)
         self.assertIn("Execution Quality（執行品質，不是勝率）", html)
-        self.assertIn("quality.combined_score", html)
-        self.assertIn("'分層判讀'", html)
+        self.assertNotIn("quality.combined_score", html)
+        self.assertNotIn("'分層判讀'", html)
         self.assertIn("function technicalText(value)", html)
         self.assertIn('data-scan-mode="SHORT"', html)
         self.assertIn('data-scan-mode="LONG"', html)
@@ -272,9 +303,10 @@ class V33ContractTests(unittest.TestCase):
         self.assertIn("使用手冊", html)
         self.assertIn('<details class="manual-card">', html)
         self.assertIn("Signal Episode（訊號生命週期）", html)
-        self.assertIn("Trade Quality（交易品質）／Confidence（信心）", html)
+        self.assertIn("交易品質／安全檢查", html)
+        self.assertNotIn("Trade Quality（交易品質）／Confidence（信心）", html)
         self.assertIn("禁止追價／交易計畫失效", html)
-        self.assertIn("多空衝突／轉弱與翻向", html)
+        self.assertNotIn("多空衝突／轉弱與翻向", html)
         self.assertIn("三大交易時段", html)
         self.assertIn("詳細數據", html)
         self.assertIn("歷史訊號", html)
@@ -312,11 +344,10 @@ class V33ContractTests(unittest.TestCase):
         stored_status = html.split("function itemStoredEntryStatus(item)", 1)[1].split(
             "function itemDisplayEntryStatus", 1
         )[0]
-        self.assertIn("original_final_status", stored_status)
         self.assertIn("eligibility.original_status", stored_status)
-        self.assertIn("status=originalFinal||", stored_status)
-        self.assertNotIn("includes(originalEligibility)", stored_status)
-        self.assertNotIn("eligibility.status==='WAIT_RETEST'", stored_status)
+        self.assertIn("eligibility.original_status||eligibility.status", stored_status)
+        self.assertNotIn("original_final_status", stored_status)
+        self.assertNotIn("decision_context", stored_status)
         self.assertNotIn("掃描中｜上一輪結果只供參考", html)
         self.assertNotIn("更新失敗｜上一輪結果只供參考", html)
         self.assertNotIn("下方保留上一輪", html)
@@ -398,19 +429,75 @@ class V33ContractTests(unittest.TestCase):
         self.assertLess(comparator.index("dataTimeDiff"), comparator.index("freshDiff"))
         self.assertLess(comparator.index("freshDiff"), comparator.index("rrDiff"))
 
-        decision = html.split("function decisionContextStatus(item,payload={})", 1)[1].split(
-            "function itemEntryStatus", 1
+        entry_status = html.split("function itemEntryStatus(item)", 1)[1].split(
+            "function itemStoredEntryStatus", 1
         )[0]
-        self.assertIn("if(itemReadOnlyReason(item))return 'READ_ONLY'", decision)
-        final_panel = html.split("function finalDecisionPanel", 1)[1].split(
-            "function entryBadge", 1
+        self.assertIn("eligibility.status", entry_status)
+        self.assertIn("eligibility.wait_reason_code", entry_status)
+        self.assertIn("eligibility.hard_blockers", entry_status)
+        self.assertIn("check?.hard!==false&&check?.passed===false", entry_status)
+        self.assertIn("return 'HARD_GATE_BLOCKED'", entry_status)
+        self.assertNotIn("new_entry_allowed", entry_status)
+        self.assertNotIn("item?.actionable", entry_status)
+        self.assertNotIn("decision_context", entry_status)
+        self.assertNotIn("decisionContext", entry_status)
+        decision_panel = html.split("function decisionPanel(item", 1)[1].split(
+            "function timeframeGrid", 1
         )[0]
-        self.assertIn("instrumentButton(item.inst_id,'幣種掃描（更新判定）'", final_panel)
-        self.assertNotIn('data-preflight-id=', final_panel)
+        self.assertIn("const entry=item.entry_eligibility||{}", decision_panel)
+        self.assertIn("instrumentButton(item.inst_id,'幣種掃描（更新判定）'", decision_panel)
+        self.assertNotIn("finalDecisionPanel", decision_panel)
+        self.assertNotIn("decisionContext", decision_panel)
         self.assertIn(
-            "copyAction=status==='ENTRY_READY'&&!expired&&!readOnlyReason", final_panel
+            "copyAction=status==='ENTRY_READY'&&!expired&&!readOnlyReason?",
+            decision_panel,
         )
+        self.assertIn("status==='HARD_GATE_BLOCKED'", decision_panel)
+        entry_badge = html.split("function entryBadge(item)", 1)[1].split(
+            "function entryCallout", 1
+        )[0]
+        self.assertIn("status==='HARD_GATE_BLOCKED'", entry_badge)
+        self.assertIn("風控未通過｜暫停進場", entry_badge)
         self.assertIn("function reportRenderFingerprint(report)", html)
+        fingerprint = html.split("function reportRenderFingerprint(report)", 1)[1].split(
+            "function reportCardEntries", 1
+        )[0]
+        self.assertIn("item.entry_eligibility?.status", fingerprint)
+        self.assertIn("item.entry_eligibility?.original_status", fingerprint)
+        self.assertIn("item.lifecycle?.status", fingerprint)
+        self.assertNotIn("decision_context", fingerprint)
+
+        instrument_state = html.split("function instrumentPayloadState(payload)", 1)[
+            1
+        ].split("function instrumentOverallContext", 1)[0]
+        self.assertIn("payload.preflight?.verdict?.status", instrument_state)
+        self.assertIn("itemEntryStatus(payload.item)", instrument_state)
+        self.assertIn("PLAN_INVALIDATED:80", instrument_state)
+        self.assertIn("HARD_GATE_BLOCKED:70", instrument_state)
+        self.assertIn("function instrumentDisplayItem(payload)", html)
+        display_item = html.split("function instrumentDisplayItem(payload)", 1)[
+            1
+        ].split("function instrumentOverallContext", 1)[0]
+        self.assertIn("entry_eligibility:{...entry,status,label:", display_item)
+        self.assertIn("verdict.hard_blockers", display_item)
+        self.assertNotIn("decisionContext", instrument_state)
+        instrument_results = html.split("function renderInstrumentResults", 1)[1].split(
+            "function renderStoredInstrument", 1
+        )[0]
+        self.assertIn("instrumentOverallVerdict(isolatedShort,isolatedLong)", instrument_results)
+        self.assertNotIn("hasStructured", instrument_results)
+        self.assertNotIn("itemDecisionContext", instrument_results)
+        instrument_side = html.split("function renderInstrumentSide(payload,selector)", 1)[
+            1
+        ].split("function renderInstrumentResults", 1)[0]
+        self.assertIn("instrumentDisplayItem(payload)", instrument_side)
+        primary_payload = html.split("function instrumentPrimaryPayload(context)", 1)[
+            1
+        ].split("function instrumentPlainGuide", 1)[0]
+        self.assertIn(
+            "'DATA_UNAVAILABLE','HARD_GATE_BLOCKED','MISSED_ENTRY'",
+            primary_payload,
+        )
         self.assertIn("function captureReportUiState()", html)
         self.assertIn("function restoreReportUiState(saved)", html)
         self.assertIn("if(state.reportRenderKey===renderKey)return", report)
@@ -465,6 +552,8 @@ class V33ContractTests(unittest.TestCase):
         shell_assets = worker.split("SHELL_ASSETS", 1)[1].split("];", 1)[0]
         self.assertNotIn("/api/", shell_assets)
         self.assertIn('"display": "standalone"', manifest)
+        self.assertIn('"name": "OKX Radar V3.4"', manifest)
+        self.assertNotIn("V3.4 Context", manifest)
 
     def test_market_scan_has_no_github_schedule(self):
         root = Path(__file__).parents[1]

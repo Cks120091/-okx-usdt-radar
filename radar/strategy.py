@@ -30,7 +30,7 @@ class StrategyConfig:
     require_micro_volume_anomaly: bool = False
     minimum_rr: float = 1.8
     estimated_taker_fee_pct: float = 0.05
-    max_execution_cost_to_risk_pct: float = 12.0
+    max_execution_cost_to_risk_pct: float = 15.0
     max_entry_extension_atr: float = 0.80
     severe_entry_extension_atr: float = 1.80
     max_slippage_pct: float = 0.15
@@ -896,6 +896,7 @@ class AdaptiveStrategyEngine:
                 "execution_depth",
                 "slippage",
                 "execution_cost",
+                "execution_cost_warning",
             }
         ]
         checks.extend(
@@ -1012,6 +1013,16 @@ class AdaptiveStrategyEngine:
                     ),
                     quality["execution_cost_to_risk_pct"],
                     hard=True,
+                ),
+                self._safety_check(
+                    "execution_cost_warning",
+                    "Execution Cost（交易成本）10% 建議線",
+                    (
+                        quality["execution_cost_to_risk_pct"] is not None
+                        and quality["execution_cost_to_risk_pct"] <= 10.0
+                    ),
+                    quality["execution_cost_to_risk_pct"],
+                    hard=False,
                 ),
             ]
         )
@@ -1711,6 +1722,7 @@ class AdaptiveStrategyEngine:
             major_conflict_ok,
             "沒有重大跨群反向證據",
             live.conflict_severity,
+            hard=False,
         )
 
         failed_hard = [
@@ -1718,15 +1730,6 @@ class AdaptiveStrategyEngine:
             for check in updated.safety_checks
             if check.get("hard", True) and not check.get("passed", False)
         ]
-        if not major_conflict_ok and result.candidate_plan is not None:
-            return AnalysisResult(
-                None,
-                "major_evidence_conflict",
-                replace(updated, status="FILTERED"),
-                live,
-                result.candidate_plan,
-                result.candidate_signal,
-            )
         if failed_hard and formal_candidate:
             first = str(failed_hard[0].get("key", "safety"))
             reasons = {
@@ -1735,7 +1738,6 @@ class AdaptiveStrategyEngine:
                 "execution_depth": "execution_quality_unavailable",
                 "slippage": "slippage_too_high",
                 "execution_cost": "execution_cost_too_high",
-                "major_conflict": "major_evidence_conflict",
             }
             return AnalysisResult(
                 None,
@@ -2102,9 +2104,11 @@ class AdaptiveStrategyEngine:
         passed: bool,
         label: str,
         value: object | None = None,
+        *,
+        hard: bool = True,
     ) -> MarketState:
         checks = [item for item in state.safety_checks if item.get("key") != key]
-        checks.append(self._safety_check(key, label, passed, value))
+        checks.append(self._safety_check(key, label, passed, value, hard=hard))
         missing = list(state.missing_conditions)
         if not passed:
             missing = _unique([label, *missing])

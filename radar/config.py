@@ -33,7 +33,7 @@ class AppConfig:
     context_candidates: int = 100
     execution_notional_usdt: float = 1_000.0
     estimated_taker_fee_pct: float = 0.05
-    max_execution_cost_to_risk_pct: float = 12.0
+    max_execution_cost_to_risk_pct: float = 15.0
     max_slippage_pct: float = 0.15
     max_entry_extension_atr: float = 0.80
     severe_entry_extension_atr: float = 1.80

@@ -622,6 +622,47 @@ class MarketStoryV34Tests(unittest.TestCase):
             any("價格推不動" in item for item in enriched.conflicts)
         )
 
+    def test_macro_countertrend_does_not_pollute_participation_flow(self):
+        candles_4h, candles_1h, candles_15m = valid_breakout_frames()
+        story = self.engine.analyze_short(
+            candles_4h,
+            candles_1h,
+            candles_15m,
+        )
+        self.assertEqual(story.trigger_direction, "LONG")
+        context = MarketContext(
+            "TEST-USDT-SWAP",
+            20_000_000,
+            0.0001,
+            0.15,
+            0.66,
+            1,
+            open_interest_change_pct=1.2,
+            cvd=500.0,
+        )
+
+        enriched = enrich_story_context(
+            story,
+            context,
+            timing=None,
+            market_bias={"score": 10.0, "label": "全市場偏空"},
+        )
+
+        self.assertTrue(
+            any("全市場背景" in item for item in enriched.conflicts)
+        )
+        self.assertFalse(
+            any(
+                "全市場背景" in item
+                for item in enriched.market_participation["conflicts"]
+            )
+        )
+        self.assertEqual(enriched.market_participation["state"], "SUPPORT")
+        self.assertEqual(
+            enriched.groups["participation_flow"]["stance"],
+            "SUPPORT",
+        )
+
     def test_flat_noise_never_becomes_trigger_by_score_alone(self):
         flat = [100 + math.sin(index * 0.4) * 0.05 for index in range(100)]
         story = self.engine.analyze_short(
