@@ -7,6 +7,7 @@ from datetime import datetime, timedelta, timezone
 from types import SimpleNamespace
 from unittest.mock import patch
 
+from radar.api import OKXAPIError
 from radar.config import AppConfig
 from radar.models import MarketContext, MarketState, RadarReport, Signal, Ticker
 from radar.reporting import load_latest_report, save_report
@@ -1051,6 +1052,78 @@ class RuntimeSafetyTests(unittest.TestCase):
 
         candle = RuntimeError("15m K 線取得失敗")
         self.assertIn("不是訊號失效", _single_scan_failure_message(candle))
+
+    def test_retryable_single_scan_failure_recovers_once(self):
+        class TransientThenSuccessfulScanner(SingleInstrumentScanner):
+            def __init__(self):
+                super().__init__()
+                self.attempts = 0
+
+            def scan_instrument(
+                self,
+                inst_id,
+                market_bias,
+                long_market_bias=None,
+                btc_bias="NEUTRAL",
+                long_btc_bias="NEUTRAL",
+                requested_horizon="BOTH",
+            ):
+                self.attempts += 1
+                if self.attempts == 1:
+                    raise OKXAPIError("HTTP 503 temporary upstream failure")
+                return super().scan_instrument(
+                    inst_id,
+                    market_bias,
+                    long_market_bias,
+                    btc_bias,
+                    long_btc_bias,
+                    requested_horizon,
+                )
+
+        with tempfile.TemporaryDirectory() as directory:
+            scanner = TransientThenSuccessfulScanner()
+            runtime = RadarRuntime(scanner, AppConfig(data_dir=directory))
+
+            with patch("radar.service.time.sleep") as sleeper:
+                payload = runtime.scan_instrument_dict("AAA", "SHORT")
+
+            self.assertEqual(payload["inst_id"], "AAA-USDT-SWAP")
+            self.assertEqual(scanner.attempts, 2)
+            self.assertEqual(scanner.release_calls, 2)
+            sleeper.assert_called_once_with(0.75)
+
+    def test_non_retryable_single_scan_failure_is_not_hidden_by_retry(self):
+        class BrokenScanner(SingleInstrumentScanner):
+            def __init__(self):
+                super().__init__()
+                self.attempts = 0
+
+            def scan_instrument(
+                self,
+                inst_id,
+                market_bias,
+                long_market_bias=None,
+                btc_bias="NEUTRAL",
+                long_btc_bias="NEUTRAL",
+                requested_horizon="BOTH",
+            ):
+                self.attempts += 1
+                raise RuntimeError("deterministic calculation bug")
+
+        with tempfile.TemporaryDirectory() as directory:
+            scanner = BrokenScanner()
+            runtime = RadarRuntime(scanner, AppConfig(data_dir=directory))
+
+            with (
+                patch("radar.service.time.sleep") as sleeper,
+                patch("radar.service.LOGGER.exception"),
+                self.assertRaises(PreflightError),
+            ):
+                runtime.scan_instrument_dict("AAA", "SHORT")
+
+            self.assertEqual(scanner.attempts, 1)
+            self.assertEqual(scanner.release_calls, 1)
+            sleeper.assert_not_called()
 
     def test_single_instrument_scan_is_normalized_and_not_persisted_to_report(self):
         with tempfile.TemporaryDirectory() as directory:

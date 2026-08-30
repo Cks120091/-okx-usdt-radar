@@ -14,8 +14,10 @@ from http import HTTPStatus
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from typing import Any
+from urllib.error import HTTPError, URLError
 from urllib.parse import parse_qs, urlparse
 
+from .api import OKXAPIError
 from .config import AppConfig
 from .models import RadarReport
 from .preflight import build_preflight_payload
@@ -63,26 +65,90 @@ _SCAN_MODE_HORIZONS = {
 }
 
 
-def _single_scan_failure_message(exc: Exception) -> str:
-    messages: list[str] = []
+def _single_scan_error_chain(exc: BaseException) -> list[BaseException]:
+    errors: list[BaseException] = []
     current: BaseException | None = exc
-    while current is not None and len(messages) < 6:
-        messages.append(str(current))
+    while current is not None and len(errors) < 8:
+        errors.append(current)
         current = current.__cause__
-    detail = " ".join(messages).lower()
-    if "timed out" in detail or "connection refused" in detail or "502" in detail:
+    return errors
+
+
+def _single_scan_error_detail(exc: BaseException) -> str:
+    return " ".join(str(error) for error in _single_scan_error_chain(exc)).lower()
+
+
+def _single_scan_failure_is_retryable(exc: BaseException) -> bool:
+    errors = _single_scan_error_chain(exc)
+    if any(
+        isinstance(error, (OKXAPIError, HTTPError, URLError, TimeoutError, ConnectionError))
+        for error in errors
+    ):
+        return True
+    detail = _single_scan_error_detail(exc)
+    return any(
+        marker in detail
+        for marker in (
+            "timed out",
+            "timeout",
+            "connection refused",
+            "connection reset",
+            "remote end closed",
+            "temporary failure",
+            "name resolution",
+            "rate limit",
+            "code=50004",
+            "code=50011",
+            " 429",
+            " 502",
+            " 503",
+            " 504",
+        )
+    )
+
+
+def _single_scan_retry_delay(exc: BaseException) -> float:
+    detail = _single_scan_error_detail(exc)
+    if "429" in detail or "code=50011" in detail or "rate limit" in detail:
+        return 2.25
+    return 0.75
+
+
+def _single_scan_failure_message(exc: Exception) -> str:
+    detail = _single_scan_error_detail(exc)
+    if any(
+        marker in detail
+        for marker in (
+            "timed out",
+            "timeout",
+            "connection refused",
+            "connection reset",
+            "remote end closed",
+            "temporary failure",
+            "name resolution",
+            "502",
+            "503",
+            "504",
+        )
+    ):
         return (
-            "OKX 公開行情目前連線失敗；系統已嘗試官方主端點與備援端點。"
+            "OKX 公開行情目前連線失敗；系統已自動重試官方主端點與備援端點。"
             "這不是幣種或訊號失效，請稍後再試。"
         )
     if "429" in detail or "code=50011" in detail or "rate limit" in detail:
-        return "OKX 暫時限制請求頻率；這不是幣種失效，請約 10 秒後再試。"
+        return (
+            "OKX 暫時限制請求頻率；系統已自動等待並重試。"
+            "這不是幣種失效，請約 10 秒後再試。"
+        )
     if "k 線" in detail:
         return (
-            "OKX 最新 K 線目前無法完整取得；不是訊號失效。"
+            "OKX 最新 K 線自動重試後仍無法完整取得；不是訊號失效。"
             "系統沒有拿缺漏週期硬算，請稍後再試。"
         )
-    return "OKX 最新單幣資料暫時無法完成分析；這不是幣種失效，請稍後再試。"
+    return (
+        "OKX 最新單幣資料自動重試後仍無法完成分析；"
+        "這不是幣種失效，請稍後再試。"
+    )
 
 
 def _normalize_horizon(value: Any) -> str | None:
@@ -1260,30 +1326,57 @@ class RadarRuntime:
                     active_signal = active_loader(normalized_id, stored_horizon)
                     if active_signal is not None:
                         stored_signals[stored_horizon] = active_signal
-            try:
-                analyzer_parameters = inspect.signature(analyzer).parameters
-                analyzer_args: dict[str, Any] = {}
-                if "market_bias" in analyzer_parameters:
-                    analyzer_args["market_bias"] = market_bias
-                if "long_market_bias" in analyzer_parameters:
-                    analyzer_args["long_market_bias"] = long_market_bias
-                if "btc_bias" in analyzer_parameters:
-                    analyzer_args["btc_bias"] = btc_bias
-                if "long_btc_bias" in analyzer_parameters:
-                    analyzer_args["long_btc_bias"] = long_btc_bias
-                if "requested_horizon" in analyzer_parameters:
-                    analyzer_args["requested_horizon"] = requested_horizon
-                analysis = analyzer(normalized_id, **analyzer_args)
-            except ValueError as exc:
-                raise PreflightError(HTTPStatus.UNPROCESSABLE_ENTITY, str(exc)) from exc
-            except Exception as exc:
-                LOGGER.exception("Single-instrument scan failed for %s", normalized_id)
+            analyzer_parameters = inspect.signature(analyzer).parameters
+            analyzer_args: dict[str, Any] = {}
+            if "market_bias" in analyzer_parameters:
+                analyzer_args["market_bias"] = market_bias
+            if "long_market_bias" in analyzer_parameters:
+                analyzer_args["long_market_bias"] = long_market_bias
+            if "btc_bias" in analyzer_parameters:
+                analyzer_args["btc_bias"] = btc_bias
+            if "long_btc_bias" in analyzer_parameters:
+                analyzer_args["long_btc_bias"] = long_btc_bias
+            if "requested_horizon" in analyzer_parameters:
+                analyzer_args["requested_horizon"] = requested_horizon
+
+            analysis = None
+            for attempt in range(2):
+                try:
+                    analysis = analyzer(normalized_id, **analyzer_args)
+                    break
+                except ValueError as exc:
+                    raise PreflightError(
+                        HTTPStatus.UNPROCESSABLE_ENTITY,
+                        str(exc),
+                    ) from exc
+                except Exception as exc:
+                    if attempt == 0 and _single_scan_failure_is_retryable(exc):
+                        delay = _single_scan_retry_delay(exc)
+                        LOGGER.warning(
+                            "Transient single-instrument scan failure for %s; "
+                            "retrying once after %.2fs: %s",
+                            normalized_id,
+                            delay,
+                            exc,
+                        )
+                        time.sleep(delay)
+                        continue
+                    LOGGER.exception(
+                        "Single-instrument scan failed for %s",
+                        normalized_id,
+                    )
+                    raise PreflightError(
+                        HTTPStatus.BAD_GATEWAY,
+                        _single_scan_failure_message(exc),
+                    ) from exc
+                finally:
+                    self._release_scanner_transient_data()
+
+            if analysis is None:  # pragma: no cover - loop exits by return or exception
                 raise PreflightError(
                     HTTPStatus.BAD_GATEWAY,
-                    _single_scan_failure_message(exc),
-                ) from exc
-            finally:
-                self._release_scanner_transient_data()
+                    "OKX 最新單幣資料暫時無法完成分析，請稍後再試。",
+                )
 
         def horizon_payload(result: Any, horizon: str) -> dict[str, Any]:
             if requested_horizon != "BOTH" and requested_horizon != horizon:
