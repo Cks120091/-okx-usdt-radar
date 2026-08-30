@@ -92,7 +92,7 @@ class V33ContractTests(unittest.TestCase):
         self.assertIn("function isExpiredSnapshot(item)", html)
         self.assertIn("⏱ 資料已過期", html)
         self.assertIn("資料已過期｜原快照", html)
-        self.assertIn("label='幣種掃描（更新判定）'", html)
+        self.assertIn("label='幣種掃描'", html)
         self.assertIn("reportBecameStale", html)
         self.assertIn("overflow-x:hidden", html)
         self.assertIn("env(safe-area-inset-bottom)", html)
@@ -111,7 +111,7 @@ class V33ContractTests(unittest.TestCase):
         self.assertIn(".primary-nav{grid-row:5;position:relative", html)
         self.assertIn("grid-template-columns:repeat(4,minmax(0,1fr))", html)
         self.assertIn(".decision-actions{display:grid;grid-template-columns:repeat(2,minmax(0,1fr))", html)
-        self.assertIn("okx-radar-shell-v3.5-card-direction-lock-1", service_worker)
+        self.assertIn("okx-radar-shell-v3.5-split-refresh-1", service_worker)
         self.assertIn("市場自動計畫", html)
         self.assertIn("plan.adaptive_market_plan", html)
         self.assertIn("plan.market_plan_sources", html)
@@ -195,10 +195,11 @@ class V33ContractTests(unittest.TestCase):
         self.assertNotIn("開發者資料（Raw Data）", html)
         self.assertNotIn("分組績效 JSON", html)
         self.assertNotIn("raw_indicators", html)
-        self.assertIn("幣種掃描（更新判定）", html)
+        self.assertIn("⚡ 進場前更新", html)
+        self.assertIn("重新取得最新成交資料", html)
         self.assertIn("進場檢查", html)
         self.assertIn("/api/preflight", html)
-        self.assertIn("只更新或重新分析這一個幣，不重新掃描全市場", html)
+        self.assertIn("只更新現價、深度、滑價與成本，不重新分析多週期方向", html)
         self.assertIn("原始 Trigger（價格觸發）沒有被修改", html)
         self.assertIn("data-preflight-id", html)
         self.assertIn("function preflightPlainGuide(data)", html)
@@ -218,7 +219,7 @@ class V33ContractTests(unittest.TestCase):
         self.assertIn("function signalTriggerTime(item)", html)
         self.assertIn("訊號觸發時間（台灣）", html)
         self.assertNotIn("status!=='ENTRY_READY'&&status!=='MISSED_ENTRY'", html)
-        self.assertIn("okx-radar-shell-v3.5-card-direction-lock-1", service_worker)
+        self.assertIn("okx-radar-shell-v3.5-split-refresh-1", service_worker)
         self.assertIn("$('#preflightRefresh').addEventListener('click',loadPreflight)", html)
         self.assertIn("'#waitRetestBox','#longWaitRetestBox'", html)
         self.assertIn("scanAction=includeInstrument", html)
@@ -228,7 +229,8 @@ class V33ContractTests(unittest.TestCase):
         self.assertNotIn("OPPOSITE_WARNING", html)
         self.assertNotIn("CONFIRMED_REVERSAL", html)
         self.assertNotIn("二次反轉確認", html)
-        self.assertIn("同時核對舊訊號、最新收盤與成交條件", html)
+        self.assertIn("重新分析最新多週期資料", html)
+        self.assertIn("不重新掃描多週期 K 線", html)
         self.assertIn("訊號觸發時間（台灣）", html)
         self.assertIn("15m 短線歷史", html)
         self.assertIn("4H 長線歷史", html)
@@ -244,7 +246,7 @@ class V33ContractTests(unittest.TestCase):
             Path(__file__).parents[1] / "radar" / "service.py"
         ).read_text(encoding="utf-8"))
         self.assertIn("幣種掃描", html)
-        self.assertIn("正在統一更新判定", html)
+        self.assertIn("正在掃描這一個幣", html)
         self.assertIn("/api/instrument/scan", html)
         self.assertIn("data-instrument-id", html)
         self.assertIn("function openInstrument(instId,{scanNow=true,horizon='BOTH',directionLock=''}={})", html)
@@ -256,7 +258,7 @@ class V33ContractTests(unittest.TestCase):
         self.assertIn("每次按下都重新取得最新公開資料", html)
         self.assertNotIn("<canvas", html)
         self.assertIn(
-            "function instrumentButton(instId,label='幣種掃描（更新判定）',horizon='BOTH',directionLock='')",
+            "function instrumentButton(instId,label='幣種掃描',horizon='BOTH',directionLock='')",
             html,
         )
         self.assertIn("data-instrument-horizon", html)
@@ -486,7 +488,9 @@ class V33ContractTests(unittest.TestCase):
             "function timeframeGrid", 1
         )[0]
         self.assertIn("const entry=item.entry_eligibility||{}", decision_panel)
-        self.assertIn("instrumentButton(item.inst_id,'幣種掃描（更新判定）'", decision_panel)
+        self.assertIn("instrumentButton(item.inst_id,'幣種掃描'", decision_panel)
+        self.assertIn("data-preflight-id", decision_panel)
+        self.assertIn("⚡ 進場前更新", decision_panel)
         self.assertNotIn("finalDecisionPanel", decision_panel)
         self.assertNotIn("decisionContext", decision_panel)
         self.assertIn(
@@ -617,7 +621,7 @@ class V33ContractTests(unittest.TestCase):
         self.assertIn("payload.closed_item", html)
         self.assertIn("previous?[item,previous]:[item]", html)
         self.assertIn("等待新的 Trigger 與全新交易計畫", html)
-        self.assertIn("okx-radar-shell-v3.5-card-direction-lock-1", worker)
+        self.assertIn("okx-radar-shell-v3.5-split-refresh-1", worker)
 
     def test_market_scan_has_no_github_schedule(self):
         root = Path(__file__).parents[1]

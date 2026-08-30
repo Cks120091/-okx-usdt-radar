@@ -2029,51 +2029,18 @@ class RadarRuntime:
         }
 
     def preflight_dict(self, inst_id: str, horizon: str) -> dict[str, Any]:
-        """Run the canonical single-symbol refresh for one stored signal."""
+        """Refresh execution conditions for one stored signal only.
+
+        This is intentionally separate from ``scan_instrument_dict``.  A
+        preflight refresh reuses the stored Trigger and trade plan and fetches
+        only the latest ticker and execution context; a coin scan performs the
+        full multi-timeframe analysis.
+        """
 
         normalized_id = str(inst_id or "").strip().upper()
         normalized_horizon = _normalize_horizon(horizon)
         if not normalized_id.endswith("-USDT-SWAP") or normalized_horizon is None:
             raise PreflightError(HTTPStatus.BAD_REQUEST, "幣種或長短線參數不正確")
-
-        # Production uses one canonical source for both the card's
-        # "更新現狀" action and the dedicated coin scan page.  Lightweight
-        # scanner fixtures without scan_instrument keep the compatibility path
-        # below for deterministic unit tests and offline integrations.
-        if callable(getattr(self.scanner, "scan_instrument", None)):
-            direction_lock = None
-            with self._state_lock:
-                if self._latest is not None:
-                    collection = (
-                        self._latest.long_signals
-                        if normalized_horizon == "LONG"
-                        else self._latest.signals
-                    )
-                    stored = next(
-                        (item for item in collection if item.inst_id == normalized_id),
-                        None,
-                    )
-                    if stored is not None:
-                        direction_lock = stored.direction
-            repository = getattr(self.scanner, "repository", None)
-            active_loader = getattr(repository, "load_active_signal", None)
-            if callable(active_loader):
-                stored = active_loader(normalized_id, normalized_horizon)
-                if stored is not None:
-                    direction_lock = stored.direction
-            refreshed = self.scan_instrument_dict(
-                normalized_id,
-                normalized_horizon,
-                direction_lock,
-            )
-            side = refreshed["long" if normalized_horizon == "LONG" else "short"]
-            payload = side.get("preflight")
-            if payload is None:
-                raise PreflightError(
-                    HTTPStatus.NOT_FOUND,
-                    "目前沒有可核對的舊正式 Trigger；請以單幣最新分析結果為準",
-                )
-            return deepcopy(payload)
 
         with self._state_lock:
             system_status, _, _ = self._system_status_locked()

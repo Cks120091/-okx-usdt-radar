@@ -126,6 +126,16 @@ class PreflightScanner:
         self.client = client
 
 
+class FullCapablePreflightScanner(PreflightScanner):
+    def __init__(self, client: PreflightClient):
+        super().__init__(client)
+        self.single_scan_calls = 0
+
+    def scan_instrument(self, *args, **kwargs):
+        self.single_scan_calls += 1
+        raise AssertionError("進場前更新不應啟動多週期幣種掃描")
+
+
 class ReanalysisPreflightScanner(PreflightScanner):
     def __init__(self, client: PreflightClient, new_signal: Signal | None):
         super().__init__(client)
@@ -270,6 +280,21 @@ class PreflightTests(unittest.TestCase):
             self.assertEqual(payload["plan_state"]["new_entry_status"], "READY")
             self.assertEqual(item.market_metrics, original_metrics)
             self.assertEqual(item.execution_quality, original_quality)
+
+    def test_preflight_stays_separate_when_full_coin_scan_is_available(self):
+        with tempfile.TemporaryDirectory() as directory:
+            item = make_signal()
+            client = PreflightClient()
+            scanner = FullCapablePreflightScanner(client)
+            runtime = RadarRuntime(scanner, AppConfig(data_dir=directory))
+            runtime._latest = make_report(item)
+
+            payload = runtime.preflight_dict(item.inst_id, "SHORT")
+
+            self.assertEqual(payload["verdict"]["status"], "ENTRY_READY")
+            self.assertEqual(scanner.single_scan_calls, 0)
+            self.assertEqual(client.ticker_calls, 1)
+            self.assertEqual(client.context_calls, 1)
 
     def test_twelve_second_cache_prevents_duplicate_okx_requests(self):
         with tempfile.TemporaryDirectory() as directory:
