@@ -1,4 +1,3 @@
-import threading
 import time
 import unittest
 from dataclasses import replace
@@ -752,8 +751,8 @@ class ScannerTests(unittest.TestCase):
             "card_direction_locked_opposite",
         )
 
-    def test_on_demand_scan_parallelizes_sources_with_bounded_request_budget(self):
-        class BoundedParallelClient(ContextFakeClient):
+    def test_on_demand_scan_uses_isolated_sequential_request_path(self):
+        class SequentialClient(ContextFakeClient):
             def __init__(self):
                 super().__init__()
                 self.retries = 4
@@ -761,24 +760,20 @@ class ScannerTests(unittest.TestCase):
                 self.options = []
                 self.active_calls = 0
                 self.max_active_calls = 0
-                self.lock = threading.Lock()
 
             def _timed(self, source, request_retries, request_timeout_seconds, result):
-                with self.lock:
-                    self.options.append(
-                        (source, request_retries, request_timeout_seconds)
-                    )
-                    self.active_calls += 1
-                    self.max_active_calls = max(
-                        self.max_active_calls,
-                        self.active_calls,
-                    )
+                self.options.append(
+                    (source, request_retries, request_timeout_seconds)
+                )
+                self.active_calls += 1
+                self.max_active_calls = max(
+                    self.max_active_calls,
+                    self.active_calls,
+                )
                 try:
-                    time.sleep(0.03)
                     return result()
                 finally:
-                    with self.lock:
-                        self.active_calls -= 1
+                    self.active_calls -= 1
 
             def get_usdt_swap_instrument(
                 self,
@@ -858,7 +853,7 @@ class ScannerTests(unittest.TestCase):
                     ),
                 )
 
-        client = BoundedParallelClient()
+        client = SequentialClient()
         scanner = MarketScanner(
             client,
             ScannerConfig(min_quote_volume_24h=0, universe_max_spread_pct=1.0),
@@ -870,21 +865,22 @@ class ScannerTests(unittest.TestCase):
         )
 
         self.assertIsNotNone(analysis.short_result)
-        self.assertGreaterEqual(client.max_active_calls, 2)
-        self.assertIn("context", {source for source, _, _ in client.options})
-        for source, retries, timeout in client.options:
-            if source == "context":
-                self.assertEqual((retries, timeout), (0, 4.0))
-            elif source in {
+        self.assertEqual(client.max_active_calls, 1)
+        self.assertEqual(
+            [source for source, _, _ in client.options],
+            [
                 "instrument",
                 "ticker",
                 "candles:4H",
                 "candles:1H",
                 "candles:15m",
-            }:
-                self.assertEqual((retries, timeout), (2, 10.0))
-            else:
-                self.assertEqual((retries, timeout), (1, 6.0))
+                "open_interest",
+                "candles:5m",
+                "context",
+            ],
+        )
+        for _, retries, timeout in client.options:
+            self.assertEqual((retries, timeout), (None, None))
 
     def test_single_reanalysis_uses_latest_multiframe_data_and_rejects_missed_plan(self):
         previous = Signal(

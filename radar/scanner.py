@@ -1063,16 +1063,17 @@ class MarketScanner:
         include_short = requested_horizon in {"SHORT", "BOTH"}
         include_long = requested_horizon in {"LONG", "BOTH"}
 
+        # Keep the on-demand coin scan on its original isolated request path.
+        # These calls are intentionally sequential: the pre-merge flow was
+        # reliable on a small Render instance because one symbol never opened
+        # several competing OKX connections at once.  The newer card lifecycle
+        # and plan reconciliation remain below; only data acquisition is
+        # restored to the independent path.
         instrument_loader = getattr(self.client, "get_usdt_swap_instrument", None)
-        def load_instrument() -> Instrument | None:
-            if callable(instrument_loader):
-                return self._single_scan_call(
-                    instrument_loader,
-                    inst_id,
-                    _retry_limit=2,
-                    _timeout_limit=10.0,
-                )
-            return next(
+        if callable(instrument_loader):
+            instrument = instrument_loader(inst_id)
+        else:
+            instrument = next(
                 (
                     item
                     for item in self.client.get_usdt_swap_instruments()
@@ -1080,8 +1081,17 @@ class MarketScanner:
                 ),
                 None,
             )
+        if instrument is None:
+            raise ValueError("OKX 最新 live USDT 永續清單中找不到這個幣種")
 
         ticker_loader = getattr(self.client, "get_ticker", None)
+        if callable(ticker_loader):
+            ticker = ticker_loader(inst_id)
+        else:
+            ticker = self.client.get_swap_tickers().get(inst_id)
+            if ticker is None:
+                raise ValueError("OKX 最新 Ticker 中找不到這個幣種")
+
         requested_bars = (
             ("1D", "4H", "1H")
             if include_long and not include_short
@@ -1092,102 +1102,36 @@ class MarketScanner:
             bars_to_fetch.append("1D")
         if include_short:
             bars_to_fetch.append("5m")
+        core_bars = [bar for bar in bars_to_fetch if bar != "5m"]
 
         oi_loader = getattr(self.client, "get_open_interest_for", None)
         bulk_oi_loader = getattr(self.client, "get_open_interest_usd", None)
         context_loader = getattr(self.client, "get_market_context", None)
         context_applier = getattr(self.engine, "apply_market_context", None)
 
-        def load_ticker() -> Ticker:
-            if callable(ticker_loader):
-                return self._single_scan_call(
-                    ticker_loader,
-                    inst_id,
-                    _retry_limit=2,
-                    _timeout_limit=10.0,
-                )
-            ticker_value = self.client.get_swap_tickers().get(inst_id)
-            if ticker_value is None:
-                raise ValueError("OKX 最新 Ticker 中找不到這個幣種")
-            return ticker_value
-
-        def load_open_interest() -> float | None:
-            if callable(oi_loader):
-                return self._single_scan_call(
-                    oi_loader,
-                    inst_id,
-                    _retry_limit=1,
-                    _timeout_limit=6.0,
-                )
-            if callable(bulk_oi_loader):
-                return bulk_oi_loader().get(inst_id)
-            return None
-
         errors: list[str] = []
-        bundle: dict[str, list[Candle]] = {}
+        bundle = self._fetch_bundle(inst_id, tuple(core_bars))
         bar_errors: dict[str, Exception] = {}
         open_interest_usd: float | None = None
         timing: list[Candle] = []
         loaded_context: MarketContext | None = None
-        core_bars = [bar for bar in bars_to_fetch if bar != "5m"]
-        with ThreadPoolExecutor(
-            max_workers=max(1, min(3, 2 + len(core_bars)))
-        ) as executor:
-            instrument_future = executor.submit(load_instrument)
-            ticker_future = executor.submit(load_ticker)
-            bar_futures = {
-                bar: executor.submit(self._single_scan_candles, inst_id, bar)
-                for bar in core_bars
-            }
-            try:
-                instrument = instrument_future.result()
-            except Exception as exc:
-                raise RuntimeError(f"合約資料取得失敗：{exc}") from exc
-            if instrument is None:
-                raise ValueError("OKX 最新 live USDT 永續清單中找不到這個幣種")
-            try:
-                ticker = ticker_future.result()
-            except Exception as exc:
-                raise RuntimeError(f"Ticker 即時價格取得失敗：{exc}") from exc
-            for bar, future in bar_futures.items():
-                try:
-                    candles = future.result()
-                except Exception as exc:
-                    bar_errors[bar] = exc
-                    continue
-                bundle[bar] = candles
+        try:
+            if callable(oi_loader):
+                open_interest_usd = oi_loader(inst_id)
+            elif callable(bulk_oi_loader):
+                open_interest_usd = bulk_oi_loader().get(inst_id)
+        except Exception as exc:
+            errors.append(f"Open Interest：{exc}")
 
-        # Core price data is fetched first with low concurrency.  Optional
-        # timing/OI/deep sources cannot compete with Entry/SL/TP inputs for
-        # outbound connections on a small deployment instance.
-        with ThreadPoolExecutor(max_workers=2) as executor:
-            oi_future = executor.submit(load_open_interest)
-            timing_future = (
-                executor.submit(self._single_scan_candles, inst_id, "5m")
-                if include_short
-                else None
-            )
+        if include_short:
             try:
-                open_interest_usd = oi_future.result()
+                timing = self._cached_or_fresh_candles(inst_id, "5m")
             except Exception as exc:
-                errors.append(f"Open Interest：{exc}")
-            if timing_future is not None:
-                try:
-                    timing = timing_future.result()
-                except Exception as exc:
-                    bar_errors["5m"] = exc
+                bar_errors["5m"] = exc
 
         if callable(context_loader) and callable(context_applier):
             try:
-                # Deep Data is deliberately last and optional.  Each source
-                # gets one short attempt, but cannot make core analysis fail.
-                loaded_context = self._single_scan_call(
-                    context_loader,
-                    inst_id,
-                    open_interest_usd,
-                    _retry_limit=0,
-                    _timeout_limit=4.0,
-                )
+                loaded_context = context_loader(inst_id, open_interest_usd)
             except Exception as exc:
                 errors.append(f"Context 整合失敗：{exc}")
 
