@@ -23,6 +23,7 @@ from .models import RadarReport
 from .preflight import build_preflight_payload
 from .public_payload import public_candidate_payload, public_report_payload
 from .push import PushSubscriptionError, build_push_notifier
+from .repository import terminal_card_retention_until
 from .reporting import (
     load_latest_report,
     load_runtime_state,
@@ -531,6 +532,9 @@ def _preflight_terminal_kind(payload: dict[str, Any] | None) -> str | None:
 def _project_persisted_preflight_terminal(
     payload: dict[str, Any],
     terminal_kind: str,
+    *,
+    observed_at: str = "",
+    horizon: str = "",
 ) -> None:
     """Make the response agree with the terminal outcome that won the CAS.
 
@@ -548,7 +552,7 @@ def _project_persisted_preflight_terminal(
             {
                 "status": "COMPLETED",
                 "situation": "TARGET_REACHED",
-                "label": "目標已達｜本次交易計畫完成",
+                "label": "已達止盈｜本次交易計畫完成",
                 "reason": "原始 TP1 已到達；舊計畫不可重新進場，請等待新的 Trigger。",
                 "actionable": False,
             }
@@ -556,7 +560,7 @@ def _project_persisted_preflight_terminal(
         lifecycle.update(
             {
                 "status": "TARGET_REACHED",
-                "label": "已觸發・目標已達",
+                "label": "已觸發・已達止盈",
                 "active": False,
                 "terminal": True,
                 "note": "本次交易計畫已完成；價格回到原 Entry 也不會復活舊訊號。",
@@ -569,7 +573,7 @@ def _project_persisted_preflight_terminal(
             {
                 "status": "PLAN_INVALIDATED",
                 "situation": "INVALIDATED",
-                "label": "交易計畫已失效｜等待全新 Trigger",
+                "label": "已達止損｜本次交易計畫結束",
                 "reason": "原始 SL／失效位已被突破；同一筆訊號永久結束。",
                 "actionable": False,
             }
@@ -577,7 +581,7 @@ def _project_persisted_preflight_terminal(
         lifecycle.update(
             {
                 "status": "INVALIDATED",
-                "label": "已觸發・已失效",
+                "label": "已觸發・已達止損",
                 "active": False,
                 "terminal": True,
                 "note": "原交易計畫永久失效；必須等待新的 Trigger／REENTRY。",
@@ -609,6 +613,12 @@ def _project_persisted_preflight_terminal(
         )
         plan_status = "CLOSED_UNKNOWN"
         direction_still_valid = False
+    if observed_at:
+        lifecycle["closed_at"] = observed_at
+        lifecycle["retention_until"] = terminal_card_retention_until(
+            observed_at,
+            horizon,
+        )
     plan.update(
         {
             "status": plan_status,
@@ -790,17 +800,18 @@ class RadarRuntime:
         self._progress: dict[str, Any] = self._idle_progress()
 
     def _prune_restored_terminal_cards(self) -> None:
-        """Remove exact CLOSED episodes accidentally retained in latest.json.
+        """Move exact CLOSED episodes into their bounded review collections.
 
         SQLite owns the Signal Episode lifecycle.  A prior report-file write
-        can fail after the terminal CAS succeeds, so startup reconciles only
-        exact trigger identities and never removes a newer episode or the
-        unrelated horizon.
+        can fail after the terminal CAS succeeds, so startup reconciles exact
+        trigger identities, restores recent TP/SL cards, and never removes a
+        newer active Episode or the unrelated horizon.
         """
 
         report = self._latest
         repository = getattr(self.scanner, "repository", None)
         terminal_loader = getattr(repository, "preflight_terminal_kind", None)
+        recent_loader = getattr(repository, "recent_terminal_signals", None)
         if report is None or not callable(terminal_loader):
             return
 
@@ -829,12 +840,29 @@ class RadarRuntime:
                 output.append(item)
             return output
 
+        short_closed = list(report.closed_signals)
+        long_closed = list(report.long_closed_signals)
+        if callable(recent_loader):
+            try:
+                short_closed = recent_loader("SHORT")
+                long_closed = recent_loader("LONG")
+            except Exception:
+                LOGGER.exception("Failed to restore recent terminal cards")
         updated_report = replace(
             report,
             signals=retained(list(report.signals)),
+            closed_signals=short_closed,
             long_signals=retained(list(report.long_signals)),
+            long_closed_signals=long_closed,
         )
-        if not changed:
+        previous_terminal_ids = {
+            item.trigger_id
+            for item in [*report.closed_signals, *report.long_closed_signals]
+        }
+        restored_terminal_ids = {
+            item.trigger_id for item in [*short_closed, *long_closed]
+        }
+        if not changed and previous_terminal_ids == restored_terminal_ids:
             return
         self._latest = updated_report
         try:
@@ -1397,6 +1425,7 @@ class RadarRuntime:
                 else None
             )
             preflight = None
+            persisted_terminal_kind = None
             if stored_signal is not None:
                 try:
                     preflight = build_preflight_payload(
@@ -1423,7 +1452,7 @@ class RadarRuntime:
                             horizon,
                             normalized_id,
                         )
-                        self._persist_preflight_terminal(
+                        persisted_terminal_kind = self._persist_preflight_terminal(
                             repository=getattr(self.scanner, "repository", None),
                             signal=stored_signal,
                             payload=preflight,
@@ -1521,6 +1550,59 @@ class RadarRuntime:
             fresh_item = fresh_signal or result.market_state
             item = fresh_item
             is_signal_item = fresh_signal is not None
+            closed_item_payload = None
+            stored_trigger_id = str(
+                getattr(stored_signal, "trigger_id", "") or ""
+            )
+            fresh_trigger_id = str(
+                getattr(fresh_signal, "trigger_id", "") or ""
+            )
+            independent_new_episode = bool(
+                stored_signal is not None
+                and fresh_signal is not None
+                and stored_trigger_id
+                and fresh_trigger_id
+                and stored_trigger_id != fresh_trigger_id
+                and persisted_terminal_kind in {"COMPLETED", "INVALIDATED"}
+            )
+            if independent_new_episode:
+                # The old Episode reached TP/SL on the same refresh that the
+                # repository accepted a genuinely newer Trigger.  Keep the
+                # terminal card as a separate payload and let the main item be
+                # the new plan; attaching the old preflight to it would replace
+                # its new Entry/SL/TP with the closed plan in the UI.
+                terminal_signal = None
+                terminal_loader = getattr(
+                    getattr(self.scanner, "repository", None),
+                    "load_terminal_signal",
+                    None,
+                )
+                if callable(terminal_loader):
+                    terminal_signal = terminal_loader(stored_signal)
+                if terminal_signal is None:
+                    with self._state_lock:
+                        latest = self._latest
+                        terminal_collection = (
+                            list(latest.long_closed_signals)
+                            if latest is not None and horizon == "LONG"
+                            else list(latest.closed_signals)
+                            if latest is not None
+                            else []
+                        )
+                    terminal_signal = next(
+                        (
+                            candidate
+                            for candidate in terminal_collection
+                            if candidate.trigger_id == stored_trigger_id
+                        ),
+                        None,
+                    )
+                if terminal_signal is not None:
+                    closed_item_payload = public_candidate_payload(
+                        terminal_signal,
+                        signal=True,
+                    )
+                preflight = None
             if stored_signal is not None and preflight is not None:
                 # A live Signal Episode owns its direction and original
                 # Entry/SL/TP until terminal invalidation/completion.  A fresh
@@ -1761,6 +1843,7 @@ class RadarRuntime:
                     if item is not None
                     else None
                 ),
+                "closed_item": closed_item_payload,
                 "preflight": preflight,
                 "latest_confirmation": confirmation,
                 "decision_context": canonical_decision,
@@ -2341,6 +2424,7 @@ class RadarRuntime:
                 return replace(
                     report,
                     long_signals=[],
+                    long_closed_signals=[],
                     long_watchlist=[],
                     long_market_map=[],
                     long_market_bias={},
@@ -2354,6 +2438,7 @@ class RadarRuntime:
             return replace(
                 report,
                 long_signals=previous.long_signals,
+                long_closed_signals=previous.long_closed_signals,
                 long_watchlist=previous.long_watchlist,
                 long_market_map=previous.long_market_map,
                 long_market_bias=previous.long_market_bias,
@@ -2371,6 +2456,7 @@ class RadarRuntime:
             return replace(
                 report,
                 signals=[],
+                closed_signals=[],
                 watchlist=[],
                 market_map=[],
                 market_regime_counts={},
@@ -2385,6 +2471,7 @@ class RadarRuntime:
         return replace(
             report,
             signals=previous.signals,
+            closed_signals=previous.closed_signals,
             watchlist=previous.watchlist,
             market_map=previous.market_map,
             market_regime_counts=previous.market_regime_counts,
@@ -2639,7 +2726,51 @@ class RadarRuntime:
         if persisted_kind is None:
             return None
 
-        _project_persisted_preflight_terminal(payload, persisted_kind)
+        _project_persisted_preflight_terminal(
+            payload,
+            persisted_kind,
+            observed_at=observed_at,
+            horizon=horizon,
+        )
+        exact_terminal_loader = getattr(repository, "load_terminal_signal", None)
+        terminal_signal = (
+            exact_terminal_loader(signal)
+            if callable(exact_terminal_loader)
+            else None
+        )
+        if terminal_signal is None:
+            stage = (
+                "COMPLETED"
+                if persisted_kind == "COMPLETED"
+                else "INVALIDATED"
+                if persisted_kind == "INVALIDATED"
+                else "CLOSED_UNKNOWN"
+            )
+            verdict = dict(payload.get("verdict", {}) or {})
+            lifecycle = {
+                **dict(getattr(signal, "lifecycle", {}) or {}),
+                **dict(payload.get("signal_lifecycle", {}) or {}),
+            }
+            eligibility = dict(getattr(signal, "entry_eligibility", {}) or {})
+            eligibility.update(
+                {
+                    "status": stage,
+                    "label": verdict.get("label"),
+                    "reason": verdict.get("reason"),
+                    "actionable": False,
+                    "new_entry_allowed": False,
+                }
+            )
+            terminal_signal = replace(
+                signal,
+                signal_stage=stage,
+                freshness=(
+                    "COMPLETED" if stage == "COMPLETED" else "INVALIDATED"
+                ),
+                lifecycle=lifecycle,
+                entry_eligibility=eligibility,
+                actionable=False,
+            )
 
         with self._state_lock:
             self._terminal_preflight_outcomes[cache_key] = persisted_kind
@@ -2651,28 +2782,46 @@ class RadarRuntime:
             if current_report is None:
                 return persisted_kind
             field_name = "long_signals" if horizon == "LONG" else "signals"
+            closed_field_name = (
+                "long_closed_signals" if horizon == "LONG" else "closed_signals"
+            )
             current_items = list(getattr(current_report, field_name))
             retained_items = [
                 item
                 for item in current_items
                 if item.trigger_id != signal.trigger_id
             ]
-            if len(retained_items) == len(current_items):
-                return persisted_kind
+            closed_items = [
+                item
+                for item in list(getattr(current_report, closed_field_name))
+                if item.trigger_id != signal.trigger_id
+            ]
+            if persisted_kind in {"COMPLETED", "INVALIDATED"}:
+                closed_items.append(terminal_signal)
+                closed_items.sort(
+                    key=lambda item: str(
+                        getattr(item, "lifecycle", {}).get("closed_at") or ""
+                    ),
+                    reverse=True,
+                )
+                closed_items = closed_items[:100]
             updated_report = replace(
                 current_report,
-                **{field_name: retained_items},
+                **{
+                    field_name: retained_items,
+                    closed_field_name: closed_items,
+                },
             )
             # SQLite has already committed the terminal CAS, so the public
-            # in-memory view must stop exposing this card even if the report
-            # file write fails. Startup performs the same exact-episode prune
-            # against SQLite before publishing a restored latest.json.
+            # in-memory view must move this card out of ACTIVE even if the
+            # report-file write fails. Startup rebuilds the bounded terminal
+            # collections from SQLite before publishing a restored latest.json.
             self._latest = updated_report
             try:
                 save_report(updated_report, self.config.data_dir)
             except Exception:
                 LOGGER.exception(
-                    "Failed to persist terminal-card cleanup for %s %s",
+                    "Failed to persist terminal-card transition for %s %s",
                     signal.inst_id,
                     horizon,
                 )

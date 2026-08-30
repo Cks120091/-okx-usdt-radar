@@ -480,6 +480,95 @@ class TargetReachedSingleScanner(SingleInstrumentScanner):
         return analysis
 
 
+class RolloverRepository:
+    def __init__(self, old_signal, new_signal):
+        self.active_signal = old_signal
+        self.old_signal = old_signal
+        self.new_signal = new_signal
+        closed_at = datetime.now(timezone.utc)
+        self.terminal_signal = Signal.from_dict(old_signal.to_dict())
+        self.terminal_signal.signal_stage = "COMPLETED"
+        self.terminal_signal.freshness = "COMPLETED"
+        self.terminal_signal.actionable = False
+        self.terminal_signal.lifecycle = {
+            **self.terminal_signal.lifecycle,
+            "status": "COMPLETED",
+            "terminal_status": "COMPLETED",
+            "terminal": True,
+            "entry_ready_once": True,
+            "closed_at": closed_at.isoformat(),
+            "retention_until": (closed_at + timedelta(hours=5)).isoformat(),
+        }
+        self.terminal_signal.entry_eligibility = {
+            "status": "COMPLETED",
+            "label": "已達止盈｜本次交易計畫完成",
+            "actionable": False,
+            "new_entry_allowed": False,
+        }
+
+    def load_active_signal(self, inst_id, horizon):
+        active = self.active_signal
+        if (
+            active is not None
+            and active.inst_id == inst_id
+            and active.radar_horizon == horizon
+        ):
+            return active
+        return None
+
+    def complete_preflight_plan(self, signal_item, observed_at):
+        return False
+
+    def preflight_terminal_kind(self, signal_item):
+        if signal_item.trigger_id == self.old_signal.trigger_id:
+            return "COMPLETED"
+        return None
+
+    def load_terminal_signal(self, signal_item):
+        if signal_item.trigger_id == self.old_signal.trigger_id:
+            return self.terminal_signal
+        return None
+
+
+class NewTriggerAfterTargetScanner(SingleInstrumentScanner):
+    def __init__(self, old_signal, new_signal):
+        super().__init__()
+        self.new_signal = new_signal
+        self.repository = RolloverRepository(old_signal, new_signal)
+
+    def scan_instrument(
+        self,
+        inst_id,
+        market_bias,
+        long_market_bias=None,
+        btc_bias="NEUTRAL",
+        long_btc_bias="NEUTRAL",
+        requested_horizon="BOTH",
+    ):
+        analysis = super().scan_instrument(
+            inst_id,
+            market_bias,
+            long_market_bias,
+            btc_bias,
+            long_btc_bias,
+            requested_horizon,
+        )
+        analysis.ticker = Ticker(
+            analysis.inst_id,
+            106.0,
+            105.99,
+            106.01,
+            int(time.time() * 1000),
+        )
+        analysis.short_result = SimpleNamespace(
+            signal=self.new_signal,
+            market_state=analysis.short_result.market_state,
+            reason="new_signal_found",
+        )
+        self.repository.active_signal = self.new_signal
+        return analysis
+
+
 class FailingScanner:
     def scan_once(self, progress=None, scan_id=None):
         raise RuntimeError("fixture scan failure")
@@ -1244,6 +1333,17 @@ class RuntimeSafetyTests(unittest.TestCase):
             self.assertEqual(scanner.repository.complete_calls, 1)
             self.assertEqual(runtime._latest.signals, [])
             self.assertEqual(
+                [item.trigger_id for item in runtime._latest.closed_signals],
+                ["short-episode-old"],
+            )
+            self.assertEqual(
+                runtime._latest.closed_signals[0].entry_eligibility["label"],
+                "已達止盈｜本次交易計畫完成",
+            )
+            self.assertTrue(
+                runtime._latest.closed_signals[0].lifecycle["retention_until"]
+            )
+            self.assertEqual(
                 runtime._latest.long_signals[0].trigger_id,
                 "long-episode-untouched",
             )
@@ -1267,6 +1367,61 @@ class RuntimeSafetyTests(unittest.TestCase):
             refreshed = restored.scan_instrument_dict("AAA", "SHORT")
             self.assertIsNone(refreshed["short"]["preflight"])
             self.assertEqual(scanner.repository.complete_calls, 1)
+
+    def test_terminal_old_episode_and_new_trigger_are_returned_as_two_cards(self):
+        with tempfile.TemporaryDirectory() as directory:
+            current = report()
+            old_signal = allow_entry(current.signals[0])
+            old_signal.trigger_id = "old-completed-episode"
+            old_signal.lifecycle = {
+                "status": "ACTIVE",
+                "terminal": False,
+                "entry_ready_once": True,
+                "triggered_at": "2026-08-20T00:00:00+00:00",
+            }
+            new_signal = allow_entry(signal())
+            new_signal.trigger_id = "new-independent-episode"
+            new_signal.entry_low = "107"
+            new_signal.entry_high = "108"
+            new_signal.stop_loss = "103"
+            new_signal.take_profit_1 = "115"
+            new_signal.lifecycle = {
+                "status": "ACTIVE",
+                "terminal": False,
+                "entry_ready_once": True,
+                "triggered_at": "2026-08-20T00:15:00+00:00",
+            }
+            scanner = NewTriggerAfterTargetScanner(old_signal, new_signal)
+            runtime = RadarRuntime(scanner, AppConfig(data_dir=directory))
+            runtime._latest = current
+
+            payload = runtime.scan_instrument_dict("AAA", "SHORT")["short"]
+
+            self.assertEqual(payload["kind"], "SIGNAL")
+            self.assertIsNone(payload["preflight"])
+            self.assertEqual(
+                payload["item"]["trigger_id"],
+                "new-independent-episode",
+            )
+            self.assertEqual(payload["item"]["entry_low"], "107")
+            self.assertEqual(payload["item"]["stop_loss"], "103")
+            self.assertEqual(
+                payload["closed_item"]["trigger_id"],
+                "old-completed-episode",
+            )
+            self.assertEqual(
+                payload["closed_item"]["entry_eligibility"]["label"],
+                "已達止盈｜本次交易計畫完成",
+            )
+            self.assertNotEqual(
+                payload["item"]["trigger_id"],
+                payload["closed_item"]["trigger_id"],
+            )
+            self.assertEqual(runtime._latest.signals, [])
+            self.assertEqual(
+                runtime._latest.closed_signals[0].trigger_id,
+                "old-completed-episode",
+            )
 
     def test_durable_invalidation_wins_over_concurrent_live_target(self):
         with tempfile.TemporaryDirectory() as directory:
@@ -1431,6 +1586,14 @@ class RuntimeSafetyTests(unittest.TestCase):
             self.assertEqual(result, "COMPLETED")
             self.assertEqual(len(runtime._latest.signals), 1)
             self.assertEqual(runtime._latest.signals[0].trigger_id, "episode-new")
+            self.assertEqual(
+                [item.trigger_id for item in runtime._latest.closed_signals],
+                ["episode-old"],
+            )
+            self.assertNotEqual(
+                runtime._latest.closed_signals[0].trigger_id,
+                runtime._latest.signals[0].trigger_id,
+            )
 
     def test_push_config_is_exposed_without_a_private_key(self):
         with tempfile.TemporaryDirectory() as directory:
@@ -1582,6 +1745,25 @@ class RuntimeSafetyTests(unittest.TestCase):
                     "new_entry_allowed": False,
                 },
             }
+            closed = Signal.from_dict(item.to_dict())
+            closed.trigger_id = "closed-episode-public-id"
+            closed.signal_stage = "COMPLETED"
+            closed.freshness = "COMPLETED"
+            closed.lifecycle = {
+                **closed.lifecycle,
+                "status": "COMPLETED",
+                "terminal_status": "COMPLETED",
+                "terminal": True,
+                "entry_ready_once": True,
+                "closed_at": "2026-08-27T16:00:00+00:00",
+                "retention_until": "2026-08-27T21:00:00+00:00",
+            }
+            closed.entry_eligibility = {
+                "status": "COMPLETED",
+                "label": "已達止盈｜本次交易計畫完成",
+                "actionable": False,
+            }
+            current.closed_signals = [closed]
             market = MarketState(
                 inst_id="AAA-USDT-SWAP",
                 regime="TREND",
@@ -1677,6 +1859,21 @@ class RuntimeSafetyTests(unittest.TestCase):
                     "age_bars": 1,
                     "triggered_at": "2026-08-27T15:46:18+00:00",
                 },
+            )
+            self.assertEqual(
+                payload["closed_signals"][0]["trigger_id"],
+                "closed-episode-public-id",
+            )
+            self.assertEqual(
+                payload["closed_signals"][0]["lifecycle"]["retention_until"],
+                "2026-08-27T21:00:00+00:00",
+            )
+            self.assertTrue(
+                payload["closed_signals"][0]["lifecycle"]["entry_ready_once"]
+            )
+            self.assertNotIn(
+                "event_key",
+                payload["closed_signals"][0]["lifecycle"],
             )
             self.assertEqual(
                 payload["signals"][0]["decision_context"]["hard_gate"][

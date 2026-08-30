@@ -14,6 +14,20 @@ from urllib.request import Request, urlopen
 from .models import Candle, Instrument, MarketContext, Ticker
 
 
+def _request_overrides(
+    request_retries: int | None,
+    request_timeout_seconds: float | None,
+) -> dict[str, int | float]:
+    """Forward per-request limits only when a caller explicitly supplies them."""
+
+    options: dict[str, int | float] = {}
+    if request_retries is not None:
+        options["request_retries"] = request_retries
+    if request_timeout_seconds is not None:
+        options["request_timeout_seconds"] = request_timeout_seconds
+    return options
+
+
 class OKXAPIError(RuntimeError):
     """An OKX transport or application error with an optional exact code.
 
@@ -140,6 +154,9 @@ class OKXPublicClient:
         path: str,
         params: dict[str, Any],
         cache_ttl_seconds: float | None = None,
+        *,
+        request_retries: int | None = None,
+        request_timeout_seconds: float | None = None,
     ) -> list[Any]:
         if cache_ttl_seconds is None:
             cache_ttl_seconds = {
@@ -159,7 +176,17 @@ class OKXPublicClient:
         last_error: Exception | None = None
         attempt_errors: list[Exception] = []
         host_errors: dict[str, str] = {}
-        for attempt in range(self.retries + 1):
+        retry_limit = (
+            self.retries
+            if request_retries is None
+            else max(0, min(int(request_retries), self.retries))
+        )
+        timeout_seconds = (
+            self.timeout_seconds
+            if request_timeout_seconds is None
+            else max(1.0, min(float(request_timeout_seconds), self.timeout_seconds))
+        )
+        for attempt in range(retry_limit + 1):
             request_base_url = self.base_urls[attempt % len(self.base_urls)]
             url = f"{request_base_url}{path}?{query}"
             limiter = (
@@ -178,7 +205,7 @@ class OKXPublicClient:
                 },
             )
             try:
-                with urlopen(request, timeout=self.timeout_seconds) as response:
+                with urlopen(request, timeout=timeout_seconds) as response:
                     payload = json.loads(response.read().decode("utf-8"))
                 if str(payload.get("code")) != "0":
                     response_code = str(payload.get("code"))
@@ -214,7 +241,7 @@ class OKXPublicClient:
                 last_error = exc
                 attempt_errors.append(exc)
                 host_errors[urlparse(request_base_url).hostname or request_base_url] = str(exc)
-                if attempt >= self.retries:
+                if attempt >= retry_limit:
                     break
                 self._metric("retries")
                 delay = (0.45 * (2**attempt)) + random.uniform(0.0, 0.15)
@@ -250,13 +277,23 @@ class OKXPublicClient:
         self._instrument_meta = {item.inst_id: item for item in ordered}
         return ordered
 
-    def get_usdt_swap_instrument(self, inst_id: str) -> Instrument | None:
+    def get_usdt_swap_instrument(
+        self,
+        inst_id: str,
+        *,
+        request_retries: int | None = None,
+        request_timeout_seconds: float | None = None,
+    ) -> Instrument | None:
         """Fetch one live linear USDT perpetual selected by the user."""
 
         try:
             data = self._get(
                 "/api/v5/public/instruments",
                 {"instType": "SWAP", "instId": inst_id},
+                **_request_overrides(
+                    request_retries,
+                    request_timeout_seconds,
+                ),
             )
         except OKXAPIError as exc:
             # OKX answers an unknown ``instId`` with application error 51001
@@ -303,10 +340,23 @@ class OKXPublicClient:
             tickers[inst_id] = ticker
         return tickers
 
-    def get_ticker(self, inst_id: str) -> Ticker:
+    def get_ticker(
+        self,
+        inst_id: str,
+        *,
+        request_retries: int | None = None,
+        request_timeout_seconds: float | None = None,
+    ) -> Ticker:
         """Fetch one live ticker for an explicit user-requested preflight check."""
 
-        rows = self._get("/api/v5/market/ticker", {"instId": inst_id})
+        rows = self._get(
+            "/api/v5/market/ticker",
+            {"instId": inst_id},
+            **_request_overrides(
+                request_retries,
+                request_timeout_seconds,
+            ),
+        )
         row = next(
             (item for item in rows if str(item.get("instId", "")) == inst_id),
             None,
@@ -429,10 +479,22 @@ class OKXPublicClient:
             },
         )
 
-    def get_candles(self, inst_id: str, bar: str, limit: int = 100) -> list[Candle]:
+    def get_candles(
+        self,
+        inst_id: str,
+        bar: str,
+        limit: int = 100,
+        *,
+        request_retries: int | None = None,
+        request_timeout_seconds: float | None = None,
+    ) -> list[Candle]:
         data = self._get(
             "/api/v5/market/candles",
             {"instId": inst_id, "bar": bar, "limit": min(max(limit, 1), 300)},
+            **_request_overrides(
+                request_retries,
+                request_timeout_seconds,
+            ),
         )
         candles: list[Candle] = []
         for row in data:
@@ -468,12 +530,22 @@ class OKXPublicClient:
         }
         return output
 
-    def get_open_interest_for(self, inst_id: str) -> float | None:
+    def get_open_interest_for(
+        self,
+        inst_id: str,
+        *,
+        request_retries: int | None = None,
+        request_timeout_seconds: float | None = None,
+    ) -> float | None:
         """Fetch open interest for one instrument without loading the universe."""
 
         data = self._get(
             "/api/v5/public/open-interest",
             {"instType": "SWAP", "instId": inst_id},
+            **_request_overrides(
+                request_retries,
+                request_timeout_seconds,
+            ),
         )
         row = next(
             (item for item in data if str(item.get("instId", "")) == inst_id),
@@ -492,6 +564,9 @@ class OKXPublicClient:
         self,
         inst_id: str,
         open_interest_usd: float | None = None,
+        *,
+        request_retries: int | None = None,
+        request_timeout_seconds: float | None = None,
     ) -> MarketContext:
         failures: list[str] = []
         sampled_at = 0
@@ -514,7 +589,14 @@ class OKXPublicClient:
         execution_notional = max(0.0, getattr(self, "execution_notional_usdt", 0.0))
 
         try:
-            rows = self._get("/api/v5/public/funding-rate", {"instId": inst_id})
+            rows = self._get(
+                "/api/v5/public/funding-rate",
+                {"instId": inst_id},
+                **_request_overrides(
+                    request_retries,
+                    request_timeout_seconds,
+                ),
+            )
             if not rows:
                 raise OKXAPIError("empty funding-rate response")
             funding_rate = _float_or_none(rows[0].get("fundingRate"))
@@ -526,7 +608,14 @@ class OKXPublicClient:
             failures.append(f"funding_rate: {exc}")
 
         try:
-            rows = self._get("/api/v5/market/books", {"instId": inst_id, "sz": 20})
+            rows = self._get(
+                "/api/v5/market/books",
+                {"instId": inst_id, "sz": 20},
+                **_request_overrides(
+                    request_retries,
+                    request_timeout_seconds,
+                ),
+            )
             if not rows:
                 raise OKXAPIError("empty order-book response")
             bids = rows[0].get("bids", [])
@@ -565,7 +654,14 @@ class OKXPublicClient:
             failures.append(f"order_book: {exc}")
 
         try:
-            rows = self._get("/api/v5/market/trades", {"instId": inst_id, "limit": 100})
+            rows = self._get(
+                "/api/v5/market/trades",
+                {"instId": inst_id, "limit": 100},
+                **_request_overrides(
+                    request_retries,
+                    request_timeout_seconds,
+                ),
+            )
             buy_size = sum(_float(row.get("sz")) for row in rows if row.get("side") == "buy")
             sell_size = sum(_float(row.get("sz")) for row in rows if row.get("side") == "sell")
             total_size = buy_size + sell_size

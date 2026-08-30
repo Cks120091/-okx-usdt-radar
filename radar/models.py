@@ -241,7 +241,12 @@ class RadarReport:
     max_signals: int = 20
     api_metrics: dict[str, Any] = field(default_factory=dict)
     version: str = "3.4"
+    # Closed Signal Episodes remain visible for a short, horizon-specific
+    # review window without occupying an active-signal slot.  SHORT cards are
+    # retained for five hours and LONG cards for one day by the repository.
+    closed_signals: list[Signal] = field(default_factory=list)
     long_signals: list[Signal] = field(default_factory=list)
+    long_closed_signals: list[Signal] = field(default_factory=list)
     long_watchlist: list[MarketState] = field(default_factory=list)
     long_market_map: list[MarketState] = field(default_factory=list)
     data_quality: dict[str, Any] = field(default_factory=dict)
@@ -265,7 +270,13 @@ class RadarReport:
         payload["signals"] = [item.to_dict() for item in self.signals]
         payload["watchlist"] = [item.to_dict() for item in self.watchlist]
         payload["market_map"] = [item.to_dict() for item in self.market_map]
+        payload["closed_signals"] = [
+            item.to_dict() for item in self.closed_signals
+        ]
         payload["long_signals"] = [item.to_dict() for item in self.long_signals]
+        payload["long_closed_signals"] = [
+            item.to_dict() for item in self.long_closed_signals
+        ]
         payload["long_watchlist"] = [item.to_dict() for item in self.long_watchlist]
         payload["long_market_map"] = [item.to_dict() for item in self.long_market_map]
         payload["safety"] = {
@@ -292,8 +303,15 @@ class RadarReport:
         values["market_map"] = [
             MarketState.from_dict(item) for item in values.get("market_map", [])
         ]
+        values["closed_signals"] = [
+            Signal.from_dict(item) for item in values.get("closed_signals", [])
+        ]
         values["long_signals"] = [
             Signal.from_dict(item) for item in values.get("long_signals", [])
+        ]
+        values["long_closed_signals"] = [
+            Signal.from_dict(item)
+            for item in values.get("long_closed_signals", [])
         ]
         values["long_watchlist"] = [
             MarketState.from_dict(item) for item in values.get("long_watchlist", [])

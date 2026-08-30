@@ -30,6 +30,7 @@ _REPORT_FIELDS = (
 )
 
 _SIGNAL_FIELDS = (
+    "trigger_id",
     "inst_id",
     "direction",
     "strategy",
@@ -153,6 +154,10 @@ def public_report_payload(report: Any) -> dict[str, Any]:
         _public_candidate(item, signal=True)
         for item in _read(report, "signals", [])
     ]
+    payload["closed_signals"] = [
+        _public_candidate(item, signal=True)
+        for item in _read(report, "closed_signals", [])
+    ]
     payload["watchlist"] = [
         _public_candidate(item, signal=False)
         for item in _read(report, "watchlist", [])
@@ -164,6 +169,10 @@ def public_report_payload(report: Any) -> dict[str, Any]:
     payload["long_signals"] = [
         _public_candidate(item, signal=True)
         for item in _read(report, "long_signals", [])
+    ]
+    payload["long_closed_signals"] = [
+        _public_candidate(item, signal=True)
+        for item in _read(report, "long_closed_signals", [])
     ]
     payload["long_watchlist"] = [
         _public_candidate(item, signal=False)
@@ -213,7 +222,18 @@ def _public_candidate(item: Any, *, signal: bool) -> dict[str, Any]:
     )
     payload["lifecycle"] = _select(
         _read(item, "lifecycle", {}),
-        ("age_bars", "triggered_at"),
+        (
+            "age_bars",
+            "triggered_at",
+            "closed_at",
+            "retention_until",
+            "status",
+            "terminal_status",
+            "outcome",
+            "terminal",
+            "entry_ready_once",
+            "entry_ready_at",
+        ),
     )
     payload["execution_quality"] = _select(
         _read(item, "execution_quality", {}),

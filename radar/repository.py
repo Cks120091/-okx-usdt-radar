@@ -23,6 +23,27 @@ ACTIVE_STAGES = {
     "NO_FOLLOW_THROUGH",
 }
 
+TERMINAL_CARD_RETENTION_HOURS = {
+    "SHORT": 5,
+    "LONG": 24,
+}
+
+
+def terminal_card_retention_until(closed_at: str, horizon: str) -> str:
+    """Return the exact UI-retention deadline for a proven TP/SL outcome."""
+
+    normalized_horizon = str(horizon or "").strip().upper()
+    hours = TERMINAL_CARD_RETENTION_HOURS.get(normalized_horizon)
+    if hours is None:
+        return ""
+    try:
+        parsed = datetime.fromisoformat(str(closed_at).replace("Z", "+00:00"))
+    except (TypeError, ValueError):
+        return ""
+    if parsed.tzinfo is None:
+        parsed = parsed.replace(tzinfo=timezone.utc)
+    return (parsed.astimezone(timezone.utc) + timedelta(hours=hours)).isoformat()
+
 
 class SignalRepository:
     """SQLite state memory, duplicate lock, lifecycle and outcome ledger."""
@@ -537,19 +558,55 @@ class SignalRepository:
         lifecycle.update(
             {
                 "last_seen_at": observed_at,
+                "closed_at": observed_at,
+                "retention_until": terminal_card_retention_until(
+                    observed_at,
+                    persisted.radar_horizon,
+                ),
                 "previous_stage": row["stage"],
                 "current_stage": "INVALIDATED",
+                "status": "INVALIDATED",
+                "terminal_status": "INVALIDATED",
                 "transition": "PREFLIGHT_PLAN_INVALIDATED",
                 "outcome": "PREFLIGHT_STOP_CROSSED",
                 "tp_sl_order": "UNKNOWN_FROM_LIVE_TICKER",
+                "terminal": True,
+                "duplicate_locked": True,
             }
         )
+        entry_eligibility = dict(persisted.entry_eligibility)
+        entry_eligibility.update(
+            {
+                "status": "INVALIDATED",
+                "label": "已達止損｜本次交易計畫結束",
+                "reason": "最新價格已到達原始 SL／失效位；舊計畫永久結束。",
+                "actionable": False,
+                "new_entry_allowed": False,
+            }
+        )
+        decision_context = dict(persisted.decision_context)
+        final = dict(decision_context.get("final", {}) or {})
+        final.update(
+            {
+                "status": "INVALIDATED",
+                "label": "已達止損｜本次交易計畫結束",
+                "new_entry_allowed": False,
+                "trigger_preserved": False,
+                "wait_reason": {
+                    "code": "STOP_REACHED",
+                    "label": "等待新的 Trigger 與全新交易計畫",
+                },
+            }
+        )
+        decision_context["final"] = final
         updated = replace(
             persisted,
             signal_stage="INVALIDATED",
             freshness="INVALIDATED",
             lifecycle=lifecycle,
             actionable=False,
+            entry_eligibility=entry_eligibility,
+            decision_context=decision_context,
         )
         with self._write_scope():
             cursor = self._connection.execute(
@@ -643,6 +700,11 @@ class SignalRepository:
         lifecycle.update(
             {
                 "last_seen_at": observed_at,
+                "closed_at": observed_at,
+                "retention_until": terminal_card_retention_until(
+                    observed_at,
+                    persisted.radar_horizon,
+                ),
                 "previous_stage": row["stage"],
                 "current_stage": "COMPLETED",
                 "status": "COMPLETED",
@@ -658,7 +720,7 @@ class SignalRepository:
         entry_eligibility.update(
             {
                 "status": "COMPLETED",
-                "label": "目標已達｜本次交易計畫完成",
+                "label": "已達止盈｜本次交易計畫完成",
                 "reason": "最新價格已到達原始 TP1；舊計畫不可重新進場。",
                 "actionable": False,
                 "new_entry_allowed": False,
@@ -669,7 +731,7 @@ class SignalRepository:
         final.update(
             {
                 "status": "COMPLETED",
-                "label": "目標已達｜本次交易計畫完成",
+                "label": "已達止盈｜本次交易計畫完成",
                 "new_entry_allowed": False,
                 "trigger_preserved": True,
                 "wait_reason": {
@@ -848,23 +910,42 @@ class SignalRepository:
                 # Opposite evidence may update the original plan's observed
                 # price path, but it is not a second formal direction while
                 # the current episode remains ACTIVE.
-                return self._advance_existing(
+                advanced = self._advance_existing(
                     existing,
                     active,
                     raw.market_metrics,
                     completed_at,
                 )
+                if advanced.lifecycle.get("terminal") and not active_claims_event:
+                    # The latest closed-candle path can finish the old plan at
+                    # the same time a genuinely newer Trigger appears. Close
+                    # the old Episode first, then create the new one with its
+                    # own immutable Entry/SL/TP instead of delaying it a scan.
+                    return self._reconcile_raw_signal_locked(raw, completed_at)
+                return advanced
 
             # CONTINUATION / REENTRY while the same-direction episode remains
             # active is a lifecycle update, not a new trade plan. _merge_signal
             # intentionally keeps the original Entry / SL / TP and trigger.
             merged = self._merge_signal(existing, raw)
-            return self._advance_existing(
+            advanced = self._advance_existing(
                 merged,
                 active,
                 raw.market_metrics,
                 completed_at,
             )
+            if advanced.lifecycle.get("terminal") and not active_claims_event:
+                # The candidate event arrived on the same closed-candle update
+                # that finished the old plan.  It belongs to the next Episode,
+                # so remove only that freshly merged alias from the old
+                # tombstone before reconciling it as a separate card.
+                self._release_terminal_event_alias(
+                    advanced,
+                    event_key,
+                    existing,
+                )
+                return self._reconcile_raw_signal_locked(raw, completed_at)
+            return advanced
 
         latest_closed = self._latest_closed_episode_row(
             raw.inst_id,
@@ -887,6 +968,8 @@ class SignalRepository:
             "last_seen_at": completed_at,
             "previous_stage": None,
             "current_stage": raw.signal_stage,
+            "status": "ACTIVE",
+            "terminal": False,
             "transition": "NEW",
             "duplicate_locked": True,
             "event_key": event_key,
@@ -897,7 +980,13 @@ class SignalRepository:
                 or raw.data_timestamp
                 or 0
             ),
+            "entry_ready_once": (
+                str(raw.entry_eligibility.get("status") or "").upper()
+                == "ENTRY_READY"
+            ),
         }
+        if lifecycle["entry_ready_once"]:
+            lifecycle["entry_ready_at"] = completed_at
         created = replace(
             raw,
             trigger_id=signal_id,
@@ -1048,11 +1137,29 @@ class SignalRepository:
                 "last_evaluated_core_ts": last_evaluated_core_ts,
             }
         )
+        if str(signal.entry_eligibility.get("status") or "").upper() == "ENTRY_READY":
+            lifecycle["entry_ready_once"] = True
+            lifecycle.setdefault("entry_ready_at", completed_at)
+        terminal = status == "CLOSED"
+        if terminal:
+            lifecycle["closed_at"] = completed_at
+            lifecycle["retention_until"] = terminal_card_retention_until(
+                completed_at,
+                signal.radar_horizon,
+            )
         if stage == "COMPLETED":
             lifecycle.update(
                 {
                     "status": "COMPLETED",
                     "terminal_status": "COMPLETED",
+                    "terminal": True,
+                }
+            )
+        elif stage == "INVALIDATED":
+            lifecycle.update(
+                {
+                    "status": "INVALIDATED",
+                    "terminal_status": "INVALIDATED",
                     "terminal": True,
                 }
             )
@@ -1064,8 +1171,51 @@ class SignalRepository:
                     "terminal": True,
                 }
             )
+        else:
+            lifecycle.update({"status": "ACTIVE", "terminal": False})
         merged_metrics = dict(signal.market_metrics)
         merged_metrics.update(metrics)
+        entry_eligibility = dict(signal.entry_eligibility)
+        decision_context = dict(signal.decision_context)
+        if terminal:
+            if stage == "COMPLETED":
+                terminal_label = "已達止盈｜本次交易計畫完成"
+                terminal_reason = "價格已到達原始 TP1；舊計畫不可再次進場。"
+                final_status = "COMPLETED"
+                wait_code = "TARGET_REACHED"
+            elif stage == "INVALIDATED":
+                terminal_label = "已達止損｜本次交易計畫結束"
+                terminal_reason = "價格已到達原始 SL／失效位；舊計畫永久結束。"
+                final_status = "INVALIDATED"
+                wait_code = "STOP_REACHED"
+            else:
+                terminal_label = "終局資料不足｜舊計畫已關閉"
+                terminal_reason = "K 線資料無法證明 TP／SL 先後，禁止沿用舊計畫。"
+                final_status = "DATA_UNAVAILABLE"
+                wait_code = "CLOSED_UNKNOWN"
+            entry_eligibility.update(
+                {
+                    "status": final_status,
+                    "label": terminal_label,
+                    "reason": terminal_reason,
+                    "actionable": False,
+                    "new_entry_allowed": False,
+                }
+            )
+            final = dict(decision_context.get("final", {}) or {})
+            final.update(
+                {
+                    "status": final_status,
+                    "label": terminal_label,
+                    "new_entry_allowed": False,
+                    "trigger_preserved": stage == "COMPLETED",
+                    "wait_reason": {
+                        "code": wait_code,
+                        "label": "等待新的 Trigger 與全新交易計畫",
+                    },
+                }
+            )
+            decision_context["final"] = final
         updated = replace(
             signal,
             signal_stage=stage,
@@ -1073,6 +1223,8 @@ class SignalRepository:
             lifecycle=lifecycle,
             market_metrics=merged_metrics,
             generated_at=signal.generated_at or completed_at,
+            entry_eligibility=entry_eligibility,
+            decision_context=decision_context,
             actionable=(
                 status == "ACTIVE"
                 and stage in ("EARLY_SIGNAL", "CONFIRMED", "REENTRY")
@@ -1175,6 +1327,24 @@ class SignalRepository:
                 event_keys.append(value)
         if event_keys:
             lifecycle["event_keys"] = event_keys
+        existing_was_ready = (
+            str(existing.entry_eligibility.get("status") or "").upper()
+            == "ENTRY_READY"
+        )
+        raw_is_ready = (
+            str(raw.entry_eligibility.get("status") or "").upper()
+            == "ENTRY_READY"
+        )
+        if existing_was_ready or raw_is_ready:
+            lifecycle["entry_ready_once"] = True
+            lifecycle.setdefault(
+                "entry_ready_at",
+                existing.lifecycle.get("entry_ready_at")
+                or raw.lifecycle.get("entry_ready_at")
+                or existing.generated_at
+                or raw.generated_at
+                or lifecycle.get("last_seen_at"),
+            )
         lifecycle["last_trigger_event_ts"] = max(
             int(lifecycle.get("last_trigger_event_ts") or 0),
             _signal_trigger_event_timestamp(existing),
@@ -1216,6 +1386,53 @@ class SignalRepository:
                 else existing.signal_stage
             ),
         )
+
+    def _release_terminal_event_alias(
+        self,
+        terminal_signal: Signal,
+        event_key: str,
+        previous_signal: Signal,
+    ) -> None:
+        """Keep a just-arrived event out of the Episode it simultaneously closed."""
+
+        signal_id = str(terminal_signal.trigger_id or "").strip()
+        candidate_key = str(event_key or "").strip()
+        if not signal_id or not candidate_key:
+            return
+        row = self._connection.execute(
+            "SELECT * FROM signals WHERE signal_id=? AND status='CLOSED'",
+            (signal_id,),
+        ).fetchone()
+        if row is None:
+            return
+        persisted = Signal.from_dict(json.loads(row["payload_json"]))
+        lifecycle = dict(persisted.lifecycle)
+        event_keys = [
+            str(value)
+            for value in lifecycle.get("event_keys", [])
+            if str(value).strip() and str(value) != candidate_key
+        ]
+        original_key = str(lifecycle.get("event_key") or "").strip()
+        if original_key and original_key not in event_keys:
+            event_keys.insert(0, original_key)
+        lifecycle["event_keys"] = event_keys
+        lifecycle["last_trigger_event_ts"] = max(
+            int(previous_signal.lifecycle.get("last_trigger_event_ts") or 0),
+            _signal_trigger_event_timestamp(previous_signal),
+        )
+        cleaned = replace(persisted, lifecycle=lifecycle)
+        with self._write_scope():
+            self._connection.execute(
+                """
+                UPDATE signals SET payload_json=?
+                WHERE signal_id=? AND status='CLOSED' AND payload_json=?
+                """,
+                (
+                    json.dumps(_signal_payload(cleaned), ensure_ascii=False),
+                    signal_id,
+                    row["payload_json"],
+                ),
+            )
 
     @staticmethod
     def _unchanged_projection(signal: Signal) -> Signal:
@@ -1262,6 +1479,7 @@ class SignalRepository:
             if invalidated
             else "CLOSED_UNKNOWN"
         )
+        closed_at = str(row["closed_at"] or row["updated_at"] or "")
         lifecycle = dict(signal.lifecycle)
         lifecycle.update(
             {
@@ -1273,14 +1491,62 @@ class SignalRepository:
                 "terminal": True,
                 "duplicate_locked": True,
                 "event_key": row["event_key"],
+                "outcome": row["outcome"],
+                "closed_at": closed_at,
+                "retention_until": terminal_card_retention_until(
+                    closed_at,
+                    signal.radar_horizon,
+                ),
             }
         )
+        if terminal_stage == "COMPLETED":
+            label = "已達止盈｜本次交易計畫完成"
+            reason = "價格已到達原始 TP1；舊計畫不可再次進場。"
+            final_status = "COMPLETED"
+            wait_code = "TARGET_REACHED"
+        elif terminal_stage == "INVALIDATED":
+            label = "已達止損｜本次交易計畫結束"
+            reason = "價格已到達原始 SL／失效位；舊計畫永久結束。"
+            final_status = "INVALIDATED"
+            wait_code = "STOP_REACHED"
+        else:
+            label = "終局資料不足｜舊計畫已關閉"
+            reason = "現有資料無法證明 TP／SL 先後，禁止沿用舊計畫。"
+            final_status = "DATA_UNAVAILABLE"
+            wait_code = "CLOSED_UNKNOWN"
+        entry_eligibility = dict(signal.entry_eligibility)
+        entry_eligibility.update(
+            {
+                "status": final_status,
+                "label": label,
+                "reason": reason,
+                "actionable": False,
+                "new_entry_allowed": False,
+            }
+        )
+        decision_context = dict(signal.decision_context)
+        final = dict(decision_context.get("final", {}) or {})
+        final.update(
+            {
+                "status": final_status,
+                "label": label,
+                "new_entry_allowed": False,
+                "trigger_preserved": terminal_stage == "COMPLETED",
+                "wait_reason": {
+                    "code": wait_code,
+                    "label": "等待新的 Trigger 與全新交易計畫",
+                },
+            }
+        )
+        decision_context["final"] = final
         return replace(
             signal,
             signal_stage=terminal_stage,
             freshness=("INVALIDATED" if terminal_stage == "CLOSED_UNKNOWN" else terminal_stage),
             lifecycle=lifecycle,
             actionable=False,
+            entry_eligibility=entry_eligibility,
+            decision_context=decision_context,
         )
 
     @staticmethod
@@ -1889,6 +2155,70 @@ class SignalRepository:
                 ).fetchall()
             )
         return [dict(row) for row in rows]
+
+    def load_terminal_signal(self, signal: Signal | str) -> Signal | None:
+        """Load one exact closed Episode for request-local UI projection."""
+
+        signal_id = (
+            str(signal.trigger_id or "").strip()
+            if isinstance(signal, Signal)
+            else str(signal or "").strip()
+        )
+        if not signal_id:
+            return None
+        with self._lock:
+            row = self._connection.execute(
+                "SELECT * FROM signals WHERE signal_id=? AND status='CLOSED'",
+                (signal_id,),
+            ).fetchone()
+        return self._terminal_projection(row) if row is not None else None
+
+    def recent_terminal_signals(
+        self,
+        horizon: str,
+        *,
+        as_of: datetime | None = None,
+        limit: int = 100,
+    ) -> list[Signal]:
+        """Return proven TP/SL cards still inside their review window.
+
+        These cards are separate from ACTIVE signals, so they never consume a
+        new-signal quota and a later Trigger for the same symbol can appear as
+        an independent Episode with a different Trigger id and trade plan.
+        """
+
+        normalized_horizon = str(horizon or "").strip().upper()
+        retention_hours = TERMINAL_CARD_RETENTION_HOURS.get(normalized_horizon)
+        if retention_hours is None:
+            return []
+        reference_time = as_of or datetime.now(timezone.utc)
+        if reference_time.tzinfo is None:
+            reference_time = reference_time.replace(tzinfo=timezone.utc)
+        cutoff = reference_time.astimezone(timezone.utc) - timedelta(
+            hours=retention_hours
+        )
+        safe_limit = max(1, min(int(limit), 200))
+        with self._lock:
+            rows = list(
+                self._connection.execute(
+                    """
+                    SELECT * FROM signals
+                    WHERE horizon=? AND status='CLOSED' AND closed_at>?
+                    ORDER BY closed_at DESC, signal_id DESC
+                    LIMIT ?
+                    """,
+                    (normalized_horizon, cutoff.isoformat(), safe_limit),
+                ).fetchall()
+            )
+        output: list[Signal] = []
+        for row in rows:
+            projected = self._terminal_projection(row)
+            terminal_status = str(
+                projected.lifecycle.get("terminal_status") or ""
+            ).upper()
+            if terminal_status in {"COMPLETED", "INVALIDATED"}:
+                output.append(projected)
+        return output
 
 
 def classify_microstructure(

@@ -54,7 +54,7 @@ class V33ContractTests(unittest.TestCase):
         self.assertIn("已錯過", html)
         self.assertIn("entry_eligibility", html)
         self.assertIn("長線訊號", html)
-        self.assertIn("長線目前可進", html)
+        self.assertIn("長線已觸發・持續保留", html)
         self.assertIn("longEarlySignals", html)
         self.assertIn("longReadySignals", html)
         self.assertIn("longWaitRetest", html)
@@ -111,7 +111,7 @@ class V33ContractTests(unittest.TestCase):
         self.assertIn(".primary-nav{grid-row:5;position:relative", html)
         self.assertIn("grid-template-columns:repeat(4,minmax(0,1fr))", html)
         self.assertIn(".decision-actions{display:grid;grid-template-columns:repeat(2,minmax(0,1fr))", html)
-        self.assertIn("okx-radar-shell-v3.4-single-scan-recovery-1", service_worker)
+        self.assertIn("okx-radar-shell-v3.5-signal-episodes-1", service_worker)
         self.assertIn("<title>OKX 雷達 V3.4</title>", html)
         self.assertIn("OKX 雷達 <span>V3.4</span>", html)
         self.assertNotIn('data-tab="pendingSignals"', html)
@@ -180,7 +180,8 @@ class V33ContractTests(unittest.TestCase):
         self.assertIn("訊號準備度", html)
         self.assertIn("尚未觸發", html)
         self.assertIn("可進 · ${watchCount} 觀察", html)
-        self.assertIn("itemDisplayEntryStatus(x)==='ENTRY_READY'", html)
+        self.assertIn("itemEntryStatus(x)==='ENTRY_READY'", html)
+        self.assertIn("function itemWasEntryReady(item)", html)
         self.assertIn("OI（未平倉量）異動雷達", html)
         self.assertIn("市場平均 RSI", html)
         self.assertIn("localStorage", html)
@@ -210,10 +211,10 @@ class V33ContractTests(unittest.TestCase):
         self.assertIn("舊計畫失效。", html)
         self.assertNotIn("舊計畫失效；方向不會自動變成", html)
         self.assertIn("status==='MISSED_ENTRY'", html)
-        self.assertIn("function signalTriggerTime(item,status)", html)
+        self.assertIn("function signalTriggerTime(item)", html)
         self.assertIn("訊號觸發時間（台灣）", html)
-        self.assertIn("status!=='ENTRY_READY'&&status!=='MISSED_ENTRY'", html)
-        self.assertIn("okx-radar-shell-v3.4-single-scan-recovery-1", service_worker)
+        self.assertNotIn("status!=='ENTRY_READY'&&status!=='MISSED_ENTRY'", html)
+        self.assertIn("okx-radar-shell-v3.5-signal-episodes-1", service_worker)
         self.assertIn("$('#preflightRefresh').addEventListener('click',loadPreflight)", html)
         self.assertIn("'#waitRetestBox','#longWaitRetestBox'", html)
         self.assertIn("scanAction=includeInstrument", html)
@@ -428,7 +429,8 @@ class V33ContractTests(unittest.TestCase):
             "function renderContextCoverage(report,transient=null,preview=false){", 1
         )[1].split("function reportRenderFingerprint", 1)[0]
         self.assertIn("transient==='ERROR'?'更新失敗':'掃描中'", coverage)
-        self.assertIn("itemDisplayEntryStatus(x)==='ENTRY_READY'", report)
+        self.assertIn("itemEntryStatus(x)==='ENTRY_READY'", report)
+        self.assertIn("itemWasEntryReady(item)", report)
         self.assertIn("true,shortReadOnlyReason", report)
         self.assertIn("true,longReadOnlyReason", report)
         self.assertIn(
@@ -487,7 +489,7 @@ class V33ContractTests(unittest.TestCase):
         ].split("function instrumentOverallContext", 1)[0]
         self.assertIn("payload.preflight?.verdict?.status", instrument_state)
         self.assertIn("itemEntryStatus(payload.item)", instrument_state)
-        self.assertIn("PLAN_INVALIDATED:80", instrument_state)
+        self.assertIn("STOP_LOSS:90", instrument_state)
         self.assertNotIn("HARD_GATE_BLOCKED:70", instrument_state)
         self.assertIn("function instrumentDisplayItem(payload)", html)
         display_item = html.split("function instrumentDisplayItem(payload)", 1)[
@@ -567,6 +569,30 @@ class V33ContractTests(unittest.TestCase):
         self.assertIn('"display": "standalone"', manifest)
         self.assertIn('"name": "OKX Radar V3.4"', manifest)
         self.assertNotIn("V3.4 Context", manifest)
+
+    def test_signal_episode_cards_are_sticky_terminal_and_independently_keyed(self):
+        root = Path(__file__).parents[1] / "radar" / "static"
+        html = (root / "pages.html").read_text(encoding="utf-8")
+        worker = (root / "service-worker.js").read_text(encoding="utf-8")
+
+        self.assertIn("function itemWasEntryReady(item)", html)
+        self.assertIn(
+            "if(itemWasEntryReady(item))return 'ENTRY_READY'",
+            html,
+        )
+        self.assertIn("closed_signals", html)
+        self.assertIn("long_closed_signals", html)
+        self.assertIn("function pruneExpiredTerminalCards(report)", html)
+        self.assertIn("item?.radar_horizon==='LONG'?24:5", html)
+        self.assertIn("終局結果保留 5 小時", html)
+        self.assertIn("終局結果保留 24 小時", html)
+        self.assertIn("已達止盈｜本次交易計畫完成", html)
+        self.assertIn("已達止損｜本次交易計畫結束", html)
+        self.assertIn('data-trigger-id="${esc(item.trigger_id||\'\')}"', html)
+        self.assertIn("payload.closed_item", html)
+        self.assertIn("previous?[item,previous]:[item]", html)
+        self.assertIn("等待新的 Trigger 與全新交易計畫", html)
+        self.assertIn("okx-radar-shell-v3.5-signal-episodes-1", worker)
 
     def test_market_scan_has_no_github_schedule(self):
         root = Path(__file__).parents[1]

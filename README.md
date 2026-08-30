@@ -54,7 +54,7 @@ Market Context、OI、Taker、Funding 與 Order Book 仍會保存並放在詳細
 
 部分掃描只更新被選取的週期；另一週期已完成的快照、Signal Episode 與完成時間都會保留。從 15m 卡片按「幣種掃描」只顯示 15m 交易計畫，從 4H 卡片按下則只顯示 4H 交易計畫；這是 UI 與交易計畫隔離，底層仍可把高／低週期 Bias 當成 Context 證據。單獨更新 15m 不會刪除既有 4H，反之亦然。
 
-每次按「幣種掃描（更新判定）」都會直接重新取得該幣所選週期的最新完整資料，延續或更新原 Signal Episode，再輸出本輪目前判定；不需要先看舊答案、再按第二次取得現價，也不會把非請求週期混進單幣頁。
+每次按「幣種掃描（更新判定）」都會直接重新取得該幣所選週期的最新完整資料，延續或更新原 Signal Episode，再輸出本輪目前判定；不需要先看舊答案、再按第二次取得現價，也不會把非請求週期混進單幣頁。單幣的 Instrument、Ticker、OI、多週期 K 線與 Context 會並行取得；核心來源保留一次短重試，非必要 Deep Data 採短等待上限，避免單一慢端點拖到整張卡更新失敗。
 
 ## Price-first Market Story
 
@@ -125,9 +125,9 @@ Trigger 是否存在與「現在是否適合進場」分開顯示：
 
 價格若落到原 Entry Zone 的不利側，仍保留原 Trigger 作生命週期追蹤；重新站回 Entry Zone 後即可重新評估進場。此時即時 Stop 距離可能極小，直接用目前價格計算會產生失真的超大 R:R，因此頁面顯示「暫不適用」；這只修正位置判定與顯示，不改寫原 Entry／Stop／Target 或 V3.4 Trigger。
 
-單幣掃描將「訊號生命週期」與「目前新進場資格」分開顯示。正式 Trigger 成立後維持「已觸發・有效中」；順向走遠會標示「方向仍有效｜禁止追價」，不利側尚未碰到原始 SL 時依距離顯示「容許回測中」或「接近失效」。等待回踩或禁止追價不是訊號死亡，也不是自動出場指令。
+單幣掃描將「訊號生命週期」與「目前新進場資格」分開顯示。訊號一旦曾列入「可進」，便固定留在「已觸發・持續保留」區；順向走遠仍會顯示目前不要追價，不利側尚未碰到原始 SL 時則顯示容許回測或接近失效。這些即時位置提醒不會把卡片移出保留區，也不會改寫原 Entry／SL／TP。
 
-原價格越過 SL／Invalidation 後，同一 Signal Episode 永久失效；即使價格回到舊 Entry 也不能復活，必須等待新的 Trigger／REENTRY 建立新 Entry、SL、TP 與新 Episode。重新掃描只更新同一 Episode 的現價進場資格，不會用參考資料另作反向判定，也不會製造重複 Trigger。
+價格到達 TP1 或越過 SL／Invalidation 後，卡片分別顯示「已達止盈」或「已達止損」。15m 結果卡保留 5 小時，4H 結果卡保留 24 小時後自動移出可進區；歷史紀錄仍依原本保存規則保留。同一 Signal Episode 結束後不會復活；若同幣出現較新的正式 Trigger，會建立另一個 Trigger id 與全新 Entry、SL、TP，舊結果卡與新卡可同時存在。
 
 「可進」訊號先依交易品質由高至低排列；同分時依序比較資料新鮮度、剩餘 R:R，再比較較低滑價與較高流動性。掃描進行中保留上一輪卡片順序，本輪完整完成後才統一排序。同一 Episode 保留原 Entry／Stop／Target，不因刷新而漂移。
 
@@ -280,7 +280,7 @@ python -m unittest discover -s tests -v
 git diff --check
 ```
 
-測試涵蓋 Price Trigger 與進場資格分離、流動性／Spread／Slippage／成交成本／R:R／異常行情只提醒不刪卡、資料不知道不冒充最新、Market Context／DST 時段、價格接受、控制權轉移、Signal Episode 去重與永久失效、舊資料／亂序資料不回寫、ATR 止損下限、15m／4H 隔離、三種掃描、部分掃描與獨立新鮮度、`CORE_PREVIEW` 唯讀、可進排序、單幣統一判定、Scan Lock、舊請求不可覆蓋新結果、STALE 快照保留、API 失敗降級、Web Push、PWA 與 API contract。
+測試涵蓋 Price Trigger 與進場資格分離、可進會員資格固定、Entry／SL／TP 不漂移、TP／SL 結果卡的 5／24 小時期限、同幣舊終局卡與新 Trigger 並存、單幣來源並行與短等待上限、流動性／Spread／Slippage／成交成本／R:R／異常行情只提醒不刪卡、資料不知道不冒充最新、Market Context／DST 時段、價格接受、控制權轉移、Signal Episode 去重與永久失效、舊資料／亂序資料不回寫、ATR 止損下限、15m／4H 隔離、三種掃描、部分掃描與獨立新鮮度、`CORE_PREVIEW` 唯讀、可進排序、單幣統一判定、Scan Lock、舊請求不可覆蓋新結果、STALE 快照保留、API 失敗降級、Web Push、PWA 與 API contract。
 
 ## 安全邊界與限制
 

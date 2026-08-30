@@ -249,6 +249,23 @@ class APITests(unittest.TestCase):
                 client.get_usdt_swap_instrument("GRESS-USDT-SWAP")
             )
 
+    def test_explicit_single_request_budget_bounds_retry_and_timeout(self):
+        client = OKXPublicClient(retries=3, timeout_seconds=12.0)
+        with patch(
+            "radar.api.urlopen",
+            side_effect=URLError("timed out"),
+        ) as mocked_open, patch("radar.api.time.sleep") as mocked_sleep:
+            with self.assertRaises(OKXAPIError):
+                client.get_ticker(
+                    "BTC-USDT-SWAP",
+                    request_retries=0,
+                    request_timeout_seconds=3.0,
+                )
+
+        self.assertEqual(mocked_open.call_count, 1)
+        self.assertEqual(mocked_open.call_args.kwargs["timeout"], 3.0)
+        mocked_sleep.assert_not_called()
+
 
 if __name__ == "__main__":
     unittest.main()

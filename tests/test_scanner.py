@@ -1,3 +1,4 @@
+import threading
 import time
 import unittest
 from dataclasses import replace
@@ -697,6 +698,132 @@ class ScannerTests(unittest.TestCase):
             {bar for inst_id, bar, _ in client.candle_requests if inst_id == analysis.inst_id},
             {"1D", "4H", "1H", "15m", "5m"},
         )
+
+    def test_on_demand_scan_parallelizes_sources_with_bounded_request_budget(self):
+        class BoundedParallelClient(ContextFakeClient):
+            def __init__(self):
+                super().__init__()
+                self.retries = 4
+                self.timeout_seconds = 12.0
+                self.options = []
+                self.active_calls = 0
+                self.max_active_calls = 0
+                self.lock = threading.Lock()
+
+            def _timed(self, source, request_retries, request_timeout_seconds, result):
+                with self.lock:
+                    self.options.append(
+                        (source, request_retries, request_timeout_seconds)
+                    )
+                    self.active_calls += 1
+                    self.max_active_calls = max(
+                        self.max_active_calls,
+                        self.active_calls,
+                    )
+                try:
+                    time.sleep(0.03)
+                    return result()
+                finally:
+                    with self.lock:
+                        self.active_calls -= 1
+
+            def get_usdt_swap_instrument(
+                self,
+                inst_id,
+                *,
+                request_retries=None,
+                request_timeout_seconds=None,
+            ):
+                self.options.append(
+                    ("instrument", request_retries, request_timeout_seconds)
+                )
+                return next(item for item in self.instruments if item.inst_id == inst_id)
+
+            def get_ticker(
+                self,
+                inst_id,
+                *,
+                request_retries=None,
+                request_timeout_seconds=None,
+            ):
+                return self._timed(
+                    "ticker",
+                    request_retries,
+                    request_timeout_seconds,
+                    lambda: Ticker(inst_id, 110, 109.99, 110.01, 1),
+                )
+
+            def get_open_interest_for(
+                self,
+                inst_id,
+                *,
+                request_retries=None,
+                request_timeout_seconds=None,
+            ):
+                return self._timed(
+                    "open_interest",
+                    request_retries,
+                    request_timeout_seconds,
+                    lambda: 5_000_000,
+                )
+
+            def get_candles(
+                self,
+                inst_id,
+                bar,
+                limit=100,
+                *,
+                request_retries=None,
+                request_timeout_seconds=None,
+            ):
+                return self._timed(
+                    f"candles:{bar}",
+                    request_retries,
+                    request_timeout_seconds,
+                    lambda: candles(limit, micro_anomaly=bar == "5m"),
+                )
+
+            def get_market_context(
+                self,
+                inst_id,
+                open_interest_usd=None,
+                *,
+                request_retries=None,
+                request_timeout_seconds=None,
+            ):
+                return self._timed(
+                    "context",
+                    request_retries,
+                    request_timeout_seconds,
+                    lambda: MarketContext(
+                        inst_id,
+                        open_interest_usd,
+                        0.0001,
+                        0.12,
+                        0.56,
+                        1,
+                    ),
+                )
+
+        client = BoundedParallelClient()
+        scanner = MarketScanner(
+            client,
+            ScannerConfig(min_quote_volume_24h=0, universe_max_spread_pct=1.0),
+        )
+
+        analysis = scanner.scan_instrument(
+            "AAA-USDT-SWAP",
+            requested_horizon="SHORT",
+        )
+
+        self.assertIsNotNone(analysis.short_result)
+        self.assertGreaterEqual(client.max_active_calls, 2)
+        self.assertIn("context", {source for source, _, _ in client.options})
+        for source, retries, timeout in client.options:
+            if source == "context":
+                self.assertEqual((retries, timeout), (0, 4.0))
+            else:
+                self.assertEqual((retries, timeout), (1, 6.0))
 
     def test_single_reanalysis_uses_latest_multiframe_data_and_rejects_missed_plan(self):
         previous = Signal(

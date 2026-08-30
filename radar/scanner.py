@@ -882,6 +882,26 @@ class MarketScanner:
             if include_short:
                 message += "不影響其短線判定。"
 
+        closed_signals: list[Signal] = []
+        long_closed_signals: list[Signal] = []
+        terminal_loader = getattr(
+            self.repository,
+            "recent_terminal_signals",
+            None,
+        )
+        if callable(terminal_loader):
+            reference_time = datetime.fromisoformat(completed_at)
+            if include_short:
+                closed_signals = terminal_loader(
+                    "SHORT",
+                    as_of=reference_time,
+                )
+            if include_long:
+                long_closed_signals = terminal_loader(
+                    "LONG",
+                    as_of=reference_time,
+                )
+
         report = RadarReport(
             status=status,
             generated_at=completed_at,
@@ -911,7 +931,9 @@ class MarketScanner:
             actionable=True,
             max_signals=min(max(self.config.max_signals, 0), 20),
             api_metrics=api_metrics,
+            closed_signals=closed_signals,
             long_signals=long_signals,
+            long_closed_signals=long_closed_signals,
             long_watchlist=long_watchlist,
             long_market_map=long_market_map,
             data_quality=data_quality,
@@ -943,6 +965,61 @@ class MarketScanner:
             }[normalized_mode],
         )
         return report
+
+    def _single_scan_call(
+        self,
+        function: Callable[..., Any],
+        *args: Any,
+        _retry_limit: int = 1,
+        _timeout_limit: float = 6.0,
+    ) -> Any:
+        """Call one OKX method with a bounded on-demand request budget.
+
+        The web endpoint already retries the complete transaction once. Four
+        retries of up to twelve seconds inside every individual OKX request
+        made a single card refresh exceed common mobile-network wait windows.
+        Real client methods opt into this shorter budget; test/compatibility
+        clients keep their existing signatures and behavior.
+        """
+
+        try:
+            parameters = inspect.signature(function).parameters
+        except (TypeError, ValueError):
+            parameters = {}
+        accepts_kwargs = any(
+            parameter.kind == inspect.Parameter.VAR_KEYWORD
+            for parameter in parameters.values()
+        )
+        options: dict[str, Any] = {}
+        if "request_retries" in parameters or accepts_kwargs:
+            options["request_retries"] = min(
+                max(int(getattr(self.client, "retries", 1)), 0),
+                max(int(_retry_limit), 0),
+            )
+        if "request_timeout_seconds" in parameters or accepts_kwargs:
+            options["request_timeout_seconds"] = min(
+                max(float(getattr(self.client, "timeout_seconds", 6.0)), 1.0),
+                max(float(_timeout_limit), 1.0),
+            )
+        return function(*args, **options)
+
+    def _single_scan_candles(self, inst_id: str, bar: str) -> list[Candle]:
+        cache_key = (inst_id, bar)
+        if bar in self._bar_interval_ms:
+            with self._candle_cache_lock:
+                cached = self._candle_cache.get(cache_key)
+            if cached is not None and self._cache_covers_current_bar(cached, bar):
+                return list(cached)
+        candles = self._single_scan_call(
+            self.client.get_candles,
+            inst_id,
+            bar,
+            self._bar_limit(bar),
+        )
+        if bar in self._bar_interval_ms and len(candles) >= 60:
+            with self._candle_cache_lock:
+                self._candle_cache[cache_key] = list(candles)
+        return candles
 
     def scan_instrument(
         self,
@@ -977,10 +1054,10 @@ class MarketScanner:
         include_long = requested_horizon in {"LONG", "BOTH"}
 
         instrument_loader = getattr(self.client, "get_usdt_swap_instrument", None)
-        if callable(instrument_loader):
-            instrument = instrument_loader(inst_id)
-        else:
-            instrument = next(
+        def load_instrument() -> Instrument | None:
+            if callable(instrument_loader):
+                return self._single_scan_call(instrument_loader, inst_id)
+            return next(
                 (
                     item
                     for item in self.client.get_usdt_swap_instruments()
@@ -988,23 +1065,109 @@ class MarketScanner:
                 ),
                 None,
             )
-        if instrument is None:
-            raise ValueError("OKX 最新 live USDT 永續清單中找不到這個幣種")
 
         ticker_loader = getattr(self.client, "get_ticker", None)
-        if callable(ticker_loader):
-            ticker = ticker_loader(inst_id)
-        else:
-            ticker = self.client.get_swap_tickers().get(inst_id)
-            if ticker is None:
-                raise ValueError("OKX 最新 Ticker 中找不到這個幣種")
-
         requested_bars = (
             ("1D", "4H", "1H")
             if include_long and not include_short
             else self.short_bars
         )
-        bundle = self._fetch_bundle(inst_id, requested_bars)
+        bars_to_fetch = list(requested_bars)
+        if include_long and include_short and "1D" not in bars_to_fetch:
+            bars_to_fetch.append("1D")
+        if include_short:
+            bars_to_fetch.append("5m")
+
+        oi_loader = getattr(self.client, "get_open_interest_for", None)
+        bulk_oi_loader = getattr(self.client, "get_open_interest_usd", None)
+        context_loader = getattr(self.client, "get_market_context", None)
+        context_applier = getattr(self.engine, "apply_market_context", None)
+
+        def load_ticker() -> Ticker:
+            if callable(ticker_loader):
+                return self._single_scan_call(ticker_loader, inst_id)
+            ticker_value = self.client.get_swap_tickers().get(inst_id)
+            if ticker_value is None:
+                raise ValueError("OKX 最新 Ticker 中找不到這個幣種")
+            return ticker_value
+
+        def load_open_interest() -> float | None:
+            if callable(oi_loader):
+                return self._single_scan_call(oi_loader, inst_id)
+            if callable(bulk_oi_loader):
+                return bulk_oi_loader().get(inst_id)
+            return None
+
+        errors: list[str] = []
+        bundle: dict[str, list[Candle]] = {}
+        bar_errors: dict[str, Exception] = {}
+        open_interest_usd: float | None = None
+        timing: list[Candle] = []
+        loaded_context: MarketContext | None = None
+        task_count = 3 + len(bars_to_fetch) + int(callable(context_loader))
+        with ThreadPoolExecutor(max_workers=max(1, min(8, task_count))) as executor:
+            instrument_future = executor.submit(load_instrument)
+            ticker_future = executor.submit(load_ticker)
+            oi_future = executor.submit(load_open_interest)
+            bar_futures = {
+                bar: executor.submit(self._single_scan_candles, inst_id, bar)
+                for bar in bars_to_fetch
+            }
+
+            def load_context() -> MarketContext:
+                try:
+                    oi_value = oi_future.result()
+                except Exception:
+                    oi_value = None
+                # Targeted metadata populates contract sizing used by depth
+                # and slippage calculations. Wait for it here while all K-line
+                # and ticker calls continue in parallel.
+                instrument_future.result()
+                # Funding, book and trades are useful enrichment, but they are
+                # optional and fetched serially inside get_market_context.
+                # Give them one short attempt each so an unhealthy Deep Data
+                # route cannot hold a mobile card refresh open for a minute.
+                return self._single_scan_call(
+                    context_loader,
+                    inst_id,
+                    oi_value,
+                    _retry_limit=0,
+                    _timeout_limit=4.0,
+                )
+
+            context_future = (
+                executor.submit(load_context)
+                if callable(context_loader) and callable(context_applier)
+                else None
+            )
+            instrument = instrument_future.result()
+            if instrument is None:
+                raise ValueError("OKX 最新 live USDT 永續清單中找不到這個幣種")
+            ticker = ticker_future.result()
+            for bar, future in bar_futures.items():
+                try:
+                    candles = future.result()
+                except Exception as exc:
+                    bar_errors[bar] = exc
+                    continue
+                if bar == "5m":
+                    timing = candles
+                else:
+                    bundle[bar] = candles
+            try:
+                open_interest_usd = oi_future.result()
+            except Exception as exc:
+                errors.append(f"Open Interest：{exc}")
+            if context_future is not None:
+                try:
+                    loaded_context = context_future.result()
+                except Exception as exc:
+                    errors.append(f"Context 整合失敗：{exc}")
+
+        failed_core_bars = [bar for bar in requested_bars if bar in bar_errors]
+        if failed_core_bars:
+            bar = failed_core_bars[0]
+            raise RuntimeError(f"{bar} K 線取得失敗：{bar_errors[bar]}") from bar_errors[bar]
         missing_core_bars = [
             bar for bar in requested_bars if len(bundle.get(bar, [])) < 60
         ]
@@ -1020,33 +1183,21 @@ class MarketScanner:
             else None
         )
 
-        errors: list[str] = []
         long_result: AnalysisResult | None = None
         if include_long and callable(getattr(self.engine, "analyze_long", None)):
             try:
-                if "1D" not in bundle:
-                    daily = self._fetch_bundle(inst_id, ("1D",)).get("1D", [])
-                    if len(daily) < 60:
-                        raise ValueError(
-                            "OKX 回傳的 1D 已收盤 K 線少於 60 根；"
-                            "只會暫停 4H 長線判定，不代表幣種或短線訊號失效。"
-                        )
-                    bundle["1D"] = daily
+                if "1D" in bar_errors:
+                    raise RuntimeError(
+                        f"1D K 線取得失敗：{bar_errors['1D']}"
+                    ) from bar_errors["1D"]
+                if len(bundle.get("1D", [])) < 60:
+                    raise ValueError(
+                        "OKX 回傳的 1D 已收盤 K 線少於 60 根；"
+                        "只會暫停 4H 長線判定，不代表幣種或短線訊號失效。"
+                    )
                 long_result = self._analyze_long_v33(instrument, ticker, bundle)
             except Exception as exc:
                 errors.append(f"長線資料：{exc}")
-
-        open_interest_usd: float | None = None
-        oi_loader = getattr(self.client, "get_open_interest_for", None)
-        try:
-            if callable(oi_loader):
-                open_interest_usd = oi_loader(inst_id)
-            else:
-                bulk_oi_loader = getattr(self.client, "get_open_interest_usd", None)
-                if callable(bulk_oi_loader):
-                    open_interest_usd = bulk_oi_loader().get(inst_id)
-        except Exception as exc:
-            errors.append(f"Open Interest：{exc}")
 
         oi_change = self._open_interest_change(inst_id, open_interest_usd)
         if short_result is not None:
@@ -1062,19 +1213,13 @@ class MarketScanner:
                 oi_change,
             )
 
-        timing: list[Candle] = []
         if include_short:
-            try:
-                timing = self.client.get_candles(
-                    inst_id,
-                    "5m",
-                    self.config.candle_limit_5m,
-                )
-                if len(timing) < 60:
-                    errors.append("5m 已收盤 K 線不足 60 根")
-                    timing = []
-            except Exception as exc:
-                errors.append(f"5m：{exc}")
+            if "5m" in bar_errors:
+                errors.append(f"5m：{bar_errors['5m']}")
+                timing = []
+            elif len(timing) < 60:
+                errors.append("5m 已收盤 K 線不足 60 根")
+                timing = []
 
         context = MarketContext(
             inst_id=inst_id,
@@ -1087,14 +1232,14 @@ class MarketScanner:
             best_bid=ticker.bid,
             best_ask=ticker.ask,
         )
-        context_loader = getattr(self.client, "get_market_context", None)
-        context_applier = getattr(self.engine, "apply_market_context", None)
         if callable(context_loader) and callable(context_applier):
             try:
-                loaded_context = context_loader(inst_id, open_interest_usd)
+                if loaded_context is None:
+                    raise RuntimeError("Deep Data 端點未完成")
                 errors = list(dict.fromkeys([*errors, *loaded_context.failures]))
                 context = replace(
                     loaded_context,
+                    open_interest_usd=open_interest_usd,
                     open_interest_change_pct=oi_change,
                     failures=list(errors),
                 )

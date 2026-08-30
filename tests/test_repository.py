@@ -3,7 +3,7 @@ import sqlite3
 import tempfile
 import unittest
 from dataclasses import replace
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from unittest.mock import patch
 
@@ -607,6 +607,229 @@ class SignalRepositoryTests(unittest.TestCase):
         self.assertEqual(
             [tuple(event) for event in events if event["event_type"] == "PREFLIGHT_PLAN_COMPLETED"],
             [("COMPLETED", "PREFLIGHT_PLAN_COMPLETED")],
+        )
+
+    def test_terminal_cards_use_five_hour_and_twenty_four_hour_windows(self):
+        short_raw = replace(
+            signal_fixture("SHORT-RETENTION-USDT-SWAP"),
+            entry_eligibility={"status": "ENTRY_READY", "actionable": True},
+        )
+        short_created = self.repository.reconcile(
+            [short_raw],
+            [state_fixture(short_raw, short_raw.data_timestamp)],
+            "2026-08-20T00:00:00+00:00",
+            "SHORT",
+        )[0]
+        short_closed_at = datetime(2026, 8, 20, 0, 5, tzinfo=timezone.utc)
+        self.assertTrue(
+            self.repository.complete_preflight_plan(
+                short_created,
+                short_closed_at.isoformat(),
+            )
+        )
+
+        short_terminal = self.repository.load_terminal_signal(short_created)
+        self.assertIsNotNone(short_terminal)
+        self.assertEqual(
+            short_terminal.entry_eligibility["label"],
+            "已達止盈｜本次交易計畫完成",
+        )
+        self.assertEqual(
+            short_terminal.lifecycle["retention_until"],
+            (short_closed_at + timedelta(hours=5)).isoformat(),
+        )
+        self.assertEqual(
+            [
+                item.trigger_id
+                for item in self.repository.recent_terminal_signals(
+                    "SHORT",
+                    as_of=short_closed_at + timedelta(hours=4, minutes=59),
+                )
+            ],
+            [short_created.trigger_id],
+        )
+        self.assertEqual(
+            self.repository.recent_terminal_signals(
+                "SHORT",
+                as_of=short_closed_at + timedelta(hours=5),
+            ),
+            [],
+        )
+
+        long_event_ts = short_raw.data_timestamp + 14_400_000
+        long_raw = replace(
+            signal_fixture(
+                "LONG-RETENTION-USDT-SWAP",
+                event_ts=long_event_ts,
+                core_timestamp=long_event_ts,
+            ),
+            radar_horizon="LONG",
+            entry_eligibility={"status": "ENTRY_READY", "actionable": True},
+            market_story={
+                "trigger": {
+                    "event_ts": long_event_ts,
+                    "trigger_event_key": f"LONG:LONG:BREAKOUT:{long_event_ts}:ZONE-A",
+                }
+            },
+        )
+        long_created = self.repository.reconcile(
+            [long_raw],
+            [state_fixture(long_raw, long_event_ts)],
+            "2026-08-20T04:00:00+00:00",
+            "LONG",
+        )[0]
+        long_closed_at = datetime(2026, 8, 20, 4, 5, tzinfo=timezone.utc)
+        self.assertTrue(
+            self.repository.invalidate_preflight_plan(
+                long_created,
+                long_closed_at.isoformat(),
+            )
+        )
+        long_terminal = self.repository.load_terminal_signal(long_created)
+        self.assertEqual(
+            long_terminal.entry_eligibility["label"],
+            "已達止損｜本次交易計畫結束",
+        )
+        self.assertEqual(
+            long_terminal.lifecycle["retention_until"],
+            (long_closed_at + timedelta(hours=24)).isoformat(),
+        )
+        self.assertEqual(
+            [
+                item.trigger_id
+                for item in self.repository.recent_terminal_signals(
+                    "LONG",
+                    as_of=long_closed_at + timedelta(hours=23, minutes=59),
+                )
+            ],
+            [long_created.trigger_id],
+        )
+        self.assertEqual(
+            self.repository.recent_terminal_signals(
+                "LONG",
+                as_of=long_closed_at + timedelta(hours=24),
+            ),
+            [],
+        )
+
+    def test_entry_ready_membership_stays_sticky_when_price_leaves_zone(self):
+        raw = replace(
+            signal_fixture("STICKY-READY-USDT-SWAP"),
+            entry_eligibility={"status": "ENTRY_READY", "actionable": True},
+        )
+        created = self.repository.reconcile(
+            [raw],
+            [state_fixture(raw, raw.data_timestamp)],
+            "2026-08-20T00:00:00+00:00",
+            "SHORT",
+        )[0]
+        next_ts = raw.data_timestamp + 900_000
+        moved_away = replace(
+            raw,
+            entry_low="999",
+            entry_high="1000",
+            stop_loss="998",
+            take_profit_1="1005",
+            entry_eligibility={
+                "status": "MISSED_ENTRY",
+                "actionable": False,
+                "new_entry_allowed": False,
+            },
+            data_timestamp=next_ts,
+            closed_candle_ts=next_ts,
+            market_metrics={
+                **raw.market_metrics,
+                "core_timestamp": next_ts,
+                "core_high": 105.0,
+                "core_low": 99.0,
+            },
+        )
+        updated = self.repository.reconcile(
+            [moved_away],
+            [state_fixture(moved_away, next_ts, 105.0, 99.0)],
+            "2026-08-20T00:15:00+00:00",
+            "SHORT",
+        )[0]
+
+        self.assertEqual(updated.trigger_id, created.trigger_id)
+        self.assertTrue(updated.lifecycle["entry_ready_once"])
+        self.assertEqual(
+            updated.lifecycle["entry_ready_at"],
+            "2026-08-20T00:00:00+00:00",
+        )
+        self.assertEqual(updated.entry_eligibility["status"], "MISSED_ENTRY")
+        self.assertEqual(updated.entry_low, created.entry_low)
+        self.assertEqual(updated.stop_loss, created.stop_loss)
+        self.assertEqual(updated.take_profit_1, created.take_profit_1)
+
+    def test_same_scan_can_close_old_plan_and_create_independent_new_trigger(self):
+        old_raw = replace(
+            signal_fixture("ROLLOVER-USDT-SWAP"),
+            entry_eligibility={"status": "ENTRY_READY", "actionable": True},
+        )
+        old_created = self.repository.reconcile(
+            [old_raw],
+            [state_fixture(old_raw, old_raw.data_timestamp)],
+            "2026-08-20T00:00:00+00:00",
+            "SHORT",
+        )[0]
+        next_ts = old_raw.data_timestamp + 900_000
+        new_event_key = f"SHORT:LONG:BREAKOUT:{next_ts}:ZONE-NEW"
+        new_raw = replace(
+            old_raw,
+            entry_low="122",
+            entry_high="123",
+            stop_loss="110",
+            take_profit_1="140",
+            take_profit_2="150",
+            data_timestamp=next_ts,
+            closed_candle_ts=next_ts,
+            market_story={
+                "trigger": {
+                    "event_ts": next_ts,
+                    "trigger_event_key": new_event_key,
+                }
+            },
+            market_metrics={
+                **old_raw.market_metrics,
+                "core_timestamp": next_ts,
+                "core_high": 121.0,
+                "core_low": 99.0,
+                "core_close": 120.0,
+                "_core_path": [[next_ts, 121.0, 99.0, 120.0]],
+            },
+        )
+
+        output = self.repository.reconcile(
+            [new_raw],
+            [state_fixture(new_raw, next_ts, 121.0, 99.0)],
+            "2026-08-20T00:15:00+00:00",
+            "SHORT",
+        )
+        self.assertEqual(len(output), 1)
+        new_created = output[0]
+        self.assertNotEqual(new_created.trigger_id, old_created.trigger_id)
+        self.assertEqual(new_created.entry_low, "122")
+        self.assertEqual(new_created.stop_loss, "110")
+        self.assertEqual(new_created.take_profit_1, "140")
+
+        old_terminal = self.repository.load_terminal_signal(old_created)
+        self.assertEqual(old_terminal.signal_stage, "COMPLETED")
+        self.assertNotIn(new_event_key, old_terminal.lifecycle["event_keys"])
+        self.assertEqual(
+            self.repository.load_active_signal(old_raw.inst_id, "SHORT").trigger_id,
+            new_created.trigger_id,
+        )
+        rows = self.repository._connection.execute(
+            "SELECT signal_id, status FROM signals WHERE inst_id=? ORDER BY updated_at",
+            (old_raw.inst_id,),
+        ).fetchall()
+        self.assertEqual(
+            {(row["signal_id"], row["status"]) for row in rows},
+            {
+                (old_created.trigger_id, "CLOSED"),
+                (new_created.trigger_id, "ACTIVE"),
+            },
         )
 
     def test_completed_preflight_episode_cannot_revive_or_close_a_new_episode(self):
