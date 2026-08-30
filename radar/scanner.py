@@ -119,7 +119,10 @@ class MarketScanner:
         "1D": 86_400_000,
         "4H": 14_400_000,
         "1H": 3_600_000,
+        "15m": 900_000,
+        "5m": 300_000,
     }
+    _retained_candle_instrument_limit = 48
 
     def __init__(self, client: PublicDataClient, config: ScannerConfig | None = None):
         self.client = client
@@ -127,6 +130,7 @@ class MarketScanner:
         self._previous_open_interest_usd = dict(self.config.previous_open_interest_usd)
         self._signal_history: dict[tuple[str, str], dict[str, str]] = {}
         self._candle_cache: dict[tuple[str, str], list[Candle]] = {}
+        self._retained_candle_inst_ids: list[str] = []
         self._candle_cache_lock = threading.Lock()
         self.repository = SignalRepository(
             self.config.state_db_path,
@@ -508,11 +512,7 @@ class MarketScanner:
                 if include_short:
                     timing = []
                     try:
-                        timing = self.client.get_candles(
-                            inst_id,
-                            "5m",
-                            self.config.candle_limit_5m,
-                        )
+                        timing = self._cached_or_fresh_candles(inst_id, "5m")
                         if len(timing) < 60:
                             local_errors.append("5m 已收盤 K 線不足 60 根")
                             timing = []
@@ -3377,18 +3377,51 @@ class MarketScanner:
             "5m": self.config.candle_limit_5m,
         }.get(bar, self.config.candle_limit)
 
-    def release_transient_data(self) -> int:
-        """Release cross-timeframe candle reuse after a completed web scan.
+    def release_transient_data(
+        self,
+        retain_inst_ids: list[str] | tuple[str, ...] | None = None,
+        *,
+        replace_retained: bool = False,
+    ) -> int:
+        """Bound candle memory while keeping fresh card data reusable.
 
-        The cache prevents duplicate 4H/1H requests while one scan builds both
-        radar horizons. Keeping hundreds of candle arrays after the report is
-        published provides little value on a memory-constrained web service.
+        A completed market scan already proved that its latest confirmed bars
+        are current.  Keeping a small set for visible cards prevents an
+        immediate single-card refresh from needlessly requesting every
+        timeframe again.  A series is retained only while it still covers the
+        latest fully closed bar; stale data is always discarded.
         """
 
+        normalized = [
+            str(value or "").strip().upper()
+            for value in (retain_inst_ids or [])
+            if str(value or "").strip()
+        ]
         with self._candle_cache_lock:
-            cached_series = len(self._candle_cache)
-            self._candle_cache.clear()
-        return cached_series
+            if retain_inst_ids is None:
+                cached_series = len(self._candle_cache)
+                self._candle_cache.clear()
+                self._retained_candle_inst_ids.clear()
+                return cached_series
+
+            if replace_retained:
+                retained = list(dict.fromkeys(normalized))
+            else:
+                retained = list(
+                    dict.fromkeys([*normalized, *self._retained_candle_inst_ids])
+                )
+            retained = retained[: self._retained_candle_instrument_limit]
+            retained_set = set(retained)
+            keys_to_remove = [
+                key
+                for key, candles in self._candle_cache.items()
+                if key[0] not in retained_set
+                or not self._cache_covers_current_bar(candles, key[1])
+            ]
+            for key in keys_to_remove:
+                self._candle_cache.pop(key, None)
+            self._retained_candle_inst_ids = retained
+            return len(keys_to_remove)
 
     def _open_interest_change(
         self,

@@ -268,8 +268,24 @@ class V33ContractTests(unittest.TestCase):
         self.assertIn("function instrumentOverallVerdict(shortPayload,longPayload)", html)
         self.assertIn("function instrumentPlainGuide(context)", html)
         self.assertIn("function instrumentStateDecision(item,payload={})", html)
-        self.assertIn("function failedStoredInstrumentSide(instId,horizon)", html)
+        self.assertIn(
+            "function failedStoredInstrumentSide(instId,horizon,errorMessage='')",
+            html,
+        )
+        self.assertIn("single_scan_error:String(errorMessage||'')", html)
         self.assertIn("function renderFailedInstrumentScan(instId,horizon,error)", html)
+        self.assertIn("function renderInstrumentBusy(instId,horizon,message,autoRetry=true)", html)
+        self.assertIn(
+            "function waitForInstrumentSlot(token,instId,horizon,directionLock,consecutiveErrors=0)",
+            html,
+        )
+        self.assertIn("function instrumentStatusWithTimeout()", html)
+        self.assertIn("state.instrumentWaitDeadline=Date.now()+(12*60*1000)", html)
+        self.assertIn("nextErrors>=5", html)
+        self.assertIn("scanInstrument(true)", html)
+        self.assertIn("if(error?.status===409)", html)
+        self.assertIn("!status.running&&!status.single_scan_running", html)
+        self.assertIn("這是掃描排程，不是行情更新失敗", html)
         self.assertIn("instrumentSideCache:new Map()", html)
         self.assertIn("function cacheInstrumentSide(instId,payload,analyzedAt)", html)
         self.assertIn("state.instrumentSideCache.size>20", html)

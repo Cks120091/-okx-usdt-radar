@@ -1109,6 +1109,92 @@ class ScannerTests(unittest.TestCase):
         self.assertEqual(scanner.release_transient_data(), 1)
         self.assertEqual(scanner._candle_cache, {})
 
+    def test_release_transient_data_keeps_only_fresh_requested_card_candles(self):
+        scanner = MarketScanner(FakeClient(), ScannerConfig(workers=2))
+        interval = scanner._bar_interval_ms["15m"]
+        latest_open = (int(time.time() * 1000) // interval - 1) * interval
+
+        def recent_series():
+            base = candles(60)
+            return [
+                replace(
+                    item,
+                    ts=latest_open - (len(base) - index - 1) * interval,
+                )
+                for index, item in enumerate(base)
+            ]
+
+        scanner._candle_cache[("AAA-USDT-SWAP", "15m")] = recent_series()
+        scanner._candle_cache[("BBB-USDT-SWAP", "15m")] = recent_series()
+
+        released = scanner.release_transient_data(
+            ["AAA-USDT-SWAP"],
+            replace_retained=True,
+        )
+
+        self.assertEqual(released, 1)
+        self.assertIn(("AAA-USDT-SWAP", "15m"), scanner._candle_cache)
+        self.assertNotIn(("BBB-USDT-SWAP", "15m"), scanner._candle_cache)
+
+    def test_single_scan_retry_reuses_successful_bars_and_only_refetches_failure(self):
+        class OneFailedBarClient(FakeClient):
+            def __init__(self):
+                super().__init__()
+                self.failed_once = False
+
+            def get_candles(self, inst_id, bar, limit=100):
+                self.candle_requests.append((inst_id, bar, limit))
+                if bar == "15m" and not self.failed_once:
+                    self.failed_once = True
+                    raise TimeoutError("15m fixture timeout")
+                return candles(limit)
+
+        client = OneFailedBarClient()
+        scanner = MarketScanner(client, ScannerConfig(workers=2))
+        scanner._cache_covers_current_bar = lambda values, bar: True
+
+        scanner._single_scan_candles("AAA-USDT-SWAP", "4H")
+        scanner._single_scan_candles("AAA-USDT-SWAP", "1H")
+        with self.assertRaises(TimeoutError):
+            scanner._single_scan_candles("AAA-USDT-SWAP", "15m")
+        scanner.release_transient_data(["AAA-USDT-SWAP"])
+
+        scanner._single_scan_candles("AAA-USDT-SWAP", "4H")
+        scanner._single_scan_candles("AAA-USDT-SWAP", "1H")
+        scanner._single_scan_candles("AAA-USDT-SWAP", "15m")
+
+        counts = {
+            bar: sum(requested == bar for _, requested, _ in client.candle_requests)
+            for bar in ("4H", "1H", "15m")
+        }
+        self.assertEqual(counts, {"4H": 1, "1H": 1, "15m": 2})
+
+    def test_full_scan_card_refresh_reuses_same_closed_core_bars(self):
+        client = FakeClient()
+        scanner = MarketScanner(
+            client,
+            ScannerConfig(workers=2, min_quote_volume_24h=0),
+        )
+        scanner._cache_covers_current_bar = lambda values, bar: True
+
+        scanner.scan_once()
+        scanner.release_transient_data(
+            ["AAA-USDT-SWAP"],
+            replace_retained=True,
+        )
+        client.candle_requests.clear()
+
+        scanner.scan_instrument(
+            "AAA-USDT-SWAP",
+            requested_horizon="SHORT",
+        )
+
+        requested = [bar for _, bar, _ in client.candle_requests]
+        self.assertNotIn("4H", requested)
+        self.assertNotIn("1H", requested)
+        self.assertNotIn("15m", requested)
+        self.assertEqual(requested.count("5m"), 1)
+
     def test_short_only_scan_skips_long_candles_and_outputs(self):
         client = FakeClient()
         report = MarketScanner(
@@ -1403,7 +1489,7 @@ class ScannerTests(unittest.TestCase):
         )
         self.assertTrue(any(bar == "1D" for _, bar, _ in client.candle_requests))
 
-    def test_unchanged_higher_timeframes_are_reused_between_scans(self):
+    def test_unchanged_confirmed_timeframes_are_reused_between_scans(self):
         client = FakeClient()
         scanner = MarketScanner(
             client,
@@ -1418,7 +1504,7 @@ class ScannerTests(unittest.TestCase):
             bar: sum(requested_bar == bar for _, requested_bar, _ in client.candle_requests)
             for bar in ("1D", "4H", "1H", "15m")
         }
-        self.assertEqual(counts["15m"], 4)
+        self.assertEqual(counts["15m"], 2)
         self.assertEqual(counts["1H"], 2)
         self.assertEqual(counts["4H"], 2)
         self.assertEqual(counts["1D"], 2)

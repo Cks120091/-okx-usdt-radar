@@ -3,6 +3,7 @@ import tempfile
 import threading
 import time
 import unittest
+from dataclasses import replace
 from datetime import datetime, timedelta, timezone
 from types import SimpleNamespace
 from unittest.mock import patch
@@ -155,6 +156,39 @@ class ReleasingScanner(ImmediateScanner):
     def release_transient_data(self):
         self.release_calls += 1
         return 7
+
+
+class RetentionAwareScanner(ImmediateScanner):
+    def __init__(self):
+        self.release_requests = []
+
+    def release_transient_data(
+        self,
+        retain_inst_ids=None,
+        *,
+        replace_retained=False,
+    ):
+        self.release_requests.append(
+            (list(retain_inst_ids or []), replace_retained)
+        )
+        return 0
+
+
+class RetentionModeAwareScanner(ModeAwareScanner):
+    def __init__(self):
+        super().__init__()
+        self.release_requests = []
+
+    def release_transient_data(
+        self,
+        retain_inst_ids=None,
+        *,
+        replace_retained=False,
+    ):
+        self.release_requests.append(
+            (list(retain_inst_ids or []), replace_retained)
+        )
+        return 0
 
 
 class SingleInstrumentScanner(ImmediateScanner):
@@ -1195,6 +1229,10 @@ class RuntimeSafetyTests(unittest.TestCase):
 
         candle = RuntimeError("15m K 線取得失敗")
         self.assertIn("不是訊號失效", _single_scan_failure_message(candle))
+        candle_timeout = RuntimeError("15m K 線取得失敗：read operation timed out")
+        message = _single_scan_failure_message(candle_timeout)
+        self.assertIn("15m 核心 K 線連線逾時", message)
+        self.assertIn("只重試失敗週期", message)
 
     def test_retryable_single_scan_failure_recovers_once(self):
         class TransientThenSuccessfulScanner(SingleInstrumentScanner):
@@ -1325,6 +1363,7 @@ class RuntimeSafetyTests(unittest.TestCase):
             worker = threading.Thread(target=run_first)
             worker.start()
             self.assertTrue(scanner.started.wait(1))
+            self.assertTrue(runtime.status()["single_scan_running"])
 
             with self.assertRaises(PreflightError):
                 runtime.scan_instrument_dict("AAA", "SHORT")
@@ -1334,6 +1373,7 @@ class RuntimeSafetyTests(unittest.TestCase):
             scanner.release.set()
             worker.join(2)
             self.assertFalse(worker.is_alive())
+            self.assertFalse(runtime.status()["single_scan_running"])
             self.assertEqual(errors, [])
             self.assertEqual(len(scanner.calls), 1)
 
@@ -1995,6 +2035,59 @@ class RuntimeSafetyTests(unittest.TestCase):
             runtime.scan_blocking()
 
             self.assertEqual(scanner.release_calls, 1)
+
+    def test_successful_web_scan_retains_visible_card_candles(self):
+        with tempfile.TemporaryDirectory() as directory:
+            scanner = RetentionAwareScanner()
+            runtime = RadarRuntime(scanner, AppConfig(data_dir=directory))
+
+            runtime.scan_blocking()
+
+            self.assertEqual(len(scanner.release_requests), 1)
+            retained, replaced = scanner.release_requests[0]
+            self.assertIn("AAA-USDT-SWAP", retained)
+            self.assertTrue(replaced)
+
+    def test_partial_scan_retains_current_cards_from_both_horizons(self):
+        with tempfile.TemporaryDirectory() as directory:
+            scanner = RetentionModeAwareScanner()
+            runtime = RadarRuntime(scanner, AppConfig(data_dir=directory))
+            previous = report()
+            previous.signals = [
+                replace(signal(), inst_id="OLD-SHORT-USDT-SWAP")
+            ]
+            previous.long_signals = [
+                replace(
+                    signal(),
+                    inst_id="OLD-LONG-USDT-SWAP",
+                    radar_horizon="LONG",
+                )
+            ]
+            previous.short_completed_at = previous.completed_at
+            previous.long_completed_at = previous.completed_at
+            runtime._latest = previous
+
+            runtime.scan_blocking("SHORT")
+
+            retained, replaced = scanner.release_requests[-1]
+            self.assertIn("AAA-USDT-SWAP", retained)
+            self.assertIn("OLD-LONG-USDT-SWAP", retained)
+            self.assertNotIn("OLD-SHORT-USDT-SWAP", retained)
+            self.assertTrue(replaced)
+
+    def test_full_scan_does_not_retain_obsolete_previous_cards(self):
+        with tempfile.TemporaryDirectory() as directory:
+            scanner = RetentionModeAwareScanner()
+            runtime = RadarRuntime(scanner, AppConfig(data_dir=directory))
+            previous = report()
+            previous.signals = [replace(signal(), inst_id="OLD-USDT-SWAP")]
+            runtime._latest = previous
+
+            runtime.scan_blocking("FULL")
+
+            retained, _ = scanner.release_requests[-1]
+            self.assertIn("AAA-USDT-SWAP", retained)
+            self.assertNotIn("OLD-USDT-SWAP", retained)
 
     def test_partial_scan_passes_mode_and_preserves_unrequested_horizon(self):
         with tempfile.TemporaryDirectory() as directory:

@@ -117,6 +117,41 @@ def _single_scan_retry_delay(exc: BaseException) -> float:
 
 def _single_scan_failure_message(exc: Exception) -> str:
     detail = _single_scan_error_detail(exc)
+    bar_match = re.search(r"\b(1d|4h|1h|15m|5m)\s*k\s*線", detail)
+    if bar_match is not None:
+        raw_bar = bar_match.group(1)
+        bar_label = raw_bar.upper() if raw_bar in {"1d", "4h", "1h"} else raw_bar
+        if "429" in detail or "code=50011" in detail or "rate limit" in detail:
+            return (
+                f"OKX 暫時限制 {bar_label} K 線請求頻率；"
+                "系統已只重試失敗週期，其他成功週期保持不重抓。"
+                "這不是幣種或訊號失效，請約 10 秒後再試。"
+            )
+        if any(
+            marker in detail
+            for marker in (
+                "timed out",
+                "timeout",
+                "connection refused",
+                "connection reset",
+                "remote end closed",
+                "temporary failure",
+                "name resolution",
+                "502",
+                "503",
+                "504",
+            )
+        ):
+            return (
+                f"OKX {bar_label} 核心 K 線連線逾時；"
+                "系統已只重試失敗週期與官方備援端點。"
+                "這不是幣種或訊號失效，請稍後再試。"
+            )
+        return (
+            f"OKX {bar_label} 核心 K 線自動重試後仍不完整；"
+            "其他成功週期沒有重抓，也沒有使用舊週期硬算。"
+            "這不是訊號失效，請稍後再試。"
+        )
     if any(
         marker in detail
         for marker in (
@@ -140,11 +175,6 @@ def _single_scan_failure_message(exc: Exception) -> str:
         return (
             "OKX 暫時限制請求頻率；系統已自動等待並重試。"
             "這不是幣種失效，請約 10 秒後再試。"
-        )
-    if "k 線" in detail:
-        return (
-            "OKX 最新 K 線自動重試後仍無法完整取得；不是訊號失效。"
-            "系統沒有拿缺漏週期硬算，請稍後再試。"
         )
     return (
         "OKX 最新單幣資料自動重試後仍無法完成分析；"
@@ -931,6 +961,7 @@ class RadarRuntime:
             }
             return {
                 "running": self._running,
+                "single_scan_running": bool(self._single_inflight),
                 "system_status": system_status,
                 "runtime_status": system_status,
                 "data_status": "STALE" if stale else "FRESH" if self._latest else "NONE",
@@ -1428,7 +1459,10 @@ class RadarRuntime:
                         _single_scan_failure_message(exc),
                     ) from exc
                 finally:
-                    self._release_scanner_transient_data()
+                    # Keep every successfully fetched timeframe for this coin
+                    # across the transaction-level retry.  Only the failed
+                    # source should need another OKX request.
+                    self._release_scanner_transient_data([normalized_id])
 
             if analysis is None:  # pragma: no cover - loop exits by return or exception
                 raise PreflightError(
@@ -2198,7 +2232,7 @@ class RadarRuntime:
                     _single_scan_failure_message(exc),
                 ) from exc
             finally:
-                self._release_scanner_transient_data()
+                self._release_scanner_transient_data([normalized_id])
 
             with self._state_lock:
                 if (
@@ -2378,6 +2412,7 @@ class RadarRuntime:
                 scan_id,
                 scan_mode,
             )
+            retention_report: RadarReport | None = previous_report
             try:
                 scan_kwargs: dict[str, Any] = {
                     "progress": self._update_progress,
@@ -2388,10 +2423,9 @@ class RadarRuntime:
                     scan_kwargs["preview"] = self._publish_preview
                 if "scan_mode" in parameters:
                     scan_kwargs["scan_mode"] = scan_mode
-                try:
-                    report = self.scanner.scan_once(**scan_kwargs)
-                finally:
-                    self._release_scanner_transient_data()
+                report: RadarReport | None = self.scanner.scan_once(**scan_kwargs)
+                if report is None:  # pragma: no cover - scanner raised above
+                    raise RuntimeError("市場掃描沒有回傳報告")
                 completed_at = datetime.now(timezone.utc).isoformat()
                 if report.status != "DATA_INCOMPLETE":
                     report = self._merge_partial_report(
@@ -2466,6 +2500,12 @@ class RadarRuntime:
                         ),
                     }
                     self._persist_runtime_state_locked()
+                if report.status != "DATA_INCOMPLETE":
+                    # A partial scan has already been merged with the untouched
+                    # horizon here, so retain exactly the cards users can see.
+                    # A full scan must not let obsolete prior cards consume the
+                    # bounded cache before current 4H cards are considered.
+                    retention_report = report
                 LOGGER.info(
                     "Scan finished: id=%s mode=%s status=%s coverage=%.2f signals=%d",
                     scan_id,
@@ -2490,6 +2530,11 @@ class RadarRuntime:
                     }
                     self._persist_runtime_state_locked()
                 raise
+            finally:
+                self._release_scanner_transient_data(
+                    self._report_cache_inst_ids(retention_report),
+                    replace_retained=True,
+                )
 
     @staticmethod
     def _previous_horizon_timestamp(
@@ -2589,12 +2634,45 @@ class RadarRuntime:
             message=f"{report.message} 15m 沿用上一輪資料。",
         )
 
-    def _release_scanner_transient_data(self) -> None:
+    @staticmethod
+    def _report_cache_inst_ids(*reports: RadarReport | None) -> list[str]:
+        ordered: list[str] = []
+        for field_name in (
+            "signals",
+            "long_signals",
+            "closed_signals",
+            "long_closed_signals",
+            "watchlist",
+            "long_watchlist",
+        ):
+            for report in reports:
+                if report is None:
+                    continue
+                for item in list(getattr(report, field_name, []) or []):
+                    inst_id = str(
+                        getattr(item, "inst_id", "") or ""
+                    ).strip().upper()
+                    if inst_id and inst_id not in ordered:
+                        ordered.append(inst_id)
+        return ordered
+
+    def _release_scanner_transient_data(
+        self,
+        retain_inst_ids: list[str] | None = None,
+        *,
+        replace_retained: bool = False,
+    ) -> None:
         release = getattr(self.scanner, "release_transient_data", None)
         if not callable(release):
             return
         try:
-            released = release()
+            parameters = inspect.signature(release).parameters
+            kwargs: dict[str, Any] = {}
+            if "retain_inst_ids" in parameters:
+                kwargs["retain_inst_ids"] = retain_inst_ids
+            if "replace_retained" in parameters:
+                kwargs["replace_retained"] = replace_retained
+            released = release(**kwargs)
             LOGGER.info("Released %s cached candle series", released)
         except Exception:
             LOGGER.exception("Unable to release transient scanner data")
