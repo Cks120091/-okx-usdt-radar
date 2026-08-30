@@ -3,6 +3,7 @@ from unittest.mock import MagicMock, patch
 from urllib.error import URLError
 
 from radar.api import OKXAPIError, OKXPublicClient, SlidingWindowRateLimiter
+from radar.models import Instrument
 
 
 class FixtureClient(OKXPublicClient):
@@ -160,6 +161,24 @@ class APITests(unittest.TestCase):
         self.assertEqual(instrument.inst_id, "BTC-USDT-SWAP")
         self.assertEqual(open_interest, 25_000_000.0)
         self.assertEqual(client._open_interest_timestamps["BTC-USDT-SWAP"], 999)
+
+    def test_recent_full_scan_metadata_skips_targeted_network_request(self):
+        client = OKXPublicClient(retries=0)
+        instrument = Instrument(
+            "BTC-USDT-SWAP",
+            "live",
+            "USDT",
+            "linear",
+            0.1,
+        )
+        client._instrument_meta[instrument.inst_id] = instrument
+        client._instrument_meta_expires_at[instrument.inst_id] = float("inf")
+
+        with patch.object(client, "_get") as getter:
+            loaded = client.get_usdt_swap_instrument(instrument.inst_id)
+
+        self.assertEqual(loaded, instrument)
+        getter.assert_not_called()
 
     def test_unknown_targeted_instrument_is_not_misreported_as_api_outage(self):
         class UnknownInstrumentClient(OKXPublicClient):

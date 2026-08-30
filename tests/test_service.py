@@ -1234,6 +1234,16 @@ class RuntimeSafetyTests(unittest.TestCase):
         self.assertIn("15m 核心 K 線連線逾時", message)
         self.assertIn("只重試失敗週期", message)
 
+        ticker = RuntimeError(
+            "Ticker 即時價格取得失敗：HTTP 503 temporary upstream failure"
+        )
+        self.assertIn("Ticker（即時價格）", _single_scan_failure_message(ticker))
+
+        instrument = RuntimeError(
+            "合約資料取得失敗：The read operation timed out"
+        )
+        self.assertIn("合約資料", _single_scan_failure_message(instrument))
+
     def test_retryable_single_scan_failure_recovers_once(self):
         class TransientThenSuccessfulScanner(SingleInstrumentScanner):
             def __init__(self):
@@ -1305,6 +1315,10 @@ class RuntimeSafetyTests(unittest.TestCase):
             self.assertEqual(scanner.attempts, 1)
             self.assertEqual(scanner.release_calls, 1)
             sleeper.assert_not_called()
+            last_single = runtime.status()["last_single_scan"]
+            self.assertEqual(last_single["status"], "ERROR")
+            self.assertEqual(last_single["inst_id"], "AAA-USDT-SWAP")
+            self.assertIn("自動重試後仍無法完成", last_single["message"])
 
     def test_single_instrument_scan_is_normalized_and_not_persisted_to_report(self):
         with tempfile.TemporaryDirectory() as directory:
@@ -1323,6 +1337,9 @@ class RuntimeSafetyTests(unittest.TestCase):
             self.assertFalse(payload["safety"]["persisted_to_market_report"])
             self.assertIsNone(runtime._latest)
             self.assertEqual(scanner.release_calls, 1)
+            last_single = runtime.status()["last_single_scan"]
+            self.assertEqual(last_single["status"], "SUCCESS")
+            self.assertEqual(last_single["inst_id"], "BTC-USDT-SWAP")
 
     def test_single_scan_uses_the_requested_horizon_market_bias(self):
         with tempfile.TemporaryDirectory() as directory:

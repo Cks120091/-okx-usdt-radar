@@ -56,7 +56,7 @@ Market Context、OI、Taker、Funding 與 Order Book 仍會保存並放在詳細
 
 部分掃描只更新被選取的週期；另一週期已完成的快照、Signal Episode 與完成時間都會保留。從 15m 卡片按「幣種掃描」只顯示 15m 交易計畫，從 4H 卡片按下則只顯示 4H 交易計畫；這是 UI 與交易計畫隔離，底層仍可把高／低週期 Bias 當成 Context 證據。單獨更新 15m 不會刪除既有 4H，反之亦然。
 
-每次按「幣種掃描（更新判定）」都只分析該幣與所選週期，不重掃 Universe；它會取得最新現價，並只在需要時補抓該幣的 K 線與 Context，再延續或更新原 Signal Episode。大掃描完成後，畫面卡片最新且已收盤的 K 線會以有限數量短暫保留；同一根 K 尚未換棒時直接沿用，換棒後一定重新抓取，不拿過期資料硬算。若一個核心週期暫時失敗，已成功的週期會保留，下一次短重試只補抓失敗週期。若大掃描或前一個單幣掃描仍在收尾，畫面會顯示「等待掃描空位」並在釋放後自動接續，不再把 Scan Lock 的 `409` 誤標為行情更新失敗。從正式訊號卡進入時會鎖定該卡原始做多／做空方向：反向候選只顯示「可能反轉」提醒，不能把原卡翻向，也不能由單幣掃描寫入反向新卡。只有 15m、4H 或全市場大掃描，才能在舊 Episode 結束後建立真正的反向新卡與全新 Entry／SL／TP。OI、5m Timing 與其他非必要 Deep Data 採短等待上限並可降級，不會因單一輔助來源暫缺讓核心判定整張失敗。
+每次按「幣種掃描（更新判定）」都只分析該幣與所選週期，不重掃 Universe；它會取得最新現價，並只在需要時補抓該幣的 K 線與 Context，再延續或更新原 Signal Episode。大掃描完成後，5 分鐘內已驗證的合約資料與畫面卡片最新且已收盤的 K 線會以有限數量短暫保留；同一根 K 尚未換棒時直接沿用，換棒後一定重新抓取，不拿過期資料硬算。單幣核心資料以低並行、10 秒請求預算與官方備援端點優先完成；OI、5m Timing 與其他非必要 Deep Data 之後才抓且可降級，避免輔助來源搶走 Entry／SL／TP 所需連線。若一個核心週期暫時失敗，已成功的週期會保留，下一次短重試只補抓失敗週期。若大掃描或前一個單幣掃描仍在收尾，畫面會顯示「等待掃描空位」並在釋放後自動接續，不再把 Scan Lock 的 `409` 誤標為行情更新失敗。從正式訊號卡進入時會鎖定該卡原始做多／做空方向：反向候選只顯示「可能反轉」提醒，不能把原卡翻向，也不能由單幣掃描寫入反向新卡。只有 15m、4H 或全市場大掃描，才能在舊 Episode 結束後建立真正的反向新卡與全新 Entry／SL／TP。
 
 ## Price-first Market Story
 
@@ -201,12 +201,12 @@ iPhone／iPad 的背景通知需先用 Safari 將雷達「加入主畫面」，�
 ## API 與 Runtime 狀態
 
 - `GET /health`：服務健康與 Runtime 狀態，不觸發掃描
-- `GET /api/status`：全市場／單幣 Scan Lock、進度、資料年齡與最新錯誤
+- `GET /api/status`：全市場／單幣 Scan Lock、進度、資料年齡、最新錯誤，以及最近一次單幣掃描的幣種／週期／時間／結果
 - `GET /api/push/config`：目前 Web Push 公開金鑰與可用狀態，不含任何私鑰
 - `POST /api/scan`：啟動或加入唯一一輪掃描；`scan_mode` 可為 `SHORT`（15m）、`LONG`（4H）或 `FULL`（15m＋4H），亦可附本輪瀏覽器 `push_subscription`
 - `GET /api/report/preview`：本輪已完成的 15m 核心只讀候選；正式掃描完成後才更新持久 Episode 與最終卡片
 - `GET /api/report/latest`：手機需要的精簡 V3.4 JSON；完整 Raw Indicators 與內部 Market Story 不對外傳送
-- `POST /api/instrument/scan`：按需只掃一個 live USDT 永續；`horizon` 可為 `SHORT`、`LONG` 或 `BOTH`，只回傳請求週期的交易計畫，不重掃 Universe、不改寫全市場報告；核心週期各自重試，錯誤回應會指出實際失敗週期
+- `POST /api/instrument/scan`：按需只掃一個 live USDT 永續；`horizon` 可為 `SHORT`、`LONG` 或 `BOTH`，只回傳請求週期的交易計畫，不重掃 Universe、不改寫全市場報告；核心週期、Ticker 與合約資料各自重試，錯誤回應會指出實際失敗來源
 - `GET /api/preflight?inst_id=...&horizon=SHORT|LONG`：舊版 PWA 相容入口；委派給同一套單幣掃描與目前判定，不再維護另一套可能矛盾的答案
 - `POST /api/preflight/reanalyze`：舊版 PWA 相容別名，同樣使用統一單幣判定
 - `GET /api/report/latest.md`：中文文字報告

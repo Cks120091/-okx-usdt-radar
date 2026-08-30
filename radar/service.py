@@ -117,6 +117,36 @@ def _single_scan_retry_delay(exc: BaseException) -> float:
 
 def _single_scan_failure_message(exc: Exception) -> str:
     detail = _single_scan_error_detail(exc)
+    transient_markers = (
+        "timed out",
+        "timeout",
+        "connection refused",
+        "connection reset",
+        "remote end closed",
+        "temporary failure",
+        "name resolution",
+        "ssl",
+        "eof",
+        "http 500",
+        "http 501",
+        "http 502",
+        "http 503",
+        "http 504",
+        "http 521",
+        "http 522",
+        "http 523",
+        "http 524",
+    )
+    if "ticker 即時價格取得失敗" in detail:
+        return (
+            "OKX Ticker（即時價格）在官方主端點與備援端點自動重試後仍無法取得；"
+            "核心 K 線與原訊號沒有因此失效，請稍後再試。"
+        )
+    if "合約資料取得失敗" in detail:
+        return (
+            "OKX 合約資料在官方主端點與備援端點自動重試後仍無法取得；"
+            "這不是單一幣種失效，請稍後再試。"
+        )
     bar_match = re.search(r"\b(1d|4h|1h|15m|5m)\s*k\s*線", detail)
     if bar_match is not None:
         raw_bar = bar_match.group(1)
@@ -127,21 +157,7 @@ def _single_scan_failure_message(exc: Exception) -> str:
                 "系統已只重試失敗週期，其他成功週期保持不重抓。"
                 "這不是幣種或訊號失效，請約 10 秒後再試。"
             )
-        if any(
-            marker in detail
-            for marker in (
-                "timed out",
-                "timeout",
-                "connection refused",
-                "connection reset",
-                "remote end closed",
-                "temporary failure",
-                "name resolution",
-                "502",
-                "503",
-                "504",
-            )
-        ):
+        if any(marker in detail for marker in transient_markers):
             return (
                 f"OKX {bar_label} 核心 K 線連線逾時；"
                 "系統已只重試失敗週期與官方備援端點。"
@@ -152,21 +168,7 @@ def _single_scan_failure_message(exc: Exception) -> str:
             "其他成功週期沒有重抓，也沒有使用舊週期硬算。"
             "這不是訊號失效，請稍後再試。"
         )
-    if any(
-        marker in detail
-        for marker in (
-            "timed out",
-            "timeout",
-            "connection refused",
-            "connection reset",
-            "remote end closed",
-            "temporary failure",
-            "name resolution",
-            "502",
-            "503",
-            "504",
-        )
-    ):
+    if any(marker in detail for marker in transient_markers):
         return (
             "OKX 公開行情目前連線失敗；系統已自動重試官方主端點與備援端點。"
             "這不是幣種或訊號失效，請稍後再試。"
@@ -827,6 +829,12 @@ class RadarRuntime:
         self._scan_push_subscriptions: dict[str, dict[str, Any]] = {}
         self._max_scan_push_subscriptions = 8
         self._single_inflight: set[tuple[str, str, str]] = set()
+        restored_single_scan = restored_runtime.get("last_single_scan")
+        self._last_single_scan: dict[str, Any] | None = (
+            dict(restored_single_scan)
+            if isinstance(restored_single_scan, dict)
+            else None
+        )
         self._progress: dict[str, Any] = self._idle_progress()
 
     def _prune_restored_terminal_cards(self) -> None:
@@ -962,6 +970,7 @@ class RadarRuntime:
             return {
                 "running": self._running,
                 "single_scan_running": bool(self._single_inflight),
+                "last_single_scan": deepcopy(self._last_single_scan),
                 "system_status": system_status,
                 "runtime_status": system_status,
                 "data_status": "STALE" if stale else "FRESH" if self._latest else "NONE",
@@ -1282,13 +1291,43 @@ class RadarRuntime:
                     "另一個單幣掃描正在執行，請等待本輪完成",
                 )
             self._single_inflight.add(request_key)
+            self._last_single_scan = {
+                "status": "SCANNING",
+                "inst_id": normalized_id,
+                "horizon": requested_horizon,
+                "started_at": datetime.now(timezone.utc).isoformat(),
+                "message": "單幣掃描執行中",
+            }
+            self._persist_runtime_state_locked()
         try:
             with self._scan_lock:
-                return self._scan_instrument_dict_locked(
+                result = self._scan_instrument_dict_locked(
                     normalized_id,
                     requested_horizon,
                     requested_direction_lock,
                 )
+        except PreflightError as exc:
+            with self._state_lock:
+                self._last_single_scan = {
+                    "status": "ERROR",
+                    "inst_id": normalized_id,
+                    "horizon": requested_horizon,
+                    "completed_at": datetime.now(timezone.utc).isoformat(),
+                    "message": str(exc),
+                }
+                self._persist_runtime_state_locked()
+            raise
+        else:
+            with self._state_lock:
+                self._last_single_scan = {
+                    "status": "SUCCESS",
+                    "inst_id": normalized_id,
+                    "horizon": requested_horizon,
+                    "completed_at": str(result.get("analyzed_at") or datetime.now(timezone.utc).isoformat()),
+                    "message": "單幣掃描完成",
+                }
+                self._persist_runtime_state_locked()
+            return result
         finally:
             with self._state_lock:
                 self._single_inflight.discard(request_key)
@@ -3031,6 +3070,7 @@ class RadarRuntime:
                     "last_error": self._last_error,
                     "scan_mode": self._scan_mode,
                     "scan_id": self._scan_id,
+                    "last_single_scan": deepcopy(self._last_single_scan),
                     "updated_at": datetime.now(timezone.utc).isoformat(),
                 },
             )

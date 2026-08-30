@@ -875,6 +875,14 @@ class ScannerTests(unittest.TestCase):
         for source, retries, timeout in client.options:
             if source == "context":
                 self.assertEqual((retries, timeout), (0, 4.0))
+            elif source in {
+                "instrument",
+                "ticker",
+                "candles:4H",
+                "candles:1H",
+                "candles:15m",
+            }:
+                self.assertEqual((retries, timeout), (2, 10.0))
             else:
                 self.assertEqual((retries, timeout), (1, 6.0))
 

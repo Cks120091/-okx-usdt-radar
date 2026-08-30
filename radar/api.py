@@ -103,6 +103,7 @@ class OKXPublicClient:
         )
         self.execution_notional_usdt = max(0.0, execution_notional_usdt)
         self._instrument_meta: dict[str, Instrument] = {}
+        self._instrument_meta_expires_at: dict[str, float] = {}
         self._open_interest_timestamps: dict[str, int] = {}
         self._cache: dict[str, tuple[float, list[Any]]] = {}
         self._cache_lock = threading.Lock()
@@ -275,6 +276,10 @@ class OKXPublicClient:
                 instruments.append(instrument)
         ordered = sorted(instruments, key=lambda item: item.inst_id)
         self._instrument_meta = {item.inst_id: item for item in ordered}
+        meta_expiry = time.monotonic() + 300.0
+        self._instrument_meta_expires_at = {
+            item.inst_id: meta_expiry for item in ordered
+        }
         return ordered
 
     def get_usdt_swap_instrument(
@@ -285,6 +290,18 @@ class OKXPublicClient:
         request_timeout_seconds: float | None = None,
     ) -> Instrument | None:
         """Fetch one live linear USDT perpetual selected by the user."""
+
+        instrument_meta = getattr(self, "_instrument_meta", {})
+        instrument_meta_expiry = getattr(self, "_instrument_meta_expires_at", {})
+        cached = instrument_meta.get(inst_id)
+        if (
+            cached is not None
+            and instrument_meta_expiry.get(inst_id, 0.0) > time.monotonic()
+        ):
+            metric = getattr(self, "_metric", None)
+            if callable(metric):
+                metric("cache_hits")
+            return cached
 
         try:
             data = self._get(
@@ -321,6 +338,11 @@ class OKXPublicClient:
             instrument_meta = getattr(self, "_instrument_meta", {})
             instrument_meta[instrument.inst_id] = instrument
             self._instrument_meta = instrument_meta
+            instrument_meta_expiry = getattr(self, "_instrument_meta_expires_at", {})
+            instrument_meta_expiry[instrument.inst_id] = (
+                time.monotonic() + 300.0
+            )
+            self._instrument_meta_expires_at = instrument_meta_expiry
         return instrument
 
     def get_swap_tickers(self) -> dict[str, Ticker]:
