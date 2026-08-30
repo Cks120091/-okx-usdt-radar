@@ -140,8 +140,72 @@ class StrategyTests(unittest.TestCase):
         self.assertGreaterEqual(plan.management_plan["stop_distance_atr"], 1.25)
         self.assertEqual(
             plan.management_plan["stop_method"],
-            "結構失效＋ATR＋近期波幅／影線緩衝（取較遠者）",
+            "結構失效＋1.6～1.8 ATR＋近期波幅／影線＋波動分級百分比（取較遠者）",
         )
+
+    def test_v33_quiet_short_market_still_has_practical_percentage_floor(self):
+        engine = AdaptiveStrategyEngine(StrategyConfig(minimum_rr=1.8))
+        story = SimpleNamespace(
+            trigger_direction="LONG",
+            trigger_type="BREAKOUT",
+            horizon="SHORT",
+            trigger={"entry_reference_price": 580.0, "zone_key": "major_support"},
+            invalidation_price=579.95,
+            zones={},
+            regime="TREND",
+            stage="EARLY_SIGNAL",
+            readiness=80.0,
+            supporting=["fixture"],
+            raw={
+                "volatility_profile": {
+                    "realized_volatility_pct": 0.03,
+                    "range_p70_atr": 1.0,
+                    "wick_p75_atr": 0.2,
+                }
+            },
+        )
+        core = SimpleNamespace(
+            close=580.0,
+            atr14=0.10,
+            recent_low=579.9,
+            recent_high=580.1,
+        )
+
+        plan = engine._v33_plan(story, core)
+
+        stop_distance_pct = (plan.entry - plan.stop) / plan.entry * 100.0
+        target_distance_pct = (plan.tp1 - plan.entry) / plan.entry * 100.0
+        self.assertGreaterEqual(stop_distance_pct, 0.4999)
+        self.assertGreaterEqual(target_distance_pct, 0.7499)
+        self.assertEqual(plan.management_plan["stop_floor_pct"], 0.50)
+
+    def test_v33_realized_volatility_expands_percentage_floor(self):
+        engine = AdaptiveStrategyEngine(StrategyConfig(minimum_rr=1.8))
+        story = SimpleNamespace(
+            trigger_direction="SHORT",
+            trigger_type="CONTINUATION",
+            horizon="SHORT",
+            trigger={"entry_reference_price": 100.0, "zone_key": "NO_ZONE"},
+            invalidation_price=100.05,
+            zones={},
+            regime="TREND",
+            stage="EARLY_SIGNAL",
+            readiness=75.0,
+            supporting=["fixture"],
+            raw={"volatility_profile": {"realized_volatility_pct": 0.50}},
+        )
+        core = SimpleNamespace(
+            close=100.0,
+            atr14=0.10,
+            recent_low=99.9,
+            recent_high=100.1,
+        )
+
+        plan = engine._v33_plan(story, core)
+
+        stop_distance_pct = (plan.stop - plan.entry) / plan.entry * 100.0
+        self.assertGreaterEqual(stop_distance_pct, 1.50)
+        self.assertEqual(plan.management_plan["stop_floor_pct"], 1.50)
 
     def test_v33_nearby_obstacle_becomes_partial_level_not_tiny_tp(self):
         engine = AdaptiveStrategyEngine(StrategyConfig(minimum_rr=1.8))

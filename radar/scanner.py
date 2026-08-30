@@ -80,8 +80,10 @@ class ScannerConfig:
     entry_missed_chase_atr: float = 0.50
     previous_open_interest_usd: dict[str, float] = field(default_factory=dict)
     state_db_path: str = ":memory:"
-    short_stop_floor_atr: float = 1.15
-    long_stop_floor_atr: float = 1.20
+    short_stop_floor_atr: float = 1.60
+    long_stop_floor_atr: float = 1.80
+    short_stop_floor_pct: float = 0.45
+    long_stop_floor_pct: float = 0.90
 
 
 @dataclass(frozen=True)
@@ -148,6 +150,8 @@ class MarketScanner:
                 entry_missed_chase_atr=self.config.entry_missed_chase_atr,
                 short_stop_floor_atr=self.config.short_stop_floor_atr,
                 long_stop_floor_atr=self.config.long_stop_floor_atr,
+                short_stop_floor_pct=self.config.short_stop_floor_pct,
+                long_stop_floor_pct=self.config.long_stop_floor_pct,
             )
         )
 

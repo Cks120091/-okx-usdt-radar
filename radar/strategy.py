@@ -38,8 +38,10 @@ class StrategyConfig:
     early_signal_max_age_bars: int = 2
     entry_ready_max_chase_atr: float = 0.15
     entry_missed_chase_atr: float = 0.50
-    short_stop_floor_atr: float = 1.15
-    long_stop_floor_atr: float = 1.20
+    short_stop_floor_atr: float = 1.60
+    long_stop_floor_atr: float = 1.80
+    short_stop_floor_pct: float = 0.45
+    long_stop_floor_pct: float = 0.90
 
 
 @dataclass
@@ -382,6 +384,10 @@ class AdaptiveStrategyEngine:
             volatility.get("current_range_atr", raw.get("core_range_atr")),
             0.0,
         )
+        realized_volatility_pct = _safe_float(
+            volatility.get("realized_volatility_pct"),
+            0.0,
+        )
         distribution_floor_atr = range_p70_atr * 0.78 + wick_p75_atr * 0.45
         if distribution_floor_atr > 0:
             stop_floor_atr = max(
@@ -420,8 +426,27 @@ class AdaptiveStrategyEngine:
             else max(structural_stop, volatility_stop)
         )
         risk = abs(entry - stop)
-        if risk <= 0:
-            risk = max(atr * stop_floor_atr, abs(entry) * 0.003)
+        base_stop_floor_pct = (
+            self.config.long_stop_floor_pct
+            if story.horizon == "LONG"
+            else self.config.short_stop_floor_pct
+        )
+        if story.trigger_type == "BREAKOUT":
+            base_stop_floor_pct += 0.05 if story.horizon == "SHORT" else 0.10
+        if isinstance(noise, dict) and noise.get("high"):
+            base_stop_floor_pct += 0.15 if story.horizon == "SHORT" else 0.25
+        realized_multiplier = 3.5 if story.horizon == "LONG" else 3.0
+        realized_floor_pct = realized_volatility_pct * realized_multiplier
+        practical_stop_floor_pct = _clamp(
+            max(base_stop_floor_pct, realized_floor_pct),
+            self.config.long_stop_floor_pct
+            if story.horizon == "LONG"
+            else self.config.short_stop_floor_pct,
+            4.0 if story.horizon == "LONG" else 2.0,
+        )
+        practical_risk_floor = abs(entry) * practical_stop_floor_pct / 100.0
+        risk = max(risk, atr * stop_floor_atr, practical_risk_floor)
+        if risk > 0:
             stop = entry - risk if is_long else entry + risk
 
         obstacle_key = "major_resistance" if is_long else "major_support"
@@ -453,8 +478,11 @@ class AdaptiveStrategyEngine:
             "auto_ordering": False,
             "stop_distance_atr": round(risk / atr, 2),
             "stop_floor_atr": round(stop_floor_atr, 2),
-            "stop_method": "結構失效＋ATR＋近期波幅／影線緩衝（取較遠者）",
+            "stop_distance_pct": round(risk / max(abs(entry), 1e-9) * 100.0, 4),
+            "stop_floor_pct": round(practical_stop_floor_pct, 3),
+            "stop_method": "結構失效＋1.6～1.8 ATR＋近期波幅／影線＋波動分級百分比（取較遠者）",
             "volatility_profile": dict(volatility),
+            "realized_volatility_pct": round(realized_volatility_pct, 4),
             "structural_buffer_atr": round(structural_buffer_atr, 3),
             "target_method": target_method,
             "adaptive_market_plan": True,
