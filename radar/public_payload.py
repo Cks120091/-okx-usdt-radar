@@ -244,6 +244,7 @@ def _public_candidate(item: Any, *, signal: bool) -> dict[str, Any]:
                 "new_entry_allowed",
                 "direction_still_valid",
                 "hard_blockers",
+                "risk_warnings",
                 "wait_reason_code",
             ),
         )
@@ -324,6 +325,8 @@ def _public_decision_context(decision: Any) -> dict[str, Any]:
             "unknowns",
             "reasons",
             "thresholds",
+            "advisory_only",
+            "entry_veto_enabled",
         ),
     )
     payload["hard_gate"]["checks"] = [

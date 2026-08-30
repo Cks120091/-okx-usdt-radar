@@ -145,7 +145,7 @@ class AnomalyAndDriverTests(unittest.TestCase):
         self.assertIn("spread", anomaly["coverage"]["available"])
         self.assertIn("slippage", anomaly["coverage"]["unknown"])
 
-    def test_anomaly_blocks_entry_only_and_never_changes_trigger(self):
+    def test_severe_anomaly_warns_and_never_changes_trigger(self):
         flow = summarize_flow_history(
             [
                 {
@@ -171,19 +171,21 @@ class AnomalyAndDriverTests(unittest.TestCase):
         )
 
         self.assertEqual(anomaly["status"], "BLOCK")
-        self.assertTrue(anomaly["entry_block"])
+        self.assertFalse(anomaly["entry_block"])
+        self.assertEqual(anomaly["entry_permission"], "ADVISORY_ONLY")
         self.assertFalse(anomaly["may_create_trigger"])
         self.assertFalse(anomaly["may_cancel_trigger"])
         self.assertIn("OI_VELOCITY", {item["code"] for item in anomaly["reasons"]})
 
-    def test_missing_required_data_blocks_entry_without_cancelling_trigger(self):
+    def test_missing_required_data_warns_without_cancelling_trigger(self):
         anomaly = detect_anomaly(
             {"missing_sources": ["order_book"]},
             {"state": "UNKNOWN"},
         )
 
         self.assertEqual(anomaly["status"], "BLOCK")
-        self.assertTrue(anomaly["entry_block"])
+        self.assertFalse(anomaly["entry_block"])
+        self.assertEqual(anomaly["entry_permission"], "ADVISORY_ONLY")
         self.assertFalse(anomaly["may_cancel_trigger"])
         self.assertIn(
             "REQUIRED_DATA_MISSING",
@@ -267,7 +269,10 @@ class AnomalyAndDriverTests(unittest.TestCase):
         json.dumps({"context": context, "interpretation": interpretation})
         self.assertEqual(context["regime"]["key"], "TREND")
         self.assertCountEqual(context["sessions"]["active"], ["LONDON", "NEW_YORK"])
-        self.assertTrue(context["anomaly"]["entry_block"])
+        self.assertFalse(context["anomaly"]["entry_block"])
+        self.assertEqual(
+            context["anomaly"]["entry_permission"], "ADVISORY_ONLY"
+        )
         self.assertEqual(context["anomaly"]["coverage"]["status"], "PARTIAL")
         self.assertEqual(
             interpretation["trigger_permission"],

@@ -128,130 +128,42 @@ def _latest_confirmation(result: Any, original_direction: str) -> dict[str, Any]
     decision = dict(getattr(item, "decision_context", {}) or {}) if item else {}
     hard_gate = dict(decision.get("hard_gate", {}) or {})
     final = dict(decision.get("final", {}) or {})
-    failed_hard_checks = [
-        str(check.get("key") or check.get("label") or "hard_gate")
+    failed_risk_checks = [
+        str(check.get("key") or check.get("label") or "risk_warning")
         for check in list(getattr(item, "safety_checks", []) or [])
-        if check.get("hard", True) is not False
-        and check.get("passed") is False
+        if check.get("passed") is False
     ] if item is not None else []
-    direction_dependent_safety_keys = {
-        "chase",
-        "entry_eligibility",
-        "entry_permission",
-        "execution_cost",
-        "major_conflict",
-        "risk_reward",
-        "rr",
-        "stop_distance",
-        "stop_loss",
-        "structural_headroom",
-    }
-    shared_failed_hard_checks = [
-        key
-        for key in failed_hard_checks
-        if key.strip().lower() not in direction_dependent_safety_keys
-    ]
-    reason_code = str(getattr(result, "reason", "") or "").lower()
-    reason_hard_blocked = any(
-        token in reason_code
-        for token in (
-            "data", "liquidity", "spread", "slippage", "execution",
-            "insufficient", "stop_distance", "structural_headroom", "risk_reward",
-        )
-    )
-    reason_shared_hard_blocked = any(
-        token in reason_code
-        for token in (
-            "anomal",
-            "api_data",
-            "context_data",
-            "core_data",
-            "deep_data",
-            "liquidity",
-            "order_book",
-            "spread",
-            "slippage",
-        )
-    )
     hard_gate_blockers = [
         str(value) for value in list(hard_gate.get("blockers", []) or [])
     ]
     hard_gate_unknowns = [
         str(value) for value in list(hard_gate.get("unknowns", []) or [])
     ]
-    direction_dependent_decision_keys = {
-        "chase",
-        "entry_permission",
-        "execution_cost",
-        "execution_cost_too_high",
-        "plan_invalidation",
-        "plan_terminal",
-        "risk_reward",
-        "rr_insufficient",
-        "stop_distance",
-        "stop_loss",
-        "structural_headroom",
-        "trade_plan",
-    }
-    shared_decision_failures: list[str] = []
-    for key in [*hard_gate_blockers, *hard_gate_unknowns]:
-        normalized_key = key.strip().lower()
-        if normalized_key in direction_dependent_decision_keys:
-            continue
-        if normalized_key == "safety_checks" and not shared_failed_hard_checks:
-            # The aggregate safety row may represent only a candidate's own
-            # RR/SL/chase failure.  Those are re-evaluated by preflight for the
-            # stored direction, so do not double-count them here.
-            continue
-        # Unknown/future Hard Gate keys default to shared and fail closed.
-        shared_decision_failures.append(key)
-    shared_hard_blocked = bool(
-        shared_failed_hard_checks
-        or shared_decision_failures
-        or reason_shared_hard_blocked
-        or final.get("status") in {"DATA_UNAVAILABLE", "ANOMALY"}
-    )
-    hard_blocked = bool(
-        hard_gate.get("blocked")
-        or hard_gate.get("unknown")
-        or failed_hard_checks
-        or getattr(state, "status", "") == "FILTERED"
-        or reason_hard_blocked
-        or final.get("status") in {"DATA_UNAVAILABLE", "ANOMALY", "NO_EDGE"}
+    risk_warning_codes = list(
+        dict.fromkeys(
+            [
+                *hard_gate_blockers,
+                *hard_gate_unknowns,
+                *failed_risk_checks,
+            ]
+        )
     )
 
-    if shared_hard_blocked:
-        # Data integrity, liquidity and abnormal-market protection apply to
-        # both directions. Removing reverse judgement must never weaken these
-        # shared Hard Gates.
-        status = "HARD_GATE_BLOCKED"
-        label = "方向訊號保留・共同風控未通過"
-        message = (
-            "最新資料、流動性、Spread、Slippage 或異常行情風控未完整通過；"
-            "原 Signal Episode 保留追蹤，但禁止新進場。"
-        )
-    elif opposite:
+    if opposite:
         # The fresh opposite candidate is not the stored plan.  Its
         # direction-dependent R:R, SL or entry checks must never veto an
-        # otherwise valid original Episode. Shared Hard Gates were handled
-        # above, so this direction comparison remains informational only.
+        # otherwise valid original Episode. Risk review is advisory, so this
+        # direction comparison remains informational only.
         status = "ORIGINAL_DIRECTION_NOT_RECONFIRMED"
         label = "方向比較只供參考"
         message = (
             "最新掃描沒有延續原方向；這項方向比較只供參考，不建立反向判定、"
             "不改寫進場資格，也不終止舊 Episode。"
         )
-    elif hard_blocked:
-        status = "HARD_GATE_BLOCKED"
-        label = "方向訊號保留・執行風控未通過"
-        message = (
-            "最新資料、流動性、滑價、R:R 或結構風控未完整通過；"
-            "原 Signal Episode 保留追蹤，但禁止新進場。"
-        )
     elif noise.get("high"):
         status = "HIGH_NOISE"
-        label = "疑似假突破・等待收盤確認"
-        message = "最新核心週期來回交叉、雜訊偏高；方向不翻轉，但暫停新進場。"
+        label = "疑似假突破・雜訊提醒"
+        message = "最新核心週期來回交叉、雜訊偏高；只顯示提醒，不改寫進場資格。"
     elif (
         formal
         and direction == original_direction
@@ -263,7 +175,7 @@ def _latest_confirmation(result: Any, original_direction: str) -> dict[str, Any]
     elif formal and direction == original_direction:
         status = "SAME_DIRECTION_WAIT"
         label = "原方向仍有效・目前等待"
-        message = "最新仍是同方向正式 Trigger，但目前位置或執行條件不允許新進場。"
+        message = "最新仍是同方向正式 Trigger，但目前價格位置尚未符合進場條件。"
     elif direction == original_direction:
         status = "ORIGINAL_DIRECTION_STABLE"
         label = "原方向結構仍穩定"
@@ -273,10 +185,10 @@ def _latest_confirmation(result: Any, original_direction: str) -> dict[str, Any]
         )
     else:
         status = "NO_FORMAL_TRIGGER"
-        label = "最新確認不足・暫停新進場"
+        label = "最新確認不足・只供參考"
         message = (
             "舊訊號仍保留作生命週期追蹤，但最新核心週期已無同方向正式 Trigger；"
-            "尚未進場者目前不可使用舊 Entry。"
+            "這項比較不改寫舊 Episode 的現價位置判定。"
         )
 
     groups = dict(getattr(state, "evidence_groups", {}) or {})
@@ -288,13 +200,8 @@ def _latest_confirmation(result: Any, original_direction: str) -> dict[str, Any]
         "stage": stage,
         "formal_trigger": formal,
         "two_step_reversal_confirmed": False,
-        "hard_blockers": (
-            [*shared_decision_failures, *shared_failed_hard_checks]
-            if opposite and shared_hard_blocked
-            else []
-            if opposite
-            else hard_gate_blockers or failed_hard_checks
-        ),
+        "hard_blockers": [],
+        "risk_warnings": risk_warning_codes,
         "closed_candle_ts": getattr(state, "closed_candle_ts", None),
         "group_stances": {
             key: str((value or {}).get("stance", "NEUTRAL"))
@@ -310,62 +217,61 @@ def _merge_preflight_confirmation(
     confirmation: dict[str, Any],
 ) -> dict[str, Any]:
     merged = deepcopy(payload)
+    confirmation = deepcopy(confirmation)
     merged["latest_confirmation"] = deepcopy(confirmation)
     verdict = merged.setdefault("verdict", {})
     lifecycle = merged.setdefault("signal_lifecycle", {})
-    plan = merged.setdefault("plan_state", {})
-    terminal = verdict.get("status") == "PLAN_INVALIDATED" or lifecycle.get("terminal")
+    merged.setdefault("plan_state", {})
     status = str(confirmation.get("status") or "UNKNOWN").upper()
-    if status in {"OPPOSITE_WARNING", "CONFIRMED_REVERSAL"}:
+    legacy_risk_codes = list(
+        dict.fromkeys(
+            [
+                *list(confirmation.get("risk_warnings", []) or []),
+                *list(confirmation.get("hard_blockers", []) or []),
+            ]
+        )
+    )
+    if status in {
+        "OPPOSITE_WARNING",
+        "CONFIRMED_REVERSAL",
+        "HARD_GATE_BLOCKED",
+    }:
         # Backward compatibility for an in-memory/cached V3.4 response.  A
         # direction comparison is no longer allowed to create a reversal
         # verdict or terminate a Signal Episode; only the original SL/TP
         # terminal checks own that transition.
-        status = "ORIGINAL_DIRECTION_NOT_RECONFIRMED"
-        confirmation = deepcopy(confirmation)
+        status = (
+            "ORIGINAL_DIRECTION_NOT_RECONFIRMED"
+            if status in {"OPPOSITE_WARNING", "CONFIRMED_REVERSAL"}
+            else "RISK_WARNING"
+        )
         confirmation.update(
             {
                 "status": status,
-                "label": "方向比較只供參考",
+                "label": (
+                    "方向比較只供參考"
+                    if status == "ORIGINAL_DIRECTION_NOT_RECONFIRMED"
+                    else "風險條件只供提醒"
+                ),
                 "message": (
                     "最新掃描沒有延續原方向；這項方向比較只供參考，不建立"
                     "反向判定、不改寫進場資格，也不終止舊 Episode。"
+                    if status == "ORIGINAL_DIRECTION_NOT_RECONFIRMED"
+                    else "流動性、Spread、Slippage、R:R 與成交成本只作風險提醒，"
+                    "不再改寫目前進場資格或隱藏卡片。"
                 ),
                 "two_step_reversal_confirmed": False,
+                "hard_blockers": [],
+                "risk_warnings": legacy_risk_codes,
             }
         )
 
-    if not terminal and status in {"DATA_UNAVAILABLE", "HARD_GATE_BLOCKED"}:
-        labels = {
-            "DATA_UNAVAILABLE": "最新資料不足｜禁止新進場",
-            "HARD_GATE_BLOCKED": "執行風控未通過｜暫停新進場",
-        }
-        verdict.update(
-            {
-                "status": status,
-                "situation": status,
-                "label": labels[status],
-                "reason": confirmation.get("message"),
-                "actionable": False,
-                "hard_blockers": list(
-                    confirmation.get("hard_blockers", [])
-                    or verdict.get("hard_blockers", [])
-                    or []
-                ),
-            }
-        )
-        plan.update(
-            {
-                "old_plan_reusable_for_new_entry": False,
-                "new_entry_status": "WAIT",
-                "direction_status": "ORIGINAL_BIAS_RETAINED",
-            }
-        )
+    confirmation["hard_blockers"] = []
+    confirmation["risk_warnings"] = legacy_risk_codes
+
     # Direction/noise/formal-Trigger comparisons are context only. They do
-    # not overwrite the current Entry/SL/TP preflight verdict. This restores
-    # the simple behaviour from before reverse judgement: one scan updates the
-    # active Episode, while only a real Hard Gate or terminal plan state can
-    # remove its current entry permission.
+    # not overwrite the current Entry/SL/TP preflight verdict.  Risk reviews
+    # are advisory as well; only the positional/lifecycle verdict decides.
 
     confirmation["new_entry_allowed"] = bool(verdict.get("actionable"))
     merged["latest_confirmation"] = deepcopy(confirmation)
@@ -396,6 +302,23 @@ def _canonical_single_decision(
     plan = dict(preflight.get("plan_state", {}) or {})
     status = str(verdict.get("status", "DATA_UNAVAILABLE")).upper()
     situation = str(verdict.get("situation", "")).upper()
+    if status in {"HARD_GATE_BLOCKED", "ANOMALY"}:
+        # Normalize cached responses produced before risk checks became
+        # advisory. The positional status now owns entry permission; if the
+        # old payload did not preserve it, keep the card visible in WAIT
+        # instead of fabricating an actionable Entry.
+        item_entry = dict(getattr(item, "entry_eligibility", {}) or {})
+        status = str(
+            verdict.get("position_status")
+            or item_entry.get("position_status")
+            or item_entry.get("status")
+            or "WAIT_RETEST"
+        ).upper()
+        if status in {"HARD_GATE_BLOCKED", "ANOMALY"}:
+            status = "WAIT_RETEST"
+        situation = status
+        verdict["actionable"] = status == "ENTRY_READY"
+        verdict["hard_blockers"] = []
     lifecycle_status = str(lifecycle.get("status", "")).upper()
     plan_status = str(plan.get("status", "")).upper()
     direction = str(preflight.get("direction") or final.get("direction") or "NEUTRAL")
@@ -436,22 +359,16 @@ def _canonical_single_decision(
         if status == "ENTRY_READY" and verdict.get("actionable") is True
         else "DATA_UNAVAILABLE"
         if status == "DATA_UNAVAILABLE" or situation == "DATA_UNAVAILABLE"
-        else "ANOMALY"
-        if status == "ANOMALY"
         else "NO_CHASE"
     if status == "MISSED_ENTRY"
         and situation in {"FAVORABLE_MISSED", "PRICE_TOO_FAR"}
-        else "NO_EDGE"
-        if status == "HARD_GATE_BLOCKED"
-        and "RR_INSUFFICIENT" in set(verdict.get("hard_blockers", []) or [])
         else "WAIT"
     )
     labels = {
         "INVALIDATED": "交易計畫已失效｜等待全新 Trigger",
         "COMPLETED": "目標已達｜本次交易計畫完成",
-        "ENTER": "目前可進｜完整風控已通過",
+        "ENTER": "目前可進｜附風險提醒",
         "DATA_UNAVAILABLE": "資料不足｜禁止新進場",
-        "ANOMALY": "異常行情｜等待穩定",
         "NO_CHASE": "方向仍可追蹤｜禁止追價",
         "NO_EDGE": "風險報酬不值得",
         "WAIT": str(verdict.get("label") or "目前等待確認"),
@@ -467,7 +384,6 @@ def _canonical_single_decision(
         "INVALIDATED": ("NEW_TRIGGER_REQUIRED", "等待新的 Trigger／REENTRY"),
         "COMPLETED": ("TARGET_REACHED", "本次機會已完成｜等待全新 Trigger"),
         "DATA_UNAVAILABLE": ("DATA_MISSING", "等待最新完整資料"),
-        "ANOMALY": ("ANOMALY", "等待市場恢復穩定"),
         "NO_CHASE": ("PRICE_TOO_FAR", "等待回到合理進場區或新事件"),
         "NO_EDGE": ("RISK_REWARD", "等待新的合理交易計畫"),
         "WAIT": (str(situation or "ENTRY_CONFIRMATION"), labels["WAIT"]),
@@ -1564,7 +1480,7 @@ class RadarRuntime:
                 elif same_direction:
                     # No new formal Trigger was created, but the newest
                     # same-direction Market State still refreshes the Episode
-                    # explanation and real Hard Gate evidence.
+                    # explanation and the latest advisory risk evidence.
                     item = deepcopy(stored_signal)
                     for field in (
                         "spread_pct",
@@ -1678,6 +1594,9 @@ class RadarRuntime:
                         "new_entry_allowed": verdict.get("actionable") is True,
                         "hard_blockers": list(
                             verdict.get("hard_blockers", []) or []
+                        ),
+                        "risk_warnings": list(
+                            verdict.get("risk_warnings", []) or []
                         ),
                     }
                 )

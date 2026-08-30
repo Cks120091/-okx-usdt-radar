@@ -383,8 +383,8 @@ def detect_anomaly(
     severity_rank = {"NORMAL": 0, "WATCH": 1, "BLOCK": 2}
     # Absence of measurements is not proof that the market is normal.  It is
     # explicitly UNKNOWN unless the caller identified the missing source as a
-    # required safety input, in which case the existing fail-closed BLOCK rule
-    # above applies.  Partial optional coverage may still be NORMAL when every
+    # required input, in which case the severity remains BLOCK as a prominent
+    # warning. Partial optional coverage may still be NORMAL when every
     # available check is within limits, but the coverage remains visible.
     status = "UNKNOWN" if coverage_status == "UNKNOWN" and not reasons else "NORMAL"
     for reason in reasons:
@@ -395,8 +395,8 @@ def detect_anomaly(
         "label": _ANOMALY_LABELS[status],
         "reasons": reasons,
         "coverage": coverage,
-        "entry_block": status == "BLOCK",
-        "entry_permission": "BLOCK_NEW_ENTRY_ONLY" if status == "BLOCK" else "UNCHANGED",
+        "entry_block": False,
+        "entry_permission": "ADVISORY_ONLY",
         "may_create_trigger": False,
         "may_cancel_trigger": False,
     }
@@ -588,7 +588,7 @@ def build_interpretation(
             "invalidate": _unique_strings(conditions.get("invalidate"))[:3],
         },
         "trigger_permission": "NEVER_CREATES_OR_CANCELS_TRIGGER",
-        "entry_permission": "MAY_BLOCK_NEW_ENTRY",
+        "entry_permission": "ADVISORY_ONLY",
     }
 
 
@@ -1136,7 +1136,8 @@ def _anomaly_projection(value: Mapping[str, Any] | None) -> dict[str, Any]:
         "label": str((value or {}).get("label", _ANOMALY_LABELS[status])),
         "reasons": reasons[:5],
         "coverage": coverage,
-        "entry_block": bool((value or {}).get("entry_block", status == "BLOCK")),
+        "entry_block": False,
+        "entry_permission": "ADVISORY_ONLY",
         "may_create_trigger": False,
         "may_cancel_trigger": False,
     }

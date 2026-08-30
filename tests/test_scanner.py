@@ -338,6 +338,25 @@ class ScannerTests(unittest.TestCase):
             "ENTER",
         )
 
+    def test_missing_deep_data_warns_without_removing_formal_signal(self):
+        signal = qualified_signal()
+        result = AnalysisResult(signal, "qualified", qualified_state(signal))
+
+        updated = MarketScanner._mark_deep_data_missing(
+            result,
+            ["Order Book 暫缺"],
+        )
+
+        self.assertIsNotNone(updated.signal)
+        self.assertTrue(updated.signal.actionable)
+        check = next(
+            item
+            for item in updated.signal.safety_checks
+            if item["key"] == "deep_data_available"
+        )
+        self.assertFalse(check["passed"])
+        self.assertFalse(check["hard"])
+
     def test_refresh_entry_eligibility_never_reuses_entry_ready_when_data_missing(self):
         scanner = MarketScanner(FakeClient(), ScannerConfig(min_quote_volume_24h=0))
 
@@ -377,7 +396,7 @@ class ScannerTests(unittest.TestCase):
                     refreshed.entry_eligibility["reason"],
                 )
 
-    def test_execution_hard_gates_preserve_trigger_but_never_reopen_at_entry(self):
+    def test_execution_risks_warn_and_reopen_when_price_returns_to_entry(self):
         scanner = MarketScanner(
             FakeClient(),
             ScannerConfig(
@@ -427,13 +446,16 @@ class ScannerTests(unittest.TestCase):
                 self.assertEqual(returned_to_entry.lifecycle, signal.lifecycle)
                 self.assertIn(
                     expected_blocker,
-                    returned_to_entry.entry_eligibility["hard_blockers"],
+                    returned_to_entry.entry_eligibility["risk_warnings"],
                 )
-                self.assertFalse(returned_to_entry.actionable)
-                self.assertFalse(
+                self.assertEqual(
+                    returned_to_entry.entry_eligibility["hard_blockers"], []
+                )
+                self.assertTrue(returned_to_entry.actionable)
+                self.assertTrue(
                     returned_to_entry.entry_eligibility["new_entry_allowed"]
                 )
-                self.assertNotEqual(
+                self.assertEqual(
                     returned_to_entry.entry_eligibility["status"],
                     "ENTRY_READY",
                 )
@@ -574,7 +596,7 @@ class ScannerTests(unittest.TestCase):
         self.assertIsNotNone(short_scan.short_result)
         self.assertIsNone(short_scan.long_result)
 
-    def test_anomaly_context_keeps_trigger_but_blocks_new_entry(self):
+    def test_anomaly_context_keeps_trigger_and_only_warns(self):
         scanner = MarketScanner(
             FakeClient(),
             ScannerConfig(min_quote_volume_24h=0, universe_max_spread_pct=1.0),
@@ -623,14 +645,15 @@ class ScannerTests(unittest.TestCase):
         self.assertIsNotNone(contextual.signal)
         self.assertEqual(contextual.signal.trigger_id, signal.trigger_id)
         self.assertEqual(contextual.signal.lifecycle, signal.lifecycle)
-        self.assertFalse(contextual.signal.actionable)
+        self.assertTrue(contextual.signal.actionable)
         refreshed = scanner._refresh_entry_eligibility(contextual.signal)
-        self.assertEqual(refreshed.entry_eligibility["status"], "ANOMALY")
+        self.assertEqual(refreshed.entry_eligibility["status"], "ENTRY_READY")
         self.assertIn(
             "ANOMALOUS_MARKET",
-            refreshed.entry_eligibility["hard_blockers"],
+            refreshed.entry_eligibility["risk_warnings"],
         )
-        self.assertFalse(refreshed.entry_eligibility["new_entry_allowed"])
+        self.assertEqual(refreshed.entry_eligibility["hard_blockers"], [])
+        self.assertTrue(refreshed.entry_eligibility["new_entry_allowed"])
 
     def test_on_demand_scan_only_loads_the_requested_instrument(self):
         class SingleInstrumentClient(ContextFakeClient):
@@ -1118,7 +1141,7 @@ class ScannerTests(unittest.TestCase):
         self.assertIn(permitted, top_twenty)
         self.assertEqual(sum(not item.actionable for item in top_twenty), 19)
 
-    def test_attach_decision_synchronizes_true_severe_chase_status(self):
+    def test_attach_decision_does_not_apply_a_second_chase_veto(self):
         scanner = MarketScanner(
             FakeClient(),
             ScannerConfig(min_quote_volume_24h=0),
@@ -1138,17 +1161,13 @@ class ScannerTests(unittest.TestCase):
 
         self.assertEqual(
             attached.decision_context["final"]["status"],
-            "NO_CHASE",
+            "ENTER",
         )
-        self.assertFalse(attached.actionable)
-        self.assertEqual(attached.entry_eligibility["status"], "MISSED_ENTRY")
+        self.assertTrue(attached.actionable)
+        self.assertEqual(attached.entry_eligibility["status"], "ENTRY_READY")
         self.assertEqual(attached.entry_eligibility["chase_atr"], 2.1)
-        self.assertEqual(
-            attached.entry_eligibility["wait_reason_code"],
-            "PRICE_TOO_FAR",
-        )
-        self.assertIn("CHASE", attached.entry_eligibility["hard_blockers"])
-        self.assertEqual(attached.market_metrics["entry_status"], "MISSED_ENTRY")
+        self.assertEqual(attached.entry_eligibility["hard_blockers"], [])
+        self.assertIn("chase", attached.entry_eligibility["risk_warnings"])
 
     def test_one_symbol_failure_is_isolated_and_surviving_signal_remains(self):
         scanner = MarketScanner(

@@ -1,6 +1,6 @@
 # OKX Radar V3.4
 
-以 OKX 公開市場資料運作的 USDT 線性永續合約雙雷達。系統只做分析，不接受 API Key、Secret 或 Passphrase，也沒有自動下單、Paper Trading 或 Live Trading 路徑。V3.4 延續既有 Price-first（價格優先）Trigger、Signal Episode（訊號生命週期）與嚴格 Hard Gate（硬性風控）。Market Context（市場情境）保留為詳細參考資料，不再作為反向判定，也不會額外否決已通過進場資格與 Hard Gate 的正式訊號。
+以 OKX 公開市場資料運作的 USDT 線性永續合約雙雷達。系統只做分析，不接受 API Key、Secret 或 Passphrase，也沒有自動下單、Paper Trading 或 Live Trading 路徑。V3.4 延續既有 Price-first（價格優先）Trigger 與 Signal Episode（訊號生命週期）。Market Context、流動性、Spread、Slippage、成交成本、R:R 與異常行情都保留為詳細風險提醒，不再作反向判定或硬性否決正式訊號。
 
 手機介面將 Entry Zone 統一顯示為「Entry（最佳進場點位）」，並依「目前能否進場 → 方向 → Entry／SL／TP／R:R → 主要原因與安全檢查」排列。其他 OI（未平倉量）、Funding（資金費率）、Taker Flow（主動買賣流）、Spread（買賣價差）、Slippage（滑價）與 Order Book（訂單簿）收進詳細資料。單幣請求期間只使用輕量 CSS 掃描動畫，不載入 GIF、影片、Canvas 或大型外部資源。
 
@@ -8,7 +8,7 @@
 
 OKX REST 預設使用官方目前建議的 `openapi.okx.com`，連線失敗時會自動改試 `www.okx.com`。兩個官方端點都無法連線時，頁面會明確標示為 OKX 行情連線問題；K 線歷史不足則會列出缺少的週期，不會再誤寫成幣種或訊號失效。
 
-V3.4 的核心原則是：**正式價格 Trigger 與風控資格分開，但判定保持單純**。先確認已收盤價格事件是否形成 Trigger，再依現價位置與 Hard Gate 決定目前可進、等回踩、已錯過、失效或資料不足。情境與資金資料只負責補充說明，不建立反向訊號，也不再形成另一套會把原本可進訊號移走的判定。
+V3.4 的核心原則是：**正式價格 Trigger 成立就保留卡片，風險檢查只提醒、不刪訊號**。先確認已收盤價格事件是否形成 Trigger，再依現價相對 Entry／SL／TP 的位置決定目前可進、等回踩、已錯過或失效。情境、資金與執行品質資料只負責補充說明，不建立反向訊號，也不會把原本可進的訊號移走。
 
 ## 目前判定順序
 
@@ -16,7 +16,7 @@ V3.4 的核心原則是：**正式價格 Trigger 與風控資格分開，但判�
 | --- | --- | --- |
 | 1. Price Trigger（價格觸發） | 已收盤核心週期是否已形成正式方向與交易計畫 | 不用分數或參考資料憑空製造 Trigger |
 | 2. Entry Eligibility（進場資格） | 現價是否仍在合理 Entry，或應等回踩／禁止追價 | 走遠不等於訊號死亡 |
-| 3. Hard Gate（硬性風控） | 資料、流動性、Spread、Slippage、成本、SL、R:R、追價、失效與異常風險是否允許新進場 | 不可被任何分數或情境資料推翻 |
+| 3. Risk Review（風險提醒） | 流動性、Spread、Slippage、成本、SL 距離、R:R、深度與異常行情是否需要注意 | 只顯示提醒，不改寫 Price Trigger 或 Entry Eligibility |
 
 Market Context、OI、Taker、Funding 與 Order Book 仍會保存並放在詳細資料中，協助理解行情；它們不參與反向判定。資料缺失就顯示不知道，不用舊值、0 或中性假設補算。
 
@@ -28,7 +28,7 @@ Market Context、OI、Taker、Funding 與 Order Book 仍會保存並放在詳細
 4. 15m 核心判定完成後可先發布只讀 `CORE_PREVIEW`；它不建立／推進持久 Signal Episode，也一律不可進場。
 5. 依新鮮度、生命週期與故事成熟度，對最高順位最多 100 個標的補 5m、Funding、Taker、CVD、OI、Order Book 與執行資料。
 6. 整理 Market Context、變化趨勢與異常資料供詳細頁參考；資料不足就顯示不知道，不填假值，也不作反向判定。
-7. 最後依現價進場資格與 Hard Gate 輸出本輪目前判定。執行資料缺失或門檻未通過會封鎖新進場，但不會抹除仍有效的價格 Trigger。
+7. 最後依現價相對 Entry／SL／TP 的位置輸出本輪判定，並附上執行品質與市場風險提醒；提醒不會封鎖或隱藏正式 Trigger。
 8. SQLite 保存 Signal Episode、事件、MFE／MAE、TP／SL 先後與結果，再從真實完成樣本計算績效。
 9. 每個雷達最多顯示 20 個訊號；不足就顯示 0 個，不為湊數放寬標準。
 
@@ -89,16 +89,16 @@ Market Context、OI、Taker、Funding 與 Order Book 仍會保存並放在詳細
 
 最近至少三筆可比較樣本存在時，系統會看 OI、Taker、Funding、深度與 Order Book 是正在增強、持平、轉弱或異常加速，而不是只看最後一個值；樣本不足、時間窗不一致或來源缺失時維持 `UNKNOWN`。Market Context 會整理 Regime（行情型態）、Phase（階段）、Volatility（波動）、BTC／市場帶動與三大交易時段。Deep Data 的一致或不一致狀態只放在詳細資料供參考，不會取消價格 Trigger、否決已通過的進場資格或生成反向正式訊號。
 
-瞬間插針、異常巨量、OI 快速清洗、Funding 極端、Spread／Slippage 急升或深度消失會被列為異常風險；達到 Hard Gate 封鎖級別時，目前判定會顯示「異常行情｜等待穩定」。一般觀察級異常只提示風險，不誇大成必然反轉。
+瞬間插針、異常巨量、OI 快速清洗、Funding 極端、Spread／Slippage 急升或深度消失都會列為醒目風險提醒，但不取消正式 Trigger、不改成反向訊號，也不把仍在 Entry 的卡片移出可進區。
 
 ## Execution Quality 與 Trigger 分離
 
-入場位置、結構 R:R、Stop 距離、Spread、深度、估算滑價與來回成本組成 `execution_quality`。它只回答「現在是否適合執行」，不回答「價格 Trigger 是否存在」。Hard Gate 採 fail-closed：不知道就顯示不知道並禁止新進場，不會用舊資料、0 值或預設中性冒充最新結果。
+入場位置、結構 R:R、Stop 距離、Spread、深度、估算滑價與來回成本組成 `execution_quality`。它只回答「有哪些執行風險」，不回答「價格 Trigger 是否存在」，也不再擁有一票否決權。缺少的資料會明確顯示未知，不用舊值、0 值或預設中性冒充最新結果。
 
-- 資料過期／缺失、API 失敗、流動性不足、Spread／Slippage 超限、成交成本占風險過高、無合理 SL、R:R 不足、嚴重追價、原計畫失效或封鎖級異常，都是不能被 Context 推翻的 Hard Gate。
+- 流動性不足、Spread／Slippage 偏高、成交成本占風險偏高、SL 距離偏大、R:R 不足與異常行情全部改成提醒；不再刪除或封鎖正式卡片。
 - 突破追價距離以突破邊界／Entry Zone 計算；從最近防守點累積的整段推進只作警告，避免把剛越過邊界的新 Trigger 誤判為已錯過。
-- OI 偏低、5m 資料不一致、Funding 擁擠或 Order Book 不一致本身不取消有效的核心 Trigger，也不額外否決進場；但執行資料缺失或成交風險超限會封鎖新訂單。
-- 新計畫的 SL 以「市場結構失效位置＋ATR 最低緩衝，取較遠者」計算；前方結構無法提供合理目標空間時直接不交易，不放遠 SL 硬湊 R:R。
+- OI 偏低、5m 資料不一致、Funding 擁擠、Order Book 不一致或執行資料缺失都只供參考，不取消有效核心 Trigger。
+- 新計畫的 SL 仍以「市場結構失效位置＋ATR 最低緩衝，取較遠者」計算；前方結構空間或 R:R 不理想時照常保留卡片並顯示提醒，不放遠 SL 硬湊 R:R。
 - Runtime 的部分 `SCANNING` 只暫停正在更新的雷達；另一週期若曾完成掃描，會保留原訊號、完成時間與獨立過期狀態。從未完成過的週期明確顯示「尚未掃描」，不會以空清單冒充最新結果。部分掃描發生 `ERROR` 時也只停用失敗週期，不覆寫另一週期；全市場或核心資料全失敗才會遮蔽兩邊正式訊號。`STALE` 會保留上一輪短長線快照供查看，但明確標記資料已過期並維持 `actionable=false`。
 
 ## 訊號生命週期與排序
@@ -119,11 +119,11 @@ SQLite 以 Event Key 與唯一 active episode 鎖定同一個 Trigger，避免�
 
 Trigger 是否存在與「現在是否適合進場」分開顯示：
 
-- `ENTRY_READY`：仍在 Entry Zone 或只順向偏離最多 0.15 ATR，且剩餘 R:R 至少 1.8。
+- `ENTRY_READY`：仍在 Entry Zone 或只順向偏離最多 0.15 ATR；R:R 不足時附加提醒，但不移除可進卡片。
 - `WAIT_RETEST`：Trigger 仍存在，但已偏離 Entry Zone；等待回踩／重新確認，不追價。
-- `MISSED_ENTRY`：順向偏離超過 0.50 ATR、剩餘 R:R 不足，或生命週期已離開進場階段；保留故事追蹤但禁止新進場。
+- `MISSED_ENTRY`：順向偏離超過 0.50 ATR，或生命週期已離開進場階段；保留故事追蹤但不建議在延伸位置追價。
 
-價格若落到原 Entry Zone 的不利側，仍保留原 Trigger 作生命週期追蹤，但必須重新站回 Entry Zone 並通過最新 Hard Gate 才能重新評估進場。此時即時 Stop 距離可能極小，直接用目前價格計算會產生失真的超大 R:R，因此頁面顯示「暫不適用」；這只修正執行資格與顯示，不改寫原 Entry／Stop／Target 或 V3.4 Trigger。
+價格若落到原 Entry Zone 的不利側，仍保留原 Trigger 作生命週期追蹤；重新站回 Entry Zone 後即可重新評估進場。此時即時 Stop 距離可能極小，直接用目前價格計算會產生失真的超大 R:R，因此頁面顯示「暫不適用」；這只修正位置判定與顯示，不改寫原 Entry／Stop／Target 或 V3.4 Trigger。
 
 單幣掃描將「訊號生命週期」與「目前新進場資格」分開顯示。正式 Trigger 成立後維持「已觸發・有效中」；順向走遠會標示「方向仍有效｜禁止追價」，不利側尚未碰到原始 SL 時依距離顯示「容許回測中」或「接近失效」。等待回踩或禁止追價不是訊號死亡，也不是自動出場指令。
 
@@ -181,11 +181,11 @@ Trigger 是否存在與「現在是否適合進場」分開顯示：
 - 判定原因、安全檢查、全市場搜尋、收藏與 TradingView 快捷連結；開發者原始資料不傳送到手機
 - 專業交易終端視覺：深黑平面、細邊框、清楚的多空／進場層級與精簡市場指揮台；只使用 CSS、既有 SVG 與掃描中狀態動畫，不載入大型圖片、影片或外部字型，離屏卡片延遲繪製以控制手機負擔
 - 搜尋或點擊任何「幣種掃描」入口都會直接重新取得該幣與指定週期的最新資料，不會先把上一輪全市場快照冒充成即時判定，也不會改寫另一週期或整份全市場報告
-- 所有「幣種掃描（更新判定）」入口共用同一次單幣完整掃描：同時核對 Signal Episode、最新已收盤多週期結構、現價、Order Book、Spread、Slippage、剩餘 R:R 與 Hard Gate，最後只顯示一個清楚的目前判定
-- `CORE_PREVIEW` 只顯示初步候選、掃描進度與參考計畫；完整資料與 Hard Gate 完成前固定不可進場，也不會寫入假的 Episode
-- V3.4 新計畫的 SL 採「結構失效位置＋ATR 最低緩衝，取較遠者」，降低一般影線造成過近止損；若前方結構無法提供最低 R:R，直接禁止新進場
+- 所有「幣種掃描（更新判定）」入口共用同一次單幣完整掃描：同時核對 Signal Episode、最新已收盤多週期結構、現價、Order Book、Spread、Slippage 與剩餘 R:R，最後只顯示一個清楚判定及其風險提醒
+- `CORE_PREVIEW` 只顯示初步候選、掃描進度與參考計畫；它不建立 Episode，也不冒充已完成的正式掃描
+- V3.4 新計畫的 SL 採「結構失效位置＋ATR 最低緩衝，取較遠者」，降低一般影線造成過近止損；R:R 不理想時保留卡片並提醒
 - 真實歷史統計分頁
-- 「更多 → 使用手冊」使用摺疊式短說明，涵蓋快速開始、15m／4H、三種掃描、訊號階段、Signal Episode、交易品質、Hard Gate、Entry／SL／TP、R:R、禁止追價、交易計畫失效、重新掃描、三大時段、詳細資料與歷史訊號
+- 「更多 → 使用手冊」使用摺疊式短說明，涵蓋快速開始、15m／4H、三種掃描、訊號階段、Signal Episode、交易品質、風險提醒、Entry／SL／TP、R:R、禁止追價、交易計畫失效、重新掃描、三大時段、詳細資料與歷史訊號
 - Web App Manifest、SVG icon 與只快取 App Shell 的 Service Worker；`/api/*` 與 `/health` 永遠走網路
 - 可由使用者開啟「掃描完成通知」；手動啟動掃描後即使關閉頁面，完成或失敗時仍會收到不含交易訊號內容的背景通知，點擊可回到最新報告
 
@@ -199,7 +199,7 @@ iPhone／iPad 的背景通知需先用 Safari 將雷達「加入主畫面」，�
 - `GET /api/status`：Scan Lock、進度、資料年齡與最新錯誤
 - `GET /api/push/config`：目前 Web Push 公開金鑰與可用狀態，不含任何私鑰
 - `POST /api/scan`：啟動或加入唯一一輪掃描；`scan_mode` 可為 `SHORT`（15m）、`LONG`（4H）或 `FULL`（15m＋4H），亦可附本輪瀏覽器 `push_subscription`
-- `GET /api/report/preview`：本輪已完成的 15m 核心只讀候選；Deep Data 與 Hard Gate 未完成前一律不可進場
+- `GET /api/report/preview`：本輪已完成的 15m 核心只讀候選；正式掃描完成後才更新持久 Episode 與最終卡片
 - `GET /api/report/latest`：手機需要的精簡 V3.4 JSON；完整 Raw Indicators 與內部 Market Story 不對外傳送
 - `POST /api/instrument/scan`：按需只掃一個 live USDT 永續；`horizon` 可為 `SHORT`、`LONG` 或 `BOTH`，只回傳請求週期的交易計畫，不重掃 Universe、不改寫全市場報告
 - `GET /api/preflight?inst_id=...&horizon=SHORT|LONG`：舊版 PWA 相容入口；委派給同一套單幣掃描與目前判定，不再維護另一套可能矛盾的答案
@@ -225,16 +225,16 @@ iPhone／iPad 的背景通知需先用 Safari 將雷達「加入主畫面」，�
 | `candle_limit_1h` | 240 | 1H 已收盤 K 線 |
 | `candle_limit_15m` | 200 | 15m 已收盤 K 線 |
 | `candle_limit_5m` | 120 | 最高順位候選 5m K 線 |
-| `min_quote_volume_24h` | 5,000,000 | Universe 成交額硬門檻 |
-| `universe_max_spread_pct` | 1.00 | Universe 極端 Spread 硬門檻 |
-| `max_spread_pct` | 0.10 | 新進場 Spread Hard Gate |
+| `min_quote_volume_24h` | 5,000,000 | 24H 成交額風險提醒與排序參考 |
+| `universe_max_spread_pct` | 1.00 | Universe 極端 Spread 提醒值 |
+| `max_spread_pct` | 0.10 | Spread 風險提醒值 |
 | `min_open_interest_usd` | 3,000,000 | OI Context 參考／舊設定相容，非硬門檻 |
-| `minimum_rr` | 1.8 | 新進場最低 R:R；不取消既有價格 Trigger |
+| `minimum_rr` | 1.8 | R:R 建議值；低於此值仍保留正式卡片並提醒 |
 | `execution_notional_usdt` | 1,000 | 公開深度滑價估算名目金額，不會下單 |
-| `max_execution_cost_to_risk_pct` | 15 | 新進場成交成本占風險 Hard Gate；10%～15% 顯示偏高提醒但不單獨否決 |
-| `max_slippage_pct` | 0.15 | 新進場方向性 Slippage Hard Gate |
+| `max_execution_cost_to_risk_pct` | 15 | 成交成本占風險提醒值；超過仍不否決正式訊號 |
+| `max_slippage_pct` | 0.15 | 方向性 Slippage 風險提醒值 |
 | `max_entry_extension_atr` | 0.8 | 延伸位置品質分界 |
-| `severe_entry_extension_atr` | 1.8 | 嚴重追價 Hard Gate；不等於舊 Episode 死亡 |
+| `severe_entry_extension_atr` | 1.8 | 嚴重延伸風險提醒值；不等於舊 Episode 死亡 |
 | `early_signal_max_age_bars` | 2 | age 0～2，共保留三根 15m 已收盤 K |
 | `entry_ready_max_chase_atr` | 0.15 | 仍可進的順向偏離上限 |
 | `entry_missed_chase_atr` | 0.50 | 超過即列已錯過、禁止追價 |
@@ -280,13 +280,13 @@ python -m unittest discover -s tests -v
 git diff --check
 ```
 
-測試涵蓋 Price Trigger 與進場資格分離、參考資料不額外否決正式訊號、Hard Gate fail-closed、資料不知道不冒充最新、Market Context／DST 時段、價格接受、控制權轉移、Signal Episode 去重與永久失效、舊資料／亂序資料不回寫、ATR 止損下限、結構目標空間、15m／4H 隔離、三種掃描、部分掃描與獨立新鮮度、`CORE_PREVIEW` 不可進場、可進排序、單幣統一判定、Scan Lock、舊請求不可覆蓋新結果、STALE 快照保留、API 失敗降級、Web Push、PWA 與 API contract。
+測試涵蓋 Price Trigger 與進場資格分離、流動性／Spread／Slippage／成交成本／R:R／異常行情只提醒不刪卡、資料不知道不冒充最新、Market Context／DST 時段、價格接受、控制權轉移、Signal Episode 去重與永久失效、舊資料／亂序資料不回寫、ATR 止損下限、15m／4H 隔離、三種掃描、部分掃描與獨立新鮮度、`CORE_PREVIEW` 唯讀、可進排序、單幣統一判定、Scan Lock、舊請求不可覆蓋新結果、STALE 快照保留、API 失敗降級、Web Push、PWA 與 API contract。
 
 ## 安全邊界與限制
 
 - V3.4 是研究與決策輔助，不是投資建議，也不保證成交或獲利。
 - AI／自動交易屬未來隔離模組；目前沒有模型決策下單、私人 API 或 Live Trading。即使未來加入，Risk Engine 也必須是 AI 之外的硬編碼邊界，並先經 Paper／Demo 驗證。
-- 歷史統計只提供研究參考，不會偷偷改寫 Hard Gate、Trigger 規則或門檻。
+- 歷史統計只提供研究參考，不會偷偷改寫 Trigger、Entry 位置規則或風險提醒值。
 - Order Book 深度只涵蓋公開快照；序列判定能降低假牆風險，但不能保證沒有 spoofing。
 - 同一根核心 K 線同時碰 TP 與 SL 時記為 `AMBIGUOUS_SAME_BAR`，不捏造先後；若兩輪掃描間超出已載入 K 線範圍，則記為 `DATA_GAP` 且不納入績效。
 - 上線前仍應長期 shadow logging、replay 與版本分層比較。

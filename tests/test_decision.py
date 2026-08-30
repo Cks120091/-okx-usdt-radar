@@ -113,7 +113,7 @@ class DecisionContextTests(unittest.TestCase):
 
         self.assertEqual(item, before)
 
-    def test_partial_data_is_unknown_and_never_enters(self):
+    def test_partial_deep_data_warns_but_keeps_formal_entry(self):
         item = complete_signal()
         item["data_quality"] = {
             "core": "AVAILABLE",
@@ -125,10 +125,11 @@ class DecisionContextTests(unittest.TestCase):
 
         self.assertEqual(result["hard_gate"]["status"], "UNKNOWN")
         self.assertIn("data_quality", result["hard_gate"]["unknowns"])
-        self.assertEqual(result["final"]["status"], "DATA_UNAVAILABLE")
-        self.assertFalse(result["final"]["new_entry_allowed"])
+        self.assertEqual(result["final"]["status"], "ENTER")
+        self.assertTrue(result["final"]["new_entry_allowed"])
+        self.assertTrue(result["hard_gate"]["advisory_only"])
 
-    def test_missing_execution_numbers_fail_closed(self):
+    def test_missing_execution_numbers_are_advisory(self):
         item = complete_signal()
         del item["market_metrics"]["buy_slippage_pct"]
         del item["market_metrics"]["execution_cost_to_risk_pct"]
@@ -139,9 +140,10 @@ class DecisionContextTests(unittest.TestCase):
         self.assertEqual(result["hard_gate"]["status"], "UNKNOWN")
         self.assertIn("slippage", result["hard_gate"]["unknowns"])
         self.assertIn("execution_cost", result["hard_gate"]["unknowns"])
-        self.assertEqual(result["final"]["status"], "DATA_UNAVAILABLE")
+        self.assertEqual(result["final"]["status"], "ENTER")
+        self.assertTrue(result["final"]["new_entry_allowed"])
 
-    def test_failed_existing_hard_check_blocks_even_when_entry_is_ready(self):
+    def test_failed_legacy_hard_check_is_advisory_when_entry_is_ready(self):
         item = complete_signal()
         item["safety_checks"].append(
             {"key": "api_data", "passed": False, "hard": True, "label": "API 失敗"}
@@ -150,8 +152,8 @@ class DecisionContextTests(unittest.TestCase):
         result = build_decision_context(item)
 
         self.assertEqual(result["hard_gate"]["status"], "BLOCKED")
-        self.assertEqual(result["final"]["status"], "WAIT")
-        self.assertFalse(result["final"]["new_entry_allowed"])
+        self.assertEqual(result["final"]["status"], "ENTER")
+        self.assertTrue(result["final"]["new_entry_allowed"])
 
     def test_slippage_uses_direct_threshold_not_quality_score(self):
         item = complete_signal()
@@ -161,8 +163,8 @@ class DecisionContextTests(unittest.TestCase):
         result = build_decision_context(item)
 
         self.assertIn("slippage", result["hard_gate"]["blockers"])
-        self.assertEqual(result["final"]["status"], "WAIT")
-        self.assertFalse(result["final"]["new_entry_allowed"])
+        self.assertEqual(result["final"]["status"], "ENTER")
+        self.assertTrue(result["final"]["new_entry_allowed"])
 
     def test_thresholds_parameter_changes_limit_without_changing_priority(self):
         item = complete_signal()
@@ -173,7 +175,7 @@ class DecisionContextTests(unittest.TestCase):
 
         self.assertEqual(normal["final"]["status"], "ENTER")
         self.assertIn("spread", strict["hard_gate"]["blockers"])
-        self.assertFalse(strict["final"]["new_entry_allowed"])
+        self.assertTrue(strict["final"]["new_entry_allowed"])
 
     def test_no_chase_preserves_trigger_and_is_not_invalidation(self):
         item = complete_signal()
@@ -221,7 +223,7 @@ class DecisionContextTests(unittest.TestCase):
         self.assertEqual(result["final"]["status"], "NO_CHASE")
         self.assertFalse(result["final"]["new_entry_allowed"])
 
-    def test_missed_entry_with_real_execution_blocker_keeps_gate_priority(self):
+    def test_missed_entry_position_keeps_priority_over_risk_warning(self):
         item = complete_signal()
         item["entry_eligibility"].update(
             {
@@ -240,7 +242,7 @@ class DecisionContextTests(unittest.TestCase):
 
         self.assertIn("entry_permission", result["hard_gate"]["blockers"])
         self.assertIn("spread", result["hard_gate"]["blockers"])
-        self.assertEqual(result["final"]["status"], "WAIT")
+        self.assertEqual(result["final"]["status"], "NO_CHASE")
         self.assertFalse(result["final"]["new_entry_allowed"])
 
     def test_live_entry_distance_overrides_stale_hidden_entry_quality(self):
@@ -273,7 +275,7 @@ class DecisionContextTests(unittest.TestCase):
         self.assertEqual(result["final"]["status"], "ENTER")
         self.assertTrue(result["final"]["new_entry_allowed"])
 
-    def test_true_live_severe_chase_reports_source_value_and_blocks(self):
+    def test_legacy_ready_status_is_not_overridden_by_risk_review(self):
         item = complete_signal()
         item["entry_eligibility"].update(
             {
@@ -295,10 +297,9 @@ class DecisionContextTests(unittest.TestCase):
         self.assertEqual(chase["value"]["chase_atr"], 2.1)
         self.assertEqual(chase["value"]["threshold_atr"], 1.8)
         self.assertIn("2.10 ATR", chase["reason"])
-        self.assertEqual(result["final"]["status"], "NO_CHASE")
-        self.assertFalse(result["final"]["new_entry_allowed"])
-        self.assertIn("2.10 ATR", result["final"]["reasons"][0])
-        self.assertNotIn("仍在最佳進場", result["final"]["reasons"][0])
+        self.assertEqual(result["final"]["status"], "ENTER")
+        self.assertTrue(result["final"]["new_entry_allowed"])
+        self.assertTrue(result["hard_gate"]["advisory_only"])
 
     def test_legacy_episode_uses_numeric_quality_extension_as_chase_fallback(self):
         item = complete_signal()
@@ -319,7 +320,7 @@ class DecisionContextTests(unittest.TestCase):
         self.assertEqual(chase["status"], "BLOCKED")
         self.assertEqual(chase["value"]["source"], "entry_quality.extension_atr")
         self.assertEqual(chase["value"]["chase_atr"], 2.2)
-        self.assertEqual(result["final"]["status"], "NO_CHASE")
+        self.assertEqual(result["final"]["status"], "ENTER")
 
     def test_missing_live_chase_with_nonsevere_legacy_value_is_unknown(self):
         item = complete_signal()
@@ -342,8 +343,8 @@ class DecisionContextTests(unittest.TestCase):
         self.assertIsNone(chase["value"]["chase_atr"])
         self.assertEqual(chase["value"]["entry_quality_extension_atr"], 0.4)
         self.assertIn("chase", result["hard_gate"]["unknowns"])
-        self.assertEqual(result["final"]["status"], "DATA_UNAVAILABLE")
-        self.assertFalse(result["final"]["new_entry_allowed"])
+        self.assertEqual(result["final"]["status"], "ENTER")
+        self.assertTrue(result["final"]["new_entry_allowed"])
 
     def test_terminal_invalidation_has_highest_priority_and_cannot_revive(self):
         item = complete_signal()
@@ -364,7 +365,7 @@ class DecisionContextTests(unittest.TestCase):
         self.assertFalse(result["final"]["trigger_preserved"])
         self.assertEqual(result["episode"]["status"], "INVALIDATED")
 
-    def test_anomaly_blocks_an_otherwise_valid_signal(self):
+    def test_anomaly_is_warning_for_an_otherwise_valid_signal(self):
         item = complete_signal()
         item["market_metrics"].update(
             {"anomaly_state": "LIQUIDITY_WITHDRAWAL", "anomaly_label": "深度突然消失"}
@@ -372,8 +373,8 @@ class DecisionContextTests(unittest.TestCase):
 
         result = build_decision_context(item)
 
-        self.assertEqual(result["final"]["status"], "ANOMALY")
-        self.assertFalse(result["final"]["new_entry_allowed"])
+        self.assertEqual(result["final"]["status"], "ENTER")
+        self.assertTrue(result["final"]["new_entry_allowed"])
         self.assertIn("anomaly", result["hard_gate"]["blockers"])
 
     def test_anomaly_watch_warns_without_becoming_a_hard_gate(self):
@@ -489,10 +490,10 @@ class DecisionContextTests(unittest.TestCase):
         self.assertEqual(result["hard_gate"]["status"], "BLOCKED")
         self.assertIn("SPREAD_TOO_HIGH", result["hard_gate"]["blockers"])
         self.assertIn("EXECUTION_COST_TOO_HIGH", result["hard_gate"]["blockers"])
-        self.assertNotEqual(result["final"]["status"], "ENTER")
-        self.assertFalse(result["final"]["new_entry_allowed"])
+        self.assertEqual(result["final"]["status"], "ENTER")
+        self.assertTrue(result["final"]["new_entry_allowed"])
 
-    def test_entry_ready_with_explicit_permission_false_fails_closed(self):
+    def test_legacy_permission_false_is_advisory_when_position_is_ready(self):
         item = complete_signal()
         item["entry_eligibility"]["new_entry_allowed"] = False
 
@@ -500,8 +501,8 @@ class DecisionContextTests(unittest.TestCase):
 
         self.assertIn("entry_permission", result["hard_gate"]["blockers"])
         self.assertEqual(result["hard_gate"]["status"], "BLOCKED")
-        self.assertEqual(result["final"]["status"], "WAIT")
-        self.assertFalse(result["final"]["new_entry_allowed"])
+        self.assertEqual(result["final"]["status"], "ENTER")
+        self.assertTrue(result["final"]["new_entry_allowed"])
 
     def test_wait_retest_and_missed_entry_are_not_terminal_states(self):
         cases = (
@@ -569,16 +570,16 @@ class DecisionContextTests(unittest.TestCase):
         self.assertFalse(result["final"]["new_entry_allowed"])
         self.assertTrue(result["final"]["trigger_preserved"])
 
-    def test_low_rr_is_no_edge_instead_of_moving_stop(self):
+    def test_low_rr_is_a_warning_without_moving_stop(self):
         item = complete_signal()
         item["risk_reward"] = 1.1
         item["entry_eligibility"]["remaining_rr"] = 1.1
 
         result = build_decision_context(item)
 
-        self.assertEqual(result["final"]["status"], "NO_EDGE")
+        self.assertEqual(result["final"]["status"], "ENTER")
         self.assertIn("risk_reward", result["hard_gate"]["blockers"])
-        self.assertFalse(result["final"]["new_entry_allowed"])
+        self.assertTrue(result["final"]["new_entry_allowed"])
 
     def test_execution_cost_uses_warning_band_before_hard_limit(self):
         for cost in (13.5, 15.0):
@@ -606,8 +607,8 @@ class DecisionContextTests(unittest.TestCase):
         result = build_decision_context(blocked)
 
         self.assertIn("execution_cost", result["hard_gate"]["blockers"])
-        self.assertEqual(result["final"]["status"], "WAIT")
-        self.assertFalse(result["final"]["new_entry_allowed"])
+        self.assertEqual(result["final"]["status"], "ENTER")
+        self.assertTrue(result["final"]["new_entry_allowed"])
 
     def test_correlated_countertrend_context_does_not_cancel_formal_trigger(self):
         item = complete_signal()
@@ -723,7 +724,7 @@ class DecisionContextTests(unittest.TestCase):
         self.assertEqual(result["final"]["status"], "ENTER")
         self.assertTrue(result["final"]["new_entry_allowed"])
 
-    def test_context_relaxation_never_overrides_a_real_hard_gate(self):
+    def test_spread_and_context_conflict_are_both_advisory(self):
         item = complete_signal()
         item["conflicts"] = ["4H 背景反向，屬逆勢 Trigger"]
         item["spread_pct"] = 0.2
@@ -732,8 +733,8 @@ class DecisionContextTests(unittest.TestCase):
 
         self.assertFalse(result["conflict"]["blocks_entry"])
         self.assertIn("spread", result["hard_gate"]["blockers"])
-        self.assertEqual(result["final"]["status"], "WAIT")
-        self.assertFalse(result["final"]["new_entry_allowed"])
+        self.assertEqual(result["final"]["status"], "ENTER")
+        self.assertTrue(result["final"]["new_entry_allowed"])
 
     def test_high_conflict_lowers_confidence_but_never_changes_entry_or_direction(self):
         item = complete_signal()

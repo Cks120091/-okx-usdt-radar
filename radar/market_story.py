@@ -532,7 +532,7 @@ class MarketStoryEngine:
                 "neutral": ["深度資料尚未取得"],
                 "permission": "CONTEXT_ONLY_NEVER_CANCELS_TRIGGER",
                 "trigger_permission": "NEVER_CREATES_OR_CANCELS_TRIGGER",
-                "entry_permission": "MAY_BLOCK_NEW_ENTRY",
+                "entry_permission": "ADVISORY_ONLY",
             },
             execution_quality={
                 "score": entry_location["score"],
@@ -731,7 +731,7 @@ def enrich_story_context(
         "complete": context.complete,
         "permission": "CONTEXT_ONLY_NEVER_CANCELS_TRIGGER",
         "trigger_permission": "NEVER_CREATES_OR_CANCELS_TRIGGER",
-        "entry_permission": "MAY_BLOCK_NEW_ENTRY",
+        "entry_permission": "ADVISORY_ONLY",
     }
     groups = {key: dict(value) for key, value in story.groups.items()}
     participation_score = 70.0 if state == "SUPPORT" else 35.0 if state == "CONFLICT" else 50.0
@@ -814,9 +814,9 @@ def execution_quality(
         score += cost_score * 0.10
         if execution_to_risk is not None:
             if execution_to_risk > max_cost_to_risk_pct:
-                warnings.append("交易成本占原始風險超過硬性上限")
+                warnings.append("交易成本占原始風險超過建議上限")
             elif execution_to_risk > 10.0:
-                warnings.append("交易成本占原始風險偏高，但仍低於硬性上限")
+                warnings.append("交易成本占原始風險偏高，但仍低於建議上限")
         if max(float(entry_slippage or 0.0), float(exit_slippage or 0.0)) > max_slippage_pct:
             warnings.append("估算滑價偏高")
     else:

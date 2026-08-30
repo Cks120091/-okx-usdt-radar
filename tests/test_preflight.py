@@ -233,11 +233,13 @@ class PreflightTests(unittest.TestCase):
             blocked["execution"]["execution_cost_to_risk_pct"],
             15.0,
         )
-        self.assertEqual(blocked["verdict"]["status"], "HARD_GATE_BLOCKED")
+        self.assertEqual(blocked["verdict"]["status"], "ENTRY_READY")
+        self.assertTrue(blocked["verdict"]["actionable"])
         self.assertIn(
             "EXECUTION_COST_TOO_HIGH",
-            blocked["verdict"]["hard_blockers"],
+            blocked["verdict"]["risk_warnings"],
         )
+        self.assertEqual(blocked["verdict"]["hard_blockers"], [])
 
     def test_refreshes_one_signal_and_keeps_stored_trigger_unchanged(self):
         with tempfile.TemporaryDirectory() as directory:
@@ -328,16 +330,17 @@ class PreflightTests(unittest.TestCase):
 
             payload = runtime.preflight_dict(item.inst_id, "SHORT")
 
-            # The original episode remains active, but a new order this close
-            # to SL fails the execution-cost Hard Gate.
-            self.assertEqual(payload["verdict"]["status"], "HARD_GATE_BLOCKED")
+            # The original episode remains active. Position still requires a
+            # retest, while execution cost is shown only as a warning.
+            self.assertEqual(payload["verdict"]["status"], "WAIT_RETEST")
             self.assertFalse(payload["verdict"]["actionable"])
-            self.assertIn("執行風控未通過", payload["verdict"]["label"])
-            self.assertEqual(payload["verdict"]["situation"], "HARD_GATE_BLOCKED")
+            self.assertIn("接近失效", payload["verdict"]["label"])
+            self.assertEqual(payload["verdict"]["situation"], "NEAR_INVALIDATION")
             self.assertIn(
                 "EXECUTION_COST_TOO_HIGH",
-                payload["verdict"]["hard_blockers"],
+                payload["verdict"]["risk_warnings"],
             )
+            self.assertEqual(payload["verdict"]["hard_blockers"], [])
             self.assertEqual(payload["signal_lifecycle"]["status"], "ACTIVE")
             self.assertIsNone(payload["live"]["remaining_rr"])
             self.assertFalse(payload["live"]["remaining_rr_applicable"])

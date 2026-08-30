@@ -111,7 +111,7 @@ class V33ContractTests(unittest.TestCase):
         self.assertIn(".primary-nav{grid-row:5;position:relative", html)
         self.assertIn("grid-template-columns:repeat(4,minmax(0,1fr))", html)
         self.assertIn(".decision-actions{display:grid;grid-template-columns:repeat(2,minmax(0,1fr))", html)
-        self.assertIn("okx-radar-shell-v3.4-simple-verdict-1", service_worker)
+        self.assertIn("okx-radar-shell-v3.4-advisory-risk-1", service_worker)
         self.assertIn("<title>OKX 雷達 V3.4</title>", html)
         self.assertIn("OKX 雷達 <span>V3.4</span>", html)
         self.assertNotIn('data-tab="pendingSignals"', html)
@@ -213,7 +213,7 @@ class V33ContractTests(unittest.TestCase):
         self.assertIn("function signalTriggerTime(item,status)", html)
         self.assertIn("訊號觸發時間（台灣）", html)
         self.assertIn("status!=='ENTRY_READY'&&status!=='MISSED_ENTRY'", html)
-        self.assertIn("okx-radar-shell-v3.4-simple-verdict-1", service_worker)
+        self.assertIn("okx-radar-shell-v3.4-advisory-risk-1", service_worker)
         self.assertIn("$('#preflightRefresh').addEventListener('click',loadPreflight)", html)
         self.assertIn("'#waitRetestBox','#longWaitRetestBox'", html)
         self.assertIn("scanAction=includeInstrument", html)
@@ -434,9 +434,9 @@ class V33ContractTests(unittest.TestCase):
         )[0]
         self.assertIn("eligibility.status", entry_status)
         self.assertIn("eligibility.wait_reason_code", entry_status)
-        self.assertIn("eligibility.hard_blockers", entry_status)
-        self.assertIn("check?.hard!==false&&check?.passed===false", entry_status)
-        self.assertIn("return 'HARD_GATE_BLOCKED'", entry_status)
+        self.assertNotIn("eligibility.hard_blockers", entry_status)
+        self.assertNotIn("check?.hard!==false&&check?.passed===false", entry_status)
+        self.assertIn("eligibility.position_status||'ENTRY_READY'", entry_status)
         self.assertNotIn("new_entry_allowed", entry_status)
         self.assertNotIn("item?.actionable", entry_status)
         self.assertNotIn("decision_context", entry_status)
@@ -452,12 +452,12 @@ class V33ContractTests(unittest.TestCase):
             "copyAction=status==='ENTRY_READY'&&!expired&&!readOnlyReason?",
             decision_panel,
         )
-        self.assertIn("status==='HARD_GATE_BLOCKED'", decision_panel)
+        self.assertNotIn("status==='HARD_GATE_BLOCKED'", decision_panel)
         entry_badge = html.split("function entryBadge(item)", 1)[1].split(
             "function entryCallout", 1
         )[0]
-        self.assertIn("status==='HARD_GATE_BLOCKED'", entry_badge)
-        self.assertIn("風控未通過｜暫停進場", entry_badge)
+        self.assertNotIn("status==='HARD_GATE_BLOCKED'", entry_badge)
+        self.assertNotIn("風控未通過｜暫停進場", entry_badge)
         self.assertIn("function reportRenderFingerprint(report)", html)
         fingerprint = html.split("function reportRenderFingerprint(report)", 1)[1].split(
             "function reportCardEntries", 1
@@ -473,13 +473,14 @@ class V33ContractTests(unittest.TestCase):
         self.assertIn("payload.preflight?.verdict?.status", instrument_state)
         self.assertIn("itemEntryStatus(payload.item)", instrument_state)
         self.assertIn("PLAN_INVALIDATED:80", instrument_state)
-        self.assertIn("HARD_GATE_BLOCKED:70", instrument_state)
+        self.assertNotIn("HARD_GATE_BLOCKED:70", instrument_state)
         self.assertIn("function instrumentDisplayItem(payload)", html)
         display_item = html.split("function instrumentDisplayItem(payload)", 1)[
             1
         ].split("function instrumentOverallContext", 1)[0]
         self.assertIn("entry_eligibility:{...entry,status,label:", display_item)
-        self.assertIn("verdict.hard_blockers", display_item)
+        self.assertIn("hard_blockers:[]", display_item)
+        self.assertIn("verdict.risk_warnings", display_item)
         self.assertNotIn("decisionContext", instrument_state)
         instrument_results = html.split("function renderInstrumentResults", 1)[1].split(
             "function renderStoredInstrument", 1
@@ -494,10 +495,7 @@ class V33ContractTests(unittest.TestCase):
         primary_payload = html.split("function instrumentPrimaryPayload(context)", 1)[
             1
         ].split("function instrumentPlainGuide", 1)[0]
-        self.assertIn(
-            "'DATA_UNAVAILABLE','HARD_GATE_BLOCKED','MISSED_ENTRY'",
-            primary_payload,
-        )
+        self.assertIn("'DATA_UNAVAILABLE','MISSED_ENTRY'", primary_payload)
         self.assertIn("function captureReportUiState()", html)
         self.assertIn("function restoreReportUiState(saved)", html)
         self.assertIn("if(state.reportRenderKey===renderKey)return", report)

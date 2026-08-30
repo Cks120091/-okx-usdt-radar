@@ -34,11 +34,12 @@ def build_decision_context(
     item: Any,
     thresholds: Mapping[str, Any] | Any | None = None,
 ) -> dict[str, Any]:
-    """Build one fail-closed, five-layer trading decision from a radar item.
+    """Build one price-first trading decision from a radar item.
 
     The function is deliberately pure: it does not mutate ``item``, persist a
-    Signal Episode, fetch market data, or create/cancel a Trigger.  Context can
-    explain or lower confidence, but it can never override a failed Hard Gate.
+    Signal Episode, fetch market data, or create/cancel a Trigger.  Execution
+    and market-risk checks are advisory; they never cancel or hide a formal
+    price Trigger.
     """
 
     limits = {
@@ -206,10 +207,10 @@ def _hard_gate(
         _add_check(
             checks,
             "safety_integrity",
-            "Hard safety checks 可核對",
+            "風險提醒資料可核對",
             "UNKNOWN",
             None,
-            "缺少 Hard safety checks，採 fail-closed。",
+            "缺少風險提醒資料；標記為未知，但不取消正式價格 Trigger。",
         )
     else:
         hard = [row for row in safety_checks if bool(row.get("hard", True))]
@@ -218,7 +219,7 @@ def _hard_gate(
         _add_check(
             checks,
             "safety_checks",
-            "既有 Hard Gate 全數通過",
+            "既有風險檢查結果",
             (
                 "BLOCKED"
                 if failed_safety
@@ -228,11 +229,11 @@ def _hard_gate(
             ),
             [str(row.get("key") or row.get("label") or "unknown") for row in failed_safety],
             (
-                "既有 Hard Gate 未通過。"
+                "既有風險檢查出現提醒。"
                 if failed_safety
-                else "Hard Gate 結果不完整。"
+                else "風險檢查資料不完整。"
                 if unknown_safety or not hard
-                else "既有 Hard Gate 全數通過。"
+                else "既有風險檢查未發現提醒。"
             ),
         )
 
@@ -243,10 +244,10 @@ def _hard_gate(
         _add_check(
             checks,
             blocker,
-            f"上游 Hard Gate：{blocker}",
+            f"上游風險提醒：{blocker}",
             "BLOCKED",
             False,
-            f"上游進場資格已標記硬性阻擋：{blocker}。",
+            f"相容舊資料的上游風險標記：{blocker}；只作提醒。",
         )
 
     explicit_entry_permission = (
@@ -258,22 +259,22 @@ def _hard_gate(
         _add_check(
             checks,
             "entry_permission",
-            "上游新進場許可未被否決",
+            "上游目前位置允許新進場",
             "BLOCKED",
             False,
-            "上游已明確設定 new_entry_allowed=False，採 fail-closed。",
+            "上游目前位置判定為不可進；保留作位置狀態，不視為風險一票否決。",
         )
 
     quote_volume = _number(_read(item, "quote_volume_24h", None))
     _numeric_limit_check(
         checks,
         key="liquidity",
-        label="24H 成交額符合最低流動性",
+        label="24H 成交額符合流動性建議值",
         value=quote_volume,
         limit=limits["min_quote_volume_24h"],
         comparison="MIN",
         missing_reason="缺少 24H 成交額，流動性未知。",
-        blocked_reason="24H 成交額低於最低流動性門檻。",
+        blocked_reason="24H 成交額低於流動性建議值。",
     )
     spread = _number(
         _read(item, "spread_pct", None)
@@ -283,12 +284,12 @@ def _hard_gate(
     _numeric_limit_check(
         checks,
         key="spread",
-        label="Spread（買賣價差）可接受",
+        label="Spread（買賣價差）未超過建議值",
         value=spread,
         limit=limits["max_spread_pct"],
         comparison="MAX",
         missing_reason="缺少 Spread，執行風險未知。",
-        blocked_reason="Spread 超過安全上限。",
+        blocked_reason="Spread 超過建議值。",
     )
 
     buy_slippage = _number(metrics.get("buy_slippage_pct"))
@@ -301,12 +302,12 @@ def _hard_gate(
     _numeric_limit_check(
         checks,
         key="slippage",
-        label="Slippage（滑價）可接受",
+        label="Slippage（滑價）未超過建議值",
         value=slippage,
         limit=limits["max_slippage_pct"],
         comparison="MAX",
         missing_reason="缺少完整買入／賣出滑價，執行風險未知。",
-        blocked_reason="估算滑價超過安全上限。",
+        blocked_reason="估算滑價超過建議值。",
     )
 
     cost_to_risk = _number(
@@ -317,12 +318,12 @@ def _hard_gate(
     _numeric_limit_check(
         checks,
         key="execution_cost",
-        label="交易成本占原始風險可接受",
+        label="交易成本占原始風險未超過建議值",
         value=cost_to_risk,
         limit=limits["max_execution_cost_to_risk_pct"],
         comparison="MAX",
-        missing_reason="缺少交易成本占風險資料，不能安全執行。",
-        blocked_reason="交易成本占原始風險過高。",
+        missing_reason="缺少交易成本占風險資料；顯示未知提醒。",
+        blocked_reason="交易成本占原始風險高於建議值。",
     )
     warning_limit = min(
         limits["execution_cost_warning_to_risk_pct"],
@@ -335,7 +336,7 @@ def _hard_gate(
         warnings.append(
             "Execution Cost（交易成本）占原始風險 "
             f"{cost_to_risk:.1f}%，高於 {warning_limit:.1f}% 建議線，"
-            f"但仍低於 {limits['max_execution_cost_to_risk_pct']:.1f}% 硬性上限。"
+            f"但仍低於 {limits['max_execution_cost_to_risk_pct']:.1f}% 建議上限。"
         )
 
     if plan_present:
@@ -348,23 +349,23 @@ def _hard_gate(
         _numeric_limit_check(
             checks,
             key="risk_reward",
-            label="R:R（風險報酬比）符合最低門檻",
+            label="R:R（風險報酬比）符合建議值",
             value=rr,
             limit=limits["minimum_rr"],
             comparison="MIN",
-            missing_reason="缺少可用 R:R，不能建立新進場資格。",
-            blocked_reason="剩餘或原始 R:R 低於最低門檻。",
+            missing_reason="缺少可用 R:R；顯示未知提醒。",
+            blocked_reason="剩餘或原始 R:R 低於建議值。",
         )
         stop_pct = _stop_pct(item, metrics)
         _numeric_limit_check(
             checks,
             key="stop_loss",
-            label="SL（止損）距離合理",
+            label="SL（止損）距離符合建議值",
             value=stop_pct,
             limit=limits["max_stop_pct"],
             comparison="POSITIVE_MAX",
-            missing_reason="缺少可核對的 Entry／SL，不能假設止損合理。",
-            blocked_reason="SL 距離無效或超過最大安全範圍。",
+            missing_reason="缺少可核對的 Entry／SL；顯示未知提醒。",
+            blocked_reason="SL 距離無效或超過建議範圍。",
         )
     else:
         _add_check(
@@ -438,7 +439,7 @@ def _hard_gate(
     }
     if chase_status == "BLOCKED" and chase_atr is not None:
         chase_reason = (
-            f"價格偏離 {chase_atr:.2f} ATR，超過嚴重追價門檻 "
+            f"價格偏離 {chase_atr:.2f} ATR，超過延伸提醒值 "
             f"{limits['severe_entry_extension_atr']:.2f} ATR"
             f"（來源：{chase_source}）。"
         )
@@ -446,7 +447,7 @@ def _hard_gate(
         chase_reason = "即時進場狀態已標記禁止追價（來源：entry_eligibility.status）。"
     elif chase_status == "PASSED" and chase_atr is not None:
         chase_reason = (
-            f"價格偏離 {chase_atr:.2f} ATR，未達嚴重追價門檻 "
+            f"價格偏離 {chase_atr:.2f} ATR，未達延伸提醒值 "
             f"{limits['severe_entry_extension_atr']:.2f} ATR"
             f"（來源：{chase_source}）。"
         )
@@ -476,9 +477,13 @@ def _hard_gate(
         "blockers": [row["key"] for row in blocked],
         "unknowns": [row["key"] for row in unknown],
         "reasons": _unique([row["reason"] for row in [*blocked, *unknown]])[:6],
-        "warnings": _unique(warnings)[:4],
+        "warnings": _unique(
+            [*warnings, *[row["reason"] for row in [*blocked, *unknown]]]
+        )[:8],
         "thresholds": dict(limits),
         "trigger_preserved": True,
+        "advisory_only": True,
+        "entry_veto_enabled": False,
     }
 
 
@@ -748,7 +753,7 @@ def _conflict_layer(
             for key, values in sorted(domain_items.items())
         ],
         # Conflict is explanatory telemetry only.  A core price Trigger that
-        # already passed the real Hard Gate must not disappear because a
+        # has a valid price Trigger must not disappear because a
         # second interpretation layer counted contrary evidence.  The same
         # domains still lower confidence and remain visible in the details.
         "blocking_domains": [],
@@ -894,7 +899,11 @@ def _final_layer(
     )
     stage = episode["source_stage"]
     active_trigger = plan_present and stage in _FORMAL_STAGES and not target_completed
-    severe_chase = "chase" in blockers
+    has_risk_warnings = bool(
+        hard_gate["blocked"]
+        or hard_gate["unknown"]
+        or market_context["anomalies"]
+    )
 
     if terminal_invalidation:
         status, label = "INVALIDATED", "交易計畫已失效"
@@ -902,27 +911,10 @@ def _final_layer(
     elif target_completed:
         status, label = "NO_EDGE", "本次目標已達｜不可重新追入"
         wait_code, wait_label = "NEW_TRIGGER_REQUIRED", "等待新的 Trigger／REENTRY"
-    elif market_context["anomalies"]:
-        status, label = "ANOMALY", "異常行情｜等待穩定"
-        wait_code, wait_label = "ANOMALY", "等待異常波動與流動性恢復"
-    elif hard_gate["unknown"]:
-        status, label = "DATA_UNAVAILABLE", "資料不足｜禁止新進場"
-        wait_code, wait_label = "DATA_MISSING", "等待最新完整資料"
-    elif severe_chase:
-        status, label = "NO_CHASE", "方向可能仍有效｜禁止追價"
-        wait_code, wait_label = "PRICE_TOO_FAR", "等待價格回到合理區"
-    elif "risk_reward" in blockers or "stop_loss" in blockers:
-        status, label = "NO_EDGE", "風險報酬不值得"
-        wait_code = "RISK_REWARD" if "risk_reward" in blockers else "STOP_LOSS"
-        wait_label = "等待新的合理交易計畫"
-    elif missed_entry_no_chase and blockers == {"entry_permission"}:
-        # ``new_entry_allowed=False`` is the expected positional permission
-        # for an already-missed Entry.  When every actual data/execution/risk
-        # gate passed, retain the precise no-chase meaning instead of replacing
-        # it with a generic Hard-Gate WAIT label.
+    elif missed_entry_no_chase:
         status, label = "NO_CHASE", "已離開合理進場區｜禁止追價"
         wait_code, wait_label = "PRICE_TOO_FAR", "等待新的進場機會"
-    elif entry_status == "MISSED_ENTRY" and blockers == {"entry_permission"}:
+    elif entry_status == "MISSED_ENTRY":
         status, label = "WAIT", "進場窗口已關閉｜禁止新進場"
         wait_code, wait_label = (
             "ENTRY_WINDOW_CLOSED",
@@ -935,24 +927,15 @@ def _final_layer(
         else:
             status, label = "NO_EDGE", "目前無明確交易優勢"
             wait_code, wait_label = "NO_EDGE", "等待正式方向與交易計畫"
-    elif hard_gate["blocked"]:
-        status, label = "WAIT", "Hard Gate 未通過｜暫停進場"
-        wait_code, wait_label = _hard_wait_reason(blockers)
-    elif entry_status == "ENTRY_READY" and active_trigger and hard_gate["passed"]:
-        status, label = "ENTER", "目前可進｜風控條件已通過"
+    elif entry_status == "ENTRY_READY" and active_trigger:
+        status, label = (
+            "ENTER",
+            "目前可進｜附風險提醒" if has_risk_warnings else "目前可進",
+        )
         wait_code, wait_label = "NONE", ""
     elif entry_status == "WAIT_RETEST":
         status, label = "WAIT", "等待回踩／重新確認"
         wait_code, wait_label = "ENTRY_RETEST", "等待重新站回合理進場區"
-    elif missed_entry_no_chase:
-        status, label = "NO_CHASE", "已離開合理進場區｜禁止追價"
-        wait_code, wait_label = "PRICE_TOO_FAR", "等待新的進場機會"
-    elif entry_status == "MISSED_ENTRY":
-        status, label = "WAIT", "進場窗口已關閉｜禁止新進場"
-        wait_code, wait_label = (
-            "ENTRY_WINDOW_CLOSED",
-            "等待新的 Trigger／REENTRY",
-        )
     elif stage in {"NEAR_TRIGGER", "WATCH", "NONE", ""}:
         status, label = "WAIT", "訊號形成中｜等待正式 Trigger"
         wait_code, wait_label = "SIGNAL_FORMING", "等待價格觸發與收盤確認"
@@ -1040,7 +1023,7 @@ def _final_layer(
         "label": label,
         "direction": direction,
         "direction_label": _direction_label(direction),
-        "new_entry_allowed": status == "ENTER" and hard_gate["passed"],
+        "new_entry_allowed": status == "ENTER",
         "trigger_preserved": not terminal_invalidation,
         "reasons": reasons[:3],
         "wait_reason": (
@@ -1281,9 +1264,10 @@ def _anomalies(
     blocking_state = structured_status == "BLOCK" or metrics_state not in safe_states
     explicit = _strings(_read(item, "anomalies", []))
     output: list[str] = []
-    # A WATCH is context/confidence information, not a Hard Gate.  Keep
-    # backward-compatible explicit anomaly fields fail-closed only when no
-    # structured WATCH/NORMAL classification is available.
+    # A WATCH is context/confidence information and remains advisory. Keep
+    # Backward-compatible explicit anomaly fields remain visible when no
+    # structured WATCH/NORMAL classification is available; the final layer
+    # treats every anomaly result as advisory.
     if blocking_state or (explicit and not structured_status and not metrics_state):
         output.extend(explicit)
         output.extend(_strings(metrics.get("anomalies", [])))
@@ -1305,7 +1289,7 @@ def _anomalies(
     for row in safety_checks:
         key = str(row.get("key") or "").lower()
         if "anomal" in key and row.get("passed") is False:
-            output.append(str(row.get("label") or "異常行情 Hard Gate 未通過"))
+            output.append(str(row.get("label") or "異常行情風險提醒"))
     return _unique(output)
 
 
@@ -1441,8 +1425,8 @@ def _hard_wait_reason(blockers: set[str]) -> tuple[str, str]:
     if blockers & {"spread", "slippage", "execution_cost"}:
         return "EXECUTION_RISK", "等待價差、滑價與成交成本恢復"
     if "safety_checks" in blockers:
-        return "HARD_GATE", "等待硬性風控條件恢復"
-    return "HARD_GATE", "等待 Hard Gate 通過"
+        return "RISK_WARNING", "留意異常行情風險"
+    return "RISK_WARNING", "留意風險提醒"
 
 
 def _invalidation_condition(item: Any) -> str:

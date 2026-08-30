@@ -103,24 +103,34 @@ def build_preflight_payload(
         else context.sell_slippage_pct
     )
     cost_to_risk = _optional_number(quality.get("execution_cost_to_risk_pct"))
-    hard_blockers: list[str] = []
+    risk_warning_codes: list[str] = []
     if not execution_complete or directional_slippage is None:
-        hard_blockers.append("EXECUTION_DATA_UNAVAILABLE")
+        risk_warning_codes.append("EXECUTION_DATA_UNAVAILABLE")
     elif directional_slippage > config.max_slippage_pct:
-        hard_blockers.append("SLIPPAGE_TOO_HIGH")
+        risk_warning_codes.append("SLIPPAGE_TOO_HIGH")
     if live_spread_pct > config.max_spread_pct:
-        hard_blockers.append("SPREAD_TOO_HIGH")
+        risk_warning_codes.append("SPREAD_TOO_HIGH")
     if cost_to_risk is None:
-        hard_blockers.append("EXECUTION_DATA_UNAVAILABLE")
+        risk_warning_codes.append("EXECUTION_DATA_UNAVAILABLE")
     elif cost_to_risk > config.max_execution_cost_to_risk_pct:
-        hard_blockers.append("EXECUTION_COST_TOO_HIGH")
+        risk_warning_codes.append("EXECUTION_COST_TOO_HIGH")
     # On the adverse side of Entry the plan first needs a structural retest,
     # so ``remaining_rr`` is intentionally not applicable.  Do not turn that
-    # positional WAIT into a fabricated zero-R:R Hard Gate; the gate is
-    # evaluated again as soon as a live entry becomes eligible.
+    # positional WAIT into a fabricated zero-R:R warning; R:R is recalculated
+    # as soon as a live entry becomes eligible.
     if isinstance(remaining_rr, (int, float)) and quality_rr < config.minimum_rr:
-        hard_blockers.append("RR_INSUFFICIENT")
-    hard_blockers = _unique(hard_blockers)
+        risk_warning_codes.append("RR_INSUFFICIENT")
+    risk_warning_codes = _unique(risk_warning_codes)
+    risk_labels = {
+        "EXECUTION_DATA_UNAVAILABLE": "Order Book／Slippage 資料不足",
+        "SLIPPAGE_TOO_HIGH": "Slippage（滑價）超過建議值",
+        "SPREAD_TOO_HIGH": "Spread（買賣價差）超過建議值",
+        "EXECUTION_COST_TOO_HIGH": "交易成本占風險偏高",
+        "RR_INSUFFICIENT": "R:R（風險報酬比）低於建議值",
+    }
+    risk_warning_labels = [
+        risk_labels.get(item, item) for item in risk_warning_codes
+    ]
 
     verdict_status = eligibility["status"]
     verdict_label = eligibility["label"]
@@ -180,29 +190,13 @@ def build_preflight_payload(
     elif verdict_status == "MISSED_ENTRY":
         entry_situation = "ENTRY_WINDOW_CLOSED"
 
-    # Execution Hard Gates block only a new order.  They never erase the
-    # original price Trigger and never turn a temporary no-entry state into a
-    # terminal invalidation.
-    if not invalidated and not target_reached and hard_blockers:
-        missing_execution = "EXECUTION_DATA_UNAVAILABLE" in hard_blockers
-        entry_situation = (
-            "DATA_UNAVAILABLE" if missing_execution else "HARD_GATE_BLOCKED"
-        )
-        verdict_status = entry_situation
-        verdict_label = (
-            "成交資料不足｜禁止新進場"
-            if missing_execution
-            else "執行風控未通過｜暫停新進場"
-        )
-        hard_labels = {
-            "EXECUTION_DATA_UNAVAILABLE": "Order Book／Slippage 資料不足",
-            "SLIPPAGE_TOO_HIGH": "Slippage（滑價）超過上限",
-            "SPREAD_TOO_HIGH": "Spread（買賣價差）超過上限",
-            "EXECUTION_COST_TOO_HIGH": "交易成本占風險過高",
-            "RR_INSUFFICIENT": "R:R（風險報酬比）不足",
-        }
-        verdict_reason = "；".join(
-            hard_labels.get(item, item) for item in hard_blockers[:3]
+    # Execution and market-quality checks are advisory.  They are shown to the
+    # user but never overwrite the positional Entry verdict or hide a Trigger.
+    if verdict_status == "ENTRY_READY" and risk_warning_labels:
+        verdict_label = "目前可進｜附風險提醒"
+        verdict_reason = (
+            f"{verdict_reason} 風險提醒："
+            + "；".join(risk_warning_labels[:3])
         )
 
     if invalidated:
@@ -240,8 +234,6 @@ def build_preflight_payload(
         plan_status = "MISSED"
     elif verdict_status == "WAIT_RETEST":
         plan_status = "WAITING_RETEST"
-    elif verdict_status in {"DATA_UNAVAILABLE", "HARD_GATE_BLOCKED"}:
-        plan_status = "ACTIVE_ENTRY_BLOCKED"
     else:
         plan_status = "ACTIVE"
 
@@ -267,7 +259,8 @@ def build_preflight_payload(
             "label": verdict_label,
             "reason": verdict_reason,
             "actionable": verdict_status == "ENTRY_READY",
-            "hard_blockers": hard_blockers,
+            "hard_blockers": [],
+            "risk_warnings": risk_warning_codes,
         },
         "signal_lifecycle": {
             "status": lifecycle_status,
@@ -286,8 +279,7 @@ def build_preflight_payload(
                 "READY"
                 if verdict_status == "ENTRY_READY"
                 else "WAIT"
-                if verdict_status
-                in {"WAIT_RETEST", "DATA_UNAVAILABLE", "HARD_GATE_BLOCKED"}
+                if verdict_status == "WAIT_RETEST"
                 else "CLOSED"
             ),
             "new_entry_allowed": verdict_status == "ENTRY_READY",
@@ -366,7 +358,9 @@ def build_preflight_payload(
             ),
             "execution_notional_usdt": context.execution_notional_usdt,
         },
-        "warnings": _unique(list(quality.get("warnings", []))),
+        "warnings": _unique(
+            [*list(quality.get("warnings", [])), *risk_warning_labels]
+        ),
         "data_quality": {
             "status": "AVAILABLE" if execution_complete else "PARTIAL",
             "ticker_available": True,
@@ -378,7 +372,8 @@ def build_preflight_payload(
             "analysis_only": True,
             "auto_ordering": False,
             "stored_trigger_unchanged": True,
-            "note": "即時檢查只更新執行條件，不產生、刪除或改寫核心 Trigger。",
+            "entry_veto_enabled": False,
+            "note": "即時檢查只提供風險提醒，不產生、刪除、改寫或隱藏核心 Trigger。",
         },
     }
 

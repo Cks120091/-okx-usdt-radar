@@ -692,7 +692,7 @@ class RuntimeSafetyTests(unittest.TestCase):
         self.assertEqual(confirmation["status"], "ORIGINAL_DIRECTION_STABLE")
         self.assertFalse(confirmation["new_entry_allowed"])
 
-    def test_latest_confirmation_treats_unspecified_safety_check_as_hard(self):
+    def test_latest_confirmation_treats_unspecified_safety_check_as_warning(self):
         current = allow_entry(signal())
         current.safety_checks = [
             {
@@ -707,9 +707,10 @@ class RuntimeSafetyTests(unittest.TestCase):
             "LONG",
         )
 
-        self.assertEqual(confirmation["status"], "HARD_GATE_BLOCKED")
-        self.assertIn("spread", confirmation["hard_blockers"])
-        self.assertFalse(confirmation["new_entry_allowed"])
+        self.assertEqual(confirmation["status"], "REVALIDATED")
+        self.assertEqual(confirmation["hard_blockers"], [])
+        self.assertIn("spread", confirmation["risk_warnings"])
+        self.assertTrue(confirmation["new_entry_allowed"])
 
     def test_opposite_direction_is_only_original_direction_not_reconfirmed(self):
         state = MarketState(
@@ -782,7 +783,7 @@ class RuntimeSafetyTests(unittest.TestCase):
         self.assertIn("只供參考", confirmation["label"])
         self.assertNotEqual(confirmation["status"], "HARD_GATE_BLOCKED")
 
-    def test_opposite_candidate_still_respects_shared_anomaly_hard_gate(self):
+    def test_opposite_candidate_shared_risks_remain_advisory(self):
         for key, label in (
             ("anomalous_market", "異常行情"),
             ("liquidity", "流動性不足"),
@@ -805,8 +806,12 @@ class RuntimeSafetyTests(unittest.TestCase):
                     "LONG",
                 )
 
-                self.assertEqual(confirmation["status"], "HARD_GATE_BLOCKED")
-                self.assertIn(key, confirmation["hard_blockers"])
+                self.assertEqual(
+                    confirmation["status"],
+                    "ORIGINAL_DIRECTION_NOT_RECONFIRMED",
+                )
+                self.assertEqual(confirmation["hard_blockers"], [])
+                self.assertIn(key, confirmation["risk_warnings"])
                 self.assertFalse(confirmation["new_entry_allowed"])
 
         opposite = allow_entry(signal())
@@ -823,8 +828,12 @@ class RuntimeSafetyTests(unittest.TestCase):
             SimpleNamespace(signal=opposite, market_state=None),
             "LONG",
         )
-        self.assertEqual(confirmation["status"], "HARD_GATE_BLOCKED")
-        self.assertIn("safety_integrity", confirmation["hard_blockers"])
+        self.assertEqual(
+            confirmation["status"],
+            "ORIGINAL_DIRECTION_NOT_RECONFIRMED",
+        )
+        self.assertEqual(confirmation["hard_blockers"], [])
+        self.assertIn("safety_integrity", confirmation["risk_warnings"])
 
     def test_confirmation_merge_ignores_direction_difference_without_closing_plan(self):
         payload = {
@@ -854,7 +863,7 @@ class RuntimeSafetyTests(unittest.TestCase):
         self.assertNotIn("direction_status", merged["plan_state"])
         self.assertTrue(merged["latest_confirmation"]["new_entry_allowed"])
 
-    def test_confirmation_merge_preserves_real_hard_and_data_blocks(self):
+    def test_confirmation_merge_turns_legacy_blocks_into_warnings(self):
         for status in ("HARD_GATE_BLOCKED", "DATA_UNAVAILABLE"):
             with self.subTest(status=status):
                 merged = _merge_preflight_confirmation(
@@ -877,13 +886,16 @@ class RuntimeSafetyTests(unittest.TestCase):
                     },
                 )
 
-                self.assertEqual(merged["verdict"]["status"], status)
-                self.assertFalse(merged["verdict"]["actionable"])
+                self.assertEqual(merged["verdict"]["status"], "ENTRY_READY")
+                self.assertTrue(merged["verdict"]["actionable"])
                 self.assertIn(
                     "fixture_hard_gate",
-                    merged["verdict"]["hard_blockers"],
+                    merged["latest_confirmation"]["risk_warnings"],
                 )
-                self.assertFalse(merged["latest_confirmation"]["new_entry_allowed"])
+                self.assertEqual(
+                    merged["latest_confirmation"]["hard_blockers"], []
+                )
+                self.assertTrue(merged["latest_confirmation"]["new_entry_allowed"])
                 self.assertTrue(merged["signal_lifecycle"]["active"])
 
     def test_legacy_reverse_status_cannot_invalidate_episode(self):

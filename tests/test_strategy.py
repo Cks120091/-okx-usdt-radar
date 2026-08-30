@@ -192,7 +192,7 @@ class StrategyTests(unittest.TestCase):
         self.assertEqual(missed["status"], "MISSED_ENTRY")
         self.assertFalse(missed["actionable"])
 
-    def test_low_remaining_rr_and_inactive_stage_are_missed(self):
+    def test_low_remaining_rr_warns_but_inactive_stage_is_missed(self):
         low_rr = _entry_eligibility(
             direction="LONG",
             current_price=101.2,
@@ -220,8 +220,10 @@ class StrategyTests(unittest.TestCase):
             missed_chase_atr=0.50,
         )
 
-        self.assertEqual(low_rr["status"], "MISSED_ENTRY")
+        self.assertEqual(low_rr["status"], "ENTRY_READY")
+        self.assertTrue(low_rr["actionable"])
         self.assertLess(low_rr["remaining_rr"], 1.8)
+        self.assertIn("RR_INSUFFICIENT", low_rr["risk_warnings"])
         self.assertEqual(inactive["status"], "MISSED_ENTRY")
 
     def test_adverse_side_does_not_publish_misleading_remaining_rr(self):
@@ -339,14 +341,50 @@ class StrategyTests(unittest.TestCase):
             any("Conflict" in item or "反向" in item for item in result.signal.conflicts)
         )
 
-    def test_low_liquidity_is_rejected(self):
+    def test_low_liquidity_is_a_warning_not_a_filter(self):
         data = trend_candles(100, 0.1, quote_volume=100)
         ticker = Ticker("TEST-USDT-SWAP", 110, 109.99, 110.01, 1)
         result = AdaptiveStrategyEngine().analyze(self.instrument, ticker, data, data, data)
-        self.assertEqual(result.reason, "liquidity_too_low")
+        self.assertNotEqual(result.reason, "liquidity_too_low")
         self.assertIsNotNone(result.market_state)
-        self.assertEqual(result.market_state.status, "FILTERED")
+        self.assertNotEqual(result.market_state.status, "FILTERED")
         self.assertTrue(result.market_state.missing_conditions)
+        check = next(
+            item
+            for item in result.market_state.safety_checks
+            if item["key"] == "universe_liquidity"
+        )
+        self.assertFalse(check["passed"])
+        self.assertFalse(check["hard"])
+
+    def test_formal_trigger_survives_liquidity_and_spread_warnings(self):
+        candles_4h, candles_1h, candles_15m = valid_breakout_frames()
+        ticker = Ticker(
+            "TEST-USDT-SWAP",
+            candles_15m[-1].close,
+            candles_15m[-1].close - 0.03,
+            candles_15m[-1].close + 0.03,
+            1,
+        )
+        result = AdaptiveStrategyEngine(
+            StrategyConfig(
+                min_quote_volume_24h=10**15,
+                universe_max_spread_pct=0.001,
+            )
+        ).analyze(
+            self.instrument,
+            ticker,
+            candles_4h,
+            candles_1h,
+            candles_15m,
+        )
+
+        self.assertIsNotNone(result.signal, result.reason)
+        checks = {item["key"]: item for item in result.signal.safety_checks}
+        self.assertFalse(checks["universe_liquidity"]["passed"])
+        self.assertFalse(checks["universe_spread"]["passed"])
+        self.assertFalse(checks["universe_liquidity"]["hard"])
+        self.assertFalse(checks["universe_spread"]["hard"])
 
     def test_live_market_context_can_confirm_or_downgrade_signal(self):
         candles_4h, candles_1h, candles_15m = valid_breakout_frames()
@@ -399,7 +437,7 @@ class StrategyTests(unittest.TestCase):
         self.assertFalse(evaluated.signal.timeframe_states["5m"]["can_block_trigger"])
         self.assertIn("micro_acceleration_5m", evaluated.signal.market_metrics)
 
-    def test_execution_cost_hard_blocks_entry_but_keeps_price_trigger(self):
+    def test_execution_cost_warns_and_keeps_price_trigger(self):
         candles_4h, candles_1h, candles_15m = valid_breakout_frames()
         candles_5m = story_candles(
             [98 + index * 0.03 for index in range(100)],
@@ -459,8 +497,7 @@ class StrategyTests(unittest.TestCase):
             for item in filtered.signal.safety_checks
             if item["key"] == "execution_cost"
         )
-        self.assertTrue(execution_check["hard"])
-        self.assertFalse(filtered.signal.entry_eligibility["actionable"])
+        self.assertFalse(execution_check["hard"])
         self.assertFalse(execution_check["passed"])
 
     def test_low_open_interest_is_context_not_a_hard_filter(self):

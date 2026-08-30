@@ -1284,7 +1284,7 @@ class MarketScanner:
         episode: Signal,
         state: MarketState,
     ) -> Signal:
-        """Keep an episode visible while applying the newest fail-closed state."""
+        """Keep an episode visible while applying the newest market state."""
 
         story = dict(state.market_story)
         story["trigger"] = dict(episode.market_story.get("trigger", {}))
@@ -1608,39 +1608,42 @@ class MarketScanner:
             exclusion_counts,
         )
         # A core preview is deliberately read-only.  Funding, OI, Order Book,
-        # slippage and execution-cost gates have not finished yet, so it must
-        # neither create/advance a durable Signal Episode nor claim entry
+        # slippage and execution-risk details have not finished yet, so it must
+        # neither create/advance a durable Signal Episode nor claim final entry
         # permission.  The final report is the only commit point.
-        short_signals = [
-            self._attach_decision_context(
-                self._refresh_entry_eligibility(
-                    replace(
-                    item,
-                    actionable=False,
-                    entry_eligibility={
-                        "status": "DATA_PENDING",
-                        "label": "初步候選｜掃描中不可進",
-                        "reason": "完整 Hard Gate 與成交條件尚未完成。",
-                        "actionable": False,
-                        "new_entry_allowed": False,
-                        "wait_reason_code": "DEEP_DATA_PENDING",
-                        "direction_still_valid": True,
-                    },
-                    safety_checks=[
-                        *item.safety_checks,
-                        {
-                            "key": "final_hard_gate",
-                            "label": "完整 Hard Gate 尚未完成",
-                            "passed": False,
-                            "value": "PENDING",
-                            "hard": True,
-                        },
-                    ],
-                    )
-                )
+        def preview_projection(item: Signal) -> Signal:
+            refreshed = self._refresh_entry_eligibility(item)
+            projected = self._attach_decision_context(refreshed)
+            eligibility = {
+                **dict(projected.entry_eligibility),
+                "status": "DATA_PENDING",
+                "label": "初步候選｜完整掃描中",
+                "reason": "成交深度與風險提醒仍在補齊，完成後顯示正式結果。",
+                "actionable": False,
+                "new_entry_allowed": False,
+                "wait_reason_code": "DEEP_DATA_PENDING",
+                "direction_still_valid": True,
+                "hard_blockers": [],
+            }
+            decision = dict(projected.decision_context)
+            decision["final"] = {
+                **dict(decision.get("final", {}) or {}),
+                "status": "WAIT",
+                "label": "初步候選｜完整掃描中",
+                "new_entry_allowed": False,
+                "wait_reason": {
+                    "code": "DEEP_DATA_PENDING",
+                    "label": "等待正式掃描完成",
+                },
+            }
+            return replace(
+                projected,
+                actionable=False,
+                entry_eligibility=eligibility,
+                decision_context=decision,
             )
-            for item in raw_short_signals
-        ]
+
+        short_signals = [preview_projection(item) for item in raw_short_signals]
         short_signals = [_without_internal_metrics(item) for item in short_signals]
         short_states = [
             _without_internal_metrics(self._attach_decision_context(item))
@@ -1675,7 +1678,7 @@ class MarketScanner:
             duration_seconds=round(time.monotonic() - started, 3),
             message=(
                 f"15m 核心初步候選 {candidate_count} 筆；目前一律不可進場。"
-                "正在補 Funding、OI、Order Book、滑價與完整 Hard Gate。"
+                "正在補 Funding、OI、Order Book、滑價與風險提醒。"
             ),
             market_regime_counts=dict(
                 Counter(item.regime for item in short_states)
@@ -1873,13 +1876,13 @@ class MarketScanner:
             "neutral": ["Deep Data 暫缺；核心 Trigger 保留"],
             "missing_sources": reasons,
             "trigger_permission": "NEVER_CREATES_OR_CANCELS_TRIGGER",
-            "entry_permission": "BLOCK_NEW_ENTRY_UNTIL_DATA_AVAILABLE",
+            "entry_permission": "ADVISORY_ONLY",
         }
         updated_state = replace(
             state,
             data_quality=data_quality,
             market_participation=participation,
-            actionable=False,
+            actionable=state.actionable,
             safety_checks=[
                 *[
                     item
@@ -1888,10 +1891,10 @@ class MarketScanner:
                 ],
                 {
                     "key": "deep_data_available",
-                    "label": "Deep Data 不完整；Trigger 保留但禁止新進場",
+                    "label": "Deep Data 不完整；保留 Trigger 並顯示提醒",
                     "passed": False,
                     "value": "MISSING",
-                    "hard": True,
+                    "hard": False,
                 },
             ],
             neutral_evidence=_unique_strings(
@@ -1906,7 +1909,7 @@ class MarketScanner:
                 result.signal,
                 data_quality=data_quality,
                 market_participation=participation,
-                actionable=False,
+                actionable=result.signal.actionable,
                 safety_checks=[
                     *[
                         item
@@ -1915,10 +1918,10 @@ class MarketScanner:
                     ],
                     {
                         "key": "deep_data_available",
-                        "label": "Deep Data 不完整；Trigger 保留但禁止新進場",
+                        "label": "Deep Data 不完整；保留 Trigger 並顯示提醒",
                         "passed": False,
                         "value": "MISSING",
-                        "hard": True,
+                        "hard": False,
                     },
                 ],
                 neutral_evidence=_unique_strings(
@@ -1950,10 +1953,8 @@ class MarketScanner:
                 states.append(result.market_state)
             if result.signal is None:
                 exclusion_counts[result.reason] += 1
-            elif self._passes_output_liquidity(result.signal, False):
-                signals.append(result.signal)
             else:
-                exclusion_counts["universe_output_gate"] += 1
+                signals.append(result.signal)
         return states, signals
 
     @staticmethod
@@ -2136,50 +2137,21 @@ class MarketScanner:
             position_status == "MISSED_ENTRY"
             and "失效" in str(eligibility.get("label", ""))
         )
-        hard_blockers = self._signal_hard_gate_blockers(signal)
-        if hard_blockers:
-            data_block = any(
-                code in {
-                    "CORE_DATA_UNAVAILABLE",
-                    "DEEP_DATA_UNAVAILABLE",
-                    "EXECUTION_DATA_UNAVAILABLE",
-                    "SOURCE_DATA_UNAVAILABLE",
-                }
-                for code in hard_blockers
-            )
-            anomaly_block = "ANOMALOUS_MARKET" in hard_blockers
-            eligibility.update(
-                {
-                    "position_status": position_status,
-                    "status": (
-                        "DATA_UNAVAILABLE"
-                        if data_block
-                        else "ANOMALY"
-                        if anomaly_block
-                        else "HARD_GATE_BLOCKED"
-                    ),
-                    "label": (
-                        "資料不足｜禁止新進場"
-                        if data_block
-                        else "異常行情｜等待穩定"
-                        if anomaly_block
-                        else "風控未通過｜暫停新進場"
-                    ),
-                    "reason": "；".join(self._hard_gate_labels(hard_blockers)[:3]),
-                }
-            )
+        risk_warnings = _unique_strings(
+            [
+                *list(eligibility.get("risk_warnings", []) or []),
+                *self._signal_risk_warning_codes(signal),
+            ]
+        )
+        position_actionable = bool(eligibility.get("actionable"))
         eligibility.update(
             {
-                "actionable": bool(eligibility.get("actionable"))
-                and not hard_blockers,
-                "new_entry_allowed": bool(eligibility.get("actionable"))
-                and not hard_blockers,
+                "actionable": position_actionable,
+                "new_entry_allowed": position_actionable,
                 "direction_still_valid": direction_still_valid,
-                "hard_blockers": hard_blockers,
-                "wait_reason_code": self._entry_wait_reason(
-                    eligibility,
-                    hard_blockers,
-                ),
+                "hard_blockers": [],
+                "risk_warnings": risk_warnings,
+                "wait_reason_code": self._entry_wait_reason(eligibility),
             }
         )
         metrics.update(
@@ -2190,7 +2162,7 @@ class MarketScanner:
             }
         )
         checks = [
-            item
+            {**item, "hard": False}
             for item in signal.safety_checks
             if item.get("key") != "entry_eligibility"
         ]
@@ -2225,50 +2197,18 @@ class MarketScanner:
                 "direction_still_valid",
                 str(final.get("status")) != "INVALIDATED",
             )
-            decision_blockers = list(
-                decision.get("hard_gate", {}).get("blockers", [])
-            )
-            upstream_blockers = list(eligibility.get("hard_blockers", []) or [])
-            if "chase" in decision_blockers:
-                upstream_blockers.append("CHASE")
-            eligibility["hard_blockers"] = _unique_strings(upstream_blockers)
+            risk_review = decision.get("hard_gate", {})
+            risk_warnings = [
+                *list(eligibility.get("risk_warnings", []) or []),
+                *list(risk_review.get("blockers", []) or []),
+                *list(risk_review.get("unknowns", []) or []),
+            ]
+            eligibility["hard_blockers"] = []
+            eligibility["risk_warnings"] = _unique_strings(risk_warnings)
             wait_reason = final.get("wait_reason")
             if isinstance(wait_reason, dict):
                 eligibility["wait_reason_code"] = wait_reason.get("code")
             metrics = dict(item.market_metrics)
-            if final.get("status") == "NO_CHASE" and "chase" in decision_blockers:
-                # Keep the public positional status aligned with the same live
-                # value that caused the Hard Gate.  This prevents a card from
-                # saying both ``ENTRY_READY`` and ``禁止追價``.
-                eligibility.setdefault("position_status", eligibility.get("status"))
-                chase_check = next(
-                    (
-                        check
-                        for check in decision.get("hard_gate", {}).get("checks", [])
-                        if check.get("key") == "chase"
-                    ),
-                    {},
-                )
-                chase_check_value = chase_check.get("value", {})
-                canonical_chase_atr = (
-                    chase_check_value.get("chase_atr")
-                    if isinstance(chase_check_value, dict)
-                    else None
-                )
-                eligibility.update(
-                    {
-                        "status": "MISSED_ENTRY",
-                        "label": "已錯過｜禁止追價",
-                        "reason": str(chase_check.get("reason") or "")
-                        or "價格已離開合理進場區，禁止追價。",
-                        "chase_atr": canonical_chase_atr,
-                        "actionable": False,
-                        "new_entry_allowed": False,
-                        "wait_reason_code": "PRICE_TOO_FAR",
-                    }
-                )
-                metrics["entry_status"] = "MISSED_ENTRY"
-                metrics["entry_chase_atr"] = canonical_chase_atr
             return replace(
                 item,
                 actionable=allowed,
@@ -2437,9 +2377,9 @@ class MarketScanner:
             {
                 "key": "anomalous_market",
                 "label": anomaly.get("label", "行情狀態未知"),
-                "passed": not bool(anomaly.get("entry_block")),
+                "passed": anomaly_status != "BLOCK",
                 "value": anomaly_status,
-                "hard": True,
+                "hard": False,
             }
         )
         updated_state = replace(
@@ -2450,7 +2390,7 @@ class MarketScanner:
             conflicts=conflicts,
             supporting_evidence=supporting,
             safety_checks=checks,
-            actionable=state.actionable and not bool(anomaly.get("entry_block")),
+            actionable=state.actionable,
         )
 
         def update_signal(signal: Signal | None) -> Signal | None:
@@ -2464,7 +2404,7 @@ class MarketScanner:
                 conflicts=conflicts,
                 supporting_evidence=supporting,
                 safety_checks=checks,
-                actionable=signal.actionable and not bool(anomaly.get("entry_block")),
+                actionable=signal.actionable,
             )
 
         updated_signal = update_signal(result.signal)
@@ -2476,8 +2416,8 @@ class MarketScanner:
             candidate_signal=updated_candidate,
         )
 
-    def _signal_hard_gate_blockers(self, signal: Signal) -> list[str]:
-        """Return entry blockers without cancelling the stored Trigger."""
+    def _signal_risk_warning_codes(self, signal: Signal) -> list[str]:
+        """Return advisory risk codes without cancelling or hiding a Trigger."""
 
         blockers: list[str] = []
         for check in signal.safety_checks:
@@ -2538,47 +2478,10 @@ class MarketScanner:
         anomaly = context.get("anomaly", {}) if isinstance(context, dict) else {}
         if str(anomaly.get("status", "NORMAL")).upper() == "BLOCK":
             blockers.append("ANOMALOUS_MARKET")
-        if bool((signal.lifecycle or {}).get("terminal")) or str(
-            (signal.lifecycle or {}).get("status", "")
-        ).upper() in {"INVALIDATED", "COMPLETED", "CLOSED"}:
-            blockers.append("PLAN_TERMINAL")
         return _unique_strings(blockers)
 
     @staticmethod
-    def _hard_gate_labels(blockers: list[str]) -> list[str]:
-        labels = {
-            "CORE_DATA_UNAVAILABLE": "核心資料不足或尚未確認收盤",
-            "DEEP_DATA_UNAVAILABLE": "市場深度資料不足",
-            "SOURCE_DATA_UNAVAILABLE": "行情來源資料不足",
-            "EXECUTION_DATA_UNAVAILABLE": "成交深度／滑價資料不足",
-            "SPREAD_TOO_HIGH": "Spread（買賣價差）超過上限",
-            "SLIPPAGE_TOO_HIGH": "Slippage（滑價）超過上限",
-            "EXECUTION_COST_TOO_HIGH": "交易成本占風險過高",
-            "RR_INSUFFICIENT": "R:R（風險報酬比）不足",
-            "ANOMALOUS_MARKET": "行情異常，等待市場穩定",
-            "PLAN_TERMINAL": "原交易計畫已永久失效或完成",
-            "CONTEXT_DATA": "Deep Data 不完整",
-            "EXECUTION_DEPTH": "Order Book（訂單簿）深度不足",
-            "SLIPPAGE": "Slippage（滑價）未通過",
-            "EXECUTION_COST": "Execution Cost（交易成本）未通過",
-        }
-        return [labels.get(code, code.replace("_", " ")) for code in blockers]
-
-    @staticmethod
-    def _entry_wait_reason(
-        eligibility: dict[str, Any],
-        blockers: list[str],
-    ) -> str | None:
-        if blockers:
-            if "ANOMALOUS_MARKET" in blockers:
-                return "ANOMALY"
-            if any("DATA" in code or "DEPTH" in code for code in blockers):
-                return "DATA_MISSING"
-            if "RR_INSUFFICIENT" in blockers:
-                return "RR_INSUFFICIENT"
-            if "SPREAD_TOO_HIGH" in blockers or "SLIPPAGE_TOO_HIGH" in blockers:
-                return "LIQUIDITY_RISK"
-            return "HARD_GATE"
+    def _entry_wait_reason(eligibility: dict[str, Any]) -> str | None:
         status = str(eligibility.get("status", ""))
         label = str(eligibility.get("label", ""))
         if status == "ENTRY_READY":
@@ -3103,11 +3006,9 @@ class MarketScanner:
         item: Signal | MarketState,
         require_context: bool = False,
     ) -> bool:
-        del require_context
-        if item.quote_volume_24h < self.config.min_quote_volume_24h:
-            return False
-        if item.spread_pct > self.config.universe_max_spread_pct:
-            return False
+        # Formal price Triggers are no longer removed by liquidity/Spread
+        # thresholds.  Those values remain visible as risk warnings.
+        del item, require_context
         return True
 
     def _calculate_market_bias(self, results: dict[str, object]) -> dict[str, object]:

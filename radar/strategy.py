@@ -229,15 +229,17 @@ class AdaptiveStrategyEngine:
             self._safety_check("core_data", "核心 K 線與 Ticker 可用", True),
             self._safety_check(
                 "universe_liquidity",
-                "24H 成交額符合 Universe 門檻",
+                "24H 成交額流動性提醒",
                 quote_volume_24h >= self.config.min_quote_volume_24h,
                 quote_volume_24h,
+                hard=False,
             ),
             self._safety_check(
                 "universe_spread",
-                "Spread 未達極端異常排除門檻",
+                "Spread（買賣價差）風險提醒",
                 ticker.spread_pct <= self.config.universe_max_spread_pct,
                 round(ticker.spread_pct, 4),
+                hard=False,
             ),
         ]
         direction = (
@@ -280,21 +282,6 @@ class AdaptiveStrategyEngine:
             actionable=story.triggered and story.stage in ("EARLY_SIGNAL", "CONFIRMED", "REENTRY"),
         )
 
-        universe_failures = [
-            item for item in checks if item["key"].startswith("universe_") and not item["passed"]
-        ]
-        if universe_failures:
-            reason = (
-                "liquidity_too_low"
-                if universe_failures[0]["key"] == "universe_liquidity"
-                else "spread_extremely_abnormal"
-            )
-            return AnalysisResult(
-                None,
-                reason,
-                replace(market_state, status="FILTERED", actionable=False),
-                story,
-            )
         if not story.triggered:
             return AnalysisResult(
                 None,
@@ -305,30 +292,30 @@ class AdaptiveStrategyEngine:
 
         plan = self._v33_plan(story, tf_core)
         risk_pct = abs(plan.entry - plan.stop) / max(abs(plan.entry), 1e-9) * 100.0
-        if plan.rr < self.config.minimum_rr:
-            return AnalysisResult(
-                None,
-                "insufficient_structural_headroom",
-                self._fail_safety(
-                    replace(market_state, actionable=False),
-                    "risk_reward",
-                    f"前方結構空間不足 {self.config.minimum_rr:.1f}R，禁止新進場",
-                ),
-                story,
-                plan,
-            )
-        if risk_pct <= 0 or risk_pct > 5.0:
-            return AnalysisResult(
-                None,
-                "stop_distance_unacceptable",
-                self._fail_safety(
-                    replace(market_state, actionable=False),
-                    "stop_loss",
-                    "結構止損超過價格 5%，風險過大，禁止新進場",
-                ),
-                story,
-                plan,
-            )
+        market_state = self._set_safety(
+            market_state,
+            "risk_reward",
+            plan.rr >= self.config.minimum_rr,
+            (
+                f"R:R（風險報酬比）至少 {self.config.minimum_rr:.1f}R"
+                if plan.rr >= self.config.minimum_rr
+                else f"R:R 僅 {plan.rr:.2f}R，低於 {self.config.minimum_rr:.1f}R（提醒）"
+            ),
+            round(plan.rr, 3),
+            hard=False,
+        )
+        market_state = self._set_safety(
+            market_state,
+            "stop_loss",
+            0 < risk_pct <= 5.0,
+            (
+                "SL（止損）距離在 5% 以內"
+                if 0 < risk_pct <= 5.0
+                else f"SL 距離為 {risk_pct:.2f}%，請自行評估倉位（提醒）"
+            ),
+            round(risk_pct, 4),
+            hard=False,
+        )
         signal = self._signal_from_v33(
             instrument,
             ticker,
@@ -903,10 +890,10 @@ class AdaptiveStrategyEngine:
             [
                 self._safety_check(
                     "context_data",
-                    "Deep Data 完整度（Trigger 保留／新進場需通過）",
+                    "Deep Data 完整度提醒",
                     context.complete,
                     len(live_story.market_participation.get("available_sources", [])),
-                    hard=True,
+                    hard=False,
                 ),
                 self._safety_check(
                     "open_interest",
@@ -917,10 +904,10 @@ class AdaptiveStrategyEngine:
                 ),
                 self._safety_check(
                     "execution_depth",
-                    "Order Book 深度足以估算成交",
+                    "Order Book 深度資料提醒",
                     context.execution_quality_complete,
                     context.execution_notional_usdt,
-                    hard=True,
+                    hard=False,
                 ),
             ]
         )
@@ -981,7 +968,7 @@ class AdaptiveStrategyEngine:
             [
                 self._safety_check(
                     "slippage",
-                    "Slippage（滑價）不超過執行上限",
+                    "Slippage（滑價）風險提醒",
                     (
                         context.execution_quality_complete
                         and context.buy_slippage_pct is not None
@@ -1001,18 +988,18 @@ class AdaptiveStrategyEngine:
                         and context.sell_slippage_pct is not None
                         else None
                     ),
-                    hard=True,
+                    hard=False,
                 ),
                 self._safety_check(
                     "execution_cost",
-                    "Execution Cost（交易成本）占風險不超標",
+                    "Execution Cost（交易成本）風險提醒",
                     (
                         quality["execution_cost_to_risk_pct"] is not None
                         and quality["execution_cost_to_risk_pct"]
                         <= self.config.max_execution_cost_to_risk_pct
                     ),
                     quality["execution_cost_to_risk_pct"],
-                    hard=True,
+                    hard=False,
                 ),
                 self._safety_check(
                     "execution_cost_warning",
@@ -1035,11 +1022,6 @@ class AdaptiveStrategyEngine:
             actionable=(
                 live_story.stage in ("EARLY_SIGNAL", "CONFIRMED", "REENTRY")
                 and bool(result.signal.entry_eligibility.get("actionable"))
-                and all(
-                    bool(item.get("passed"))
-                    for item in checks
-                    if item.get("hard")
-                )
             ),
         )
         signal = replace(
@@ -1058,11 +1040,6 @@ class AdaptiveStrategyEngine:
             actionable=(
                 live_story.stage in ("EARLY_SIGNAL", "CONFIRMED", "REENTRY")
                 and bool(result.signal.entry_eligibility.get("actionable"))
-                and all(
-                    bool(item.get("passed"))
-                    for item in checks
-                    if item.get("hard")
-                )
             ),
             market_participation=dict(live_story.market_participation),
             execution_quality=quality,
@@ -3099,12 +3076,12 @@ def _entry_eligibility(
             f"價格位於 Entry Zone 不利側 {adverse_atr:.2f} ATR；"
             "必須重新站回 Entry Zone 並確認，現在禁止進場。"
         )
-    elif chase_atr > missed_chase_atr or remaining_rr < minimum_rr:
+    elif chase_atr > missed_chase_atr:
         status = "MISSED_ENTRY"
         label = "已錯過｜禁止追價"
         reason = (
-            f"順向偏離 {chase_atr:.2f} ATR，剩餘風報 {remaining_rr:.2f}R；"
-            f"門檻為 {missed_chase_atr:.2f} ATR 內且至少 {minimum_rr:.2f}R。"
+            f"順向偏離 {chase_atr:.2f} ATR，已超過 {missed_chase_atr:.2f} ATR；"
+            "等待價格回到 Entry Zone，不在延伸位置追價。"
         )
     elif chase_atr > ready_max_chase_atr:
         status = "WAIT_RETEST"
@@ -3115,9 +3092,15 @@ def _entry_eligibility(
         )
     else:
         status = "ENTRY_READY"
-        label = "目前可進｜仍在合理區"
+        low_rr = remaining_rr < minimum_rr
+        label = "目前可進｜附 R:R 提醒" if low_rr else "目前可進｜仍在合理區"
         reason = (
             f"順向偏離 {chase_atr:.2f} ATR，剩餘風報 {remaining_rr:.2f}R。"
+            + (
+                f" 低於 {minimum_rr:.2f}R 建議值，請自行評估。"
+                if low_rr
+                else ""
+            )
         )
 
     return {
@@ -3145,6 +3128,11 @@ def _entry_eligibility(
         "ready_max_chase_atr": ready_max_chase_atr,
         "missed_chase_atr": missed_chase_atr,
         "minimum_rr": minimum_rr,
+        "risk_warnings": (
+            ["RR_INSUFFICIENT"]
+            if current_risk > 0 and remaining_rr < minimum_rr
+            else []
+        ),
         "time_alone_never_invalidates": True,
     }
 
