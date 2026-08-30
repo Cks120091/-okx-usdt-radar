@@ -1692,6 +1692,18 @@ class RuntimeSafetyTests(unittest.TestCase):
                 "attack_waves": {"BULL": ["x" * 20_000]},
             }
             item.execution_quality = {"score": 87, "label": "良好", "raw": "x" * 5_000}
+            item.management_plan = {
+                "adaptive_market_plan": True,
+                "frozen_at_trigger": True,
+                "market_strength_score": 76.0,
+                "market_strength_label": "強",
+                "target_method": "有效市場結構＋波動／力度自動目標",
+                "market_plan_sources": ["價格 Trigger", "價格＋OI", "Taker／CVD"],
+                "structural_target_price": 101.0,
+                "structural_target_rr": 0.9,
+                "first_obstacle_action": "途中觀察",
+                "private_debug": "not-public",
+            }
             item.lifecycle = {
                 "age_bars": 1,
                 "triggered_at": "2026-08-27T15:46:18+00:00",
@@ -1852,6 +1864,17 @@ class RuntimeSafetyTests(unittest.TestCase):
             self.assertEqual(
                 payload["signals"][0]["entry_eligibility"]["status"],
                 "ENTRY_READY",
+            )
+            self.assertTrue(
+                payload["signals"][0]["management_plan"]["adaptive_market_plan"]
+            )
+            self.assertEqual(
+                payload["signals"][0]["management_plan"]["market_plan_sources"],
+                ["價格 Trigger", "價格＋OI", "Taker／CVD"],
+            )
+            self.assertNotIn(
+                "private_debug",
+                payload["signals"][0]["management_plan"],
             )
             self.assertEqual(
                 payload["signals"][0]["lifecycle"],

@@ -18,7 +18,7 @@ V3.4 的核心原則是：**正式價格 Trigger 成立就保留卡片，風險�
 | 2. Entry Eligibility（進場資格） | 現價是否仍在合理 Entry，或應等回踩／禁止追價 | 走遠不等於訊號死亡 |
 | 3. Risk Review（風險提醒） | 流動性、Spread、Slippage、成本、SL 距離、R:R、深度與異常行情是否需要注意 | 只顯示提醒，不改寫 Price Trigger 或 Entry Eligibility |
 
-Market Context、OI、Taker、Funding 與 Order Book 仍會保存並放在詳細資料中，協助理解行情；它們不參與反向判定。資料缺失就顯示不知道，不用舊值、0 或中性假設補算。
+Market Context、OI、Taker、Funding 與 Order Book 仍會保存並放在詳細資料中，協助理解行情；它們不參與反向判定，但會在 Trigger 成立當下共同調整市場力度與止盈空間。資料缺失就顯示不知道，不用舊值、0 或中性假設補算。
 
 ## 系統流程
 
@@ -98,7 +98,8 @@ Market Context、OI、Taker、Funding 與 Order Book 仍會保存並放在詳細
 - 流動性不足、Spread／Slippage 偏高、成交成本占風險偏高、SL 距離偏大、R:R 不足與異常行情全部改成提醒；不再刪除或封鎖正式卡片。
 - 突破追價距離以突破邊界／Entry Zone 計算；從最近防守點累積的整段推進只作警告，避免把剛越過邊界的新 Trigger 誤判為已錯過。
 - OI 偏低、5m 資料不一致、Funding 擁擠、Order Book 不一致或執行資料缺失都只供參考，不取消有效核心 Trigger。
-- 新計畫的 SL 仍以「市場結構失效位置＋ATR 最低緩衝，取較遠者」計算；前方結構空間或 R:R 不理想時照常保留卡片並顯示提醒，不放遠 SL 硬湊 R:R。
+- 新計畫的 SL 以「市場結構失效位置＋ATR＋近 20 根真實波幅／影線分布」取較遠者；TP1／TP2 則由行情型態、結構目標、核心量比、Timing、價格＋OI、Taker／CVD、Order Book 與 Funding 擁擠度自動計算。過近支撐壓力只列為途中部分減倉／突破觀察，不再直接把約 1R 的位置當成整筆交易完成；卡片仍保留，不增加新的 Hard Gate。
+- 自動交易計畫只在正式 Trigger 成立時生成一次。進入 Signal Episode 後，原始 Entry／SL／TP 固定不漂移；後續 OI 或成交力度變化只更新證據與管理提醒。
 - Runtime 的部分 `SCANNING` 只暫停正在更新的雷達；另一週期若曾完成掃描，會保留原訊號、完成時間與獨立過期狀態。從未完成過的週期明確顯示「尚未掃描」，不會以空清單冒充最新結果。部分掃描發生 `ERROR` 時也只停用失敗週期，不覆寫另一週期；全市場或核心資料全失敗才會遮蔽兩邊正式訊號。`STALE` 會保留上一輪短長線快照供查看，但明確標記資料已過期並維持 `actionable=false`。
 
 ## 訊號生命週期與排序
@@ -183,7 +184,7 @@ Trigger 是否存在與「現在是否適合進場」分開顯示：
 - 搜尋或點擊任何「幣種掃描」入口都會直接重新取得該幣與指定週期的最新資料，不會先把上一輪全市場快照冒充成即時判定，也不會改寫另一週期或整份全市場報告
 - 所有「幣種掃描（更新判定）」入口共用同一次單幣完整掃描：同時核對 Signal Episode、最新已收盤多週期結構、現價、Order Book、Spread、Slippage 與剩餘 R:R，最後只顯示一個清楚判定及其風險提醒
 - `CORE_PREVIEW` 只顯示初步候選、掃描進度與參考計畫；它不建立 Episode，也不冒充已完成的正式掃描
-- V3.4 新計畫的 SL 採「結構失效位置＋ATR 最低緩衝，取較遠者」，降低一般影線造成過近止損；R:R 不理想時保留卡片並提醒
+- V3.4 新計畫的 SL 採結構、ATR、近期真實波幅與影線分布的動態緩衝；TP 由市場結構、行情型態、OI 與成交力度自動生成，近端小於 1.5R 的障礙只列途中觀察
 - 真實歷史統計分頁
 - 「更多 → 使用手冊」使用摺疊式短說明，涵蓋快速開始、15m／4H、三種掃描、訊號階段、Signal Episode、交易品質、風險提醒、Entry／SL／TP、R:R、禁止追價、交易計畫失效、重新掃描、三大時段、詳細資料與歷史訊號
 - Web App Manifest、SVG icon 與只快取 App Shell 的 Service Worker；`/api/*` 與 `/health` 永遠走網路
@@ -280,7 +281,7 @@ python -m unittest discover -s tests -v
 git diff --check
 ```
 
-測試涵蓋 Price Trigger 與進場資格分離、可進會員資格固定、Entry／SL／TP 不漂移、TP／SL 結果卡的 5／24 小時期限、同幣舊終局卡與新 Trigger 並存、單幣來源並行與短等待上限、流動性／Spread／Slippage／成交成本／R:R／異常行情只提醒不刪卡、資料不知道不冒充最新、Market Context／DST 時段、價格接受、控制權轉移、Signal Episode 去重與永久失效、舊資料／亂序資料不回寫、ATR 止損下限、15m／4H 隔離、三種掃描、部分掃描與獨立新鮮度、`CORE_PREVIEW` 唯讀、可進排序、單幣統一判定、Scan Lock、舊請求不可覆蓋新結果、STALE 快照保留、API 失敗降級、Web Push、PWA 與 API contract。
+測試涵蓋 Price Trigger 與進場資格分離、可進會員資格固定、Entry／SL／TP 不漂移、TP／SL 結果卡的 5／24 小時期限、同幣舊終局卡與新 Trigger 並存、單幣來源並行與短等待上限、結構＋波動分布止損、強弱 OI／Taker／CVD 自動目標、過近障礙不直接完成交易、流動性／Spread／Slippage／成交成本／R:R／異常行情只提醒不刪卡、資料不知道不冒充最新、Market Context／DST 時段、價格接受、控制權轉移、Signal Episode 去重與永久失效、舊資料／亂序資料不回寫、15m／4H 隔離、三種掃描、部分掃描與獨立新鮮度、`CORE_PREVIEW` 唯讀、可進排序、單幣統一判定、Scan Lock、舊請求不可覆蓋新結果、STALE 快照保留、API 失敗降級、Web Push、PWA 與 API contract。
 
 ## 安全邊界與限制
 

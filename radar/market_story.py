@@ -481,6 +481,7 @@ class MarketStoryEngine:
             "core_high": core_candles[-1].high,
             "core_low": core_candles[-1].low,
             "core_atr": tf_core.atr14,
+            "volatility_profile": _volatility_profile(core_candles, tf_core),
             "core_range_atr": round(
                 (core_candles[-1].high - core_candles[-1].low)
                 / max(tf_core.atr14, 1e-9),
@@ -1765,6 +1766,65 @@ def _noise_state(candles: list[Candle], tf: TimeframeFeatures) -> dict[str, Any]
         "ma_entangled": entangled,
         "price_displacement_atr": round(displacement, 3),
         "label": "震盪｜雜訊高" if high else "雜訊可控",
+    }
+
+
+def _percentile(values: list[float], percentile: float) -> float:
+    ordered = sorted(value for value in values if math.isfinite(value))
+    if not ordered:
+        return 0.0
+    position = _clamp(percentile, 0.0, 1.0) * (len(ordered) - 1)
+    lower = int(math.floor(position))
+    upper = int(math.ceil(position))
+    if lower == upper:
+        return ordered[lower]
+    weight = position - lower
+    return ordered[lower] * (1.0 - weight) + ordered[upper] * weight
+
+
+def _volatility_profile(
+    candles: list[Candle],
+    tf: TimeframeFeatures,
+) -> dict[str, Any]:
+    """Describe tradable noise with distributions, not only the latest ATR."""
+
+    sample = candles[-21:]
+    safe_atr = max(float(tf.atr14), 1e-9)
+    true_ranges: list[float] = []
+    wicks: list[float] = []
+    close_moves: list[float] = []
+    returns: list[float] = []
+    for previous, current in zip(sample, sample[1:]):
+        true_ranges.append(
+            max(
+                current.high - current.low,
+                abs(current.high - previous.close),
+                abs(current.low - previous.close),
+            )
+        )
+        upper_wick = max(0.0, current.high - max(current.open, current.close))
+        lower_wick = max(0.0, min(current.open, current.close) - current.low)
+        wicks.append(max(upper_wick, lower_wick))
+        close_moves.append(abs(current.close - previous.close))
+        if previous.close > 0 and current.close > 0:
+            returns.append(math.log(current.close / previous.close))
+
+    realized_volatility_pct = (
+        math.sqrt(sum(value * value for value in returns) / len(returns)) * 100.0
+        if returns
+        else 0.0
+    )
+    current_range = sample[-1].high - sample[-1].low if sample else 0.0
+    return {
+        "sample_bars": len(sample),
+        "range_p70_atr": round(_percentile(true_ranges, 0.70) / safe_atr, 3),
+        "wick_p75_atr": round(_percentile(wicks, 0.75) / safe_atr, 3),
+        "close_move_p70_atr": round(
+            _percentile(close_moves, 0.70) / safe_atr,
+            3,
+        ),
+        "current_range_atr": round(current_range / safe_atr, 3),
+        "realized_volatility_pct": round(realized_volatility_pct, 4),
     }
 
 

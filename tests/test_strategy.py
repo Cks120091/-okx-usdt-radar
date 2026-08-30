@@ -140,10 +140,10 @@ class StrategyTests(unittest.TestCase):
         self.assertGreaterEqual(plan.management_plan["stop_distance_atr"], 1.25)
         self.assertEqual(
             plan.management_plan["stop_method"],
-            "結構失效＋ATR 最低緩衝（取較遠者）",
+            "結構失效＋ATR＋近期波幅／影線緩衝（取較遠者）",
         )
 
-    def test_v33_nearby_obstacle_exposes_insufficient_reward_space(self):
+    def test_v33_nearby_obstacle_becomes_partial_level_not_tiny_tp(self):
         engine = AdaptiveStrategyEngine(StrategyConfig(minimum_rr=1.8))
         story = SimpleNamespace(
             trigger_direction="LONG",
@@ -166,7 +166,60 @@ class StrategyTests(unittest.TestCase):
 
         plan = engine._v33_plan(story, core)
 
-        self.assertLess(plan.rr, engine.config.minimum_rr)
+        self.assertGreaterEqual(plan.rr, 1.50)
+        self.assertGreater(plan.tp1, 100.5)
+        self.assertEqual(plan.management_plan["structural_target_price"], 100.5)
+        self.assertIn("部分減倉", plan.management_plan["first_obstacle_action"])
+        self.assertTrue(plan.management_plan["frozen_at_trigger"])
+
+    def test_v33_recent_range_and_wicks_expand_stop_floor(self):
+        engine = AdaptiveStrategyEngine(StrategyConfig(minimum_rr=1.8))
+        base_story = {
+            "trigger_direction": "LONG",
+            "trigger_type": "BREAKOUT",
+            "horizon": "SHORT",
+            "trigger": {
+                "entry_reference_price": 100.0,
+                "zone_key": "major_support",
+                "explainability_score": 70.0,
+            },
+            "invalidation_price": 99.8,
+            "zones": {},
+            "regime": "TREND",
+            "stage": "EARLY_SIGNAL",
+            "readiness": 70.0,
+            "supporting": ["fixture"],
+            "groups": {},
+        }
+        core = SimpleNamespace(
+            close=100.0,
+            atr14=1.0,
+            recent_low=99.7,
+            recent_high=100.3,
+        )
+        calm = engine._v33_plan(
+            SimpleNamespace(**base_story, raw={}),
+            core,
+        )
+        volatile = engine._v33_plan(
+            SimpleNamespace(
+                **base_story,
+                raw={
+                    "volatility_profile": {
+                        "range_p70_atr": 1.8,
+                        "wick_p75_atr": 0.7,
+                        "current_range_atr": 2.0,
+                    }
+                },
+            ),
+            core,
+        )
+
+        self.assertLess(volatile.stop, calm.stop)
+        self.assertGreater(
+            volatile.management_plan["stop_floor_atr"],
+            calm.management_plan["stop_floor_atr"],
+        )
 
     def test_entry_eligibility_separates_trigger_from_chase_state(self):
         base = {
@@ -415,6 +468,97 @@ class StrategyTests(unittest.TestCase):
         self.assertEqual(opposed.reason, "qualified")
         self.assertEqual(opposed.signal.market_participation["state"], "CONFLICT")
         self.assertTrue(opposed.signal.conflicts)
+
+    def test_v33_targets_expand_and_contract_with_oi_and_order_flow(self):
+        candles_4h, candles_1h, candles_15m = valid_breakout_frames()
+        candles_5m = story_candles(
+            [98 + index * 0.03 for index in range(100)],
+            300_000,
+        )
+        ticker = Ticker(
+            "TEST-USDT-SWAP",
+            candles_15m[-1].close,
+            candles_15m[-1].close - 0.03,
+            candles_15m[-1].close + 0.03,
+            1,
+        )
+        engine = AdaptiveStrategyEngine(
+            StrategyConfig(min_quote_volume_24h=1_000_000)
+        )
+        technical = engine.analyze(
+            self.instrument,
+            ticker,
+            candles_4h,
+            candles_1h,
+            candles_15m,
+        )
+        self.assertIsNotNone(technical.signal, technical.reason)
+        self.assertEqual(technical.signal.direction, "LONG")
+
+        strong = engine.apply_market_context(
+            technical,
+            MarketContext(
+                "TEST-USDT-SWAP",
+                20_000_000,
+                0.0001,
+                0.24,
+                0.70,
+                2,
+                open_interest_change_pct=1.2,
+                taker_buy_volume=700.0,
+                taker_sell_volume=300.0,
+                cvd=400.0,
+                order_book_sequence={
+                    "state": "PERSISTENT_SUPPORT",
+                    "reason": "fixture support",
+                },
+            ),
+            "LONG",
+            candles_5m,
+            {"score": 72.0, "label": "偏多"},
+        )
+        weak = engine.apply_market_context(
+            technical,
+            MarketContext(
+                "TEST-USDT-SWAP",
+                20_000_000,
+                0.0010,
+                -0.24,
+                0.30,
+                2,
+                open_interest_change_pct=-1.2,
+                taker_buy_volume=300.0,
+                taker_sell_volume=700.0,
+                cvd=-400.0,
+                order_book_sequence={
+                    "state": "PERSISTENT_OPPOSITION",
+                    "reason": "fixture opposition",
+                },
+            ),
+            "LONG",
+            candles_5m,
+            {"score": 72.0, "label": "偏多"},
+        )
+
+        self.assertIsNotNone(strong.signal)
+        self.assertIsNotNone(weak.signal)
+        self.assertEqual(strong.signal.stop_loss, weak.signal.stop_loss)
+        self.assertGreater(strong.signal.risk_reward, weak.signal.risk_reward)
+        self.assertGreater(
+            float(strong.signal.take_profit_1),
+            float(weak.signal.take_profit_1),
+        )
+        self.assertGreaterEqual(weak.signal.risk_reward, 1.50)
+        self.assertTrue(strong.signal.management_plan["adaptive_market_plan"])
+        self.assertTrue(strong.signal.management_plan["frozen_at_trigger"])
+        self.assertIn(
+            "價格＋OI",
+            strong.signal.management_plan["market_plan_sources"],
+        )
+        self.assertIn(
+            "Taker／CVD",
+            strong.signal.management_plan["market_plan_sources"],
+        )
 
     def test_quiet_micro_timeframe_does_not_veto_complete_setup(self):
         candles_4h, candles_1h, candles_15m = valid_breakout_frames()

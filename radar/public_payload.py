@@ -40,6 +40,8 @@ _SIGNAL_FIELDS = (
     "take_profit_1",
     "take_profit_2",
     "risk_reward",
+    "trend_strength_label",
+    "trend_strength_score",
     "invalidation",
     "quote_volume_24h",
     "regime",
@@ -238,6 +240,23 @@ def _public_candidate(item: Any, *, signal: bool) -> dict[str, Any]:
     payload["execution_quality"] = _select(
         _read(item, "execution_quality", {}),
         ("score", "label", "recommendation"),
+    )
+    payload["management_plan"] = _select(
+        _read(item, "management_plan", {}),
+        (
+            "adaptive_market_plan",
+            "frozen_at_trigger",
+            "market_strength_score",
+            "market_strength_label",
+            "target_method",
+            "stop_method",
+            "target_rr_model",
+            "tp2_rr_model",
+            "market_plan_sources",
+            "structural_target_price",
+            "structural_target_rr",
+            "first_obstacle_action",
+        ),
     )
     payload["data_quality"] = _select(
         _read(item, "data_quality", {}),

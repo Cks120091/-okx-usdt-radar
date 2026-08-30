@@ -176,6 +176,9 @@ class AdaptiveStrategyEngine:
         quote_volume_24h = sum(item.quote_volume for item in volume_source[-24:])
         metrics = {
             "last_price": ticker.last,
+            # Internal formatting input for the deep-data target adaptation.
+            # Public payload filtering does not expose this implementation field.
+            "instrument_tick_size": instrument.tick_size,
             "price_change_core_pct": _price_change_pct(
                 ticker.last,
                 candles_core[-2].close,
@@ -369,6 +372,24 @@ class AdaptiveStrategyEngine:
         noise = story.trigger.get("noise", {})
         if isinstance(noise, dict) and noise.get("high"):
             stop_floor_atr += 0.25
+        raw = getattr(story, "raw", {})
+        raw = raw if isinstance(raw, dict) else {}
+        volatility = raw.get("volatility_profile", {})
+        volatility = volatility if isinstance(volatility, dict) else {}
+        range_p70_atr = _safe_float(volatility.get("range_p70_atr"), 0.0)
+        wick_p75_atr = _safe_float(volatility.get("wick_p75_atr"), 0.0)
+        current_range_atr = _safe_float(
+            volatility.get("current_range_atr", raw.get("core_range_atr")),
+            0.0,
+        )
+        distribution_floor_atr = range_p70_atr * 0.78 + wick_p75_atr * 0.45
+        if distribution_floor_atr > 0:
+            stop_floor_atr = max(
+                stop_floor_atr,
+                _clamp(distribution_floor_atr, 1.0, 1.85),
+            )
+        if current_range_atr > 1.45:
+            stop_floor_atr += min(0.25, (current_range_atr - 1.45) * 0.18)
         if proposed_stop is None or (is_long and proposed_stop >= entry) or (not is_long and proposed_stop <= entry):
             proposed_stop = (
                 min(tf_core.recent_low - atr * 0.20, entry - atr * stop_floor_atr)
@@ -376,7 +397,13 @@ class AdaptiveStrategyEngine:
                 else max(tf_core.recent_high + atr * 0.20, entry + atr * stop_floor_atr)
             )
         zone_key = str(story.trigger.get("zone_key", "NO_ZONE") or "NO_ZONE")
-        structural_buffer = atr * 0.20 if zone_key != "NO_ZONE" else 0.0
+        wick_buffer_atr = _clamp(wick_p75_atr * 0.65, 0.0, 0.55)
+        structural_buffer_atr = (
+            max(0.20, wick_buffer_atr)
+            if zone_key != "NO_ZONE"
+            else wick_buffer_atr
+        )
+        structural_buffer = atr * structural_buffer_atr
         structural_stop = (
             float(proposed_stop) - structural_buffer
             if is_long
@@ -409,17 +436,16 @@ class AdaptiveStrategyEngine:
             if not is_long and structural_target is not None and structural_target < entry
             else None
         )
-        if structural_rr is not None and structural_rr > 0:
-            tp1 = float(structural_target)
-            rr = structural_rr
-            target_method = "實際支撐／壓力結構目標"
-        else:
-            rr = self.config.minimum_rr
-            tp1 = entry + risk * rr if is_long else entry - risk * rr
-            target_method = "R:R 推算目標（非實際支撐／壓力）"
-        tp2 = entry + risk * max(2.7, rr + 0.8) if is_long else entry - risk * max(2.7, rr + 0.8)
-        strength_score = float(story.trigger.get("explainability_score", 50.0))
-        strength_label = "強" if strength_score >= 78.0 else "中等" if strength_score >= 58.0 else "偏弱"
+        market_profile = self._v33_market_plan_profile(story)
+        rr, target_method = self._v33_tp1_rr(
+            structural_rr,
+            market_profile["tp1_model_rr"],
+        )
+        tp2_rr = max(float(market_profile["tp2_model_rr"]), rr + 0.70)
+        tp1 = entry + risk * rr if is_long else entry - risk * rr
+        tp2 = entry + risk * tp2_rr if is_long else entry - risk * tp2_rr
+        strength_score = float(market_profile["strength_score"])
+        strength_label = str(market_profile["strength_label"])
         management = {
             "tp1_action": "TP1 後可把 Stop 移到 Break-even；實際委託由使用者決定。",
             "tp2_action": "TP2 或結構目標分批處理。",
@@ -427,8 +453,26 @@ class AdaptiveStrategyEngine:
             "auto_ordering": False,
             "stop_distance_atr": round(risk / atr, 2),
             "stop_floor_atr": round(stop_floor_atr, 2),
-            "stop_method": "結構失效＋ATR 最低緩衝（取較遠者）",
+            "stop_method": "結構失效＋ATR＋近期波幅／影線緩衝（取較遠者）",
+            "volatility_profile": dict(volatility),
+            "structural_buffer_atr": round(structural_buffer_atr, 3),
             "target_method": target_method,
+            "adaptive_market_plan": True,
+            "frozen_at_trigger": True,
+            "market_strength_score": round(strength_score, 1),
+            "market_strength_label": strength_label,
+            "target_rr_model": round(rr, 3),
+            "tp2_rr_model": round(tp2_rr, 3),
+            "market_plan_sources": list(market_profile["sources"]),
+            "structural_target_price": structural_target,
+            "structural_target_rr": (
+                round(structural_rr, 3) if structural_rr is not None else None
+            ),
+            "first_obstacle_action": (
+                "近端結構只列為部分減倉／突破觀察，不直接結束交易計畫。"
+                if structural_rr is not None and 0 < structural_rr < 1.50
+                else "依自動市場目標管理。"
+            ),
         }
         return _Plan(
             direction=direction,
@@ -453,6 +497,227 @@ class AdaptiveStrategyEngine:
             signal_stage=story.stage,
             trend_strength_label=strength_label,
             trend_strength_score=strength_score,
+            management_plan=management,
+        )
+
+    def _v33_market_plan_profile(
+        self,
+        story: StoryAssessment,
+        context: MarketContext | None = None,
+        timing: TimeframeFeatures | None = None,
+    ) -> dict[str, object]:
+        """Build one target profile from price, volatility and live participation."""
+
+        direction = getattr(story, "trigger_direction", "NEUTRAL")
+        sign = 1.0 if direction == "LONG" else -1.0
+        trigger = getattr(story, "trigger", {})
+        trigger = trigger if isinstance(trigger, dict) else {}
+        groups = getattr(story, "groups", {})
+        groups = groups if isinstance(groups, dict) else {}
+        raw = getattr(story, "raw", {})
+        raw = raw if isinstance(raw, dict) else {}
+        volatility = raw.get("volatility_profile", {})
+        volatility = volatility if isinstance(volatility, dict) else {}
+
+        sources: list[str] = ["價格 Trigger"]
+        trigger_score = _clamp(
+            _safe_float(trigger.get("explainability_score"), 50.0),
+            0.0,
+            100.0,
+        )
+        trend_group = groups.get("trend_momentum", {})
+        trend_score = _clamp(
+            _safe_float(
+                trend_group.get("score") if isinstance(trend_group, dict) else None,
+                50.0,
+            ),
+            0.0,
+            100.0,
+        )
+        if isinstance(trend_group, dict) and trend_group:
+            sources.append("趨勢／動能")
+
+        volume_ratio = _safe_float(raw.get("core_volume_ratio"), 1.0)
+        volume_score = _clamp(50.0 + (volume_ratio - 1.0) * 35.0, 25.0, 90.0)
+        if "core_volume_ratio" in raw:
+            sources.append("核心週期成交量")
+
+        timing_score = 50.0
+        if timing is not None:
+            timing_key = "5m" if getattr(story, "horizon", "SHORT") == "SHORT" else "1H"
+            timeframe_states = getattr(story, "timeframe_states", {})
+            timing_state = (
+                timeframe_states.get(timing_key, {})
+                if isinstance(timeframe_states, dict)
+                else {}
+            )
+            raw_timing_score = _safe_float(
+                timing_state.get("score") if isinstance(timing_state, dict) else None,
+                50.0,
+            )
+            timing_score = (
+                raw_timing_score
+                if direction == "LONG"
+                else 100.0 - raw_timing_score
+            )
+            sources.append("Timing 力度")
+
+        taker_score = 50.0
+        oi_score = 50.0
+        order_book_score = 50.0
+        if context is not None:
+            if context.taker_buy_ratio is not None:
+                directional_taker = (
+                    context.taker_buy_ratio
+                    if direction == "LONG"
+                    else 1.0 - context.taker_buy_ratio
+                )
+                taker_score = _clamp(directional_taker * 100.0, 20.0, 80.0)
+                sources.append("Taker／CVD")
+            elif context.cvd is not None:
+                taker_score = 65.0 if context.cvd * sign > 0 else 35.0
+                sources.append("CVD")
+
+            signed_move = _safe_float(raw.get("core_return_pct"), 0.0) * sign
+            if context.open_interest_change_pct is not None:
+                oi_change = float(context.open_interest_change_pct)
+                if oi_change >= 0.50 and signed_move > 0.0:
+                    oi_score = _clamp(72.0 + oi_change * 4.0, 72.0, 90.0)
+                elif oi_change >= 0.50 and signed_move <= 0.0:
+                    oi_score = 30.0
+                elif oi_change <= -0.80 and signed_move > 0.0:
+                    oi_score = 38.0
+                elif oi_change <= -0.80 and signed_move < 0.0:
+                    oi_score = 45.0
+                sources.append("價格＋OI")
+
+            sequence_state = str(context.order_book_sequence.get("state", ""))
+            if sequence_state in ("PERSISTENT_SUPPORT", "REFILL_ABSORPTION"):
+                order_book_score = 68.0
+                sources.append("委託簿序列")
+            elif sequence_state in (
+                "LIQUIDITY_WITHDRAWAL",
+                "PERSISTENT_OPPOSITION",
+            ):
+                order_book_score = 32.0
+                sources.append("委託簿序列")
+            elif context.order_book_imbalance is not None:
+                order_book_score = _clamp(
+                    50.0 + context.order_book_imbalance * sign * 100.0,
+                    25.0,
+                    75.0,
+                )
+                sources.append("委託簿快照")
+
+        strength_score = (
+            trigger_score * 0.22
+            + trend_score * 0.20
+            + volume_score * 0.13
+            + timing_score * 0.10
+            + taker_score * 0.15
+            + oi_score * 0.14
+            + order_book_score * 0.06
+        )
+        if context is not None and context.funding_rate is not None:
+            directional_funding = context.funding_rate * sign
+            if directional_funding > 0.0008:
+                strength_score -= 7.0
+                sources.append("Funding 擁擠修正")
+            elif directional_funding > 0.0005:
+                strength_score -= 3.0
+
+        noise = trigger.get("noise", raw.get("noise", {}))
+        if isinstance(noise, dict) and noise.get("high"):
+            strength_score -= 5.0
+        strength_score = _clamp(strength_score, 25.0, 90.0)
+
+        base_rr = {
+            "BREAKOUT": 1.70,
+            "CONTINUATION": 1.60,
+            "REVERSAL": 1.50,
+        }.get(str(getattr(story, "trigger_type", "")), 1.55)
+        target_adjustment = (strength_score - 50.0) / 50.0 * 0.45
+        current_range_atr = _safe_float(
+            volatility.get("current_range_atr", raw.get("core_range_atr")),
+            0.0,
+        )
+        if current_range_atr >= 1.45 and strength_score >= 60.0:
+            target_adjustment += min(0.12, (current_range_atr - 1.45) * 0.08)
+        tp1_model_rr = _clamp(base_rr + target_adjustment, 1.50, 2.25)
+        tp2_model_rr = _clamp(
+            tp1_model_rr + 0.70 + strength_score / 100.0 * 0.55,
+            2.20,
+            3.55,
+        )
+        strength_label = (
+            "強" if strength_score >= 72.0 else "中等" if strength_score >= 52.0 else "偏弱"
+        )
+        return {
+            "strength_score": round(strength_score, 2),
+            "strength_label": strength_label,
+            "tp1_model_rr": round(tp1_model_rr, 3),
+            "tp2_model_rr": round(tp2_model_rr, 3),
+            "sources": _unique(sources),
+        }
+
+    @staticmethod
+    def _v33_tp1_rr(
+        structural_rr: float | None,
+        model_rr: float,
+    ) -> tuple[float, str]:
+        adaptive_rr = _clamp(float(model_rr), 1.50, 2.25)
+        if structural_rr is not None and structural_rr >= 1.50:
+            selected = min(float(structural_rr), adaptive_rr)
+            return selected, "有效市場結構＋波動／力度自動目標"
+        if structural_rr is not None and structural_rr > 0:
+            return adaptive_rr, "近端結構列為部分減倉；正式 TP 由市場力度推算"
+        return adaptive_rr, "波動＋成交力度自動目標（無近端有效結構）"
+
+    def _adapt_v33_plan_to_market(
+        self,
+        plan: _Plan,
+        story: StoryAssessment,
+        context: MarketContext,
+        timing: TimeframeFeatures | None,
+    ) -> _Plan:
+        profile = self._v33_market_plan_profile(story, context, timing)
+        management = dict(plan.management_plan or {})
+        structural_rr_value = management.get("structural_target_rr")
+        structural_rr = (
+            _safe_float(structural_rr_value, 0.0)
+            if structural_rr_value is not None
+            else None
+        )
+        rr, target_method = self._v33_tp1_rr(
+            structural_rr,
+            float(profile["tp1_model_rr"]),
+        )
+        tp2_rr = max(float(profile["tp2_model_rr"]), rr + 0.70)
+        risk = abs(plan.entry - plan.stop)
+        if risk <= 0:
+            return plan
+        is_long = plan.direction == "LONG"
+        tp1 = plan.entry + risk * rr if is_long else plan.entry - risk * rr
+        tp2 = plan.entry + risk * tp2_rr if is_long else plan.entry - risk * tp2_rr
+        management.update(
+            {
+                "target_method": target_method,
+                "adaptive_market_plan": True,
+                "frozen_at_trigger": True,
+                "market_strength_score": round(float(profile["strength_score"]), 1),
+                "market_strength_label": str(profile["strength_label"]),
+                "target_rr_model": round(rr, 3),
+                "tp2_rr_model": round(tp2_rr, 3),
+                "market_plan_sources": list(profile["sources"]),
+            }
+        )
+        return replace(
+            plan,
+            tp1=tp1,
+            tp2=tp2,
+            rr=rr,
+            trend_strength_score=float(profile["strength_score"]),
+            trend_strength_label=str(profile["strength_label"]),
             management_plan=management,
         )
 
@@ -884,6 +1149,8 @@ class AdaptiveStrategyEngine:
                 "slippage",
                 "execution_cost",
                 "execution_cost_warning",
+                "risk_reward",
+                "entry_eligibility",
             }
         ]
         checks.extend(
@@ -942,8 +1209,56 @@ class AdaptiveStrategyEngine:
                 result.candidate_signal,
             )
 
-        plan = result.candidate_plan
+        plan = self._adapt_v33_plan_to_market(
+            result.candidate_plan,
+            live_story,
+            context,
+            timing,
+        )
         risk_pct = abs(plan.entry - plan.stop) / max(abs(plan.entry), 1e-9) * 100.0
+        tick_size = _safe_float(metrics.get("instrument_tick_size"), 0.0)
+        entry_low = _safe_float(result.signal.entry_low, plan.entry)
+        entry_high = _safe_float(result.signal.entry_high, plan.entry)
+        current_price = _safe_float(metrics.get("last_price"), plan.entry)
+        core_atr = _safe_float(live_story.raw.get("core_atr"), 0.0)
+        eligibility = _entry_eligibility(
+            direction=plan.direction,
+            current_price=current_price,
+            entry_low=entry_low,
+            entry_high=entry_high,
+            stop=plan.stop,
+            target=plan.tp1,
+            atr=core_atr,
+            stage=live_story.stage,
+            minimum_rr=self.config.minimum_rr,
+            ready_max_chase_atr=self.config.entry_ready_max_chase_atr,
+            missed_chase_atr=self.config.entry_missed_chase_atr,
+        )
+        checks.extend(
+            [
+                self._safety_check(
+                    "risk_reward",
+                    (
+                        f"自動市場目標 R:R {plan.rr:.2f}R"
+                        if plan.rr >= self.config.minimum_rr
+                        else (
+                            f"自動市場目標 {plan.rr:.2f}R，"
+                            f"低於 {self.config.minimum_rr:.1f}R 建議值（提醒）"
+                        )
+                    ),
+                    plan.rr >= self.config.minimum_rr,
+                    round(plan.rr, 3),
+                    hard=False,
+                ),
+                self._safety_check(
+                    "entry_eligibility",
+                    eligibility["label"],
+                    bool(eligibility["actionable"]),
+                    eligibility["chase_atr"],
+                    hard=False,
+                ),
+            ]
+        )
         quality = execution_quality(
             live_story,
             state.spread_pct,
@@ -962,6 +1277,17 @@ class AdaptiveStrategyEngine:
                 "execution_quality_label": quality["label"],
                 "estimated_round_trip_cost_pct": quality["estimated_round_trip_cost_pct"],
                 "execution_cost_to_risk_pct": quality["execution_cost_to_risk_pct"],
+                "entry_status": eligibility["status"],
+                "entry_chase_atr": eligibility["chase_atr"],
+                "remaining_rr": eligibility["remaining_rr"],
+                "market_plan_strength_score": round(plan.trend_strength_score, 1),
+                "market_plan_strength_label": plan.trend_strength_label,
+                "adaptive_target_rr": round(plan.rr, 3),
+                "adaptive_tp2_rr": plan.management_plan.get("tp2_rr_model"),
+                "market_plan_sources": plan.management_plan.get(
+                    "market_plan_sources",
+                    [],
+                ),
             }
         )
         checks.extend(
@@ -1021,11 +1347,23 @@ class AdaptiveStrategyEngine:
             entry_quality=dict(quality.get("entry_location", {})),
             actionable=(
                 live_story.stage in ("EARLY_SIGNAL", "CONFIRMED", "REENTRY")
-                and bool(result.signal.entry_eligibility.get("actionable"))
+                and bool(eligibility["actionable"])
             ),
         )
-        signal = replace(
+        adaptive_signal = replace(
             result.signal,
+            stop_loss=_format_price(plan.stop, tick_size),
+            take_profit_1=_format_price(plan.tp1, tick_size),
+            take_profit_2=_format_price(plan.tp2, tick_size),
+            risk_reward=round(plan.rr, 2),
+            trend_strength_label=plan.trend_strength_label,
+            trend_strength_score=round(plan.trend_strength_score, 1),
+            management_plan=dict(plan.management_plan or {}),
+            entry_eligibility=eligibility,
+            actionable=bool(eligibility["actionable"]),
+        )
+        signal = replace(
+            adaptive_signal,
             evidence=live_story.supporting,
             factor_scores={key: float(group["score"]) for key, group in live_story.groups.items()},
             market_metrics=metrics,
@@ -1039,7 +1377,7 @@ class AdaptiveStrategyEngine:
             summary=live_story.summary,
             actionable=(
                 live_story.stage in ("EARLY_SIGNAL", "CONFIRMED", "REENTRY")
-                and bool(result.signal.entry_eligibility.get("actionable"))
+                and bool(eligibility["actionable"])
             ),
             market_participation=dict(live_story.market_participation),
             execution_quality=quality,
@@ -3159,3 +3497,11 @@ def _price_change_pct(current: float, baseline: float) -> float | None:
     if not math.isfinite(current) or not math.isfinite(baseline) or baseline <= 0:
         return None
     return round((current - baseline) / baseline * 100.0, 3)
+
+
+def _safe_float(value: object, default: float = 0.0) -> float:
+    try:
+        number = float(value)
+    except (TypeError, ValueError):
+        return default
+    return number if math.isfinite(number) else default
