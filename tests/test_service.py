@@ -170,6 +170,7 @@ class SingleInstrumentScanner(ImmediateScanner):
         btc_bias="NEUTRAL",
         long_btc_bias="NEUTRAL",
         requested_horizon="BOTH",
+        direction_lock=None,
     ):
         self.calls.append(
             {
@@ -179,6 +180,7 @@ class SingleInstrumentScanner(ImmediateScanner):
                 "btc_bias": btc_bias,
                 "long_btc_bias": long_btc_bias,
                 "requested_horizon": requested_horizon,
+                "direction_lock": direction_lock,
             }
         )
         now_ms = int(time.time() * 1000)
@@ -1044,6 +1046,58 @@ class RuntimeSafetyTests(unittest.TestCase):
             self.assertEqual(payload["decision_context"]["final"]["direction"], "LONG")
             self.assertEqual(payload["item"]["entry_low"], "100")
             self.assertEqual(payload["item"]["market_metrics"]["last_price"], 100.5)
+
+    def test_card_scoped_scan_never_returns_opposite_signal(self):
+        with tempfile.TemporaryDirectory() as directory:
+            scanner = OppositeSignalSingleScanner()
+            runtime = RadarRuntime(scanner, AppConfig(data_dir=directory))
+            current = report()
+            current.signals[0] = allow_entry(current.signals[0])
+            runtime._latest = current
+
+            payload = runtime.scan_instrument_dict(
+                "AAA",
+                "SHORT",
+                "LONG",
+            )["short"]
+
+            self.assertEqual(payload["kind"], "SIGNAL")
+            self.assertEqual(payload["item"]["direction"], "LONG")
+            self.assertEqual(payload["direction_lock"], "LONG")
+            self.assertTrue(payload["opposite_warning"]["detected"])
+            self.assertEqual(
+                payload["opposite_warning"]["candidate_direction"],
+                "SHORT",
+            )
+            self.assertIn("卡片不翻向", payload["opposite_warning"]["message"])
+
+    def test_card_scoped_scan_without_active_episode_shows_neutral_warning(self):
+        with tempfile.TemporaryDirectory() as directory:
+            scanner = OppositeSignalSingleScanner()
+            runtime = RadarRuntime(scanner, AppConfig(data_dir=directory))
+            current = report()
+            current.signals = []
+            runtime._latest = current
+
+            result = runtime.scan_instrument_dict("AAA", "SHORT", "LONG")
+            payload = result["short"]
+
+            self.assertEqual(payload["kind"], "STATE")
+            self.assertEqual(payload["item"]["direction"], "NEUTRAL")
+            self.assertIsNotNone(payload["opposite_warning"])
+            self.assertTrue(result["safety"]["card_direction_locked"])
+
+    def test_card_direction_lock_requires_one_horizon_and_valid_direction(self):
+        with tempfile.TemporaryDirectory() as directory:
+            runtime = RadarRuntime(
+                SingleInstrumentScanner(),
+                AppConfig(data_dir=directory),
+            )
+
+            with self.assertRaises(PreflightError):
+                runtime.scan_instrument_dict("AAA", "BOTH", "LONG")
+            with self.assertRaises(PreflightError):
+                runtime.scan_instrument_dict("AAA", "SHORT", "NEUTRAL")
 
     def test_same_direction_scan_updates_context_but_keeps_episode_plan(self):
         with tempfile.TemporaryDirectory() as directory:

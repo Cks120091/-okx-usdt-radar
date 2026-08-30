@@ -796,7 +796,7 @@ class RadarRuntime:
             self._scan_mode = "FULL"
         self._scan_push_subscriptions: dict[str, dict[str, Any]] = {}
         self._max_scan_push_subscriptions = 8
-        self._single_inflight: set[tuple[str, str]] = set()
+        self._single_inflight: set[tuple[str, str, str]] = set()
         self._progress: dict[str, Any] = self._idle_progress()
 
     def _prune_restored_terminal_cards(self) -> None:
@@ -1204,6 +1204,7 @@ class RadarRuntime:
         self,
         inst_id: str,
         horizon: str = "BOTH",
+        direction_lock: str | None = None,
     ) -> dict[str, Any]:
         """Run one deduplicated single-symbol transaction end to end."""
 
@@ -1220,7 +1221,24 @@ class RadarRuntime:
                 HTTPStatus.BAD_REQUEST,
                 "單幣掃描週期必須是 15m、4H 或 15m＋4H",
             )
-        request_key = (normalized_id, requested_horizon)
+        requested_direction_lock = (
+            str(direction_lock or "").strip().upper() or None
+        )
+        if requested_direction_lock not in {None, "LONG", "SHORT"}:
+            raise PreflightError(
+                HTTPStatus.BAD_REQUEST,
+                "卡片原方向必須是做多或做空",
+            )
+        if requested_direction_lock is not None and requested_horizon == "BOTH":
+            raise PreflightError(
+                HTTPStatus.BAD_REQUEST,
+                "卡片方向鎖定必須指定 15m 或 4H",
+            )
+        request_key = (
+            normalized_id,
+            requested_horizon,
+            requested_direction_lock or "UNLOCKED",
+        )
         with self._state_lock:
             if self._running:
                 raise PreflightError(
@@ -1238,6 +1256,7 @@ class RadarRuntime:
                 return self._scan_instrument_dict_locked(
                     normalized_id,
                     requested_horizon,
+                    requested_direction_lock,
                 )
         finally:
             with self._state_lock:
@@ -1247,6 +1266,7 @@ class RadarRuntime:
         self,
         inst_id: str,
         horizon: str = "BOTH",
+        direction_lock: str | None = None,
     ) -> dict[str, Any]:
         """Refresh one symbol for the explicitly requested radar horizon."""
 
@@ -1262,6 +1282,14 @@ class RadarRuntime:
             raise PreflightError(
                 HTTPStatus.BAD_REQUEST,
                 "單幣掃描週期必須是 15m、4H 或 15m＋4H",
+            )
+        requested_direction_lock = (
+            str(direction_lock or "").strip().upper() or None
+        )
+        if requested_direction_lock not in {None, "LONG", "SHORT"}:
+            raise PreflightError(
+                HTTPStatus.BAD_REQUEST,
+                "卡片原方向必須是做多或做空",
             )
         analyzer = getattr(self.scanner, "scan_instrument", None)
         if not callable(analyzer):
@@ -1366,6 +1394,8 @@ class RadarRuntime:
                 analyzer_args["long_btc_bias"] = long_btc_bias
             if "requested_horizon" in analyzer_parameters:
                 analyzer_args["requested_horizon"] = requested_horizon
+            if "direction_lock" in analyzer_parameters:
+                analyzer_args["direction_lock"] = requested_direction_lock
 
             analysis = None
             for attempt in range(2):
@@ -1547,7 +1577,43 @@ class RadarRuntime:
                     "decision_context": canonical_decision,
                 }
             fresh_signal = result.signal
-            fresh_item = fresh_signal or result.market_state
+            fresh_state = result.market_state
+            locked_opposite_reason = (
+                str(getattr(result, "reason", ""))
+                == "card_direction_locked_opposite"
+            )
+            candidate_source = (
+                fresh_state if locked_opposite_reason else fresh_signal or fresh_state
+            )
+            candidate_direction = str(
+                getattr(candidate_source, "direction", "") or "NEUTRAL"
+            )
+            opposite_warning = bool(
+                requested_direction_lock is not None
+                and candidate_direction in {"LONG", "SHORT"}
+                and candidate_direction != requested_direction_lock
+            )
+            if (
+                fresh_signal is not None
+                and requested_direction_lock is not None
+                and fresh_signal.direction != requested_direction_lock
+            ):
+                # Defense in depth for scanner adapters that do not implement
+                # direction_lock themselves. Never expose an opposite Trigger
+                # as the result of a card-scoped scan.
+                fresh_signal = None
+            fresh_item = fresh_signal or fresh_state
+            if opposite_warning and stored_signal is None and fresh_item is not None:
+                # With no active Episode to display (for example, a retained
+                # TP/SL card), show a neutral reversal warning instead of an
+                # opposite-direction pseudo-card.
+                fresh_item = deepcopy(fresh_item)
+                fresh_item.direction = "NEUTRAL"
+                fresh_item.summary = (
+                    f"原{('做多' if requested_direction_lock == 'LONG' else '做空')}方向"
+                    f"目前轉弱，偵測到{('做多' if candidate_direction == 'LONG' else '做空')}候選；"
+                    "本次卡片掃描只提示可能反轉，不建立反向卡。"
+                )
             item = fresh_item
             is_signal_item = fresh_signal is not None
             closed_item_payload = None
@@ -1847,6 +1913,20 @@ class RadarRuntime:
                 "preflight": preflight,
                 "latest_confirmation": confirmation,
                 "decision_context": canonical_decision,
+                "direction_lock": requested_direction_lock,
+                "opposite_warning": (
+                    {
+                        "detected": True,
+                        "candidate_direction": candidate_direction,
+                        "message": (
+                            f"原{('做多' if requested_direction_lock == 'LONG' else '做空')}方向轉弱，"
+                            f"偵測到{('做多' if candidate_direction == 'LONG' else '做空')}候選；"
+                            "卡片不翻向，真正反向新卡只由 15m／4H／全市場大掃描建立。"
+                        ),
+                    }
+                    if opposite_warning
+                    else None
+                ),
             }
 
         return {
@@ -1854,6 +1934,7 @@ class RadarRuntime:
             "analyzed_at": analysis.analyzed_at,
             "source": "ON_DEMAND_SINGLE_INSTRUMENT",
             "requested_horizon": requested_horizon,
+            "direction_lock": requested_direction_lock,
             "current_price": analysis.ticker.last,
             "short": horizon_payload(analysis.short_result, "SHORT"),
             "long": horizon_payload(analysis.long_result, "LONG"),
@@ -1865,9 +1946,11 @@ class RadarRuntime:
                 "persisted_signal_episode": True,
                 "persisted_to_market_report": False,
                 "persisted_to_report": False,
+                "card_direction_locked": requested_direction_lock is not None,
                 "note": (
                     "只掃描這一個幣；Signal Episode 會安全延續，但結果不加入"
                     "全市場排行，也不在伺服器記憶體保留完整單幣分析。"
+                    "卡片方向鎖定時，反向候選只提示；真正反向卡只由大掃描建立。"
                 ),
             },
         }
@@ -1885,7 +1968,31 @@ class RadarRuntime:
         # scanner fixtures without scan_instrument keep the compatibility path
         # below for deterministic unit tests and offline integrations.
         if callable(getattr(self.scanner, "scan_instrument", None)):
-            refreshed = self.scan_instrument_dict(normalized_id, normalized_horizon)
+            direction_lock = None
+            with self._state_lock:
+                if self._latest is not None:
+                    collection = (
+                        self._latest.long_signals
+                        if normalized_horizon == "LONG"
+                        else self._latest.signals
+                    )
+                    stored = next(
+                        (item for item in collection if item.inst_id == normalized_id),
+                        None,
+                    )
+                    if stored is not None:
+                        direction_lock = stored.direction
+            repository = getattr(self.scanner, "repository", None)
+            active_loader = getattr(repository, "load_active_signal", None)
+            if callable(active_loader):
+                stored = active_loader(normalized_id, normalized_horizon)
+                if stored is not None:
+                    direction_lock = stored.direction
+            refreshed = self.scan_instrument_dict(
+                normalized_id,
+                normalized_horizon,
+                direction_lock,
+            )
             side = refreshed["long" if normalized_horizon == "LONG" else "short"]
             payload = side.get("preflight")
             if payload is None:
@@ -2970,6 +3077,7 @@ def serve(runtime: RadarRuntime, host: str, port: int) -> None:
                     result = runtime.scan_instrument_dict(
                         payload.get("inst_id", ""),
                         payload.get("horizon", "BOTH"),
+                        payload.get("direction_lock"),
                     )
                 except PreflightError as exc:
                     self._send_json(exc.status, {"error": str(exc)})

@@ -1029,6 +1029,7 @@ class MarketScanner:
         btc_bias: str = "NEUTRAL",
         long_btc_bias: str = "NEUTRAL",
         requested_horizon: str = "BOTH",
+        direction_lock: str | None = None,
     ) -> SingleInstrumentScan:
         """Analyze one explicitly requested symbol without scanning the universe.
 
@@ -1050,6 +1051,9 @@ class MarketScanner:
         }.get(requested_horizon, requested_horizon)
         if requested_horizon not in {"SHORT", "LONG", "BOTH"}:
             raise ValueError("單幣掃描週期必須是 SHORT、LONG 或 BOTH")
+        direction_lock = str(direction_lock or "").strip().upper() or None
+        if direction_lock not in {None, "LONG", "SHORT"}:
+            raise ValueError("卡片方向鎖定必須是 LONG 或 SHORT")
         include_short = requested_horizon in {"SHORT", "BOTH"}
         include_long = requested_horizon in {"LONG", "BOTH"}
 
@@ -1333,6 +1337,18 @@ class MarketScanner:
             if signal is not None and not self._passes_output_liquidity(signal, False):
                 signal = None
                 reason = "universe_output_gate"
+            if (
+                signal is not None
+                and direction_lock is not None
+                and signal.direction != direction_lock
+            ):
+                # A scan launched from an existing card is an update of that
+                # card's original thesis, never an opposite-signal publisher.
+                # Suppress the raw opposite Trigger before repository
+                # reconciliation so only a normal 15m/4H/full radar scan can
+                # persist a genuinely reversed Episode.
+                signal = None
+                reason = "card_direction_locked_opposite"
             raw_signal = signal
             reconciler = getattr(self.repository, "reconcile_instrument", None)
             if callable(reconciler):

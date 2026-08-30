@@ -699,6 +699,59 @@ class ScannerTests(unittest.TestCase):
             {"1D", "4H", "1H", "15m", "5m"},
         )
 
+    def test_card_direction_lock_suppresses_opposite_before_reconciliation(self):
+        class SingleInstrumentClient(ContextFakeClient):
+            def get_usdt_swap_instrument(self, inst_id):
+                return next(item for item in self.instruments if item.inst_id == inst_id)
+
+            def get_ticker(self, inst_id):
+                return Ticker(inst_id, 110, 109.99, 110.01, 1)
+
+            def get_open_interest_for(self, inst_id):
+                return 5_000_000
+
+        class ReconcileSpy:
+            def __init__(self):
+                self.raw_signal = "not-called"
+
+            def load_microstructure(self, inst_id):
+                return None
+
+            def save_microstructure(self, context, sampled_at):
+                return None
+
+            def reconcile_instrument(self, raw_signal, state, analyzed_at, horizon):
+                self.raw_signal = raw_signal
+                return None
+
+        client = SingleInstrumentClient()
+        scanner = MarketScanner(
+            client,
+            ScannerConfig(min_quote_volume_24h=0, universe_max_spread_pct=1.0),
+        )
+        raw = qualified_signal()
+        state = qualified_state(raw)
+        scanner._analyze_short_v33 = lambda *_: AnalysisResult(
+            raw,
+            "signal_found",
+            state,
+        )
+        repository = ReconcileSpy()
+        scanner.repository = repository
+
+        analysis = scanner.scan_instrument(
+            "AAA-USDT-SWAP",
+            requested_horizon="SHORT",
+            direction_lock="SHORT",
+        )
+
+        self.assertIsNone(repository.raw_signal)
+        self.assertIsNone(analysis.short_result.signal)
+        self.assertEqual(
+            analysis.short_result.reason,
+            "card_direction_locked_opposite",
+        )
+
     def test_on_demand_scan_parallelizes_sources_with_bounded_request_budget(self):
         class BoundedParallelClient(ContextFakeClient):
             def __init__(self):
