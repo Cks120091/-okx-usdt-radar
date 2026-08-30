@@ -3,6 +3,7 @@ from __future__ import annotations
 import math
 from dataclasses import dataclass, replace
 from decimal import Decimal, ROUND_HALF_UP
+from typing import Any, Callable
 
 from .evidence import (
     EvidenceAssessment,
@@ -93,6 +94,7 @@ class AdaptiveStrategyEngine:
         candles_15m: list[Candle],
         candles_5m: list[Candle] | None = None,
         previous_story: dict[str, object] | None = None,
+        excursion_profile_loader: Callable[[str, str], dict[str, Any]] | None = None,
     ) -> AnalysisResult:
         return self._analyze_v33(
             instrument,
@@ -103,6 +105,7 @@ class AdaptiveStrategyEngine:
             candles_5m,
             previous_story,
             horizon="SHORT",
+            excursion_profile_loader=excursion_profile_loader,
         )
 
     def analyze_long(
@@ -113,6 +116,7 @@ class AdaptiveStrategyEngine:
         candles_4h: list[Candle],
         candles_1h: list[Candle],
         previous_story: dict[str, object] | None = None,
+        excursion_profile_loader: Callable[[str, str], dict[str, Any]] | None = None,
     ) -> AnalysisResult:
         return self._analyze_v33(
             instrument,
@@ -123,6 +127,7 @@ class AdaptiveStrategyEngine:
             candles_1h,
             previous_story,
             horizon="LONG",
+            excursion_profile_loader=excursion_profile_loader,
         )
 
     def _analyze_v33(
@@ -135,6 +140,7 @@ class AdaptiveStrategyEngine:
         candles_timing: list[Candle] | None,
         previous_story: dict[str, object] | None,
         horizon: str,
+        excursion_profile_loader: Callable[[str, str], dict[str, Any]] | None = None,
     ) -> AnalysisResult:
         required = (candles_higher, candles_bias, candles_core)
         if min((len(items) for items in required), default=0) < 60:
@@ -295,7 +301,23 @@ class AdaptiveStrategyEngine:
                 story,
             )
 
-        plan = self._v33_plan(story, tf_core)
+        excursion_profile: dict[str, Any] = {}
+        if callable(excursion_profile_loader):
+            try:
+                loaded_profile = excursion_profile_loader(
+                    story.trigger_direction,
+                    story.trigger_type,
+                )
+                if isinstance(loaded_profile, dict):
+                    excursion_profile = loaded_profile
+            except Exception:
+                # Historical learning is an enhancement.  A damaged or locked
+                # research store must never prevent a fresh market analysis.
+                excursion_profile = {
+                    "enabled": False,
+                    "reason": "profile_unavailable",
+                }
+        plan = self._v33_plan(story, tf_core, excursion_profile)
         risk_pct = abs(plan.entry - plan.stop) / max(abs(plan.entry), 1e-9) * 100.0
         market_state = self._set_safety(
             market_state,
@@ -349,6 +371,7 @@ class AdaptiveStrategyEngine:
         self,
         story: StoryAssessment,
         tf_core: TimeframeFeatures,
+        excursion_profile: dict[str, Any] | None = None,
     ) -> _Plan:
         direction = story.trigger_direction
         is_long = direction == "LONG"
@@ -444,6 +467,44 @@ class AdaptiveStrategyEngine:
             else self.config.short_stop_floor_pct,
             4.0 if story.horizon == "LONG" else 2.0,
         )
+        history = excursion_profile if isinstance(excursion_profile, dict) else {}
+        stop_history = history.get("stop", {})
+        stop_history = stop_history if isinstance(stop_history, dict) else {}
+        historical_mae_p80_pct = _safe_float(
+            stop_history.get("mae_p80_pct"),
+            0.0,
+        )
+        stop_history_confidence = _clamp(
+            _safe_float(stop_history.get("confidence"), 0.0),
+            0.0,
+            0.85,
+        )
+        history_execution_buffer_pct = (
+            atr
+            * max(0.15, wick_buffer_atr * 0.25)
+            / max(abs(entry), 1e-9)
+            * 100.0
+        )
+        historical_stop_floor_pct: float | None = None
+        if (
+            history.get("enabled")
+            and stop_history.get("available")
+            and int(stop_history.get("sample_size") or 0) >= 5
+            and historical_mae_p80_pct > 0
+        ):
+            learned_mae_floor = _clamp(
+                historical_mae_p80_pct + history_execution_buffer_pct,
+                practical_stop_floor_pct,
+                5.0 if story.horizon == "LONG" else 2.5,
+            )
+            historical_stop_floor_pct = (
+                practical_stop_floor_pct * (1.0 - stop_history_confidence)
+                + learned_mae_floor * stop_history_confidence
+            )
+            practical_stop_floor_pct = max(
+                practical_stop_floor_pct,
+                historical_stop_floor_pct,
+            )
         practical_risk_floor = abs(entry) * practical_stop_floor_pct / 100.0
         risk = max(risk, atr * stop_floor_atr, practical_risk_floor)
         if risk > 0:
@@ -462,11 +523,63 @@ class AdaptiveStrategyEngine:
             else None
         )
         market_profile = self._v33_market_plan_profile(story)
+        target_history = history.get("target", {})
+        target_history = target_history if isinstance(target_history, dict) else {}
+        target_history_confidence = _clamp(
+            _safe_float(target_history.get("confidence"), 0.0),
+            0.0,
+            0.85,
+        )
+        stop_distance_pct = risk / max(abs(entry), 1e-9) * 100.0
+        historical_mfe_p60_pct = _safe_float(
+            target_history.get("mfe_p60_pct"),
+            0.0,
+        )
+        historical_mfe_p80_pct = _safe_float(
+            target_history.get("mfe_p80_pct"),
+            0.0,
+        )
+        historical_tp1_rr: float | None = None
+        historical_tp2_rr: float | None = None
+        target_model_rr = float(market_profile["tp1_model_rr"])
+        tp2_model_rr = float(market_profile["tp2_model_rr"])
+        if (
+            history.get("enabled")
+            and target_history.get("available")
+            and int(target_history.get("sample_size") or 0) >= 5
+            and stop_distance_pct > 0
+            and historical_mfe_p60_pct > 0
+        ):
+            historical_tp1_rr = _clamp(
+                historical_mfe_p60_pct / stop_distance_pct,
+                1.35,
+                3.0 if story.horizon == "SHORT" else 3.5,
+            )
+            target_model_rr = _clamp(
+                target_model_rr * (1.0 - target_history_confidence)
+                + historical_tp1_rr * target_history_confidence,
+                1.50,
+                2.75 if story.horizon == "SHORT" else 3.10,
+            )
+            if historical_mfe_p80_pct > 0:
+                historical_tp2_rr = _clamp(
+                    historical_mfe_p80_pct / stop_distance_pct,
+                    historical_tp1_rr + 0.50,
+                    4.0 if story.horizon == "SHORT" else 4.8,
+                )
+                tp2_model_rr = _clamp(
+                    tp2_model_rr * (1.0 - target_history_confidence)
+                    + historical_tp2_rr * target_history_confidence,
+                    target_model_rr + 0.70,
+                    4.0 if story.horizon == "SHORT" else 4.8,
+                )
         rr, target_method = self._v33_tp1_rr(
             structural_rr,
-            market_profile["tp1_model_rr"],
+            target_model_rr,
         )
-        tp2_rr = max(float(market_profile["tp2_model_rr"]), rr + 0.70)
+        if historical_tp1_rr is not None:
+            target_method += "＋歷史 MFE 自動學習"
+        tp2_rr = max(tp2_model_rr, rr + 0.70)
         tp1 = entry + risk * rr if is_long else entry - risk * rr
         tp2 = entry + risk * tp2_rr if is_long else entry - risk * tp2_rr
         strength_score = float(market_profile["strength_score"])
@@ -480,10 +593,50 @@ class AdaptiveStrategyEngine:
             "stop_floor_atr": round(stop_floor_atr, 2),
             "stop_distance_pct": round(risk / max(abs(entry), 1e-9) * 100.0, 4),
             "stop_floor_pct": round(practical_stop_floor_pct, 3),
-            "stop_method": "結構失效＋1.6～1.8 ATR＋近期波幅／影線＋波動分級百分比（取較遠者）",
+            "stop_method": "結構失效＋近期波幅／影線＋成功交易 MAE＋滑價緩衝（ATR／百分比僅保底）",
             "volatility_profile": dict(volatility),
             "realized_volatility_pct": round(realized_volatility_pct, 4),
             "structural_buffer_atr": round(structural_buffer_atr, 3),
+            "historical_excursion_learning": bool(
+                historical_stop_floor_pct is not None
+                or historical_tp1_rr is not None
+            ),
+            "historical_excursion_source": history.get("source"),
+            "historical_stop_scope": stop_history.get("scope"),
+            "historical_stop_sample_size": int(
+                stop_history.get("sample_size") or 0
+            ),
+            "historical_mae_p80_pct": (
+                round(historical_mae_p80_pct, 4)
+                if historical_stop_floor_pct is not None
+                else None
+            ),
+            "historical_stop_confidence": round(stop_history_confidence, 3),
+            "historical_target_scope": target_history.get("scope"),
+            "historical_target_sample_size": int(
+                target_history.get("sample_size") or 0
+            ),
+            "historical_mfe_p60_pct": (
+                round(historical_mfe_p60_pct, 4)
+                if historical_tp1_rr is not None
+                else None
+            ),
+            "historical_mfe_p80_pct": (
+                round(historical_mfe_p80_pct, 4)
+                if historical_tp2_rr is not None
+                else None
+            ),
+            "historical_target_confidence": round(target_history_confidence, 3),
+            "historical_tp1_rr": (
+                round(historical_tp1_rr, 3)
+                if historical_tp1_rr is not None
+                else None
+            ),
+            "historical_tp2_rr": (
+                round(historical_tp2_rr, 3)
+                if historical_tp2_rr is not None
+                else None
+            ),
             "target_method": target_method,
             "adaptive_market_plan": True,
             "frozen_at_trigger": True,
@@ -491,7 +644,17 @@ class AdaptiveStrategyEngine:
             "market_strength_label": strength_label,
             "target_rr_model": round(rr, 3),
             "tp2_rr_model": round(tp2_rr, 3),
-            "market_plan_sources": list(market_profile["sources"]),
+            "market_plan_sources": _unique(
+                [
+                    *list(market_profile["sources"]),
+                    *(
+                        ["歷史 Signal Episode MAE／MFE"]
+                        if historical_stop_floor_pct is not None
+                        or historical_tp1_rr is not None
+                        else []
+                    ),
+                ]
+            ),
             "structural_target_price": structural_target,
             "structural_target_rr": (
                 round(structural_rr, 3) if structural_rr is not None else None
@@ -693,7 +856,7 @@ class AdaptiveStrategyEngine:
         structural_rr: float | None,
         model_rr: float,
     ) -> tuple[float, str]:
-        adaptive_rr = _clamp(float(model_rr), 1.50, 2.25)
+        adaptive_rr = _clamp(float(model_rr), 1.50, 3.10)
         if structural_rr is not None and structural_rr >= 1.50:
             selected = min(float(structural_rr), adaptive_rr)
             return selected, "有效市場結構＋波動／力度自動目標"
@@ -716,11 +879,46 @@ class AdaptiveStrategyEngine:
             if structural_rr_value is not None
             else None
         )
+        target_model_rr = float(profile["tp1_model_rr"])
+        tp2_model_rr = float(profile["tp2_model_rr"])
+        history_rr_value = management.get("historical_tp1_rr")
+        history_rr = (
+            _safe_float(history_rr_value, 0.0)
+            if history_rr_value is not None
+            else None
+        )
+        history_confidence = _clamp(
+            _safe_float(management.get("historical_target_confidence"), 0.0),
+            0.0,
+            0.85,
+        )
+        if history_rr is not None and history_rr > 0:
+            target_model_rr = _clamp(
+                target_model_rr * (1.0 - history_confidence)
+                + history_rr * history_confidence,
+                1.50,
+                3.10,
+            )
+        history_tp2_value = management.get("historical_tp2_rr")
+        history_tp2_rr = (
+            _safe_float(history_tp2_value, 0.0)
+            if history_tp2_value is not None
+            else None
+        )
+        if history_tp2_rr is not None and history_tp2_rr > 0:
+            tp2_model_rr = _clamp(
+                tp2_model_rr * (1.0 - history_confidence)
+                + history_tp2_rr * history_confidence,
+                target_model_rr + 0.70,
+                4.8,
+            )
         rr, target_method = self._v33_tp1_rr(
             structural_rr,
-            float(profile["tp1_model_rr"]),
+            target_model_rr,
         )
-        tp2_rr = max(float(profile["tp2_model_rr"]), rr + 0.70)
+        if history_rr is not None and history_rr > 0:
+            target_method += "＋歷史 MFE 自動學習"
+        tp2_rr = max(tp2_model_rr, rr + 0.70)
         risk = abs(plan.entry - plan.stop)
         if risk <= 0:
             return plan
@@ -736,7 +934,16 @@ class AdaptiveStrategyEngine:
                 "market_strength_label": str(profile["strength_label"]),
                 "target_rr_model": round(rr, 3),
                 "tp2_rr_model": round(tp2_rr, 3),
-                "market_plan_sources": list(profile["sources"]),
+                "market_plan_sources": _unique(
+                    [
+                        *list(profile["sources"]),
+                        *(
+                            ["歷史 Signal Episode MAE／MFE"]
+                            if history_rr is not None and history_rr > 0
+                            else []
+                        ),
+                    ]
+                ),
             }
         )
         return replace(

@@ -1881,6 +1881,15 @@ class MarketScanner:
         kwargs: dict[str, Any] = {}
         if "previous_story" in parameters:
             kwargs["previous_story"] = previous
+        if "excursion_profile_loader" in parameters:
+            kwargs["excursion_profile_loader"] = (
+                lambda direction, trigger_type: self.repository.excursion_profile(
+                    instrument.inst_id,
+                    "SHORT",
+                    direction,
+                    trigger_type,
+                )
+            )
         return self.engine.analyze(
             instrument,
             ticker,
@@ -1904,6 +1913,15 @@ class MarketScanner:
         kwargs: dict[str, Any] = {}
         if "previous_story" in parameters:
             kwargs["previous_story"] = previous
+        if "excursion_profile_loader" in parameters:
+            kwargs["excursion_profile_loader"] = (
+                lambda direction, trigger_type: self.repository.excursion_profile(
+                    instrument.inst_id,
+                    "LONG",
+                    direction,
+                    trigger_type,
+                )
+            )
         return analyzer(
             instrument,
             ticker,

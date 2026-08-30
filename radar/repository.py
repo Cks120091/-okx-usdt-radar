@@ -2107,6 +2107,148 @@ class SignalRepository:
             "research": _research_performance(research_rows),
         }
 
+    def excursion_profile(
+        self,
+        inst_id: str,
+        horizon: str,
+        direction: str,
+        trigger_type: str,
+        strategy_version: str = "V3.4_CONTEXT",
+    ) -> dict[str, Any]:
+        """Return a guarded MAE/MFE profile for a newly forming trade plan.
+
+        Stored excursions are expressed in the original episode's R.  Convert
+        them back to price percentages before comparing episodes, otherwise a
+        historical change to stop policy would silently change the meaning of
+        the learning sample.  MAE only learns from profitable episodes: a
+        losing trade must never teach the radar to move its next stop farther
+        away merely to avoid acknowledging the invalidation.
+        """
+
+        normalized_id = str(inst_id or "").strip().upper()
+        normalized_horizon = str(horizon or "").strip().upper()
+        normalized_direction = str(direction or "").strip().upper()
+        normalized_trigger = str(trigger_type or "").strip().upper()
+        if normalized_horizon not in {"SHORT", "LONG"}:
+            return {"enabled": False, "reason": "invalid_horizon"}
+        if normalized_direction not in {"LONG", "SHORT"}:
+            return {"enabled": False, "reason": "invalid_direction"}
+
+        with self._lock:
+            rows = list(
+                self._connection.execute(
+                    """
+                    SELECT inst_id, trigger_type, trigger_price, stop_price,
+                           mfe_r, mae_r, final_r
+                    FROM signals
+                    WHERE strategy_version=? AND horizon=? AND direction=?
+                      AND status='CLOSED' AND final_r IS NOT NULL
+                      AND outcome!='REPOSITORY_ACTIVE_CONFLICT'
+                      AND COALESCE(tp_sl_order, '')!='UNKNOWN_FROM_LIVE_TICKER'
+                    ORDER BY triggered_at DESC
+                    LIMIT 1000
+                    """,
+                    (
+                        strategy_version,
+                        normalized_horizon,
+                        normalized_direction,
+                    ),
+                ).fetchall()
+            )
+
+        records: list[dict[str, Any]] = []
+        for row in rows:
+            trigger_price = float(row["trigger_price"] or 0.0)
+            stop_price = float(row["stop_price"] or 0.0)
+            if not math.isfinite(trigger_price) or not math.isfinite(stop_price):
+                continue
+            if trigger_price <= 0 or stop_price <= 0:
+                continue
+            original_risk_pct = (
+                abs(trigger_price - stop_price) / abs(trigger_price) * 100.0
+            )
+            if not math.isfinite(original_risk_pct) or original_risk_pct <= 0:
+                continue
+            mfe_r = max(0.0, float(row["mfe_r"] or 0.0))
+            mae_r = max(0.0, float(row["mae_r"] or 0.0))
+            records.append(
+                {
+                    "inst_id": str(row["inst_id"] or "").upper(),
+                    "trigger_type": str(row["trigger_type"] or "").upper(),
+                    "mfe_pct": mfe_r * original_risk_pct,
+                    "mae_pct": mae_r * original_risk_pct,
+                    "final_r": float(row["final_r"]),
+                }
+            )
+
+        def select_pool(
+            candidates: list[dict[str, Any]],
+        ) -> tuple[list[dict[str, Any]], str]:
+            pool_specs = (
+                (
+                    "same_coin_horizon_direction_trigger",
+                    5,
+                    lambda item: item["inst_id"] == normalized_id
+                    and item["trigger_type"] == normalized_trigger,
+                ),
+                (
+                    "same_coin_horizon_direction",
+                    8,
+                    lambda item: item["inst_id"] == normalized_id,
+                ),
+                (
+                    "same_horizon_direction_trigger",
+                    12,
+                    lambda item: item["trigger_type"] == normalized_trigger,
+                ),
+                (
+                    "same_horizon_direction",
+                    20,
+                    lambda item: True,
+                ),
+            )
+            for scope, minimum, predicate in pool_specs:
+                selected = [item for item in candidates if predicate(item)]
+                if len(selected) >= minimum:
+                    return selected, scope
+            return [], "insufficient_samples"
+
+        target_pool, target_scope = select_pool(records)
+        # Successful episodes show how much adverse movement a valid thesis
+        # normally survives.  Failed episodes remain useful for MFE/target
+        # realism, but do not widen the next hard stop.
+        successful = [item for item in records if item["final_r"] > 0]
+        stop_pool, stop_scope = select_pool(successful)
+        stop_values = [item["mae_pct"] for item in stop_pool]
+        target_values = [item["mfe_pct"] for item in target_pool]
+        stop_sample = len(stop_values)
+        target_sample = len(target_values)
+        stop_confidence = _excursion_confidence(stop_sample)
+        target_confidence = _excursion_confidence(target_sample)
+        enabled = bool(stop_values or target_values)
+        return {
+            "enabled": enabled,
+            "strategy_version": strategy_version,
+            "source": "closed_signal_episodes",
+            "stop": {
+                "available": bool(stop_values),
+                "sample_size": stop_sample,
+                "scope": stop_scope,
+                "mae_p80_pct": _percentile(stop_values, 0.80),
+                "confidence": stop_confidence,
+                "profitable_episodes_only": True,
+            },
+            "target": {
+                "available": bool(target_values),
+                "sample_size": target_sample,
+                "scope": target_scope,
+                "mfe_p60_pct": _percentile(target_values, 0.60),
+                "mfe_p80_pct": _percentile(target_values, 0.80),
+                "confidence": target_confidence,
+            },
+            "reason": "learned" if enabled else "insufficient_samples",
+        }
+
     def recent_history(
         self,
         limit: int = 60,
@@ -2564,6 +2706,29 @@ def _research_bucket(records: list[dict[str, Any]]) -> dict[str, Any]:
 def _average_metric(records: list[dict[str, Any]], key: str) -> float | None:
     values = [float(record[key]) for record in records if record.get(key) is not None]
     return round(sum(values) / len(values), 3) if values else None
+
+
+def _percentile(values: list[float], quantile: float) -> float | None:
+    clean = sorted(float(value) for value in values if math.isfinite(float(value)))
+    if not clean:
+        return None
+    if len(clean) == 1:
+        return round(clean[0], 4)
+    position = (len(clean) - 1) * min(max(float(quantile), 0.0), 1.0)
+    lower = int(math.floor(position))
+    upper = int(math.ceil(position))
+    if lower == upper:
+        return round(clean[lower], 4)
+    weight = position - lower
+    return round(clean[lower] * (1.0 - weight) + clean[upper] * weight, 4)
+
+
+def _excursion_confidence(sample_size: int) -> float:
+    """Blend small samples gently and saturate after thirty episodes."""
+
+    if sample_size < 5:
+        return 0.0
+    return round(min(0.85, 0.25 + (sample_size - 5) / 25.0 * 0.60), 3)
 
 
 def _higher_timeframe_alignment(

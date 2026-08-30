@@ -140,8 +140,101 @@ class StrategyTests(unittest.TestCase):
         self.assertGreaterEqual(plan.management_plan["stop_distance_atr"], 1.25)
         self.assertEqual(
             plan.management_plan["stop_method"],
-            "結構失效＋1.6～1.8 ATR＋近期波幅／影線＋波動分級百分比（取較遠者）",
+            "結構失效＋近期波幅／影線＋成功交易 MAE＋滑價緩衝（ATR／百分比僅保底）",
         )
+
+    def test_v33_closed_episode_mae_mfe_adapts_new_plan(self):
+        engine = AdaptiveStrategyEngine(StrategyConfig(minimum_rr=1.8))
+        story = SimpleNamespace(
+            trigger_direction="LONG",
+            trigger_type="BREAKOUT",
+            horizon="SHORT",
+            trigger={"entry_reference_price": 100.0, "zone_key": "NO_ZONE"},
+            invalidation_price=99.95,
+            zones={},
+            regime="TREND",
+            stage="EARLY_SIGNAL",
+            readiness=82.0,
+            supporting=["fixture"],
+            raw={"volatility_profile": {"realized_volatility_pct": 0.03}},
+        )
+        core = SimpleNamespace(
+            close=100.0,
+            atr14=0.10,
+            recent_low=99.9,
+            recent_high=100.1,
+        )
+        profile = {
+            "enabled": True,
+            "source": "closed_signal_episodes",
+            "stop": {
+                "available": True,
+                "sample_size": 30,
+                "scope": "same_coin_horizon_direction_trigger",
+                "mae_p80_pct": 1.50,
+                "confidence": 0.85,
+            },
+            "target": {
+                "available": True,
+                "sample_size": 30,
+                "scope": "same_coin_horizon_direction_trigger",
+                "mfe_p60_pct": 4.00,
+                "mfe_p80_pct": 5.50,
+                "confidence": 0.85,
+            },
+        }
+
+        plan = engine._v33_plan(story, core, profile)
+
+        stop_distance_pct = (plan.entry - plan.stop) / plan.entry * 100.0
+        self.assertGreater(stop_distance_pct, 1.30)
+        self.assertGreater(plan.rr, 2.20)
+        self.assertTrue(plan.management_plan["historical_excursion_learning"])
+        self.assertEqual(plan.management_plan["historical_stop_sample_size"], 30)
+        self.assertEqual(plan.management_plan["historical_target_sample_size"], 30)
+        self.assertIn("歷史 MFE", plan.management_plan["target_method"])
+
+    def test_v33_tiny_history_sample_keeps_guarded_fallback(self):
+        engine = AdaptiveStrategyEngine(StrategyConfig(minimum_rr=1.8))
+        story = SimpleNamespace(
+            trigger_direction="LONG",
+            trigger_type="BREAKOUT",
+            horizon="SHORT",
+            trigger={"entry_reference_price": 100.0, "zone_key": "NO_ZONE"},
+            invalidation_price=99.95,
+            zones={},
+            regime="TREND",
+            stage="EARLY_SIGNAL",
+            readiness=82.0,
+            supporting=["fixture"],
+            raw={"volatility_profile": {"realized_volatility_pct": 0.03}},
+        )
+        core = SimpleNamespace(
+            close=100.0,
+            atr14=0.10,
+            recent_low=99.9,
+            recent_high=100.1,
+        )
+        profile = {
+            "enabled": True,
+            "stop": {
+                "available": True,
+                "sample_size": 2,
+                "mae_p80_pct": 4.0,
+                "confidence": 0.85,
+            },
+            "target": {
+                "available": True,
+                "sample_size": 2,
+                "mfe_p60_pct": 8.0,
+                "confidence": 0.85,
+            },
+        }
+
+        plan = engine._v33_plan(story, core, profile)
+
+        self.assertFalse(plan.management_plan["historical_excursion_learning"])
+        self.assertLess((plan.entry - plan.stop) / plan.entry * 100.0, 1.0)
 
     def test_v33_quiet_short_market_still_has_practical_percentage_floor(self):
         engine = AdaptiveStrategyEngine(StrategyConfig(minimum_rr=1.8))

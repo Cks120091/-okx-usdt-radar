@@ -138,6 +138,8 @@ Trigger 是否存在與「現在是否適合進場」分開顯示：
 
 `data/radar_state.sqlite3` 保存每個訊號的版本、方向、週期、Trigger 類型、Market Participation、Execution Quality、MFE、MAE、TP1／SL 先後與 Final R。
 
+新形成的交易計畫會使用已關閉 Signal Episode 做分層 MAE／MFE 自動學習：優先採用同幣種＋同週期＋同方向＋同 Trigger 樣本，樣本不足才逐層退到同幣種或同週期／方向群組。止損只採成功 Episode 的 MAE 第 80 百分位並加上影線／執行緩衝，避免失敗交易教系統無限放寬止損；止盈採全部有效完成 Episode 的 MFE 第 60／80 百分位，再與壓力支撐、OI、Taker／CVD、成交量及訂單簿力度混合。每一層至少需要 5～20 筆樣本；不足時維持結構、真實波動、ATR 與百分比保底。學習只作用於全新 Trigger 的新卡，既有 Episode 的 Entry／SL／TP 永遠不改寫。
+
 手機頁面的「更多 → 訊號歷史」會顯示精簡生命週期紀錄，包括目前有效、已完成與已失效訊號；不公開 Raw Data，也不把歷史訊號當成現在的進場依據。
 
 `GET /api/stats` 只從已完成樣本計算：

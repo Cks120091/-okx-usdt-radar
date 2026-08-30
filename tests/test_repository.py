@@ -1923,6 +1923,65 @@ class SignalRepositoryTests(unittest.TestCase):
         )
         self.assertNotIn("win_rate_pct", research["by_session"]["LONDON"])
 
+    def test_excursion_profile_uses_price_percent_and_winner_mae_only(self):
+        for index in range(6):
+            event_ts = 1_710_000_000_000 + index * 900_000
+            raw = replace(
+                signal_fixture("LEARN-USDT-SWAP", event_ts=event_ts),
+                entry_low="100",
+                entry_high="100",
+                stop_loss="99",
+                take_profit_1="102",
+                take_profit_2="103",
+                market_story={
+                    "trigger": {
+                        "event_ts": event_ts,
+                        "trigger_event_key": (
+                            f"SHORT:LONG:BREAKOUT:{event_ts}:LEARN-ZONE"
+                        ),
+                    }
+                },
+            )
+            created = self.repository.reconcile(
+                [raw],
+                [state_fixture(raw, event_ts)],
+                f"2026-08-20T00:{index:02d}:00+00:00",
+                "SHORT",
+            )[0]
+            final_r = 2.0 if index < 5 else -1.0
+            mae_r = 0.4 if index < 5 else 4.0
+            mfe_r = 2.5 if index < 5 else 0.2
+            self.repository._connection.execute(
+                """
+                UPDATE signals
+                SET status='CLOSED', outcome=?, final_r=?, mfe_r=?, mae_r=?,
+                    tp_sl_order='TP_FIRST', closed_at=updated_at
+                WHERE signal_id=?
+                """,
+                (
+                    "TP_FIRST" if final_r > 0 else "SL_FIRST",
+                    final_r,
+                    mfe_r,
+                    mae_r,
+                    created.trigger_id,
+                ),
+            )
+        self.repository._connection.commit()
+
+        profile = self.repository.excursion_profile(
+            "LEARN-USDT-SWAP",
+            "SHORT",
+            "LONG",
+            "BREAKOUT",
+        )
+
+        self.assertTrue(profile["enabled"])
+        self.assertEqual(profile["stop"]["sample_size"], 5)
+        self.assertEqual(profile["target"]["sample_size"], 6)
+        self.assertAlmostEqual(profile["stop"]["mae_p80_pct"], 0.4)
+        self.assertAlmostEqual(profile["target"]["mfe_p60_pct"], 2.5)
+        self.assertTrue(profile["stop"]["profitable_episodes_only"])
+
     def test_all_closed_bars_between_scans_preserve_tp_sl_order(self):
         raw = signal_fixture("PATH-USDT-SWAP")
         self.repository.reconcile(
