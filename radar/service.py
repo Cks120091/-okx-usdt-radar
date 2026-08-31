@@ -3157,26 +3157,24 @@ def serve(runtime: RadarRuntime, host: str, port: int) -> None:
         def do_POST(self) -> None:  # noqa: N802
             path = urlparse(self.path).path
             if path == "/api/instrument/scan":
-                try:
-                    payload = self._read_json_body()
-                    result = runtime.scan_instrument_dict(
-                        payload.get("inst_id", ""),
-                        payload.get("horizon", "BOTH"),
-                        payload.get("direction_lock"),
-                    )
-                except PreflightError as exc:
-                    self._send_json(exc.status, {"error": str(exc)})
-                except ValueError as exc:
-                    self._send_json(HTTPStatus.BAD_REQUEST, {"error": str(exc)})
-                else:
-                    self._send_json(HTTPStatus.OK, result)
+                # Removed from the product UI.  Return an explicit terminal
+                # response for older installed PWA shells so they cannot
+                # trigger the heavier multi-timeframe single-symbol scan.
+                self._send_json(
+                    HTTPStatus.GONE,
+                    {
+                        "error": (
+                            "幣種更新已停用；請從正式訊號卡使用進場前更新。"
+                        )
+                    },
+                )
                 return
             if path == "/api/preflight/reanalyze":
                 try:
                     payload = self._read_json_body()
                     # Backward-compatible alias for older installed PWA shells.
-                    # It must use the same canonical scan as every current
-                    # single-symbol refresh and must not mutate the report.
+                    # It performs the same lightweight execution check as the
+                    # current preflight route and must not mutate the report.
                     result = runtime.preflight_dict(
                         payload.get("inst_id", ""),
                         payload.get("horizon", ""),

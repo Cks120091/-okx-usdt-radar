@@ -85,14 +85,13 @@ class V33ContractTests(unittest.TestCase):
         self.assertIn("function displaySymbol(instId)", html)
         self.assertIn("replace(/-USDT-SWAP$/i,'')", html)
         self.assertIn("esc(displaySymbol(item.inst_id))", html)
-        self.assertIn("`${displaySymbol(normalized)} · ${selected==='LONG'?'4H 長線'", html)
         self.assertIn("`${displaySymbol(instId)} · ${horizon==='LONG'?'4H 長線':'15m 短線'}`", html)
         self.assertIn("資料已過期，禁止依此進場", html)
         self.assertIn("上一輪快照會繼續顯示", html)
         self.assertIn("function isExpiredSnapshot(item)", html)
         self.assertIn("⏱ 資料已過期", html)
         self.assertIn("資料已過期｜原快照", html)
-        self.assertIn("label='幣種掃描'", html)
+        self.assertNotIn("幣種掃描", html)
         self.assertIn("reportBecameStale", html)
         self.assertIn("overflow-x:hidden", html)
         self.assertIn("env(safe-area-inset-bottom)", html)
@@ -111,7 +110,7 @@ class V33ContractTests(unittest.TestCase):
         self.assertIn(".primary-nav{grid-row:5;position:relative", html)
         self.assertIn("grid-template-columns:repeat(4,minmax(0,1fr))", html)
         self.assertIn(".decision-actions{display:grid;grid-template-columns:repeat(2,minmax(0,1fr))", html)
-        self.assertIn("okx-radar-shell-v3.5-split-refresh-1", service_worker)
+        self.assertIn("okx-radar-shell-v3.6-preflight-only-1", service_worker)
         self.assertIn("市場自動計畫", html)
         self.assertIn("plan.adaptive_market_plan", html)
         self.assertIn("plan.market_plan_sources", html)
@@ -137,9 +136,8 @@ class V33ContractTests(unittest.TestCase):
         self.assertLess(
             html.index('id="preflightContent"'), html.index('id="preflightRefresh"')
         )
-        self.assertLess(
-            html.index('id="instrumentContent"'), html.index('id="instrumentScan"')
-        )
+        self.assertNotIn('id="instrumentContent"', html)
+        self.assertNotIn('id="instrumentScan"', html)
         self.assertIn("$('.shell').scrollTo({top:0", html)
         self.assertLess(html.index('<header class="top">'), html.index('<main class="shell">'))
         self.assertLess(html.index('id="filterShell"'), html.index('<main class="shell">'))
@@ -190,12 +188,12 @@ class V33ContractTests(unittest.TestCase):
         self.assertIn("市場平均 RSI", html)
         self.assertIn("localStorage", html)
         self.assertIn("TradingView（技術圖表）", html)
-        self.assertIn("搜尋幣種，例如 BTC、SNDK", html)
+        self.assertIn("輸入正式訊號幣種，例如 BTC", html)
         self.assertIn("renderOverviewUnavailable", html)
         self.assertNotIn("開發者資料（Raw Data）", html)
         self.assertNotIn("分組績效 JSON", html)
         self.assertNotIn("raw_indicators", html)
-        self.assertIn("⚡ 進場前更新", html)
+        self.assertIn("⚡ ${frame} 進場前更新", html)
         self.assertIn("重新取得最新成交資料", html)
         self.assertIn("進場檢查", html)
         self.assertIn("/api/preflight", html)
@@ -219,17 +217,18 @@ class V33ContractTests(unittest.TestCase):
         self.assertIn("function signalTriggerTime(item)", html)
         self.assertIn("訊號觸發時間（台灣）", html)
         self.assertNotIn("status!=='ENTRY_READY'&&status!=='MISSED_ENTRY'", html)
-        self.assertIn("okx-radar-shell-v3.5-split-refresh-1", service_worker)
+        self.assertIn("okx-radar-shell-v3.6-preflight-only-1", service_worker)
         self.assertIn("$('#preflightRefresh').addEventListener('click',loadPreflight)", html)
-        self.assertIn("'#waitRetestBox','#longWaitRetestBox'", html)
-        self.assertIn("scanAction=includeInstrument", html)
+        self.assertIn("${decisionPanel(item)}", html)
+        self.assertNotIn("showPreflight", html)
+        self.assertIn("function preflightActions(instId,horizon='BOTH'", html)
         self.assertNotIn("/api/preflight/reanalyze", html)
         self.assertNotIn("reanalyzeMode", html)
         self.assertNotIn("ORIGINAL_DIRECTION_STABLE", html)
         self.assertNotIn("OPPOSITE_WARNING", html)
         self.assertNotIn("CONFIRMED_REVERSAL", html)
         self.assertNotIn("二次反轉確認", html)
-        self.assertIn("重新分析最新多週期資料", html)
+        self.assertNotIn("重新分析最新多週期資料", html)
         self.assertIn("不重新掃描多週期 K 線", html)
         self.assertIn("訊號觸發時間（台灣）", html)
         self.assertIn("15m 短線歷史", html)
@@ -239,74 +238,46 @@ class V33ContractTests(unittest.TestCase):
         self.assertIn("不因 TP（止盈）／SL（止損）或走遠而提前消失", html)
         self.assertIn("function historyGroups(items)", html)
         self.assertIn("觸發 ${events.length} 次", html)
-        self.assertIn("點開查看每次觸發時間與原始價位", html)
+        self.assertIn("點開查看每次觸發時間與原始進出場價位", html)
         self.assertIn("${shortCoins} 幣 / ${shortItems.length} 次", html)
         self.assertIn("/api/history?limit=60", html)
-        self.assertIn("只按原始觸發時間輪替", (
+        service_source = (
             Path(__file__).parents[1] / "radar" / "service.py"
-        ).read_text(encoding="utf-8"))
-        self.assertIn("幣種掃描", html)
-        self.assertIn("正在掃描這一個幣", html)
-        self.assertIn("/api/instrument/scan", html)
-        self.assertIn("data-instrument-id", html)
-        self.assertIn("function openInstrument(instId,{scanNow=true,horizon='BOTH',directionLock=''}={})", html)
-        self.assertIn("if(scanNow)scanInstrument()", html)
-        self.assertIn("function instrumentScanLoading(instId,horizon='BOTH')", html)
-        self.assertIn('class="instrument-scanning"', html)
-        self.assertIn('class="scan-radar"', html)
-        self.assertIn("@keyframes radarSweep", html)
-        self.assertIn("每次按下都重新取得最新公開資料", html)
+        ).read_text(encoding="utf-8")
+        self.assertIn("只按原始觸發時間輪替", service_source)
+        retired_route = service_source.split(
+            'if path == "/api/instrument/scan":', 1
+        )[1].split('if path == "/api/preflight/reanalyze":', 1)[0]
+        self.assertIn("HTTPStatus.GONE", retired_route)
+        self.assertIn("幣種更新已停用", retired_route)
+        self.assertNotIn("runtime.scan_instrument_dict", retired_route)
+        self.assertNotIn("幣種掃描", html)
+        self.assertNotIn("/api/instrument/scan", html)
+        self.assertNotIn("data-instrument-id", html)
+        self.assertNotIn("function openInstrument", html)
+        self.assertNotIn("function scanInstrument", html)
+        self.assertNotIn("instrumentSideCache", html)
+        self.assertNotIn("single_scan_analyzed_at", html)
+        self.assertIn("function activePreflightSignal(instId,horizon)", html)
+        self.assertIn("function preferredPreflightSignal(instId)", html)
+        self.assertIn("function preflightButton(instId,horizon,item=null,compact=true)", html)
+        self.assertIn("function preflightActions(instId,horizon='BOTH'", html)
+        self.assertIn("preflightActions(item.inst_id", html)
+        self.assertIn("尚無正式交易計畫", html)
+        self.assertIn("舊交易計畫已結束", html)
+        self.assertIn("等待正式掃描結果", html)
+        self.assertIn("更新市場後可檢查", html)
+        self.assertIn("目前沒有可執行進場前更新的正式交易計畫", html)
+        self.assertIn("function planTargetR(item,targetValue,fallback=null)", html)
+        self.assertIn("function tradeRoute(item,options={})", html)
+        self.assertIn("ENTRY 進場", html)
+        self.assertIn("SL 止損", html)
+        self.assertIn("TP1 止盈", html)
+        self.assertIn("TP2 止盈", html)
+        self.assertIn("2～4R", html)
+        self.assertIn("7R", html)
+        self.assertIn("最高 8R", html)
         self.assertNotIn("<canvas", html)
-        self.assertIn(
-            "function instrumentButton(instId,label='幣種掃描',horizon='BOTH',directionLock='')",
-            html,
-        )
-        self.assertIn("data-instrument-horizon", html)
-        self.assertIn("data-instrument-direction", html)
-        self.assertIn("direction_lock:directionLock||null", html)
-        self.assertIn("可能反轉提醒", html)
-        self.assertIn("反向新卡只由 15m／4H／全市場大掃描建立", html)
-        self.assertIn("function instrumentPayloadState(payload)", html)
-        self.assertIn("function instrumentOverallVerdict(shortPayload,longPayload)", html)
-        self.assertIn("function instrumentPlainGuide(context)", html)
-        self.assertIn("function instrumentStateDecision(item,payload={})", html)
-        self.assertIn(
-            "function failedStoredInstrumentSide(instId,horizon,errorMessage='')",
-            html,
-        )
-        self.assertIn("single_scan_error:String(errorMessage||'')", html)
-        self.assertIn("function renderFailedInstrumentScan(instId,horizon,error)", html)
-        self.assertIn("function renderInstrumentBusy(instId,horizon,message,autoRetry=true)", html)
-        self.assertIn(
-            "function waitForInstrumentSlot(token,instId,horizon,directionLock,consecutiveErrors=0)",
-            html,
-        )
-        self.assertIn("function instrumentStatusWithTimeout()", html)
-        self.assertIn("state.instrumentWaitDeadline=Date.now()+(12*60*1000)", html)
-        self.assertIn("nextErrors>=5", html)
-        self.assertIn("scanInstrument(true)", html)
-        self.assertIn("if(error?.status===409)", html)
-        self.assertIn("!status.running&&!status.single_scan_running", html)
-        self.assertIn("這是掃描排程，不是行情更新失敗", html)
-        self.assertIn("instrumentSideCache:new Map()", html)
-        self.assertIn("function cacheInstrumentSide(instId,payload,analyzedAt)", html)
-        self.assertIn("state.instrumentSideCache.size>20", html)
-        self.assertIn("function syncInstrumentSideToReport(report,instId,payload)", html)
-        self.assertIn("function applyInstrumentSideCache(report)", html)
-        self.assertIn("report=applyInstrumentSideCache(report)", html)
-        self.assertIn("function isFreshSingleInstrumentResult(item)", html)
-        self.assertIn("single_scan_analyzed_at", html)
-        self.assertIn("已同步這個幣的目前頁面卡片", html)
-        self.assertIn("if(readOnly==='ERROR')return 'UPDATE_FAILED'", html)
-        self.assertIn("本次更新失敗，暫停新進場", html)
-        self.assertIn("仍依原本 SL（止損）與 TP（止盈）管理", html)
-        self.assertIn("renderFailedInstrumentScan(instId,horizon,error)", html)
-        self.assertIn("現在能不能進場？", html)
-        self.assertIn("判定依據（簡要）", html)
-        self.assertIn("目前不可進場｜尚無正式 Trigger", html)
-        self.assertIn("準備度不是進場許可", html)
-        self.assertIn("只掃描這一個幣，不重新掃描全市場", html)
-        self.assertIn("不加入全市場排名", html)
         self.assertIn("最佳進場點位", html)
         self.assertIn("已觸發・有效中", html)
         self.assertIn("目前進場資格", html)
@@ -315,7 +286,7 @@ class V33ContractTests(unittest.TestCase):
         self.assertIn("等待回踩」不是出場指令", html)
         self.assertIn("容許回測", html)
         self.assertIn("現在位置與進場資格", html)
-        self.assertIn("原始交易計畫", html)
+        self.assertIn("原始進出場價格（固定，不被本次更新改寫）", html)
         self.assertIn("交易品質變化（不是勝率）", html)
         self.assertIn("Spread（買賣價差）", html)
         self.assertIn("R:R（風險報酬比）", html)
@@ -357,21 +328,16 @@ class V33ContractTests(unittest.TestCase):
         self.assertIn("該週期先不顯示上一輪卡片", html)
         self.assertIn("另一週期若仍是 Fresh（最新）就照常有效", html)
         self.assertIn("STALE（超過 30 分鐘）", html)
-        self.assertIn("底層仍執行完整多週期驗證", html)
+        self.assertIn("4H 判斷方向", html)
+        self.assertIn("1H 判斷背景／形態", html)
+        self.assertIn("15m 作為 Trigger 與入場時間", html)
         self.assertIn('id="contextCountLabel">深度資料完整', html)
         self.assertIn('id="contextSourceCoverage">來源完整率 —', html)
         self.assertIn("function renderContextCoverage(report,transient=null,preview=false)", html)
         self.assertIn("quality.deep_complete_count", html)
         self.assertIn("quality.deep_source_completeness_pct", html)
         self.assertIn("五項來源完整率", html)
-        self.assertIn(
-            "horizon==='LONG'?null:isolatedInstrumentSide(data.short,'SHORT')",
-            html,
-        )
-        self.assertIn(
-            "horizon==='SHORT'?null:isolatedInstrumentSide(data.long,'LONG')",
-            html,
-        )
+        self.assertNotIn("isolatedInstrumentSide", html)
         self.assertIn("@media(prefers-reduced-motion:reduce)", html)
         self.assertNotIn("<canvas", html)
 
@@ -457,8 +423,11 @@ class V33ContractTests(unittest.TestCase):
         self.assertIn("transient==='ERROR'?'更新失敗':'掃描中'", coverage)
         self.assertIn("itemEntryStatus(x)==='ENTRY_READY'", report)
         self.assertIn("itemWasEntryReady(item)", report)
-        self.assertIn("true,shortReadOnlyReason", report)
-        self.assertIn("true,longReadOnlyReason", report)
+        self.assertIn(
+            "'目前沒有已觸發並持續保留的訊號。',shortReadOnlyReason",
+            report,
+        )
+        self.assertIn("'目前沒有長線訊號。',longReadOnlyReason", report)
         self.assertIn(
             "renderContextCoverage(report,shortTransient||longTransient,preview)", report
         )
@@ -488,16 +457,15 @@ class V33ContractTests(unittest.TestCase):
             "function timeframeGrid", 1
         )[0]
         self.assertIn("const entry=item.entry_eligibility||{}", decision_panel)
-        self.assertIn("instrumentButton(item.inst_id,'幣種掃描'", decision_panel)
-        self.assertIn("data-preflight-id", decision_panel)
-        self.assertIn("⚡ 進場前更新", decision_panel)
+        self.assertIn("preflightActions(item.inst_id,horizon,item,false)", decision_panel)
+        self.assertIn("tradeRoute(item", decision_panel)
         self.assertNotIn("finalDecisionPanel", decision_panel)
         self.assertNotIn("decisionContext", decision_panel)
         self.assertIn(
             "copyAction=item.entry_low&&item.stop_loss&&item.take_profit_1?",
             decision_panel,
         )
-        self.assertIn("檢查原方向", decision_panel)
+        self.assertNotIn("instrumentButton", decision_panel)
         self.assertNotIn("status==='HARD_GATE_BLOCKED'", decision_panel)
         entry_badge = html.split("function entryBadge(item)", 1)[1].split(
             "function entryCallout", 1
@@ -513,35 +481,27 @@ class V33ContractTests(unittest.TestCase):
         self.assertIn("item.lifecycle?.status", fingerprint)
         self.assertNotIn("decision_context", fingerprint)
 
-        instrument_state = html.split("function instrumentPayloadState(payload)", 1)[
+        preflight_button = html.split("function preflightButton(instId,horizon", 1)[
             1
-        ].split("function instrumentOverallContext", 1)[0]
-        self.assertIn("payload.preflight?.verdict?.status", instrument_state)
-        self.assertIn("itemEntryStatus(payload.item)", instrument_state)
-        self.assertIn("STOP_LOSS:90", instrument_state)
-        self.assertNotIn("HARD_GATE_BLOCKED:70", instrument_state)
-        self.assertIn("function instrumentDisplayItem(payload)", html)
-        display_item = html.split("function instrumentDisplayItem(payload)", 1)[
-            1
-        ].split("function instrumentOverallContext", 1)[0]
-        self.assertIn("entry_eligibility:{...entry,status,label:", display_item)
-        self.assertIn("hard_blockers:[]", display_item)
-        self.assertIn("verdict.risk_warnings", display_item)
-        self.assertNotIn("decisionContext", instrument_state)
-        instrument_results = html.split("function renderInstrumentResults", 1)[1].split(
-            "function renderStoredInstrument", 1
+        ].split("function preflightActions", 1)[0]
+        self.assertIn("activePreflightSignal(instId,normalized)", preflight_button)
+        self.assertIn("preflightSignalUsable(signal)", preflight_button)
+        self.assertIn("data-preflight-id", preflight_button)
+        self.assertIn("disabled title=", preflight_button)
+        usable = html.split("function preflightSignalUsable(signal)", 1)[1].split(
+            "function preferredPreflightSignal", 1
         )[0]
-        self.assertIn("instrumentOverallVerdict(isolatedShort,isolatedLong)", instrument_results)
-        self.assertNotIn("hasStructured", instrument_results)
-        self.assertNotIn("itemDecisionContext", instrument_results)
-        instrument_side = html.split("function renderInstrumentSide(payload,selector)", 1)[
+        self.assertIn("!isTerminalSignal(signal)", usable)
+        self.assertIn("!isPreviewItem(signal)", usable)
+        self.assertIn("!isExpiredSnapshot(signal)", usable)
+        self.assertIn("!itemReadOnlyReason(signal)", usable)
+        preflight_actions = html.split("function preflightActions(instId", 1)[
             1
-        ].split("function renderInstrumentResults", 1)[0]
-        self.assertIn("instrumentDisplayItem(payload)", instrument_side)
-        primary_payload = html.split("function instrumentPrimaryPayload(context)", 1)[
-            1
-        ].split("function instrumentPlainGuide", 1)[0]
-        self.assertIn("'DATA_UNAVAILABLE','MISSED_ENTRY'", primary_payload)
+        ].split("function preflightClass", 1)[0]
+        self.assertIn("activePreflightSignal(instId,'SHORT')", preflight_actions)
+        self.assertIn("activePreflightSignal(instId,'LONG')", preflight_actions)
+        self.assertIn("buttons.join('')", preflight_actions)
+        self.assertIn("function captureReportUiState()", html)
         self.assertIn("function captureReportUiState()", html)
         self.assertIn("function restoreReportUiState(saved)", html)
         self.assertIn("if(state.reportRenderKey===renderKey)return", report)
@@ -618,10 +578,11 @@ class V33ContractTests(unittest.TestCase):
         self.assertIn("已達止盈｜本次交易計畫完成", html)
         self.assertIn("已達止損｜本次交易計畫結束", html)
         self.assertIn('data-trigger-id="${esc(item.trigger_id||\'\')}"', html)
-        self.assertIn("payload.closed_item", html)
-        self.assertIn("previous?[item,previous]:[item]", html)
         self.assertIn("等待新的 Trigger 與全新交易計畫", html)
-        self.assertIn("okx-radar-shell-v3.5-split-refresh-1", worker)
+        self.assertIn("舊 Entry／SL／TP 不會復活", html)
+        self.assertIn("舊交易計畫已結束", html)
+        self.assertIn("tradeRoute(item,{prefix:'原始 '})", html)
+        self.assertIn("okx-radar-shell-v3.6-preflight-only-1", worker)
 
     def test_market_scan_has_no_github_schedule(self):
         root = Path(__file__).parents[1]
