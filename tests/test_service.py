@@ -1790,6 +1790,7 @@ class RuntimeSafetyTests(unittest.TestCase):
             item = current.signals[0]
             item.market_metrics = {
                 "last_price": 100.0,
+                "instrument_tick_size": 0.05,
                 "price_change_1h_pct": 1.5,
                 "raw_indicators": {"oversized": "x" * 20_000},
                 "order_book_sequence": {
@@ -1808,6 +1809,8 @@ class RuntimeSafetyTests(unittest.TestCase):
                 "frozen_at_trigger": True,
                 "market_strength_score": 76.0,
                 "market_strength_label": "強",
+                "target_rr_model": 2.625,
+                "tp2_rr_model": 3.75,
                 "target_method": "有效市場結構＋波動／力度自動目標",
                 "market_plan_sources": ["價格 Trigger", "價格＋OI", "Taker／CVD"],
                 "structural_target_price": 101.0,
@@ -1900,6 +1903,7 @@ class RuntimeSafetyTests(unittest.TestCase):
                 closed_candle_ts=1,
                 market_metrics={
                     "last_price": 100.0,
+                    "instrument_tick_size": 0.05,
                     "raw_indicators": {"x": "y" * 10_000},
                 },
                 market_story={"raw": "x" * 10_000},
@@ -1983,6 +1987,10 @@ class RuntimeSafetyTests(unittest.TestCase):
                 payload["signals"][0]["management_plan"]["market_plan_sources"],
                 ["價格 Trigger", "價格＋OI", "Taker／CVD"],
             )
+            self.assertEqual(payload["signals"][0]["instrument_tick_size"], 0.05)
+            self.assertEqual(payload["signals"][0]["display_precision"], 2)
+            self.assertEqual(payload["signals"][0]["tp1_r"], item.risk_reward)
+            self.assertEqual(payload["signals"][0]["tp2_r"], 3.75)
             self.assertNotIn(
                 "private_debug",
                 payload["signals"][0]["management_plan"],
@@ -2039,9 +2047,13 @@ class RuntimeSafetyTests(unittest.TestCase):
                     "direction",
                     "readiness_score",
                     "status",
+                    "instrument_tick_size",
+                    "display_precision",
                     "market_metrics",
                 },
             )
+            self.assertEqual(payload["market_map"][0]["instrument_tick_size"], 0.05)
+            self.assertEqual(payload["market_map"][0]["display_precision"], 2)
             self.assertLess(public_size, full_size / 2)
 
     def test_successful_web_scan_releases_transient_scanner_data(self):
@@ -2234,6 +2246,78 @@ class RuntimeSafetyTests(unittest.TestCase):
                 runtime.latest_dict()["horizon_freshness"]["LONG"]["available"]
             )
 
+    def test_partial_scan_commit_does_not_resurrect_concurrent_terminal_card(self):
+        for scan_horizon, terminal_horizon in (
+            ("SHORT", "LONG"),
+            ("LONG", "SHORT"),
+        ):
+            with self.subTest(
+                scan_horizon=scan_horizon,
+                terminal_horizon=terminal_horizon,
+            ):
+                with tempfile.TemporaryDirectory() as directory:
+                    scanner = BlockingScanner()
+                    runtime = RadarRuntime(
+                        scanner,
+                        AppConfig(data_dir=directory),
+                    )
+                    previous = report()
+                    previous_long = signal()
+                    previous_long.radar_horizon = "LONG"
+                    previous.long_signals = [previous_long]
+                    previous.short_completed_at = previous.completed_at
+                    previous.long_completed_at = previous.completed_at
+                    runtime._latest = previous
+
+                    self.assertTrue(runtime.trigger_scan(scan_mode=scan_horizon))
+                    self.assertTrue(scanner.started.wait(1))
+                    terminal_source = (
+                        previous_long
+                        if terminal_horizon == "LONG"
+                        else previous.signals[0]
+                    )
+                    terminal = replace(
+                        terminal_source,
+                        signal_stage="COMPLETED",
+                        freshness="COMPLETED",
+                        actionable=False,
+                    )
+                    with runtime._state_lock:
+                        if terminal_horizon == "LONG":
+                            runtime._latest = replace(
+                                runtime._latest,
+                                long_signals=[],
+                                long_closed_signals=[terminal],
+                            )
+                        else:
+                            runtime._latest = replace(
+                                runtime._latest,
+                                signals=[],
+                                closed_signals=[terminal],
+                            )
+
+                    scanner.release.set()
+                    deadline = time.time() + 2
+                    while runtime.status()["running"] and time.time() < deadline:
+                        time.sleep(0.01)
+
+                    completed = runtime._latest
+                    persisted = load_latest_report(directory)
+                    if terminal_horizon == "LONG":
+                        self.assertEqual(completed.long_signals, [])
+                        self.assertEqual(
+                            [item.trigger_id for item in completed.long_closed_signals],
+                            [terminal.trigger_id],
+                        )
+                        self.assertEqual(persisted.long_signals, [])
+                    else:
+                        self.assertEqual(completed.signals, [])
+                        self.assertEqual(
+                            [item.trigger_id for item in completed.closed_signals],
+                            [terminal.trigger_id],
+                        )
+                        self.assertEqual(persisted.signals, [])
+
     def test_failed_partial_scan_keeps_unrequested_completed_horizon(self):
         with tempfile.TemporaryDirectory() as directory:
             previous = report()
@@ -2284,6 +2368,60 @@ class RuntimeSafetyTests(unittest.TestCase):
             self.assertEqual(len(persisted.signals), 1)
             self.assertEqual(len(persisted.long_signals), 1)
             self.assertEqual(persisted.completed_at, previous.completed_at)
+
+    def test_opposite_success_keeps_failed_horizon_unavailable(self):
+        for failed_horizon, successful_horizon in (
+            ("LONG", "SHORT"),
+            ("SHORT", "LONG"),
+        ):
+            with self.subTest(
+                failed_horizon=failed_horizon,
+                successful_horizon=successful_horizon,
+            ):
+                with tempfile.TemporaryDirectory() as directory:
+                    previous = report()
+                    previous.signals[0] = allow_entry(previous.signals[0])
+                    previous_long = allow_entry(signal())
+                    previous_long.radar_horizon = "LONG"
+                    previous.long_signals = [previous_long]
+                    previous.short_completed_at = previous.completed_at
+                    previous.long_completed_at = previous.completed_at
+                    save_report(previous, directory)
+                    runtime = RadarRuntime(
+                        IncompleteModeScanner(),
+                        AppConfig(data_dir=directory),
+                    )
+
+                    runtime.scan_blocking(failed_horizon)
+                    runtime.scanner = ModeAwareScanner()
+                    runtime.scan_blocking(successful_horizon)
+                    payload = runtime.latest_dict()
+
+                    self.assertEqual(
+                        payload["horizon_attempt_status"],
+                        {
+                            failed_horizon: "ERROR",
+                            successful_horizon: "SUCCESS",
+                        },
+                    )
+                    self.assertEqual(
+                        payload["scan_unavailable_horizons"],
+                        [failed_horizon],
+                    )
+                    self.assertFalse(
+                        payload["safety"]["horizon_actionable"][failed_horizon]
+                    )
+                    self.assertTrue(
+                        payload["safety"]["horizon_actionable"][
+                            successful_horizon
+                        ]
+                    )
+                    if failed_horizon == "SHORT":
+                        self.assertEqual(payload["signals"], [])
+                        self.assertEqual(len(payload["long_signals"]), 1)
+                    else:
+                        self.assertEqual(len(payload["signals"]), 1)
+                        self.assertEqual(payload["long_signals"], [])
 
     def test_failed_full_scan_hides_both_previous_horizons_without_deleting_them(self):
         with tempfile.TemporaryDirectory() as directory:

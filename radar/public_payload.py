@@ -3,6 +3,8 @@ from __future__ import annotations
 from collections.abc import Mapping
 from typing import Any
 
+from .price_display import signal_plan_display_fields
+
 
 _MISSING = object()
 
@@ -201,6 +203,12 @@ def public_candidate_payload(item: Any, *, signal: bool) -> dict[str, Any]:
 
 def _public_candidate(item: Any, *, signal: bool) -> dict[str, Any]:
     payload = _select(item, _SIGNAL_FIELDS if signal else _WATCH_FIELDS)
+    display_fields = signal_plan_display_fields(item)
+    payload["instrument_tick_size"] = display_fields["instrument_tick_size"]
+    payload["display_precision"] = display_fields["display_precision"]
+    if signal:
+        payload["tp1_r"] = display_fields["tp1_r"]
+        payload["tp2_r"] = display_fields["tp2_r"]
     payload["market_metrics"] = _public_metrics(
         _read(item, "market_metrics", {}),
         _CANDIDATE_METRIC_FIELDS,
@@ -295,6 +303,9 @@ def _public_market_map_item(item: Any) -> dict[str, Any]:
         item,
         ("inst_id", "regime", "direction", "readiness_score", "status"),
     )
+    display_fields = signal_plan_display_fields(item)
+    payload["instrument_tick_size"] = display_fields["instrument_tick_size"]
+    payload["display_precision"] = display_fields["display_precision"]
     payload["market_metrics"] = _public_metrics(
         _read(item, "market_metrics", {}),
         _MAP_METRIC_FIELDS,

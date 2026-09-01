@@ -110,7 +110,7 @@ class V33ContractTests(unittest.TestCase):
         self.assertIn(".primary-nav{grid-row:5;position:relative", html)
         self.assertIn("grid-template-columns:repeat(4,minmax(0,1fr))", html)
         self.assertIn(".decision-actions{display:grid;grid-template-columns:repeat(2,minmax(0,1fr))", html)
-        self.assertIn("okx-radar-shell-v3.6-preflight-only-1", service_worker)
+        self.assertIn("okx-radar-shell-v3.6-preflight-only-2", service_worker)
         self.assertIn("市場自動計畫", html)
         self.assertIn("plan.adaptive_market_plan", html)
         self.assertIn("plan.market_plan_sources", html)
@@ -200,6 +200,10 @@ class V33ContractTests(unittest.TestCase):
         self.assertIn("只更新現價、深度、滑價與成本，不重新分析多週期方向", html)
         self.assertIn("原始 Trigger（價格觸發）沒有被修改", html)
         self.assertIn("data-preflight-id", html)
+        self.assertIn("data-preflight-trigger-id", html)
+        self.assertIn("expected_trigger_id:triggerId", html)
+        self.assertIn("state.preflight?.triggerId===triggerId", html)
+        self.assertIn("String(data?.trigger_id||'')!==triggerId", html)
         self.assertIn("function preflightPlainGuide(data)", html)
         self.assertIn("判定依據（簡要）", html)
         self.assertIn("現在怎麼做", html)
@@ -217,7 +221,7 @@ class V33ContractTests(unittest.TestCase):
         self.assertIn("function signalTriggerTime(item)", html)
         self.assertIn("訊號觸發時間（台灣）", html)
         self.assertNotIn("status!=='ENTRY_READY'&&status!=='MISSED_ENTRY'", html)
-        self.assertIn("okx-radar-shell-v3.6-preflight-only-1", service_worker)
+        self.assertIn("okx-radar-shell-v3.6-preflight-only-2", service_worker)
         self.assertIn("$('#preflightRefresh').addEventListener('click',loadPreflight)", html)
         self.assertIn("${decisionPanel(item)}", html)
         self.assertNotIn("showPreflight", html)
@@ -237,6 +241,7 @@ class V33ContractTests(unittest.TestCase):
         self.assertIn("7 天內", html)
         self.assertIn("不因 TP（止盈）／SL（止損）或走遠而提前消失", html)
         self.assertIn("function historyGroups(items)", html)
+        self.assertIn("目前有效新訊號 · 不會更新下方舊紀錄", html)
         self.assertIn("觸發 ${events.length} 次", html)
         self.assertIn("點開查看每次觸發時間與原始進出場價位", html)
         self.assertIn("${shortCoins} 幣 / ${shortItems.length} 次", html)
@@ -269,6 +274,10 @@ class V33ContractTests(unittest.TestCase):
         self.assertIn("更新市場後可檢查", html)
         self.assertIn("目前沒有可執行進場前更新的正式交易計畫", html)
         self.assertIn("function planTargetR(item,targetValue,fallback=null)", html)
+        self.assertIn("function pricePrecision(context)", html)
+        self.assertIn("const authoritative=metricNumber(fallback)", html)
+        self.assertIn("item?.tp1_r??item?.risk_reward", html)
+        self.assertIn("item?.tp2_r??item?.management_plan?.tp2_rr_model", html)
         self.assertIn("function tradeRoute(item,options={})", html)
         self.assertIn("ENTRY 進場", html)
         self.assertIn("SL 止損", html)
@@ -347,6 +356,7 @@ class V33ContractTests(unittest.TestCase):
         )
         self.assertIn("horizon_read_only_reasons", html)
         self.assertIn("function horizonReadOnlyReason(report,horizon)", html)
+        self.assertIn("function horizonAttempt(status,horizon)", html)
         self.assertIn("function readOnlyReferenceBanner(reason,horizon)", html)
         self.assertIn("function itemDisplayEntryStatus(item)", html)
         stored_status = html.split("function itemStoredEntryStatus(item)", 1)[1].split(
@@ -375,6 +385,16 @@ class V33ContractTests(unittest.TestCase):
         readonly_reason = html.split(
             "function horizonReadOnlyReason(report,horizon){", 1
         )[1].split("function itemReadOnlyReason", 1)[0]
+        self.assertIn("const attempt=horizonAttempt(state.status,horizon)", readonly_reason)
+        self.assertIn(
+            "attempt.available&&['SCANNING','ERROR'].includes(attempt.status)",
+            readonly_reason,
+        )
+        self.assertGreaterEqual(readonly_reason.count("if(!attempt.available&&"), 2)
+        self.assertIn(
+            "!attempt.available||!['SCANNING','ERROR','CORE_PREVIEW'].includes(normalizedExplicit)",
+            readonly_reason,
+        )
         self.assertLess(
             readonly_reason.index("const currentRuntime="),
             readonly_reason.index("const explicit="),
@@ -387,6 +407,10 @@ class V33ContractTests(unittest.TestCase):
         transient = html.split("function horizonTransientState(report,horizon){", 1)[
             1
         ].split("function horizonTransientMessage", 1)[0]
+        self.assertIn("attempt=horizonAttempt(state.status,horizon)", transient)
+        self.assertIn("if(attempt.status==='ERROR')return 'ERROR'", transient)
+        self.assertIn("if(attempt.status==='SCANNING')", transient)
+        self.assertIn("return null}const reportRuntime", transient)
         self.assertIn("['SCANNING','ERROR'].includes(runtime)", transient)
         self.assertIn("scanModeIncludesHorizon(mode,horizon)", transient)
         self.assertIn("if(runtime==='ERROR')return 'ERROR'", transient)
@@ -397,6 +421,13 @@ class V33ContractTests(unittest.TestCase):
         self.assertIn("mode==='SHORT'||mode==='FULL'", preview_scope)
         self.assertIn("return mode==='LONG'", preview_scope)
         self.assertIn("state.currentPreviewGeneratedAt!==report.generated_at", preview_scope)
+        render_status = html.split("function renderStatus(status){", 1)[1].split(
+            "function horizonSnapshot", 1
+        )[0]
+        self.assertIn("horizonAttempt(status,horizon)", render_status)
+        self.assertIn("item.status==='ERROR'", render_status)
+        self.assertIn("horizon_attempt_errors", html)
+        self.assertIn("只停用失敗週期，其他已完成週期保持可用", render_status)
 
         report = html.split("function renderReport(report){", 1)[1].split(
             "function renderOverview(report)", 1
@@ -487,6 +518,8 @@ class V33ContractTests(unittest.TestCase):
         self.assertIn("activePreflightSignal(instId,normalized)", preflight_button)
         self.assertIn("preflightSignalUsable(signal)", preflight_button)
         self.assertIn("data-preflight-id", preflight_button)
+        self.assertIn("data-preflight-trigger-id", preflight_button)
+        self.assertIn("hasExplicitEpisode", preflight_button)
         self.assertIn("disabled title=", preflight_button)
         usable = html.split("function preflightSignalUsable(signal)", 1)[1].split(
             "function preferredPreflightSignal", 1
@@ -495,12 +528,26 @@ class V33ContractTests(unittest.TestCase):
         self.assertIn("!isPreviewItem(signal)", usable)
         self.assertIn("!isExpiredSnapshot(signal)", usable)
         self.assertIn("!itemReadOnlyReason(signal)", usable)
+        self.assertIn("!signalDataUnavailable(signal)", usable)
         preflight_actions = html.split("function preflightActions(instId", 1)[
             1
         ].split("function preflightClass", 1)[0]
         self.assertIn("activePreflightSignal(instId,'SHORT')", preflight_actions)
         self.assertIn("activePreflightSignal(instId,'LONG')", preflight_actions)
         self.assertIn("buttons.join('')", preflight_actions)
+        load_preflight = html.split("async function loadPreflight(){", 1)[1].split(
+            "function openPreflight", 1
+        )[0]
+        self.assertIn("expected_trigger_id:triggerId", load_preflight)
+        self.assertIn("preflightResponseTerminal(data)", load_preflight)
+        self.assertIn("state.preflight.terminal=true", load_preflight)
+        self.assertIn("try{await loadReport()}", load_preflight)
+        self.assertIn("const locked=state.preflight.terminal", load_preflight)
+        open_preflight = html.split("function openPreflight", 1)[1].split(
+            "function hidePreflight", 1
+        )[0]
+        self.assertIn("state.preflight={instId,horizon,triggerId", open_preflight)
+        self.assertIn("$('#preflightPage .preflight-shell')", open_preflight)
         self.assertIn("function captureReportUiState()", html)
         self.assertIn("function captureReportUiState()", html)
         self.assertIn("function restoreReportUiState(saved)", html)
@@ -582,7 +629,7 @@ class V33ContractTests(unittest.TestCase):
         self.assertIn("舊 Entry／SL／TP 不會復活", html)
         self.assertIn("舊交易計畫已結束", html)
         self.assertIn("tradeRoute(item,{prefix:'原始 '})", html)
-        self.assertIn("okx-radar-shell-v3.6-preflight-only-1", worker)
+        self.assertIn("okx-radar-shell-v3.6-preflight-only-2", worker)
 
     def test_market_scan_has_no_github_schedule(self):
         root = Path(__file__).parents[1]

@@ -161,8 +161,17 @@ class SignalRepositoryTests(unittest.TestCase):
         self.assertEqual(len(committed), 1)
 
     def test_recent_history_is_compact_and_excludes_raw_payload(self):
+        raw = replace(
+            signal_fixture(),
+            risk_reward=3.27,
+            market_metrics={
+                **signal_fixture().market_metrics,
+                "instrument_tick_size": 0.01,
+            },
+            management_plan={"tp2_rr_model": 5.875},
+        )
         created = self.repository.reconcile(
-            [signal_fixture()],
+            [raw],
             [],
             "2026-08-21T00:00:00+00:00",
             "SHORT",
@@ -173,6 +182,32 @@ class SignalRepositoryTests(unittest.TestCase):
         self.assertEqual(len(created), 1)
         self.assertEqual(len(rows), 1)
         self.assertEqual(rows[0]["inst_id"], "AAA-USDT-SWAP")
+        self.assertEqual(rows[0]["instrument_tick_size"], 0.01)
+        self.assertEqual(rows[0]["display_precision"], 2)
+        self.assertEqual(rows[0]["tp1_r"], 3.27)
+        self.assertEqual(rows[0]["tp2_r"], 5.875)
+        self.assertNotIn("payload_json", rows[0])
+
+    def test_recent_history_keeps_legacy_rows_without_display_metadata_safe(self):
+        created = self.repository.reconcile(
+            [signal_fixture()],
+            [],
+            "2026-08-21T00:00:00+00:00",
+            "SHORT",
+        )[0]
+        self.repository._connection.execute(
+            "UPDATE signals SET payload_json=? WHERE signal_id=?",
+            ("{}", created.trigger_id),
+        )
+        self.repository._connection.commit()
+
+        rows = self.repository.recent_history(10)
+
+        self.assertEqual(len(rows), 1)
+        self.assertEqual(rows[0]["tp1_r"], 2.0)
+        self.assertIsNone(rows[0]["tp2_r"])
+        self.assertIsNone(rows[0]["instrument_tick_size"])
+        self.assertIsNone(rows[0]["display_precision"])
         self.assertNotIn("payload_json", rows[0])
 
     def test_recent_history_filters_by_horizon_and_original_trigger_age(self):

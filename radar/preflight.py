@@ -8,6 +8,7 @@ from typing import Any, Protocol
 
 from .market_story import execution_quality
 from .models import MarketContext, Signal, Ticker
+from .price_display import signal_plan_display_fields
 from .strategy import _entry_eligibility
 
 
@@ -245,14 +246,17 @@ def build_preflight_payload(
         if original_price is not None and original_price > 0
         else None
     )
+    plan_display = signal_plan_display_fields(signal)
     return {
         "inst_id": signal.inst_id,
+        "trigger_id": signal.trigger_id,
         "horizon": signal.radar_horizon,
         "horizon_label": "4H 長線" if signal.radar_horizon == "LONG" else "15m 短線",
         "direction": signal.direction,
         "strategy": signal.strategy,
         "trigger_type": signal.trigger_type,
         "signal_stage": signal.signal_stage,
+        **plan_display,
         "verdict": {
             "status": verdict_status,
             "situation": entry_situation,

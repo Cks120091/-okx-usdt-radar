@@ -20,6 +20,7 @@ from urllib.parse import parse_qs, urlparse
 from .api import OKXAPIError
 from .config import AppConfig
 from .models import RadarReport
+from .price_display import signal_plan_display_fields
 from .preflight import build_preflight_payload
 from .public_payload import public_candidate_payload, public_report_payload
 from .push import PushSubscriptionError, build_push_notifier
@@ -763,9 +764,25 @@ def _read_only_reasons(
 
 
 class PreflightError(RuntimeError):
-    def __init__(self, status: HTTPStatus, message: str):
+    def __init__(
+        self,
+        status: HTTPStatus,
+        message: str,
+        *,
+        code: str | None = None,
+        details: dict[str, Any] | None = None,
+    ):
         super().__init__(message)
         self.status = status
+        self.code = code
+        self.details = dict(details or {})
+
+    def response_payload(self) -> dict[str, Any]:
+        payload: dict[str, Any] = {"error": str(self)}
+        if self.code:
+            payload["code"] = self.code
+        payload.update(self.details)
+        return payload
 
 
 class RadarRuntime:
@@ -785,8 +802,13 @@ class RadarRuntime:
         # the whole analyze -> reconcile -> preflight -> response transaction,
         # while the legacy inner path also enters it defensively.
         self._scan_lock = threading.RLock()
-        self._state_lock = threading.Lock()
+        # Re-entrant so the final preflight identity check, terminal CAS,
+        # report projection and cache publication can share one state
+        # transaction.  That closes the gap where a same-horizon scan could
+        # otherwise start after validation but before persistence.
+        self._state_lock = threading.RLock()
         self._preflight_lock = threading.Lock()
+        self._preflight_inflight_horizons: set[str] = set()
         self._preflight_cache: dict[
             tuple[str, str, str], tuple[float, dict[str, Any]]
         ] = {}
@@ -826,6 +848,58 @@ class RadarRuntime:
             )
         except ValueError:
             self._scan_mode = "FULL"
+        restored_horizon_attempts = restored_runtime.get(
+            "horizon_attempt_status"
+        )
+        self._horizon_attempt_status: dict[str, str] = {}
+        for horizon in ("SHORT", "LONG"):
+            restored_horizon_status = (
+                str(restored_horizon_attempts.get(horizon) or "").upper()
+                if isinstance(restored_horizon_attempts, dict)
+                else ""
+            )
+            if restored_horizon_status not in {
+                "IDLE",
+                "RESTORED",
+                "SCANNING",
+                "SUCCESS",
+                "ERROR",
+            }:
+                restored_horizon_status = (
+                    "ERROR"
+                    if restored_status == "ERROR"
+                    and horizon in _SCAN_MODE_HORIZONS[self._scan_mode]
+                    else "RESTORED"
+                    if self._latest is not None
+                    and self._previous_horizon_timestamp(self._latest, horizon)
+                    else "IDLE"
+                )
+            if restored_horizon_status == "SCANNING":
+                restored_horizon_status = "ERROR"
+            self._horizon_attempt_status[horizon] = restored_horizon_status
+        restored_horizon_errors = restored_runtime.get("horizon_attempt_errors")
+        self._horizon_attempt_errors: dict[str, str | None] = {
+            horizon: (
+                str(restored_horizon_errors.get(horizon))
+                if isinstance(restored_horizon_errors, dict)
+                and restored_horizon_errors.get(horizon)
+                else self._last_error
+                if self._horizon_attempt_status[horizon] == "ERROR"
+                else None
+            )
+            for horizon in ("SHORT", "LONG")
+        }
+        if "ERROR" in self._horizon_attempt_status.values():
+            self._last_attempt_status = "ERROR"
+            if not self._last_error:
+                self._last_error = next(
+                    (
+                        error
+                        for error in self._horizon_attempt_errors.values()
+                        if error
+                    ),
+                    "上一次週期掃描未完成；舊資料不可冒充最新。",
+                )
         self._scan_push_subscriptions: dict[str, dict[str, Any]] = {}
         self._max_scan_push_subscriptions = 8
         self._single_inflight: set[tuple[str, str, str]] = set()
@@ -930,6 +1004,19 @@ class RadarRuntime:
                     HTTPStatus.CONFLICT,
                     "單幣掃描正在執行；完成後再啟動全市場掃描",
                 )
+            blocked_preflight_horizons = (
+                _SCAN_MODE_HORIZONS[normalized_mode]
+                & self._preflight_inflight_horizons
+            )
+            if blocked_preflight_horizons:
+                raise PreflightError(
+                    HTTPStatus.CONFLICT,
+                    "同週期進場前更新正在執行；完成後再掃描市場",
+                    code="HORIZON_PREFLIGHT_RUNNING",
+                    details={
+                        "horizons": sorted(blocked_preflight_horizons),
+                    },
+                )
             if self._running:
                 if normalized_subscription is not None:
                     self._register_scan_push_locked(normalized_subscription)
@@ -951,7 +1038,12 @@ class RadarRuntime:
     def scan_blocking(self, scan_mode: str = "FULL") -> RadarReport:
         normalized_mode = _normalize_scan_mode(scan_mode)
         with self._state_lock:
-            if self._running or self._single_inflight:
+            if (
+                self._running
+                or self._single_inflight
+                or _SCAN_MODE_HORIZONS[normalized_mode]
+                & self._preflight_inflight_horizons
+            ):
                 raise RuntimeError("scan already running")
             self._begin_scan_locked(normalized_mode)
         try:
@@ -978,6 +1070,12 @@ class RadarRuntime:
                 "snapshot_expired": system_status == "STALE",
                 "last_error": self._last_error,
                 "last_attempt_status": self._last_attempt_status,
+                "horizon_attempt_status": dict(
+                    self._horizon_attempt_status
+                ),
+                "horizon_attempt_errors": dict(
+                    self._horizon_attempt_errors
+                ),
                 "has_report": self._latest is not None,
                 "has_preview": self._preview is not None and self._running,
                 "latest_status": self._latest.status if self._latest else None,
@@ -1006,40 +1104,47 @@ class RadarRuntime:
             }
             actionable = system_status == "FRESH" and self._latest.status != "DATA_INCOMPLETE"
             snapshot_expired = system_status == "STALE"
-            unavailable_horizons = (
-                _SCAN_MODE_HORIZONS[self._scan_mode]
-                if system_status == "SCANNING"
-                or (
-                    system_status == "ERROR"
-                    and self._last_attempt_status == "ERROR"
-                )
-                else frozenset()
+            horizon_attempt_status = dict(self._horizon_attempt_status)
+            # Keep projections fail-closed for callers/tests that observe the
+            # state between _running becoming true and the persisted attempt
+            # map being restored. Production starts update both atomically.
+            if self._running:
+                for horizon in _SCAN_MODE_HORIZONS[self._scan_mode]:
+                    horizon_attempt_status[horizon] = "SCANNING"
+            unavailable_horizons = frozenset(
+                horizon
+                for horizon, status in horizon_attempt_status.items()
+                if status in {"SCANNING", "ERROR"}
             )
             horizon_actionable = {
                 horizon: (
                     self._latest.status != "DATA_INCOMPLETE"
                     and item["available"]
                     and not item["expired"]
-                    and (
-                        system_status == "FRESH"
-                        or (
-                            system_status in {"SCANNING", "ERROR"}
-                            and horizon not in unavailable_horizons
-                        )
-                    )
+                    and horizon not in unavailable_horizons
                 )
                 for horizon, item in horizon_freshness.items()
             }
-            read_only_reasons = _read_only_reasons(
-                system_status,
-                horizon_freshness,
-                unavailable_horizons,
-            )
+            read_only_reasons: dict[str, str | None] = {}
+            for horizon, item in horizon_freshness.items():
+                attempt_status = horizon_attempt_status.get(horizon)
+                if not item["available"]:
+                    read_only_reasons[horizon] = None
+                elif attempt_status in {"SCANNING", "ERROR"}:
+                    read_only_reasons[horizon] = attempt_status
+                elif item["expired"]:
+                    read_only_reasons[horizon] = "STALE"
+                else:
+                    read_only_reasons[horizon] = None
             payload["runtime_status"] = system_status
             payload["actionable"] = actionable
             payload["snapshot_expired"] = snapshot_expired
             payload["latest_age_seconds"] = age_seconds
             payload["horizon_freshness"] = horizon_freshness
+            payload["horizon_attempt_status"] = horizon_attempt_status
+            payload["horizon_attempt_errors"] = dict(
+                self._horizon_attempt_errors
+            )
             payload["max_signals"] = self.config.max_signals
             payload["safety"]["horizon_actionable"] = horizon_actionable
             payload["horizon_read_only_reasons"] = read_only_reasons
@@ -1048,9 +1153,9 @@ class RadarRuntime:
             )
             suppressed_reasons: dict[str, str | None] = {
                 horizon: (
-                    system_status
-                    if system_status in {"SCANNING", "ERROR"}
-                    and horizon in unavailable_horizons
+                    horizon_attempt_status[horizon]
+                    if horizon_attempt_status.get(horizon)
+                    in {"SCANNING", "ERROR"}
                     else None
                 )
                 for horizon in ("SHORT", "LONG")
@@ -1059,11 +1164,15 @@ class RadarRuntime:
             payload["safety"]["horizon_suppressed_reasons"] = deepcopy(
                 suppressed_reasons
             )
-            payload["scan_in_progress_horizons"] = (
-                sorted(unavailable_horizons) if system_status == "SCANNING" else []
+            payload["scan_in_progress_horizons"] = sorted(
+                horizon
+                for horizon, status in horizon_attempt_status.items()
+                if status == "SCANNING"
             )
-            payload["scan_unavailable_horizons"] = (
-                sorted(unavailable_horizons) if system_status == "ERROR" else []
+            payload["scan_unavailable_horizons"] = sorted(
+                horizon
+                for horizon, status in horizon_attempt_status.items()
+                if status == "ERROR"
             )
             # Availability is the hard boundary. Even a malformed legacy partial
             # report cannot leak an array from a horizon that has no completion
@@ -1156,18 +1265,37 @@ class RadarRuntime:
                 if self._scan_mode == "FULL"
                 else {self._scan_mode}
             )
+            horizon_attempt_status = dict(self._horizon_attempt_status)
+            for horizon in requested:
+                horizon_attempt_status[horizon] = "SCANNING"
             payload["safety"]["horizon_actionable"] = {
                 horizon: bool(
                     horizon not in requested
+                    and horizon_attempt_status.get(horizon)
+                    not in {"SCANNING", "ERROR"}
                     and item.get("available")
                     and not item.get("expired")
                 )
                 for horizon, item in horizon_freshness.items()
             }
-            read_only_reasons = _read_only_reasons(
-                "CORE_PREVIEW",
-                horizon_freshness,
-                requested,
+            read_only_reasons: dict[str, str | None] = {}
+            for horizon, item in horizon_freshness.items():
+                if not item.get("available"):
+                    read_only_reasons[horizon] = None
+                elif horizon in requested:
+                    read_only_reasons[horizon] = "CORE_PREVIEW"
+                elif horizon_attempt_status.get(horizon) in {
+                    "SCANNING",
+                    "ERROR",
+                }:
+                    read_only_reasons[horizon] = horizon_attempt_status[horizon]
+                elif item.get("expired"):
+                    read_only_reasons[horizon] = "STALE"
+                else:
+                    read_only_reasons[horizon] = None
+            payload["horizon_attempt_status"] = horizon_attempt_status
+            payload["horizon_attempt_errors"] = dict(
+                self._horizon_attempt_errors
             )
             payload["horizon_read_only_reasons"] = read_only_reasons
             payload["safety"]["horizon_read_only_reasons"] = deepcopy(
@@ -1177,6 +1305,10 @@ class RadarRuntime:
                 horizon: (
                     "CORE_PREVIEW"
                     if horizon in requested and not item.get("available")
+                    else horizon_attempt_status[horizon]
+                    if horizon not in requested
+                    and horizon_attempt_status.get(horizon)
+                    in {"SCANNING", "ERROR"}
                     else None
                 )
                 for horizon, item in horizon_freshness.items()
@@ -1284,6 +1416,23 @@ class RadarRuntime:
                 raise PreflightError(
                     HTTPStatus.CONFLICT,
                     "全市場掃描正在執行，完成後才能掃描單一幣種",
+                )
+            single_horizons = (
+                {"SHORT", "LONG"}
+                if requested_horizon == "BOTH"
+                else {requested_horizon}
+            )
+            if single_horizons & self._preflight_inflight_horizons:
+                raise PreflightError(
+                    HTTPStatus.CONFLICT,
+                    "同週期進場前更新正在執行，請等待完成",
+                    code="HORIZON_PREFLIGHT_RUNNING",
+                    details={
+                        "horizons": sorted(
+                            single_horizons
+                            & self._preflight_inflight_horizons
+                        ),
+                    },
                 )
             if self._single_inflight:
                 raise PreflightError(
@@ -1590,6 +1739,9 @@ class RadarRuntime:
                     preflight = _merge_preflight_confirmation(
                         {
                             "inst_id": normalized_id,
+                            "trigger_id": str(
+                                getattr(stored_signal, "trigger_id", "") or ""
+                            ),
                             "horizon": horizon,
                             "horizon_label": (
                                 "4H 長線" if horizon == "LONG" else "15m 短線"
@@ -1597,6 +1749,7 @@ class RadarRuntime:
                             "direction": str(
                                 getattr(stored_signal, "direction", "NEUTRAL")
                             ),
+                            **signal_plan_display_fields(stored_signal),
                             "verdict": {
                                 "status": "DATA_UNAVAILABLE",
                                 "situation": "DATA_UNAVAILABLE",
@@ -2028,7 +2181,149 @@ class RadarRuntime:
             },
         }
 
-    def preflight_dict(self, inst_id: str, horizon: str) -> dict[str, Any]:
+    def _assert_preflight_horizon_available_locked(self, horizon: str) -> None:
+        """Fail closed only for the scan slot that owns this preflight.
+
+        A partial 15m scan must not disable a still-fresh 4H Trigger (and vice
+        versa).  FULL scans own both slots.  Stale/missing horizons and a
+        DATA_INCOMPLETE snapshot remain unavailable regardless of scan mode.
+        """
+
+        label = "4H" if horizon == "LONG" else "15m"
+        affected_horizons = _SCAN_MODE_HORIZONS[self._scan_mode]
+        horizon_attempt_status = self._horizon_attempt_status.get(
+            horizon,
+            "IDLE",
+        )
+        if (
+            horizon_attempt_status == "SCANNING"
+            or self._running
+            and horizon in affected_horizons
+        ):
+            raise PreflightError(
+                HTTPStatus.CONFLICT,
+                f"{label} 掃描正在執行，完成後才能進行這張卡的進場前更新",
+                code="HORIZON_SCAN_RUNNING",
+                details={"horizon": horizon},
+            )
+        if self._latest is None:
+            raise PreflightError(HTTPStatus.NOT_FOUND, "尚未完成第一輪市場掃描")
+        if self._latest.status == "DATA_INCOMPLETE":
+            raise PreflightError(
+                HTTPStatus.CONFLICT,
+                "市場核心資料不完整，禁止使用舊資料進行進場前更新",
+                code="DATA_INCOMPLETE",
+                details={"horizon": horizon},
+            )
+        horizon_freshness = self._horizon_freshness_locked(horizon)
+        if not horizon_freshness["available"]:
+            raise PreflightError(
+                HTTPStatus.CONFLICT,
+                f"尚未完成 {label} 掃描，請先執行對應週期掃描或全市場掃描",
+                code="HORIZON_UNAVAILABLE",
+                details={"horizon": horizon},
+            )
+        if horizon_freshness["expired"]:
+            raise PreflightError(
+                HTTPStatus.CONFLICT,
+                f"{label} 資料已過期，請先執行對應週期掃描或全市場掃描",
+                code="HORIZON_STALE",
+                details={"horizon": horizon},
+            )
+        if horizon_attempt_status == "ERROR":
+            raise PreflightError(
+                HTTPStatus.CONFLICT,
+                f"最近一次 {label} 掃描失敗；請先重新完成這個週期的掃描",
+                code="HORIZON_SCAN_FAILED",
+                details={"horizon": horizon},
+            )
+
+    def _preflight_signal_locked(self, inst_id: str, horizon: str) -> Any | None:
+        if self._latest is None:
+            return None
+        collection = (
+            self._latest.long_signals
+            if horizon == "LONG"
+            else self._latest.signals
+        )
+        return next(
+            (item for item in collection if item.inst_id == inst_id),
+            None,
+        )
+
+    @staticmethod
+    def _preflight_trigger_mismatch(
+        *,
+        inst_id: str,
+        horizon: str,
+        expected_trigger_id: str,
+        current_trigger_id: str | None,
+    ) -> PreflightError:
+        return PreflightError(
+            HTTPStatus.CONFLICT,
+            "這張卡的 Trigger 已不是目前有效版本，請重新載入訊號頁",
+            code="TRIGGER_MISMATCH",
+            details={
+                "inst_id": inst_id,
+                "horizon": horizon,
+                "expected_trigger_id": expected_trigger_id,
+                "current_trigger_id": current_trigger_id,
+                "refresh_required": True,
+            },
+        )
+
+    def _assert_preflight_snapshot_locked(
+        self,
+        *,
+        inst_id: str,
+        horizon: str,
+        report_generated_at: str,
+        captured_trigger_id: str,
+        expected_trigger_id: str | None,
+    ) -> Any:
+        current_report_at = self._horizon_completed_at_locked(horizon)
+        if current_report_at != report_generated_at:
+            raise PreflightError(
+                HTTPStatus.CONFLICT,
+                "市場報告已更新，請回到訊號頁重新選擇",
+                code="REPORT_CHANGED",
+                details={
+                    "inst_id": inst_id,
+                    "horizon": horizon,
+                    "expected_report_generated_at": report_generated_at,
+                    "current_report_generated_at": current_report_at,
+                    "refresh_required": True,
+                },
+            )
+        current_signal = self._preflight_signal_locked(inst_id, horizon)
+        current_trigger_id = (
+            str(getattr(current_signal, "trigger_id", "") or "")
+            if current_signal is not None
+            else ""
+        )
+        expected_identity = expected_trigger_id or captured_trigger_id
+        if current_signal is None or current_trigger_id != captured_trigger_id:
+            raise self._preflight_trigger_mismatch(
+                inst_id=inst_id,
+                horizon=horizon,
+                expected_trigger_id=expected_identity,
+                current_trigger_id=current_trigger_id or None,
+            )
+        if expected_trigger_id is not None and current_trigger_id != expected_trigger_id:
+            raise self._preflight_trigger_mismatch(
+                inst_id=inst_id,
+                horizon=horizon,
+                expected_trigger_id=expected_trigger_id,
+                current_trigger_id=current_trigger_id or None,
+            )
+        return current_signal
+
+    def preflight_dict(
+        self,
+        inst_id: str,
+        horizon: str,
+        expected_trigger_id: str | None = None,
+    ) -> dict[str, Any]:
         """Refresh execution conditions for one stored signal only.
 
         This is intentionally separate from ``scan_instrument_dict``.  A
@@ -2039,50 +2334,52 @@ class RadarRuntime:
 
         normalized_id = str(inst_id or "").strip().upper()
         normalized_horizon = _normalize_horizon(horizon)
+        normalized_expected_trigger = (
+            str(expected_trigger_id or "").strip() or None
+        )
         if not normalized_id.endswith("-USDT-SWAP") or normalized_horizon is None:
             raise PreflightError(HTTPStatus.BAD_REQUEST, "幣種或長短線參數不正確")
 
         with self._state_lock:
-            system_status, _, _ = self._system_status_locked()
-            if self._running:
-                raise PreflightError(
-                    HTTPStatus.CONFLICT,
-                    "全市場掃描正在執行，完成後才能進行單幣進場檢查",
-                )
-            if self._latest is None:
-                raise PreflightError(HTTPStatus.NOT_FOUND, "尚未完成第一輪市場掃描")
-            if system_status != "FRESH":
-                raise PreflightError(
-                    HTTPStatus.CONFLICT,
-                    "市場報告已過期或異常，請先重新掃描全市場",
-                )
-            horizon_freshness = self._horizon_freshness_locked(normalized_horizon)
-            if not horizon_freshness["available"] or horizon_freshness["expired"]:
-                label = "4H" if normalized_horizon == "LONG" else "15m"
-                raise PreflightError(
-                    HTTPStatus.CONFLICT,
-                    f"{label} 資料已過期，請先執行對應週期掃描或全市場掃描",
-                )
-            report_generated_at = str(horizon_freshness["completed_at"])
-            collection = (
-                self._latest.long_signals
-                if normalized_horizon == "LONG"
-                else self._latest.signals
+            self._assert_preflight_horizon_available_locked(normalized_horizon)
+            horizon_freshness = self._horizon_freshness_locked(
+                normalized_horizon
             )
-            signal = next(
-                (item for item in collection if item.inst_id == normalized_id),
-                None,
+            report_generated_at = str(horizon_freshness["completed_at"])
+            signal = self._preflight_signal_locked(
+                normalized_id,
+                normalized_horizon,
             )
             if signal is None:
+                if normalized_expected_trigger is not None:
+                    raise self._preflight_trigger_mismatch(
+                        inst_id=normalized_id,
+                        horizon=normalized_horizon,
+                        expected_trigger_id=normalized_expected_trigger,
+                        current_trigger_id=None,
+                    )
                 raise PreflightError(
                     HTTPStatus.NOT_FOUND,
                     "最新報告中沒有這個週期的正式 Trigger；候選尚不能進行進場檢查",
                 )
+            trigger_id = str(getattr(signal, "trigger_id", "") or "")
+            if (
+                normalized_expected_trigger is not None
+                and trigger_id != normalized_expected_trigger
+            ):
+                raise self._preflight_trigger_mismatch(
+                    inst_id=normalized_id,
+                    horizon=normalized_horizon,
+                    expected_trigger_id=normalized_expected_trigger,
+                    current_trigger_id=trigger_id or None,
+                )
             repository = getattr(self.scanner, "repository", None)
             cache_key = (report_generated_at, normalized_horizon, normalized_id)
             cached = self._cached_preflight_locked(cache_key)
-            if cached is not None:
+            if cached is not None and str(cached.get("trigger_id") or "") == trigger_id:
                 return cached
+            if cached is not None:
+                self._preflight_cache.pop(cache_key, None)
 
         client = getattr(self.scanner, "client", None)
         if client is None:
@@ -2090,40 +2387,95 @@ class RadarRuntime:
 
         with self._preflight_lock:
             with self._state_lock:
-                cached = self._cached_preflight_locked(cache_key)
-                if cached is not None:
-                    return cached
-            try:
-                ticker = client.get_ticker(normalized_id)
-                context = client.get_execution_context(normalized_id)
-                payload = build_preflight_payload(
-                    signal,
-                    ticker,
-                    context,
-                    self.config,
-                    report_generated_at=report_generated_at,
+                self._assert_preflight_horizon_available_locked(
+                    normalized_horizon
                 )
-            except PreflightError:
-                raise
-            except ValueError as exc:
-                raise PreflightError(HTTPStatus.UNPROCESSABLE_ENTITY, str(exc)) from exc
-            except Exception as exc:
-                LOGGER.exception("Preflight market-data refresh failed for %s", normalized_id)
-                raise PreflightError(
-                    HTTPStatus.BAD_GATEWAY,
-                    "OKX 即時公開資料暫時無法取得，請稍後再按一次",
-                ) from exc
-
-            with self._state_lock:
+                signal = self._assert_preflight_snapshot_locked(
+                    inst_id=normalized_id,
+                    horizon=normalized_horizon,
+                    report_generated_at=report_generated_at,
+                    captured_trigger_id=trigger_id,
+                    expected_trigger_id=normalized_expected_trigger,
+                )
+                cached = self._cached_preflight_locked(cache_key)
                 if (
-                    self._latest is None
-                    or self._horizon_completed_at_locked(normalized_horizon)
-                    != report_generated_at
+                    cached is not None
+                    and str(cached.get("trigger_id") or "") == trigger_id
                 ):
-                    raise PreflightError(
-                        HTTPStatus.CONFLICT,
-                        "市場報告已更新，請回到訊號頁重新選擇",
+                    return cached
+                if cached is not None:
+                    self._preflight_cache.pop(cache_key, None)
+                # Reserve only this horizon while public data is fetched. An
+                # opposite partial scan remains free to run, but a same-slot
+                # scan cannot enter between validation and terminal commit.
+                self._preflight_inflight_horizons.add(normalized_horizon)
+            try:
+                return self._refresh_preflight_payload(
+                    normalized_id=normalized_id,
+                    normalized_horizon=normalized_horizon,
+                    normalized_expected_trigger=normalized_expected_trigger,
+                    report_generated_at=report_generated_at,
+                    trigger_id=trigger_id,
+                    signal=signal,
+                    client=client,
+                    repository=repository,
+                    cache_key=cache_key,
+                )
+            finally:
+                with self._state_lock:
+                    self._preflight_inflight_horizons.discard(
+                        normalized_horizon
                     )
+
+    def _refresh_preflight_payload(
+        self,
+        *,
+        normalized_id: str,
+        normalized_horizon: str,
+        normalized_expected_trigger: str | None,
+        report_generated_at: str,
+        trigger_id: str,
+        signal: Any,
+        client: Any,
+        repository: Any,
+        cache_key: tuple[str, str, str],
+    ) -> dict[str, Any]:
+        try:
+            ticker = client.get_ticker(normalized_id)
+            context = client.get_execution_context(normalized_id)
+            payload = build_preflight_payload(
+                signal,
+                ticker,
+                context,
+                self.config,
+                report_generated_at=report_generated_at,
+            )
+        except PreflightError:
+            raise
+        except ValueError as exc:
+            raise PreflightError(HTTPStatus.UNPROCESSABLE_ENTITY, str(exc)) from exc
+        except Exception as exc:
+            LOGGER.exception("Preflight market-data refresh failed for %s", normalized_id)
+            raise PreflightError(
+                HTTPStatus.BAD_GATEWAY,
+                "OKX 即時公開資料暫時無法取得，請稍後再按一次",
+            ) from exc
+
+        # Hold the state transaction from the post-fetch identity check
+        # through terminal persistence, public projection and cache publish.
+        # _persist_preflight_terminal re-enters this RLock after its exact
+        # repository CAS.
+        with self._state_lock:
+            self._assert_preflight_horizon_available_locked(
+                normalized_horizon
+            )
+            signal = self._assert_preflight_snapshot_locked(
+                inst_id=normalized_id,
+                horizon=normalized_horizon,
+                report_generated_at=report_generated_at,
+                captured_trigger_id=trigger_id,
+                expected_trigger_id=normalized_expected_trigger,
+            )
             terminal_kind = _preflight_terminal_kind(payload)
             persisted_terminal = self._persist_preflight_terminal(
                 repository=repository,
@@ -2136,33 +2488,55 @@ class RadarRuntime:
                 horizon=normalized_horizon,
                 cache_key=cache_key,
             )
-            with self._state_lock:
-                if (
-                    self._latest is None
-                    or self._horizon_completed_at_locked(normalized_horizon)
-                    != report_generated_at
-                ):
+            self._assert_preflight_horizon_available_locked(
+                normalized_horizon
+            )
+            current_signal = self._preflight_signal_locked(
+                normalized_id,
+                normalized_horizon,
+            )
+            if persisted_terminal is not None and current_signal is None:
+                current_report_at = self._horizon_completed_at_locked(
+                    normalized_horizon
+                )
+                if current_report_at != report_generated_at:
                     raise PreflightError(
                         HTTPStatus.CONFLICT,
                         "市場報告已更新，請回到訊號頁重新選擇",
+                        code="REPORT_CHANGED",
+                        details={
+                            "inst_id": normalized_id,
+                            "horizon": normalized_horizon,
+                            "expected_report_generated_at": report_generated_at,
+                            "current_report_generated_at": current_report_at,
+                            "refresh_required": True,
+                        },
                     )
-                cached_payload = deepcopy(payload)
-                cached_payload["cached"] = False
-                cached_payload["cache_age_seconds"] = 0.0
-                cached_payload["cache_ttl_seconds"] = self._preflight_cache_ttl_seconds
-                self._preflight_cache[cache_key] = (
-                    time.monotonic(),
-                    cached_payload,
+            else:
+                signal = self._assert_preflight_snapshot_locked(
+                    inst_id=normalized_id,
+                    horizon=normalized_horizon,
+                    report_generated_at=report_generated_at,
+                    captured_trigger_id=trigger_id,
+                    expected_trigger_id=normalized_expected_trigger,
                 )
-                if (
-                    terminal_kind == "INVALIDATED"
-                    and persisted_terminal is None
-                    and repository is None
-                ):
-                    # Compatibility-only scanners have no durable repository;
-                    # retain the legacy explicit reanalysis hand-off.
-                    self._invalidated_preflight_signals[cache_key] = deepcopy(signal)
-                return deepcopy(cached_payload)
+            cached_payload = deepcopy(payload)
+            cached_payload["cached"] = False
+            cached_payload["cache_age_seconds"] = 0.0
+            cached_payload["cache_ttl_seconds"] = self._preflight_cache_ttl_seconds
+            self._preflight_cache[cache_key] = (
+                time.monotonic(),
+                cached_payload,
+            )
+            if (
+                terminal_kind == "INVALIDATED"
+                and persisted_terminal is None
+                and repository is None
+            ):
+                # Compatibility-only scanners have no durable repository;
+                # retain the legacy explicit reanalysis hand-off.
+                self._invalidated_preflight_signals[cache_key] = deepcopy(signal)
+            return deepcopy(cached_payload)
 
     def reanalyze_preflight_dict(self, inst_id: str, horizon: str) -> dict[str, Any]:
         """Re-run one invalidated symbol through the V3.4 context pipeline."""
@@ -2370,10 +2744,45 @@ class RadarRuntime:
                 )
             return report_markdown(self._latest)
 
+    def _mark_horizon_attempts_locked(
+        self,
+        scan_mode: str,
+        status: str,
+        error: str | None = None,
+    ) -> None:
+        normalized_status = str(status or "").upper()
+        for horizon in _SCAN_MODE_HORIZONS[scan_mode]:
+            self._horizon_attempt_status[horizon] = normalized_status
+            self._horizon_attempt_errors[horizon] = (
+                str(error) if normalized_status == "ERROR" and error else None
+            )
+        remaining_error = next(
+            (
+                self._horizon_attempt_errors.get(horizon)
+                for horizon in ("SHORT", "LONG")
+                if self._horizon_attempt_status.get(horizon) == "ERROR"
+                and self._horizon_attempt_errors.get(horizon)
+            ),
+            None,
+        )
+        if normalized_status == "SCANNING":
+            self._last_attempt_status = "SCANNING"
+            self._last_error = remaining_error
+        elif remaining_error is not None:
+            self._last_attempt_status = "ERROR"
+            self._last_error = remaining_error
+        else:
+            self._last_attempt_status = normalized_status
+            self._last_error = (
+                str(error)
+                if normalized_status == "ERROR" and error
+                else None
+            )
+
     def _begin_scan_locked(self, scan_mode: str = "FULL") -> None:
         self._scan_mode = _normalize_scan_mode(scan_mode)
         self._running = True
-        self._last_attempt_status = "SCANNING"
+        self._mark_horizon_attempts_locked(self._scan_mode, "SCANNING")
         self._scan_id = str(uuid.uuid4())
         self._scan_started_at = datetime.now(timezone.utc).isoformat()
         self._preview = None
@@ -2433,41 +2842,33 @@ class RadarRuntime:
                 if report is None:  # pragma: no cover - scanner raised above
                     raise RuntimeError("市場掃描沒有回傳報告")
                 completed_at = datetime.now(timezone.utc).isoformat()
-                if report.status != "DATA_INCOMPLETE":
-                    report = self._merge_partial_report(
+                data_incomplete = report.status == "DATA_INCOMPLETE"
+                if data_incomplete:
+                    report = replace(
                         report,
-                        previous_report,
-                        scan_mode,
-                        completed_at,
+                        scan_id=scan_id,
+                        scan_started_at=started_at,
+                        generated_at=completed_at,
+                        completed_at=completed_at,
+                        runtime_status="ERROR",
+                        actionable=False,
+                        signals=[],
+                        long_signals=[],
+                        max_signals=self.config.max_signals,
+                        scan_mode=scan_mode,
                     )
-                report = replace(
-                    report,
-                    scan_id=scan_id,
-                    scan_started_at=started_at,
-                    generated_at=completed_at,
-                    completed_at=completed_at,
-                    runtime_status=(
-                        "ERROR" if report.status == "DATA_INCOMPLETE" else "FRESH"
-                    ),
-                    actionable=report.status != "DATA_INCOMPLETE",
-                    signals=([] if report.status == "DATA_INCOMPLETE" else report.signals),
-                    long_signals=(
-                        []
-                        if report.status == "DATA_INCOMPLETE"
-                        else report.long_signals
-                    ),
-                    max_signals=self.config.max_signals,
-                    scan_mode=scan_mode,
-                )
-                if report.status == "DATA_INCOMPLETE" and previous_report is not None:
+                if data_incomplete and previous_report is not None:
                     # A failed refresh is an attempt state, not a new market
                     # snapshot. Keep the last completed horizon slots on disk and
                     # in memory; the requested slot is disabled by latest_dict(),
                     # while an untouched slot remains available at its own age.
                     with self._state_lock:
                         self._preview = None
-                        self._last_error = report.message
-                        self._last_attempt_status = "ERROR"
+                        self._mark_horizon_attempts_locked(
+                            scan_mode,
+                            "ERROR",
+                            report.message,
+                        )
                         self._progress = {
                             "phase": "COMPLETED",
                             "completed": 1,
@@ -2484,16 +2885,38 @@ class RadarRuntime:
                         report.status,
                     )
                     return report
-                save_report(report, self.config.data_dir)
                 with self._state_lock:
+                    if not data_incomplete:
+                        # Preflight for the untouched horizon may have closed a
+                        # card while this partial scan was running. Merge from
+                        # the latest in-memory report and commit it under the
+                        # same lock so a stale scan-start snapshot can never
+                        # resurrect that terminal Episode.
+                        report = self._merge_partial_report(
+                            report,
+                            self._latest,
+                            scan_mode,
+                            completed_at,
+                        )
+                        report = replace(
+                            report,
+                            scan_id=scan_id,
+                            scan_started_at=started_at,
+                            generated_at=completed_at,
+                            completed_at=completed_at,
+                            runtime_status="FRESH",
+                            actionable=True,
+                            max_signals=self.config.max_signals,
+                            scan_mode=scan_mode,
+                        )
+                    save_report(report, self.config.data_dir)
                     self._latest = report
                     self._preview = None
-                    if report.status == "DATA_INCOMPLETE":
-                        self._last_error = report.message
-                        self._last_attempt_status = "ERROR"
-                    else:
-                        self._last_error = None
-                        self._last_attempt_status = "SUCCESS"
+                    self._mark_horizon_attempts_locked(
+                        scan_mode,
+                        "ERROR" if data_incomplete else "SUCCESS",
+                        report.message if data_incomplete else None,
+                    )
                     self._progress = {
                         "phase": "COMPLETED",
                         "completed": 1,
@@ -2525,8 +2948,11 @@ class RadarRuntime:
                 LOGGER.exception("Unexpected scanner failure")
                 with self._state_lock:
                     self._preview = None
-                    self._last_error = str(exc)
-                    self._last_attempt_status = "ERROR"
+                    self._mark_horizon_attempts_locked(
+                        scan_mode,
+                        "ERROR",
+                        str(exc),
+                    )
                     self._progress = {
                         "phase": "ERROR",
                         "completed": None,
@@ -3037,6 +3463,12 @@ class RadarRuntime:
                     "last_error": self._last_error,
                     "scan_mode": self._scan_mode,
                     "scan_id": self._scan_id,
+                    "horizon_attempt_status": dict(
+                        self._horizon_attempt_status
+                    ),
+                    "horizon_attempt_errors": dict(
+                        self._horizon_attempt_errors
+                    ),
                     "last_single_scan": deepcopy(self._last_single_scan),
                     "updated_at": datetime.now(timezone.utc).isoformat(),
                 },
@@ -3143,12 +3575,23 @@ def serve(runtime: RadarRuntime, host: str, port: int) -> None:
             elif path == "/api/preflight":
                 query = parse_qs(parsed.query)
                 try:
+                    expected_trigger_id = query.get(
+                        "expected_trigger_id", [""]
+                    )[0].strip()
+                    if not expected_trigger_id:
+                        raise PreflightError(
+                            HTTPStatus.BAD_REQUEST,
+                            "缺少 expected_trigger_id，無法確認這張卡仍是目前 Trigger",
+                            code="EXPECTED_TRIGGER_REQUIRED",
+                            details={"refresh_required": True},
+                        )
                     payload = runtime.preflight_dict(
                         query.get("inst_id", [""])[0],
                         query.get("horizon", [""])[0],
+                        expected_trigger_id,
                     )
                 except PreflightError as exc:
-                    self._send_json(exc.status, {"error": str(exc)})
+                    self._send_json(exc.status, exc.response_payload())
                 else:
                     self._send_json(HTTPStatus.OK, payload)
             else:
@@ -3172,15 +3615,27 @@ def serve(runtime: RadarRuntime, host: str, port: int) -> None:
             if path == "/api/preflight/reanalyze":
                 try:
                     payload = self._read_json_body()
-                    # Backward-compatible alias for older installed PWA shells.
-                    # It performs the same lightweight execution check as the
-                    # current preflight route and must not mutate the report.
+                    # Legacy route alias. Trigger identity remains mandatory so
+                    # an old installed shell cannot inspect a newer Episode by
+                    # symbol alone. It performs the same lightweight check as
+                    # GET /api/preflight and does not reanalyze the coin.
+                    expected_trigger_id = str(
+                        payload.get("expected_trigger_id") or ""
+                    ).strip()
+                    if not expected_trigger_id:
+                        raise PreflightError(
+                            HTTPStatus.BAD_REQUEST,
+                            "缺少 expected_trigger_id，無法確認這張卡仍是目前 Trigger",
+                            code="EXPECTED_TRIGGER_REQUIRED",
+                            details={"refresh_required": True},
+                        )
                     result = runtime.preflight_dict(
                         payload.get("inst_id", ""),
                         payload.get("horizon", ""),
+                        expected_trigger_id,
                     )
                 except PreflightError as exc:
-                    self._send_json(exc.status, {"error": str(exc)})
+                    self._send_json(exc.status, exc.response_payload())
                 except ValueError as exc:
                     self._send_json(HTTPStatus.BAD_REQUEST, {"error": str(exc)})
                 else:
@@ -3198,7 +3653,7 @@ def serve(runtime: RadarRuntime, host: str, port: int) -> None:
                     scan_mode=scan_mode,
                 )
             except PreflightError as exc:
-                self._send_json(exc.status, {"error": str(exc)})
+                self._send_json(exc.status, exc.response_payload())
                 return
             except PushSubscriptionError as exc:
                 self._send_json(HTTPStatus.BAD_REQUEST, {"error": str(exc)})

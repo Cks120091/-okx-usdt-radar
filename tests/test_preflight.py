@@ -3,12 +3,16 @@ import time
 import unittest
 from dataclasses import replace
 from datetime import datetime, timezone
+from http import HTTPStatus
 from types import SimpleNamespace
+from unittest.mock import patch
 
 from radar.config import AppConfig
 from radar.models import MarketContext, RadarReport, Signal, Ticker
+from radar.price_display import display_precision_from_tick_size
 from radar.preflight import build_preflight_payload
-from radar.service import PreflightError, RadarRuntime
+from radar.public_payload import public_candidate_payload
+from radar.service import PreflightError, RadarRuntime, serve
 
 
 def make_signal() -> Signal:
@@ -36,7 +40,14 @@ def make_signal() -> Signal:
         trigger_type="BREAKOUT",
         trigger_id="old-trigger-id",
         freshness="NEW",
-        market_metrics={"last_price": 100.0},
+        market_metrics={
+            "last_price": 100.0,
+            "instrument_tick_size": 0.05,
+        },
+        management_plan={
+            "target_rr_model": 2.625,
+            "tp2_rr_model": 3.75,
+        },
         market_story={
             "raw": {"core_atr": 2.0},
             "trigger": {
@@ -121,6 +132,18 @@ class PreflightClient:
         )
 
 
+class MutatingPreflightClient(PreflightClient):
+    def __init__(self, price: float = 100.1):
+        super().__init__(price)
+        self.after_context = None
+
+    def get_execution_context(self, inst_id: str) -> MarketContext:
+        context = super().get_execution_context(inst_id)
+        if self.after_context is not None:
+            self.after_context()
+        return context
+
+
 class PreflightScanner:
     def __init__(self, client: PreflightClient):
         self.client = client
@@ -195,6 +218,164 @@ def make_new_short_signal() -> Signal:
 
 
 class PreflightTests(unittest.TestCase):
+    def test_http_preflight_routes_require_and_forward_expected_trigger_id(self):
+        captured = {}
+
+        class FakeServer:
+            def __init__(self, address, handler):
+                captured["handler"] = handler
+
+            def serve_forever(self, poll_interval=0.5):
+                return None
+
+            def server_close(self):
+                return None
+
+        class FakeRuntime:
+            def __init__(self):
+                self.calls = []
+
+            def preflight_dict(self, inst_id, horizon, expected_trigger_id=None):
+                self.calls.append((inst_id, horizon, expected_trigger_id))
+                if expected_trigger_id == "trigger-mismatch":
+                    raise PreflightError(
+                        HTTPStatus.CONFLICT,
+                        "Trigger changed",
+                        code="TRIGGER_MISMATCH",
+                        details={
+                            "expected_trigger_id": expected_trigger_id,
+                            "current_trigger_id": "trigger-current",
+                        },
+                    )
+                return {"trigger_id": expected_trigger_id}
+
+            def stop(self):
+                return None
+
+        runtime = FakeRuntime()
+        with patch("radar.service.ThreadingHTTPServer", FakeServer):
+            serve(runtime, "127.0.0.1", 0)
+        handler_class = captured["handler"]
+
+        missing = object.__new__(handler_class)
+        missing.path = "/api/preflight?inst_id=AAA-USDT-SWAP&horizon=SHORT"
+        missing_responses = []
+        missing._send_json = lambda status, payload: missing_responses.append(
+            (status, payload)
+        )
+        missing.do_GET()
+        self.assertEqual(missing_responses[0][0].value, 400)
+        self.assertEqual(
+            missing_responses[0][1]["code"],
+            "EXPECTED_TRIGGER_REQUIRED",
+        )
+        self.assertEqual(runtime.calls, [])
+
+        missing_post = object.__new__(handler_class)
+        missing_post.path = "/api/preflight/reanalyze"
+        missing_post_responses = []
+        missing_post._read_json_body = lambda: {
+            "inst_id": "AAA-USDT-SWAP",
+            "horizon": "SHORT",
+        }
+        missing_post._send_json = (
+            lambda status, payload: missing_post_responses.append(
+                (status, payload)
+            )
+        )
+        missing_post.do_POST()
+        self.assertEqual(missing_post_responses[0][0].value, 400)
+        self.assertEqual(
+            missing_post_responses[0][1]["code"],
+            "EXPECTED_TRIGGER_REQUIRED",
+        )
+        self.assertEqual(runtime.calls, [])
+
+        get_handler = object.__new__(handler_class)
+        get_handler.path = (
+            "/api/preflight?inst_id=AAA-USDT-SWAP&horizon=SHORT"
+            "&expected_trigger_id=trigger-get"
+        )
+        get_responses = []
+        get_handler._send_json = lambda status, payload: get_responses.append(
+            (status, payload)
+        )
+        get_handler.do_GET()
+
+        post_handler = object.__new__(handler_class)
+        post_handler.path = "/api/preflight/reanalyze"
+        post_responses = []
+        post_handler._read_json_body = lambda: {
+            "inst_id": "AAA-USDT-SWAP",
+            "horizon": "LONG",
+            "expected_trigger_id": "trigger-post",
+        }
+        post_handler._send_json = lambda status, payload: post_responses.append(
+            (status, payload)
+        )
+        post_handler.do_POST()
+
+        mismatch_handler = object.__new__(handler_class)
+        mismatch_handler.path = (
+            "/api/preflight?inst_id=AAA-USDT-SWAP&horizon=SHORT"
+            "&expected_trigger_id=trigger-mismatch"
+        )
+        mismatch_responses = []
+        mismatch_handler._send_json = lambda status, payload: mismatch_responses.append(
+            (status, payload)
+        )
+        mismatch_handler.do_GET()
+
+        self.assertEqual(
+            runtime.calls,
+            [
+                ("AAA-USDT-SWAP", "SHORT", "trigger-get"),
+                ("AAA-USDT-SWAP", "LONG", "trigger-post"),
+                ("AAA-USDT-SWAP", "SHORT", "trigger-mismatch"),
+            ],
+        )
+        self.assertEqual(get_responses[0][0].value, 200)
+        self.assertEqual(post_responses[0][0].value, 200)
+        self.assertEqual(mismatch_responses[0][0].value, 409)
+        self.assertEqual(
+            mismatch_responses[0][1]["code"],
+            "TRIGGER_MISMATCH",
+        )
+
+    def test_frozen_plan_display_contract_uses_tick_and_model_r(self):
+        signal = make_signal()
+        client = PreflightClient(price=100.0)
+
+        preflight = build_preflight_payload(
+            signal,
+            client.get_ticker(signal.inst_id),
+            client.get_execution_context(signal.inst_id),
+            AppConfig(),
+            report_generated_at=datetime.now(timezone.utc).isoformat(),
+        )
+        public_signal = public_candidate_payload(signal, signal=True)
+
+        for payload in (preflight, public_signal):
+            self.assertEqual(payload["trigger_id"], "old-trigger-id")
+            self.assertEqual(payload["instrument_tick_size"], 0.05)
+            self.assertEqual(payload["display_precision"], 2)
+            self.assertEqual(payload["tp1_r"], 2.0)
+            self.assertEqual(payload["tp2_r"], 3.75)
+
+        legacy = replace(signal, management_plan={})
+        legacy_payload = public_candidate_payload(legacy, signal=True)
+        self.assertEqual(legacy_payload["tp1_r"], 2.0)
+        self.assertIsNone(legacy_payload["tp2_r"])
+
+    def test_tick_size_precision_handles_okx_increment_shapes(self):
+        self.assertEqual(display_precision_from_tick_size(1), 0)
+        self.assertEqual(display_precision_from_tick_size(0.1), 1)
+        self.assertEqual(display_precision_from_tick_size(0.05), 2)
+        self.assertEqual(display_precision_from_tick_size(0.00001), 5)
+        self.assertIsNone(display_precision_from_tick_size(0))
+        self.assertIsNone(display_precision_from_tick_size("bad"))
+        self.assertIsNone(display_precision_from_tick_size(10**10000))
+
     def test_execution_cost_warning_band_is_not_a_hard_block(self):
         signal = make_signal()
         client = PreflightClient(price=100.0)
@@ -280,6 +461,430 @@ class PreflightTests(unittest.TestCase):
             self.assertEqual(payload["plan_state"]["new_entry_status"], "READY")
             self.assertEqual(item.market_metrics, original_metrics)
             self.assertEqual(item.execution_quality, original_quality)
+
+    def test_wrong_expected_trigger_is_structured_conflict_before_live_fetch(self):
+        with tempfile.TemporaryDirectory() as directory:
+            item = make_signal()
+            client = PreflightClient()
+            runtime = RadarRuntime(
+                PreflightScanner(client),
+                AppConfig(data_dir=directory),
+            )
+            runtime._latest = make_report(item)
+
+            with self.assertRaises(PreflightError) as caught:
+                runtime.preflight_dict(
+                    item.inst_id,
+                    "SHORT",
+                    "stale-card-trigger",
+                )
+
+            self.assertEqual(caught.exception.status.value, 409)
+            self.assertEqual(caught.exception.code, "TRIGGER_MISMATCH")
+            self.assertEqual(
+                caught.exception.response_payload(),
+                {
+                    "error": "這張卡的 Trigger 已不是目前有效版本，請重新載入訊號頁",
+                    "code": "TRIGGER_MISMATCH",
+                    "inst_id": item.inst_id,
+                    "horizon": "SHORT",
+                    "expected_trigger_id": "stale-card-trigger",
+                    "current_trigger_id": item.trigger_id,
+                    "refresh_required": True,
+                },
+            )
+            self.assertEqual(client.ticker_calls, 0)
+            self.assertEqual(client.context_calls, 0)
+
+    def test_trigger_replacement_during_fetch_is_rejected_before_cache(self):
+        for expected_trigger_id in ("old-trigger-id", None):
+            with self.subTest(expected_trigger_id=expected_trigger_id):
+                with tempfile.TemporaryDirectory() as directory:
+                    item = make_signal()
+                    client = MutatingPreflightClient()
+                    runtime = RadarRuntime(
+                        PreflightScanner(client),
+                        AppConfig(data_dir=directory),
+                    )
+                    runtime._latest = make_report(item)
+
+                    def replace_trigger() -> None:
+                        replacement = replace(
+                            item,
+                            trigger_id="replacement-trigger-id",
+                        )
+                        runtime._latest.signals = [replacement]
+
+                    client.after_context = replace_trigger
+
+                    with self.assertRaises(PreflightError) as caught:
+                        runtime.preflight_dict(
+                            item.inst_id,
+                            "SHORT",
+                            expected_trigger_id,
+                        )
+
+                    self.assertEqual(caught.exception.status.value, 409)
+                    self.assertEqual(caught.exception.code, "TRIGGER_MISMATCH")
+                    self.assertEqual(
+                        caught.exception.details["current_trigger_id"],
+                        "replacement-trigger-id",
+                    )
+                    self.assertEqual(runtime._preflight_cache, {})
+
+    def test_same_horizon_scan_start_before_cache_commit_is_rejected(self):
+        with tempfile.TemporaryDirectory() as directory:
+            item = make_signal()
+            runtime = RadarRuntime(
+                PreflightScanner(PreflightClient()),
+                AppConfig(data_dir=directory),
+            )
+            runtime._latest = make_report(item)
+
+            def start_scan(**kwargs):
+                runtime._running = True
+                runtime._scan_mode = "SHORT"
+                runtime._last_attempt_status = "SCANNING"
+                return None
+
+            with patch.object(
+                runtime,
+                "_persist_preflight_terminal",
+                side_effect=start_scan,
+            ):
+                with self.assertRaises(PreflightError) as caught:
+                    runtime.preflight_dict(
+                        item.inst_id,
+                        "SHORT",
+                        item.trigger_id,
+                    )
+
+            self.assertEqual(caught.exception.code, "HORIZON_SCAN_RUNNING")
+            self.assertEqual(runtime._preflight_cache, {})
+
+    def test_trigger_replacement_before_cache_commit_is_rejected(self):
+        with tempfile.TemporaryDirectory() as directory:
+            item = make_signal()
+            runtime = RadarRuntime(
+                PreflightScanner(PreflightClient()),
+                AppConfig(data_dir=directory),
+            )
+            runtime._latest = make_report(item)
+
+            def replace_trigger(**kwargs):
+                runtime._latest.signals = [
+                    replace(item, trigger_id="replacement-trigger-id")
+                ]
+                return None
+
+            with patch.object(
+                runtime,
+                "_persist_preflight_terminal",
+                side_effect=replace_trigger,
+            ):
+                with self.assertRaises(PreflightError) as caught:
+                    runtime.preflight_dict(
+                        item.inst_id,
+                        "SHORT",
+                        item.trigger_id,
+                    )
+
+            self.assertEqual(caught.exception.code, "TRIGGER_MISMATCH")
+            self.assertEqual(
+                caught.exception.details["current_trigger_id"],
+                "replacement-trigger-id",
+            )
+            self.assertEqual(runtime._preflight_cache, {})
+
+    def test_stale_cached_episode_is_not_returned_for_replacement_trigger(self):
+        with tempfile.TemporaryDirectory() as directory:
+            item = make_signal()
+            client = PreflightClient()
+            runtime = RadarRuntime(
+                PreflightScanner(client),
+                AppConfig(data_dir=directory),
+            )
+            runtime._latest = make_report(item)
+
+            first = runtime.preflight_dict(
+                item.inst_id,
+                "SHORT",
+                item.trigger_id,
+            )
+            replacement = replace(item, trigger_id="replacement-trigger-id")
+            runtime._latest.signals = [replacement]
+            second = runtime.preflight_dict(
+                item.inst_id,
+                "SHORT",
+                replacement.trigger_id,
+            )
+
+            self.assertEqual(first["trigger_id"], item.trigger_id)
+            self.assertEqual(second["trigger_id"], replacement.trigger_id)
+            self.assertFalse(second["cached"])
+            self.assertEqual(client.ticker_calls, 2)
+            self.assertEqual(client.context_calls, 2)
+
+    def test_partial_scan_only_blocks_preflight_for_its_own_horizon(self):
+        for blocked_horizon, allowed_horizon in (
+            ("SHORT", "LONG"),
+            ("LONG", "SHORT"),
+        ):
+            with self.subTest(
+                blocked_horizon=blocked_horizon,
+                allowed_horizon=allowed_horizon,
+            ):
+                with tempfile.TemporaryDirectory() as directory:
+                    short = make_signal()
+                    long = replace(
+                        make_signal(),
+                        radar_horizon="LONG",
+                        trigger_id="long-trigger-id",
+                    )
+                    current = make_report(short)
+                    current.long_signals = [long]
+                    current.short_completed_at = current.completed_at
+                    current.long_completed_at = current.completed_at
+                    runtime = RadarRuntime(
+                        PreflightScanner(PreflightClient()),
+                        AppConfig(data_dir=directory),
+                    )
+                    runtime._latest = current
+                    runtime._running = True
+                    runtime._scan_mode = blocked_horizon
+                    runtime._last_attempt_status = "SCANNING"
+
+                    allowed_signal = long if allowed_horizon == "LONG" else short
+                    allowed = runtime.preflight_dict(
+                        allowed_signal.inst_id,
+                        allowed_horizon,
+                        allowed_signal.trigger_id,
+                    )
+                    self.assertEqual(allowed["horizon"], allowed_horizon)
+
+                    blocked_signal = short if blocked_horizon == "SHORT" else long
+                    with self.assertRaises(PreflightError) as caught:
+                        runtime.preflight_dict(
+                            blocked_signal.inst_id,
+                            blocked_horizon,
+                            blocked_signal.trigger_id,
+                        )
+                    self.assertEqual(caught.exception.status.value, 409)
+                    self.assertEqual(
+                        caught.exception.code,
+                        "HORIZON_SCAN_RUNNING",
+                    )
+
+    def test_failed_partial_scan_only_blocks_its_own_horizon(self):
+        for blocked_horizon, allowed_horizon in (
+            ("SHORT", "LONG"),
+            ("LONG", "SHORT"),
+        ):
+            with self.subTest(
+                blocked_horizon=blocked_horizon,
+                allowed_horizon=allowed_horizon,
+            ):
+                with tempfile.TemporaryDirectory() as directory:
+                    short = make_signal()
+                    long = replace(
+                        make_signal(),
+                        radar_horizon="LONG",
+                        trigger_id="long-trigger-id",
+                    )
+                    current = make_report(short)
+                    current.long_signals = [long]
+                    current.short_completed_at = current.completed_at
+                    current.long_completed_at = current.completed_at
+                    runtime = RadarRuntime(
+                        PreflightScanner(PreflightClient()),
+                        AppConfig(data_dir=directory),
+                    )
+                    runtime._latest = current
+                    runtime._running = False
+                    runtime._scan_mode = blocked_horizon
+                    runtime._mark_horizon_attempts_locked(
+                        blocked_horizon,
+                        "ERROR",
+                        f"{blocked_horizon} fixture failure",
+                    )
+
+                    allowed_signal = long if allowed_horizon == "LONG" else short
+                    allowed = runtime.preflight_dict(
+                        allowed_signal.inst_id,
+                        allowed_horizon,
+                        allowed_signal.trigger_id,
+                    )
+                    self.assertEqual(allowed["horizon"], allowed_horizon)
+
+                    blocked_signal = short if blocked_horizon == "SHORT" else long
+                    with self.assertRaises(PreflightError) as caught:
+                        runtime.preflight_dict(
+                            blocked_signal.inst_id,
+                            blocked_horizon,
+                            blocked_signal.trigger_id,
+                        )
+                    self.assertEqual(caught.exception.status.value, 409)
+                    self.assertEqual(
+                        caught.exception.code,
+                        "HORIZON_SCAN_FAILED",
+                    )
+
+    def test_success_on_other_horizon_does_not_clear_prior_failure(self):
+        for failed_horizon, successful_horizon in (
+            ("LONG", "SHORT"),
+            ("SHORT", "LONG"),
+        ):
+            with self.subTest(
+                failed_horizon=failed_horizon,
+                successful_horizon=successful_horizon,
+            ):
+                with tempfile.TemporaryDirectory() as directory:
+                    short = make_signal()
+                    long = replace(
+                        make_signal(),
+                        radar_horizon="LONG",
+                        trigger_id="long-trigger-id",
+                    )
+                    current = make_report(short)
+                    current.long_signals = [long]
+                    current.short_completed_at = current.completed_at
+                    current.long_completed_at = current.completed_at
+                    runtime = RadarRuntime(
+                        PreflightScanner(PreflightClient()),
+                        AppConfig(data_dir=directory),
+                    )
+                    runtime._latest = current
+
+                    runtime._mark_horizon_attempts_locked(
+                        failed_horizon,
+                        "ERROR",
+                        f"{failed_horizon} fixture failure",
+                    )
+                    runtime._mark_horizon_attempts_locked(
+                        successful_horizon,
+                        "SUCCESS",
+                    )
+
+                    payload = runtime.latest_dict()
+                    self.assertEqual(
+                        payload["horizon_attempt_status"][failed_horizon],
+                        "ERROR",
+                    )
+                    self.assertEqual(
+                        payload["horizon_attempt_status"][successful_horizon],
+                        "SUCCESS",
+                    )
+                    self.assertEqual(
+                        payload["scan_unavailable_horizons"],
+                        [failed_horizon],
+                    )
+                    self.assertFalse(
+                        payload["safety"]["horizon_actionable"][failed_horizon]
+                    )
+                    self.assertTrue(
+                        payload["safety"]["horizon_actionable"][
+                            successful_horizon
+                        ]
+                    )
+
+                    successful_signal = (
+                        short if successful_horizon == "SHORT" else long
+                    )
+                    allowed = runtime.preflight_dict(
+                        successful_signal.inst_id,
+                        successful_horizon,
+                        successful_signal.trigger_id,
+                    )
+                    self.assertEqual(allowed["horizon"], successful_horizon)
+
+                    failed_signal = short if failed_horizon == "SHORT" else long
+                    with self.assertRaises(PreflightError) as caught:
+                        runtime.preflight_dict(
+                            failed_signal.inst_id,
+                            failed_horizon,
+                            failed_signal.trigger_id,
+                        )
+                    self.assertEqual(
+                        caught.exception.code,
+                        "HORIZON_SCAN_FAILED",
+                    )
+
+    def test_full_scan_blocks_both_preflight_horizons(self):
+        with tempfile.TemporaryDirectory() as directory:
+            short = make_signal()
+            long = replace(
+                make_signal(),
+                radar_horizon="LONG",
+                trigger_id="long-trigger-id",
+            )
+            current = make_report(short)
+            current.long_signals = [long]
+            current.short_completed_at = current.completed_at
+            current.long_completed_at = current.completed_at
+            runtime = RadarRuntime(
+                PreflightScanner(PreflightClient()),
+                AppConfig(data_dir=directory),
+            )
+            runtime._latest = current
+            runtime._running = True
+            runtime._scan_mode = "FULL"
+            runtime._last_attempt_status = "SCANNING"
+
+            for horizon, item in (("SHORT", short), ("LONG", long)):
+                with self.subTest(horizon=horizon):
+                    with self.assertRaises(PreflightError) as caught:
+                        runtime.preflight_dict(
+                            item.inst_id,
+                            horizon,
+                            item.trigger_id,
+                        )
+                    self.assertEqual(
+                        caught.exception.code,
+                        "HORIZON_SCAN_RUNNING",
+                    )
+
+            runtime._running = False
+            runtime._mark_horizon_attempts_locked(
+                "FULL",
+                "ERROR",
+                "full fixture failure",
+            )
+            for horizon, item in (("SHORT", short), ("LONG", long)):
+                with self.subTest(failed_horizon=horizon):
+                    with self.assertRaises(PreflightError) as caught:
+                        runtime.preflight_dict(
+                            item.inst_id,
+                            horizon,
+                            item.trigger_id,
+                        )
+                    self.assertEqual(
+                        caught.exception.code,
+                        "HORIZON_SCAN_FAILED",
+                    )
+
+    def test_data_incomplete_snapshot_remains_fail_closed(self):
+        with tempfile.TemporaryDirectory() as directory:
+            item = make_signal()
+            client = PreflightClient()
+            current = make_report(item)
+            current.status = "DATA_INCOMPLETE"
+            runtime = RadarRuntime(
+                PreflightScanner(client),
+                AppConfig(data_dir=directory),
+            )
+            runtime._latest = current
+
+            with self.assertRaises(PreflightError) as caught:
+                runtime.preflight_dict(
+                    item.inst_id,
+                    "SHORT",
+                    item.trigger_id,
+                )
+
+            self.assertEqual(caught.exception.status.value, 409)
+            self.assertEqual(caught.exception.code, "DATA_INCOMPLETE")
+            self.assertEqual(client.ticker_calls, 0)
+            self.assertEqual(client.context_calls, 0)
 
     def test_preflight_stays_separate_when_full_coin_scan_is_available(self):
         with tempfile.TemporaryDirectory() as directory:

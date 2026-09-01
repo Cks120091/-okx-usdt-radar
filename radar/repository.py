@@ -12,6 +12,7 @@ from pathlib import Path
 from typing import Any
 
 from .models import MarketContext, MarketState, Signal
+from .price_display import signal_plan_display_fields
 
 
 ACTIVE_STAGES = {
@@ -2287,7 +2288,7 @@ class SignalRepository:
                            triggered_at, updated_at, closed_at, stage, freshness,
                            status, trigger_price, stop_price, tp1_price, tp2_price,
                            risk_reward, execution_quality, mfe_r, mae_r, outcome,
-                           final_r
+                           final_r, payload_json
                     FROM signals
                     {where_clause}
                     ORDER BY triggered_at DESC, signal_id DESC
@@ -2296,7 +2297,26 @@ class SignalRepository:
                     parameters,
                 ).fetchall()
             )
-        return [dict(row) for row in rows]
+        history: list[dict[str, Any]] = []
+        for row in rows:
+            item = dict(row)
+            raw_payload = item.pop("payload_json", "")
+            try:
+                stored_payload = json.loads(raw_payload) if raw_payload else {}
+            except (TypeError, ValueError, json.JSONDecodeError):
+                stored_payload = {}
+            if not isinstance(stored_payload, dict):
+                stored_payload = {}
+
+            # ``risk_reward`` is also a first-class frozen database column, so
+            # it remains available for legacy payloads that predate the richer
+            # display metadata. Tick precision and TP2 R are recovered only
+            # when the stored Signal payload actually contains them.
+            display_source = dict(stored_payload)
+            display_source["risk_reward"] = item.get("risk_reward")
+            item.update(signal_plan_display_fields(display_source))
+            history.append(item)
+        return history
 
     def load_terminal_signal(self, signal: Signal | str) -> Signal | None:
         """Load one exact closed Episode for request-local UI projection."""
