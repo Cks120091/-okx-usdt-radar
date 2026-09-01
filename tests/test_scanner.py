@@ -286,6 +286,41 @@ def qualified_state(signal):
 
 
 class ScannerTests(unittest.TestCase):
+    def test_excluded_contract_terminal_cards_do_not_reenter_report(self):
+        scanner = MarketScanner(
+            FakeClient(),
+            ScannerConfig(min_quote_volume_24h=0, universe_max_spread_pct=1.0),
+        )
+        scanner.engine = AlwaysSignalEngine()
+        crypto_terminal = replace(
+            qualified_signal("AAA-USDT-SWAP"),
+            signal_stage="COMPLETED",
+            freshness="COMPLETED",
+            actionable=False,
+            lifecycle={
+                "status": "COMPLETED",
+                "terminal_status": "COMPLETED",
+                "closed_at": "2026-09-01T00:00:00+00:00",
+            },
+        )
+        excluded_terminal = replace(
+            crypto_terminal,
+            inst_id="TSLA-USDT-SWAP",
+            trigger_id="excluded-stock-episode",
+        )
+        scanner.repository.recent_terminal_signals = (
+            lambda horizon, *, as_of: (
+                [crypto_terminal, excluded_terminal] if horizon == "SHORT" else []
+            )
+        )
+
+        report = scanner.scan_once(scan_mode="SHORT")
+
+        self.assertEqual(
+            [item.inst_id for item in report.closed_signals],
+            ["AAA-USDT-SWAP"],
+        )
+
     def test_core_preview_is_read_only_and_never_grants_entry(self):
         class PreviewRepository:
             def __init__(self):

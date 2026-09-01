@@ -40,6 +40,7 @@ class RouteFixtureClient(OKXPublicClient):
                     "ctVal": "0.01",
                     "ctMult": "1",
                     "ctValCcy": "BTC",
+                    "instCategory": "1",
                 }
             ]
         if path.endswith("open-interest"):
@@ -102,13 +103,32 @@ class APITests(unittest.TestCase):
 
     def test_filters_only_live_linear_usdt_swaps(self):
         rows = [
-            {"instId": "BTC-USDT-SWAP", "state": "live", "settleCcy": "USDT", "ctType": "linear", "tickSz": "0.1"},
+            {"instId": "BTC-USDT-SWAP", "state": "live", "settleCcy": "USDT", "ctType": "linear", "tickSz": "0.1", "instCategory": "1"},
+            {"instId": "UNH-USDT-SWAP", "state": "live", "settleCcy": "USDT", "ctType": "linear", "tickSz": "0.01", "instCategory": "3"},
             {"instId": "ETH-USDC-SWAP", "state": "live", "settleCcy": "USDC", "ctType": "linear", "tickSz": "0.01"},
             {"instId": "OLD-USDT-SWAP", "state": "suspend", "settleCcy": "USDT", "ctType": "linear", "tickSz": "0.001"},
             {"instId": "BTC-USD-SWAP", "state": "live", "settleCcy": "BTC", "ctType": "inverse", "tickSz": "0.1"},
         ]
         instruments = FixtureClient(rows).get_usdt_swap_instruments()
         self.assertEqual([item.inst_id for item in instruments], ["BTC-USDT-SWAP"])
+
+    def test_rejects_every_explicit_non_crypto_contract_category(self):
+        rows = [
+            {"instId": "TSLA-USDT-SWAP", "state": "live", "settleCcy": "USDT", "ctType": "linear", "tickSz": "0.01", "instCategory": "3"},
+            {"instId": "XAU-USDT-SWAP", "state": "live", "settleCcy": "USDT", "ctType": "linear", "tickSz": "0.01", "instCategory": "4"},
+            {"instId": "UNKNOWN-USDT-SWAP", "state": "live", "settleCcy": "USDT", "ctType": "linear", "tickSz": "0.01"},
+        ]
+
+        self.assertEqual(FixtureClient(rows).get_usdt_swap_instruments(), [])
+
+    def test_single_instrument_lookup_cannot_scan_stock_perpetual(self):
+        rows = [
+            {"instId": "TSLA-USDT-SWAP", "state": "live", "settleCcy": "USDT", "ctType": "linear", "tickSz": "0.01", "instCategory": "3"},
+        ]
+
+        self.assertIsNone(
+            FixtureClient(rows).get_usdt_swap_instrument("TSLA-USDT-SWAP")
+        )
 
     def test_candles_drop_unclosed_bar_and_sort(self):
         rows = [

@@ -737,11 +737,18 @@ def _instrument_from_row(row: dict[str, Any]) -> Instrument | None:
     settle_ccy = str(row.get("settleCcy", ""))
     state = str(row.get("state", ""))
     ct_type = str(row.get("ctType", ""))
+    inst_category = str(row.get("instCategory", "")).strip()
     if not (
         state == "live"
         and settle_ccy == "USDT"
         and inst_id.endswith("-USDT-SWAP")
         and ct_type in {"linear", ""}
+        # OKX classifies crypto contracts as category 1 and stock
+        # perpetuals as category 3.  Reject every explicitly non-crypto
+        # category at the universe boundary so excluded products never reach
+        # ticker, candle, OI or order-book requests.  Missing category data is
+        # also rejected: fail closed instead of risking a stock scan.
+        and inst_category == "1"
     ):
         return None
     return Instrument(

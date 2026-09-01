@@ -184,7 +184,10 @@ class MarketScanner:
             "LONG": "4H 長線",
             "FULL": "15m＋4H 全市場",
         }[normalized_mode]
-        scope = f"OKX state=live、USDT 結算、線性永續合約；{mode_label}掃描"
+        scope = (
+            "OKX instCategory=1 加密資產、state=live、USDT 結算、"
+            f"線性永續合約；{mode_label}掃描"
+        )
         self._progress(progress, "INSTRUMENTS", 0, None, "正在同步 OKX live USDT 永續 Universe")
         try:
             instruments = self.client.get_usdt_swap_instruments()
@@ -896,15 +899,23 @@ class MarketScanner:
         if callable(terminal_loader):
             reference_time = datetime.fromisoformat(completed_at)
             if include_short:
-                closed_signals = terminal_loader(
-                    "SHORT",
-                    as_of=reference_time,
-                )
+                closed_signals = [
+                    item
+                    for item in terminal_loader(
+                        "SHORT",
+                        as_of=reference_time,
+                    )
+                    if item.inst_id in instrument_map
+                ]
             if include_long:
-                long_closed_signals = terminal_loader(
-                    "LONG",
-                    as_of=reference_time,
-                )
+                long_closed_signals = [
+                    item
+                    for item in terminal_loader(
+                        "LONG",
+                        as_of=reference_time,
+                    )
+                    if item.inst_id in instrument_map
+                ]
 
         report = RadarReport(
             status=status,
@@ -2670,7 +2681,10 @@ class MarketScanner:
         if callable(metrics_reset):
             metrics_reset()
         self._progress(progress, "INSTRUMENTS", 0, None, "正在取得 OKX live USDT 永續合約")
-        scope = "OKX state=live、USDT 結算、線性永續合約"
+        scope = (
+            "OKX instCategory=1 加密資產、state=live、USDT 結算、"
+            "線性永續合約"
+        )
         try:
             instruments = self.client.get_usdt_swap_instruments()
         except Exception as exc:

@@ -1,6 +1,6 @@
 # OKX Radar V3.4
 
-以 OKX 公開市場資料運作的 USDT 線性永續合約雙雷達。系統只做分析，不接受 API Key、Secret 或 Passphrase，也沒有自動下單、Paper Trading 或 Live Trading 路徑。V3.4 延續既有 Price-first（價格優先）Trigger 與 Signal Episode（訊號生命週期）。Market Context、流動性、Spread、Slippage、成交成本、R:R 與異常行情都保留為詳細風險提醒，不再作反向判定或硬性否決正式訊號。
+以 OKX 公開市場資料運作的加密資產 USDT 線性永續合約雙雷達。Universe 只接受 OKX `instCategory=1`；股票型永續（`instCategory=3`）與其他非加密分類會在合約清單入口直接排除，不進入個別行情與策略分析。系統只做分析，不接受 API Key、Secret 或 Passphrase，也沒有自動下單、Paper Trading 或 Live Trading 路徑。V3.4 延續既有 Price-first（價格優先）Trigger 與 Signal Episode（訊號生命週期）。Market Context、流動性、Spread、Slippage、成交成本、R:R 與異常行情都保留為詳細風險提醒，不再作反向判定或硬性否決正式訊號。
 
 手機介面將 Entry Zone 統一顯示為「Entry（最佳進場點位）」，並依「目前能否進場 → 方向 → Entry／SL／TP／R:R → 主要原因與安全檢查」排列。其他 OI（未平倉量）、Funding（資金費率）、Taker Flow（主動買賣流）、Spread（買賣價差）、Slippage（滑價）與 Order Book（訂單簿）收進詳細資料。單幣請求期間只使用輕量 CSS 掃描動畫，不載入 GIF、影片、Canvas 或大型外部資源。
 
@@ -24,7 +24,7 @@ Market Context、OI、Taker、Funding 與 Order Book 仍會保存並放在詳細
 
 ## 系統流程
 
-1. 動態取得所有 `state=live`、USDT 結算、線性 `*-USDT-SWAP`。
+1. 動態取得所有 `instCategory=1`、`state=live`、USDT 結算、線性 `*-USDT-SWAP`；股票型與其他非加密合約在此步即排除。
 2. 依掃描範圍載入資料：15m 掃描使用 4H／1H／15m，4H 掃描使用 1D／4H／1H，全市場掃描同時執行兩套雷達。
 3. 短線與長線雷達各自建立 Market Story，不共用 Trigger。
 4. 15m 核心判定完成後可先發布只讀 `CORE_PREVIEW`；它不建立／推進持久 Signal Episode，也一律不可進場。
@@ -130,7 +130,7 @@ Trigger 是否存在與「現在是否適合進場」分開顯示：
 
 單幣掃描將「訊號生命週期」與「目前新進場資格」分開顯示。訊號一旦曾列入「可進」，便固定留在「已觸發・持續保留」區；順向走遠仍會顯示目前不要追價，不利側尚未碰到原始 SL 時則顯示容許回測或接近失效。這些即時位置提醒不會把卡片移出保留區，也不會改寫原 Entry／SL／TP。
 
-價格到達 TP1 或越過 SL／Invalidation 後，卡片分別顯示「已達止盈」或「已達止損」。15m 結果卡保留 5 小時，4H 結果卡保留 24 小時後自動移出可進區；歷史紀錄仍依原本保存規則保留。同一 Signal Episode 結束後不會復活；若同幣出現較新的正式 Trigger，會建立另一個 Trigger id 與全新 Entry、SL、TP，舊結果卡與新卡可同時存在。
+價格到達 TP1 或越過 SL／Invalidation 後，卡片分別顯示「已達止盈」或「已達止損」，並從 15m／4H 有效訊號頁移至獨立的「已結束」板塊。15m 結果卡保留 5 小時，4H 結果卡保留 24 小時；歷史紀錄仍依原本保存規則保留。同一 Signal Episode 結束後不會復活；若同幣出現較新的正式 Trigger，會建立另一個 Trigger id 與全新 Entry、SL、TP，新卡只出現在有效訊號頁。
 
 「可進」訊號先依交易品質由高至低排列；同分時依序比較資料新鮮度、剩餘 R:R，再比較較低滑價與較高流動性。掃描進行中保留上一輪卡片順序，本輪完整完成後才統一排序。同一 Episode 保留原 Entry／Stop／Target，不因刷新而漂移。
 
@@ -180,6 +180,8 @@ Trigger 是否存在與「現在是否適合進場」分開顯示：
 - 開啟或重新整理網頁只讀取最新報告，不會自動呼叫掃描；只有使用者按下頁面掃描按鈕才會啟動
 - 首頁候選先區分「可進」與「觀察」；未觸發項目以訊號準備度排序，執行環境分數不會被當成進場許可
 - 15m 與 4H 長線皆有全部、早期可進、目前可進、等待回踩、已錯過與接近觸發分頁
+- 已達 TP／SL 的終局卡集中到獨立「已結束」主板塊，並可切換全部、15m 與 4H；原始 Entry／SL／TP 和更早歷史紀錄仍保留
+- 全市場與單一合約入口都只接受 OKX `instCategory=1` 加密資產；股票型合約不會進入 K 線、OI、深度或策略掃描
 - 頂部提供 15m、4H 與「全市場掃描（15m＋4H）」三個固定可見入口；部分掃描保留另一雷達但維持各自資料年齡與過期標記
 - 亞洲盤、倫敦盤與紐約盤以台北／香港時間顯示；倫敦、紐約夏冬令依各自時區自動換算
 - 新鮮度、Lifecycle、價格位置、攻擊效率、Price Acceptance、控制權、市場參與、執行品質與資料品質
@@ -206,7 +208,7 @@ iPhone／iPad 的背景通知需先用 Safari 將雷達「加入主畫面」，�
 - `POST /api/scan`：啟動或加入唯一一輪掃描；`scan_mode` 可為 `SHORT`（15m）、`LONG`（4H）或 `FULL`（15m＋4H），亦可附本輪瀏覽器 `push_subscription`
 - `GET /api/report/preview`：本輪已完成的 15m 核心只讀候選；正式掃描完成後才更新持久 Episode 與最終卡片
 - `GET /api/report/latest`：手機需要的精簡 V3.4 JSON；完整 Raw Indicators 與內部 Market Story 不對外傳送
-- `POST /api/instrument/scan`：按需只掃一個 live USDT 永續；`horizon` 可為 `SHORT`、`LONG` 或 `BOTH`，只回傳請求週期的交易計畫，不重掃 Universe、不改寫全市場報告；核心週期、Ticker 與合約資料各自重試，錯誤回應會指出實際失敗來源
+- `POST /api/instrument/scan`：按需只掃一個 `instCategory=1` 的 live 加密資產 USDT 永續；`horizon` 可為 `SHORT`、`LONG` 或 `BOTH`，只回傳請求週期的交易計畫，不重掃 Universe、不改寫全市場報告；股票型與其他非加密合約會在合約驗證時拒絕，核心週期、Ticker 與合約資料各自重試，錯誤回應會指出實際失敗來源
 - `GET /api/preflight?inst_id=...&horizon=SHORT|LONG`：舊版 PWA 相容入口；委派給同一套單幣掃描與目前判定，不再維護另一套可能矛盾的答案
 - `POST /api/preflight/reanalyze`：舊版 PWA 相容別名，同樣使用統一單幣判定
 - `GET /api/report/latest.md`：中文文字報告
@@ -285,7 +287,7 @@ python -m unittest discover -s tests -v
 git diff --check
 ```
 
-測試涵蓋 Price Trigger 與進場資格分離、可進會員資格固定、Entry／SL／TP 不漂移、TP／SL 結果卡的 5／24 小時期限、同幣舊終局卡與新 Trigger 並存、單幣來源並行與短等待上限、結構＋波動分布止損、強弱 OI／Taker／CVD 自動目標、過近障礙不直接完成交易、流動性／Spread／Slippage／成交成本／R:R／異常行情只提醒不刪卡、資料不知道不冒充最新、Market Context／DST 時段、價格接受、控制權轉移、Signal Episode 去重與永久失效、舊資料／亂序資料不回寫、15m／4H 隔離、三種掃描、部分掃描與獨立新鮮度、`CORE_PREVIEW` 唯讀、可進排序、單幣統一判定、Scan Lock、舊請求不可覆蓋新結果、STALE 快照保留、API 失敗降級、Web Push、PWA 與 API contract。
+測試涵蓋 Price Trigger 與進場資格分離、可進會員資格固定、Entry／SL／TP 不漂移、TP／SL 結果卡的 5／24 小時期限與獨立已結束板塊、股票型／非加密合約在全市場及單一合約入口被排除、單幣來源並行與短等待上限、結構＋波動分布止損、強弱 OI／Taker／CVD 自動目標、過近障礙不直接完成交易、流動性／Spread／Slippage／成交成本／R:R／異常行情只提醒不刪卡、資料不知道不冒充最新、Market Context／DST 時段、價格接受、控制權轉移、Signal Episode 去重與永久失效、舊資料／亂序資料不回寫、15m／4H 隔離、三種掃描、部分掃描與獨立新鮮度、`CORE_PREVIEW` 唯讀、可進排序、Scan Lock、舊請求不可覆蓋新結果、STALE 快照保留、API 失敗降級、Web Push、PWA 與 API contract。
 
 ## 安全邊界與限制
 

@@ -1,4 +1,4 @@
-const SHELL_CACHE = "okx-radar-shell-v3.6-preflight-only-2";
+const SHELL_CACHE = "okx-radar-shell-v3.6-crypto-only-ended-1";
 const SHELL_ASSETS = ["/", "/manifest.webmanifest", "/radar-icon.svg"];
 
 self.addEventListener("install", event => {
