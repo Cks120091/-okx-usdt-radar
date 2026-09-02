@@ -408,8 +408,9 @@ def _public_decision_context(decision: Any) -> dict[str, Any]:
             "opposite_signal_created",
         ),
     )
+    continuation = _read(decision, "continuation_confirmation", {})
     payload["continuation_confirmation"] = _select(
-        _read(decision, "continuation_confirmation", {}),
+        continuation,
         (
             "key",
             "label",
@@ -421,6 +422,12 @@ def _public_decision_context(decision: Any) -> dict[str, Any]:
             "meaning",
         ),
     )
+    core_votes = _read(continuation, "core_votes", {})
+    payload["continuation_confirmation"]["core_votes"] = {
+        key: _select(value, ("state", "label", "detail"))
+        for key in ("OI", "TAKER_CVD", "VOLUME")
+        if isinstance((value := _read(core_votes, key, None)), Mapping)
+    }
     payload["quality"] = _select(
         _read(decision, "quality", {}),
         ("direction", "execution", "participation", "combined_score", "note"),

@@ -1423,6 +1423,19 @@ class DecisionContextTests(unittest.TestCase):
         self.assertIn("conflicts", continuation)
         self.assertIn("missing", continuation)
         self.assertIn("meaning", continuation)
+        self.assertEqual(
+            set(continuation["core_votes"]),
+            {"OI", "TAKER_CVD", "VOLUME"},
+        )
+        self.assertEqual(
+            continuation["core_votes"]["OI"]["state"],
+            "SUPPORT",
+        )
+        self.assertEqual(
+            set(continuation["core_votes"]["OI"]),
+            {"state", "label", "detail"},
+        )
+        self.assertNotIn("severe", continuation["core_votes"]["OI"])
         self.assertNotIn("flow_oi_alignment", public["market_metrics"])
 
     def test_market_state_without_plan_is_no_edge_not_a_fake_entry(self):

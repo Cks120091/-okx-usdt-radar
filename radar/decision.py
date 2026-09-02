@@ -993,15 +993,19 @@ def _continuation_confirmation_layer(
     if support_count == 0 and capital_conflict_count == 0:
         missing.append("至少一項同向資金證據")
     labels = {
-        "CONFIRMED": "高｜同向延續已確認",
-        "FORMING": "中｜同向延續形成中",
-        "CONFLICT": "低｜延續證據衝突",
-        "UNKNOWN": "未知｜延續資料不足",
+        "CONFIRMED": "高｜同向續走證據一致",
+        "FORMING": "中｜同向續走形成中",
+        "CONFLICT": "低｜續走證據衝突",
+        "UNKNOWN": "未知｜續走資料不足",
     }
     return {
         "key": key,
         "label": labels[key],
         "score": round(score, 1) if score is not None else None,
+        "core_votes": {
+            domain: _continuation_vote_summary(domain, vote)
+            for domain, vote in votes.items()
+        },
         "supporting": _unique(supporting)[:8],
         "conflicts": _unique(conflicts)[:8],
         "missing": _unique(missing)[:8],
@@ -1191,6 +1195,34 @@ def _vote(
         "severe": severe,
         "warnings": _unique([str(value) for value in (warnings or []) if value]),
         "missing": _unique([str(value) for value in (missing or []) if value]),
+    }
+
+
+def _continuation_vote_summary(
+    domain: str,
+    vote: Mapping[str, Any],
+) -> dict[str, str]:
+    state = str(vote.get("state") or "UNKNOWN").upper()
+    labels = {
+        "SUPPORT": "同向支持",
+        "CONFLICT": "出現反證",
+        "NEUTRAL": "尚未確認",
+        "UNKNOWN": "資料不足",
+    }
+    details = [
+        *_strings(vote.get("reasons", [])),
+        *_strings(vote.get("warnings", [])),
+        *_strings(vote.get("missing", [])),
+    ]
+    fallbacks = {
+        "OI": "OI 尚未提供明確新增部位方向",
+        "TAKER_CVD": "Taker／CVD 尚未提供明確主動成交方向",
+        "VOLUME": "成交量尚未提供明確同向參與",
+    }
+    return {
+        "state": state if state in labels else "UNKNOWN",
+        "label": labels.get(state, labels["UNKNOWN"]),
+        "detail": details[0] if details else fallbacks.get(domain, "方向資料不足"),
     }
 
 

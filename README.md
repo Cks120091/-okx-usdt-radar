@@ -148,6 +148,8 @@ Trigger 是否存在與「現在是否適合進場」分開顯示：
 
 「可進」訊號先依同向延續確認程度排列（`CONFIRMED` → `FORMING` → `UNKNOWN` → `CONFLICT`），再依交易品質由高至低；之後依序比較資料新鮮度、剩餘 R:R、較低滑價與較高流動性。這只是呈現順位，不會刪卡或改變進場權限。掃描進行中保留上一輪卡片順序，本輪完整完成後才統一排序。同一 Episode 保留原 Entry／Stop／Target，不因刷新而漂移。
 
+手機訊號卡使用交易終端式資訊層級：首列只突出幣種、週期、方向、目前進場狀態與「續走證據」；原本較零散的階段／新鮮度改為次要文字。Entry、SL、TP 與 R:R 固定為四格計畫，TP2 保留在 TP 格內。其下分別顯示 OI、Taker／CVD、核心成交量三類狀態，以及最重要的一項反證、提醒或待補資料；完整多週期、MA／MACD、Market Story 與安全資料預設收合。`證據一致` 只代表資金與成交證據較一致，不代表勝率。
+
 ## 真實歷史績效
 
 `data/radar_state.sqlite3` 保存每個訊號的版本、方向、週期、Trigger 類型、Market Participation、Execution Quality、MFE、MAE、TP1／SL 先後與 Final R。

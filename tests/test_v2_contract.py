@@ -110,7 +110,10 @@ class V33ContractTests(unittest.TestCase):
         self.assertIn(".primary-nav{grid-row:5;position:relative", html)
         self.assertIn("grid-template-columns:repeat(5,minmax(0,1fr))", html)
         self.assertIn(".decision-actions{display:grid;grid-template-columns:repeat(2,minmax(0,1fr))", html)
-        self.assertIn("okx-radar-shell-v3.6-crypto-only-ended-1", service_worker)
+        self.assertIn('<body data-active-group="home">', html)
+        self.assertIn('body:not([data-active-group="home"]) .command-deck', html)
+        self.assertIn("document.body.dataset.activeGroup=group", html)
+        self.assertIn("okx-radar-shell-v3.7-signal-terminal-1", service_worker)
         self.assertIn("市場自動計畫", html)
         self.assertIn("plan.adaptive_market_plan", html)
         self.assertIn("plan.market_plan_sources", html)
@@ -221,7 +224,7 @@ class V33ContractTests(unittest.TestCase):
         self.assertIn("function signalTriggerTime(item)", html)
         self.assertIn("訊號觸發時間（台灣）", html)
         self.assertNotIn("status!=='ENTRY_READY'&&status!=='MISSED_ENTRY'", html)
-        self.assertIn("okx-radar-shell-v3.6-crypto-only-ended-1", service_worker)
+        self.assertIn("okx-radar-shell-v3.7-signal-terminal-1", service_worker)
         self.assertIn("$('#preflightRefresh').addEventListener('click',loadPreflight)", html)
         self.assertIn("${decisionPanel(item)}", html)
         self.assertNotIn("showPreflight", html)
@@ -496,7 +499,8 @@ class V33ContractTests(unittest.TestCase):
         )[0]
         self.assertIn("const entry=item.entry_eligibility||{}", decision_panel)
         self.assertIn("preflightActions(item.inst_id,horizon,item,false)", decision_panel)
-        self.assertIn("tradeRoute(item", decision_panel)
+        self.assertIn("signalTradeGrid(item", decision_panel)
+        self.assertIn("preview:true", decision_panel)
         self.assertNotIn("finalDecisionPanel", decision_panel)
         self.assertNotIn("decisionContext", decision_panel)
         self.assertIn(
@@ -517,16 +521,26 @@ class V33ContractTests(unittest.TestCase):
         self.assertIn("item.entry_eligibility?.status", fingerprint)
         self.assertIn("item.entry_eligibility?.original_status", fingerprint)
         self.assertIn("item.lifecycle?.status", fingerprint)
-        self.assertIn("item.decision_context?.continuation_confirmation?.key", fingerprint)
+        self.assertIn("item.decision_context?.continuation_confirmation||{}", fingerprint)
+        self.assertIn("continuation.key", fingerprint)
+        self.assertIn("votes.OI?.state", fingerprint)
+        self.assertIn("votes.TAKER_CVD?.state", fingerprint)
+        self.assertIn("votes.VOLUME?.state", fingerprint)
 
         continuation = html.split("function continuationConfirmation(item)", 1)[1].split(
             "function directionBadge", 1
         )[0]
         self.assertIn("item?.decision_context?.continuation_confirmation", continuation)
-        self.assertIn("CONFIRMED:['continuation-confirmed-b','同向延續｜已確認']", continuation)
-        self.assertIn("FORMING:['continuation-forming-b','同向延續｜形成中']", continuation)
-        self.assertIn("CONFLICT:['continuation-conflict-b','同向延續｜有反證']", continuation)
-        self.assertIn("UNKNOWN:['continuation-unknown-b','同向延續｜資料不足']", continuation)
+        self.assertIn("CONFIRMED:['continuation-confirmed-b','續走｜證據一致']", continuation)
+        self.assertIn("FORMING:['continuation-forming-b','續走｜形成中']", continuation)
+        self.assertIn("CONFLICT:['continuation-conflict-b','續走｜有反證']", continuation)
+        self.assertIn("UNKNOWN:['continuation-unknown-b','續走｜資料不足']", continuation)
+        self.assertIn("function continuationCoreVote(item,key)", html)
+        self.assertIn("confirmation.core_votes?.[key]", continuation)
+        self.assertIn("function continuationStrip(item)", html)
+        self.assertIn("hasCoreVotes=domains.every", continuation)
+        self.assertIn("這是更新前的保留資料", continuation)
+        self.assertIn("readOnlyReason=itemReadOnlyReason(item)", continuation)
         self.assertIn("confirmation.supporting", continuation)
         self.assertIn("confirmation.conflicts", continuation)
         self.assertIn("confirmation.warnings", continuation)
@@ -541,6 +555,13 @@ class V33ContractTests(unittest.TestCase):
             "function renderWatchlist", 1
         )[0]
         self.assertIn("${continuationBadge(item)}", render_signals)
+        self.assertIn("${continuationStrip(item)}", render_signals)
+        self.assertIn("signal-status-line", render_signals)
+        self.assertIn("完整判定資料", render_signals)
+        self.assertIn("details(item,true)", render_signals)
+        self.assertIn("function signalTradeGrid(item,options={})", html)
+        self.assertIn("signal-plan-grid", html)
+        self.assertIn("R:R｜${esc(rrLabel)}", html)
 
         # 延續確認只能負責說明、重繪與同進場狀態內排序，不得變成進場硬門檻。
         self.assertNotIn("continuationConfirmation", entry_status)
@@ -672,8 +693,8 @@ class V33ContractTests(unittest.TestCase):
         self.assertIn("等待新的 Trigger 與全新交易計畫", html)
         self.assertIn("舊 Entry／SL／TP 不會復活", html)
         self.assertIn("舊交易計畫已結束", html)
-        self.assertIn("tradeRoute(item,{prefix:'原始 '})", html)
-        self.assertIn("okx-radar-shell-v3.6-crypto-only-ended-1", worker)
+        self.assertIn("signalTradeGrid(item,{prefix:'原始 ',original:true})", html)
+        self.assertIn("okx-radar-shell-v3.7-signal-terminal-1", worker)
 
     def test_market_scan_has_no_github_schedule(self):
         root = Path(__file__).parents[1]
