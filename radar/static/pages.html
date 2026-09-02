@@ -301,7 +301,7 @@
         </article>
         <article class="overview-card wide">
           <h3>最新 OI（未平倉量）／價格異動</h3><div class="overview-sub">區分新增多空部位與平倉推動；不是直接買賣訊號。</div>
-          <div id="overviewAnomalies"><div class="empty">需要至少兩輪掃描才能比較 OI（未平倉量）變化。</div></div>
+          <div id="overviewAnomalies"><div class="empty">等待本輪掃描結果；OI 數值、比較基準與異動狀態會分開顯示。</div></div>
         </article>
       </div>
     </section>
@@ -371,7 +371,7 @@
       <div id="anomalyGuide" class="overview-card">
         <div class="overview-sub"><strong class="up">多頭建倉</strong>＝OI（未平倉量）增＋價格漲；<strong class="down">空頭建倉</strong>＝OI（未平倉量）增＋價格跌；空頭回補／多頭平倉屬被動推動，可靠度低於新增部位。</div>
       </div>
-      <div id="anomalyBox"><div class="empty">需要至少兩輪掃描才能比較 OI（未平倉量）變化。</div></div>
+      <div id="anomalyBox"><div class="empty">等待本輪掃描結果；OI 數值、比較基準與異動狀態會分開顯示。</div></div>
     </section>
     <section id="map" class="section">
       <div class="section-title"><h2>市場地圖</h2><span>上線中的加密資產 USDT 永續合約</span></div>
@@ -749,15 +749,31 @@
       $('#rankingBox').innerHTML=panel('LONG','🟢 做多候選','long-r')+panel('SHORT','🔴 做空候選','short-r');
     }
 
+    function oiAvailability(item){
+      const m=item?.market_metrics||{},current=metricNumber(m.open_interest_usd),change=metricNumber(m.open_interest_change_pct);
+      if(current===null)return {key:'MISSING',current,change,label:'OI 數值未取得',detail:'本輪未取得 OI 數值；可能是 OI API 或該幣資料暫時不可用。'};
+      if(change===null)return {key:'NO_BASELINE',current,change,label:'OI 已取得・待比較',detail:'OI 數值已取得，但尚無上一輪比較基準。'};
+      return {key:'COMPARED',current,change,label:'OI 已完成比較',detail:'本輪已完成與上一輪 OI 的比較。'};
+    }
+
     function oiInterpretation(item){
-      const m=item.market_metrics||{};const oi=metricNumber(m.open_interest_change_pct),move=metricNumber(m.price_change_1h_pct);let key=m.oi_flow_state;
-      if(!key&&oi!==null&&move!==null){if(oi>=.5)key=move>=0?'LONG_BUILD':'SHORT_BUILD';else if(oi<=-.8)key=move>=0?'SHORT_COVER':'LONG_EXIT';else key='STABLE'}
-      return ({LONG_BUILD:['多頭建倉','新增買方部位，偏多參與','up'],SHORT_BUILD:['空頭建倉','新增賣方部位，偏空參與','down'],SHORT_COVER:['空頭回補','被動上漲，需等新買盤接力','up'],LONG_EXIT:['多頭平倉','被動下跌，注意延續風險','down'],STABLE:['持倉小幅變動','未達顯著異動門檻','flat']}[key]||['持倉資料待比較','至少需要連續兩輪掃描','flat']);
+      const m=item.market_metrics||{},availability=oiAvailability(item),oi=availability.change,move=metricNumber(m.price_change_1h_pct);let key=m.oi_flow_state;
+      if(availability.key!=='COMPARED')return [availability.label,availability.detail,'flat'];
+      if(!key&&move!==null){if(oi>=.5)key=move>=0?'LONG_BUILD':'SHORT_BUILD';else if(oi<=-.8)key=move>=0?'SHORT_COVER':'LONG_EXIT';else key='STABLE'}
+      return ({LONG_BUILD:['多頭建倉','新增買方部位，偏多參與','up'],SHORT_BUILD:['空頭建倉','新增賣方部位，偏空參與','down'],SHORT_COVER:['空頭回補','被動上漲，需等新買盤接力','up'],LONG_EXIT:['多頭平倉','被動下跌，注意延續風險','down'],STABLE:['持倉小幅變動','OI 已完成比較，但未達顯著異動門檻','flat']}[key]||['OI 已完成比較','已有上一輪比較結果，但價格方向資料不足','flat']);
+    }
+
+    function oiAnomalyEmptyState(markets){
+      const source=Array.isArray(markets)?markets:[],availability=source.map(oiAvailability),comparedCount=availability.filter(item=>item.key==='COMPARED').length,noBaselineCount=availability.filter(item=>item.key==='NO_BASELINE').length,fetchedCount=availability.filter(item=>item.key!=='MISSING').length,missingCount=source.length-fetchedCount;
+      if(!source.length)return '尚無市場資料；完成掃描後會顯示 OI 取得與比較狀態。';
+      if(comparedCount)return `OI 已完成上一輪比較，但目前沒有幣種達到異動門檻${noBaselineCount?`；另有 ${noBaselineCount} 個幣種已取得 OI、仍待下一輪基準`:''}${missingCount?`；另有 ${missingCount} 個幣種未取得 OI 數值`:''}。`;
+      if(fetchedCount)return `OI 數值已取得（${fetchedCount}/${source.length}），但尚無上一輪比較基準${missingCount?`；另有 ${missingCount} 個幣種未取得 OI 數值`:''}。完成下一輪掃描後即可比較。`;
+      return '本輪未取得 OI 數值；OI API 或該幣資料可能暫時不可用，請稍後重新掃描。';
     }
 
     function anomalyCards(markets,limit){
       const rows=markets.filter(item=>{const oi=metricNumber(item.market_metrics?.open_interest_change_pct);return oi!==null&&Math.abs(oi)>=.35}).sort((a,b)=>Math.abs(metricNumber(b.market_metrics.open_interest_change_pct)||0)-Math.abs(metricNumber(a.market_metrics.open_interest_change_pct)||0)).slice(0,limit);
-      if(!rows.length)return '<div class="empty">目前沒有達到異動門檻的 OI（未平倉量）變化；至少需要連續兩輪掃描才能比較。</div>';
+      if(!rows.length)return `<div class="empty">${esc(oiAnomalyEmptyState(markets))}</div>`;
       return `<div class="anomaly-list">${rows.map(item=>{const m=item.market_metrics||{},info=oiInterpretation(item);return `<article class="anomaly-card"><div><div class="oi-state ${info[2]}">${esc(info[0])} · ${esc(displaySymbol(item.inst_id))}</div><div class="oi-meta">${esc(info[1])}<br>價格 1H ${signed(m.price_change_1h_pct)} · 24H ${signed(m.price_change_24h_pct)}</div><div class="quick-links">${preflightActions(item.inst_id,'BOTH',item)}</div></div><div class="oi-change ${changeClass(m.open_interest_change_pct)}">OI（未平倉量）${signed(m.open_interest_change_pct)}<small>${price(m.last_price,item)}</small></div></article>`}).join('')}</div>`;
     }
 
@@ -771,10 +787,21 @@
     function continuationConfirmation(item){const value=item?.decision_context?.continuation_confirmation||{},rawKey=String(value.key||'UNKNOWN').toUpperCase(),key=['CONFIRMED','FORMING','CONFLICT','UNKNOWN'].includes(rawKey)?rawKey:'UNKNOWN';return {...value,key}}
     function continuationRank(item){return ({CONFIRMED:3,FORMING:2,UNKNOWN:1,CONFLICT:0})[continuationConfirmation(item).key]}
     function continuationBadge(item){if(terminalSignalOutcome(item))return '';const key=continuationConfirmation(item).key,view={CONFIRMED:['continuation-confirmed-b','續走｜證據一致'],FORMING:['continuation-forming-b','續走｜形成中'],CONFLICT:['continuation-conflict-b','續走｜有反證'],UNKNOWN:['continuation-unknown-b','續走｜資料不足']}[key];if(itemReadOnlyReason(item))return `<span class="badge continuation-b continuation-reference-b">續走｜上輪${esc(view[1].split('｜')[1])}</span>`;return `<span class="badge continuation-b ${view[0]}">${esc(view[1])}</span>`}
-    function continuationCoreVote(item,key){const confirmation=continuationConfirmation(item),raw=confirmation.core_votes?.[key]||{},state=String(raw.state||'UNKNOWN').toUpperCase(),safeState=['SUPPORT','CONFLICT','NEUTRAL','UNKNOWN'].includes(state)?state:'UNKNOWN',fallback={OI:'OI 尚未提供明確方向',TAKER_CVD:'主動成交方向待確認',VOLUME:'核心量能方向待確認'}[key];return {state:safeState,label:raw.label||({SUPPORT:'同向支持',CONFLICT:'出現反證',NEUTRAL:'尚未確認',UNKNOWN:'資料不足'}[safeState]),detail:raw.detail||fallback}}
+    function continuationCoreVote(item,key){
+      const confirmation=continuationConfirmation(item),raw=confirmation.core_votes?.[key]||{},state=String(raw.state||'UNKNOWN').toUpperCase(),safeState=['SUPPORT','CONFLICT','NEUTRAL','UNKNOWN'].includes(state)?state:'UNKNOWN',fallback={OI:'OI 尚未提供明確方向',TAKER_CVD:'主動成交方向待確認',VOLUME:'核心量能方向待確認'}[key];
+      let label=raw.label||({SUPPORT:'同向支持',CONFLICT:'出現反證',NEUTRAL:'尚未確認',UNKNOWN:'資料不足'}[safeState]),detail=raw.detail||fallback;
+      if(key==='OI'&&safeState==='NEUTRAL'){label='已取得・未達同向新增門檻';detail=raw.detail||'OI 已完成比較，但未達同向新增部位門檻。'}
+      if(key==='OI'&&safeState==='UNKNOWN'){
+        const availability=oiAvailability(item);
+        if(availability.key==='MISSING'){label='數值未取得';detail=availability.detail}
+        else if(availability.key==='NO_BASELINE'){label='已取得・待基準';detail=availability.detail}
+        else {label=raw.label||'方向資料不足';detail=raw.detail||'OI 已完成比較，但後端尚未形成方向判定。'}
+      }
+      return {state:safeState,label,detail}
+    }
     function continuationStrip(item){if(terminalSignalOutcome(item)||isPreviewItem(item))return '';const confirmation=continuationConfirmation(item),liveView={CONFIRMED:['confirmed','證據一致'],FORMING:['forming','持續形成'],CONFLICT:['conflict','出現反證'],UNKNOWN:['unknown','資料不足']}[confirmation.key],readOnlyReason=itemReadOnlyReason(item),stateView=readOnlyReason?['reference',`上輪${liveView[1]} · 只供參考`]:liveView,score=metricNumber(confirmation.score),domains=[['OI','OI 新資金'],['TAKER_CVD','Taker／CVD'],['VOLUME','成交量']],hasCoreVotes=domains.every(([key])=>isRecord(confirmation.core_votes?.[key])),coreGrid=hasCoreVotes?`<div class="continuation-core-grid">${domains.map(([key,label])=>{const vote=continuationCoreVote(item,key);return `<div class="continuation-core-card ${vote.state.toLowerCase()}"><span class="continuation-core-name"><i class="continuation-core-dot"></i>${esc(label)}</span><b class="continuation-core-value">${tech(vote.label)}</b><span class="continuation-core-detail">${tech(vote.detail)}</span></div>`}).join('')}</div>`:'<div class="continuation-alert missing"><b>三項核心</b>這是更新前的保留資料；重新掃描後才會顯示 OI、Taker／CVD 與成交量的個別狀態。</div>';let alert='';if(hasCoreVotes&&confirmation.conflicts?.length)alert=`<div class="continuation-alert conflict"><b>反證</b>${tech(confirmation.conflicts.slice(0,2).join('；'))}</div>`;else if(hasCoreVotes&&confirmation.warnings?.length)alert=`<div class="continuation-alert warning"><b>提醒</b>${tech(confirmation.warnings.slice(0,2).join('；'))}</div>`;else if(hasCoreVotes&&confirmation.missing?.length)alert=`<div class="continuation-alert missing"><b>待補</b>${tech(confirmation.missing.slice(0,2).join('；'))}</div>`;return `<section class="continuation-strip ${stateView[0]}" aria-label="同向續走證據"><div class="continuation-strip-head"><div class="continuation-title"><span class="continuation-state">同向續走 · ${esc(stateView[1])}</span><small>資金與成交接力</small></div><span class="continuation-score">${score===null?'尚未計分':`<b>${num(score,0)}</b> / 100`} · ${readOnlyReason?'舊快照':'非勝率'}</span></div>${coreGrid}${alert}</section>`}
     function continuationItems(values,fallback){return Array.isArray(values)&&values.length?values.slice(0,6).map(tech).join('；'):esc(fallback)}
-    function continuationDetails(item){if(terminalSignalOutcome(item)||!item?.entry_low)return '';const confirmation=continuationConfirmation(item),score=metricNumber(confirmation.score),stateLabel={CONFIRMED:'高｜同向續走證據一致',FORMING:'中｜同向續走形成中',CONFLICT:'低｜續走出現反證',UNKNOWN:'未知｜續走資料不足'}[confirmation.key],meaning=confirmation.meaning||'這是當下同向延續證據的一致度，不是勝率，也不保證價格一定朝原方向移動。';return `<div class="detail continuation-detail"><div class="continuation-detail-head"><strong>${tech(stateLabel)}</strong><span class="continuation-detail-score">${score===null?'證據分數待累積':`證據一致度 ${num(score,1)} / 100`}</span></div><div class="continuation-meaning">${tech(meaning)}</div><div class="continuation-core"><b>三項核心怎麼看（不是勝率）</b>OI（未平倉量）看是否有新增部位；Taker Flow／CVD 看主動買賣方是否沿 Trigger 方向出手；成交量看市場參與是否放大。三者都必須配合價格成果與結構判讀。</div><div class="continuation-evidence"><div class="support"><b>支持</b>${continuationItems(confirmation.supporting,'尚無明確支持')}</div><div class="conflict"><b>反證</b>${continuationItems(confirmation.conflicts,'目前沒有明確反證')}</div><div class="warning"><b>降級提醒</b>${continuationItems(confirmation.warnings,'目前沒有額外提醒')}</div><div class="missing"><b>待補資料</b>${continuationItems(confirmation.missing,'核心資料已取得')}</div></div></div>`}
+    function continuationDetails(item){if(terminalSignalOutcome(item)||!item?.entry_low)return '';const confirmation=continuationConfirmation(item),score=metricNumber(confirmation.score),stateLabel={CONFIRMED:'高｜同向續走證據一致',FORMING:'中｜同向續走形成中',CONFLICT:'低｜續走出現反證',UNKNOWN:'未知｜續走資料不足'}[confirmation.key],meaning=confirmation.meaning||'這是當下同向延續證據的一致度，不是勝率，也不保證價格一定朝原方向移動。',hasCoreVotes=['OI','TAKER_CVD','VOLUME'].every(key=>isRecord(confirmation.core_votes?.[key])),missingFallback=!hasCoreVotes?'更新前保留資料未包含三項核心明細；重新掃描後補齊。':confirmation.key==='UNKNOWN'?'目前未列出缺失來源，但仍沒有足夠證據確認續走。':'目前沒有待補資料。';return `<div class="detail continuation-detail"><div class="continuation-detail-head"><strong>${tech(stateLabel)}</strong><span class="continuation-detail-score">${score===null?'證據分數待累積':`證據一致度 ${num(score,1)} / 100`}</span></div><div class="continuation-meaning">${tech(meaning)}</div><div class="continuation-core"><b>三項核心怎麼看（不是勝率）</b>OI（未平倉量）看是否有新增部位；Taker Flow／CVD 看主動買賣方是否沿 Trigger 方向出手；成交量看市場參與是否放大。三者都必須配合價格成果與結構判讀。</div><div class="continuation-evidence"><div class="support"><b>支持</b>${continuationItems(confirmation.supporting,'尚無明確支持')}</div><div class="conflict"><b>反證</b>${continuationItems(confirmation.conflicts,'目前沒有明確反證')}</div><div class="warning"><b>降級提醒</b>${continuationItems(confirmation.warnings,'目前沒有額外提醒')}</div><div class="missing"><b>待補資料</b>${continuationItems(confirmation.missing,missingFallback)}</div></div></div>`}
     function directionBadge(item){const dir=item.direction||'NEUTRAL';return `<span class="badge ${dir==='LONG'?'long-b':dir==='SHORT'?'short-b':'watch-b'}"><i class="direction-dot"></i>${esc(directionName[dir]||'中性')}</span>`}
     function horizonBadge(item){return `<span class="badge watch-b">${item?.radar_horizon==='LONG'?'4H 長線':'15m 短線'}</span>`}
     function stageBadge(item){const stage=item.signal_stage||item.status||'WATCH';let cls='watch-b';if(stage==='EARLY'||stage==='EARLY_SIGNAL'||stage==='REENTRY')cls='early-b';else if(stage==='CONFIRMED')cls=item.direction==='LONG'?'confirmed-long':'confirmed-short';else if(stage==='NEAR_TRIGGER')cls='near-b';else if(stage==='EXTENDED'||stage==='TRENDING'||stage==='COMPLETED')cls='extended-b';else if(stage==='INVALIDATED'||stage==='NO_FOLLOW_THROUGH')cls='invalid-b';return `<span class="badge ${cls}">${esc(stageName[stage]||'觀望')}</span>`}

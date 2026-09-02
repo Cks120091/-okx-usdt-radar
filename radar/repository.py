@@ -30,6 +30,67 @@ TERMINAL_CARD_RETENTION_HOURS = {
 }
 
 
+# A completed deep-data pass can arrive while the accepted price Trigger is
+# still on the same closed core candle.  These fields describe live market
+# participation/execution context only; they must never be used as a backdoor
+# to rewrite the Episode's price plan or closed-candle lifecycle.
+_LIVE_ADVISORY_METRIC_KEYS = frozenset(
+    {
+        "best_bid",
+        "best_ask",
+        "sampled_at",
+        "timestamp_ms",
+        "cvd",
+        "market_driver",
+        "relative_strength",
+        "market_resonance",
+        "market_sessions",
+        "anomaly_state",
+        "anomalies",
+    }
+)
+_LIVE_ADVISORY_METRIC_PREFIXES = (
+    "open_interest_",
+    "oi_",
+    "flow_",
+    "taker_",
+    "funding_",
+    "order_book_",
+    "context_",
+    "source_",
+    "market_participation_",
+    "execution_",
+    "bid_depth_",
+    "ask_depth_",
+    "buy_slippage_",
+    "sell_slippage_",
+)
+_LIVE_DATA_QUALITY_KEYS = frozenset(
+    {
+        "deep",
+        "deep_status",
+        "deep_available_sources",
+        "missing_sources",
+        "context_sampled_at",
+        "source_success",
+        "source_completeness_pct",
+        "api_failures",
+    }
+)
+_LIVE_SAFETY_CHECK_KEYS = frozenset(
+    {
+        "context_data",
+        "deep_data_available",
+        "open_interest",
+        "execution_depth",
+        "execution_cost",
+        "execution_cost_warning",
+        "slippage",
+        "anomalous_market",
+    }
+)
+
+
 def terminal_card_retention_until(closed_at: str, horizon: str) -> str:
     """Return the exact UI-retention deadline for a proven TP/SL outcome."""
 
@@ -408,7 +469,13 @@ class SignalRepository:
                 output_by_id[unavailable.trigger_id] = unavailable
                 seen_signal_ids.add(unavailable.trigger_id)
                 continue
-            updated = self._advance_existing(stored, row, state.market_metrics, completed_at)
+            updated = self._advance_existing(
+                stored,
+                row,
+                state.market_metrics,
+                completed_at,
+                advisory_source=state,
+            )
             if updated.freshness not in ("COMPLETED", "INVALIDATED"):
                 output_by_id[updated.trigger_id] = updated
                 seen_signal_ids.add(updated.trigger_id)
@@ -900,11 +967,28 @@ class SignalRepository:
             )
             if (
                 last_evaluated_core_ts > 0
-                and candidate_core_ts <= last_evaluated_core_ts
+                and candidate_core_ts < last_evaluated_core_ts
             ):
                 # Score, evidence, context and execution facts belong to the
-                # same closed-core snapshot. A delayed/equal candidate cannot
+                # accepted closed-core snapshot. A delayed candidate cannot
                 # roll any part of the accepted episode backwards.
+                return self._unchanged_projection(existing)
+            if (
+                last_evaluated_core_ts > 0
+                and candidate_core_ts == last_evaluated_core_ts
+            ):
+                # Deep OI / flow / execution data may finish after the price
+                # Trigger was stored.  Refresh only the explicitly advisory
+                # projection for the same symbol, horizon and direction.  The
+                # immutable plan, Trigger and lifecycle stay byte-for-byte
+                # anchored to the accepted Episode.
+                if str(active["direction"]) == raw.direction:
+                    return self._refresh_same_core_advisory(
+                        existing,
+                        raw,
+                        active,
+                        completed_at,
+                    )
                 return self._unchanged_projection(existing)
 
             if str(active["direction"]) != raw.direction:
@@ -1018,12 +1102,141 @@ class SignalRepository:
         )
         return created
 
+    def _refresh_same_core_advisory(
+        self,
+        existing: Signal,
+        source: Signal | MarketState,
+        row: sqlite3.Row,
+        completed_at: str,
+    ) -> Signal:
+        """Persist fresh live context without evaluating the core candle twice.
+
+        ``source`` has already been matched to the exact accepted core
+        timestamp by the caller.  Keep this merge deliberately narrow: all
+        trade-plan, Trigger, stage, outcome and lifecycle values continue to
+        come from ``existing``.
+        """
+
+        if (
+            source.inst_id != existing.inst_id
+            or source.radar_horizon != existing.radar_horizon
+            or source.direction != existing.direction
+        ):
+            return self._unchanged_projection(existing)
+        source_core_ts = (
+            _signal_core_timestamp(source)
+            if isinstance(source, Signal)
+            else _market_state_core_timestamp(source)
+        )
+        accepted_core_ts = max(
+            int(existing.lifecycle.get("last_evaluated_core_ts") or 0),
+            _signal_core_timestamp(existing),
+        )
+        if (
+            source_core_ts <= 0
+            or accepted_core_ts <= 0
+            or source_core_ts != accepted_core_ts
+        ):
+            return self._unchanged_projection(existing)
+
+        metrics = dict(existing.market_metrics)
+        for key, value in source.market_metrics.items():
+            normalized = str(key)
+            if (
+                normalized in _LIVE_ADVISORY_METRIC_KEYS
+                or normalized.startswith(_LIVE_ADVISORY_METRIC_PREFIXES)
+            ):
+                metrics[normalized] = value
+
+        story = dict(existing.market_story)
+        source_story = source.market_story
+        for key in ("context", "interpretation"):
+            if key in source_story:
+                story[key] = source_story[key]
+
+        groups = dict(existing.evidence_groups)
+        participation_group = source.evidence_groups.get("participation_flow")
+        if isinstance(participation_group, dict):
+            groups["participation_flow"] = dict(participation_group)
+
+        data_quality = dict(existing.data_quality)
+        for key, value in source.data_quality.items():
+            normalized = str(key)
+            if (
+                normalized in _LIVE_DATA_QUALITY_KEYS
+                or normalized.startswith(("deep_", "context_", "source_", "api_"))
+            ):
+                data_quality[normalized] = value
+
+        # Replace only context/execution checks.  Price-plan and structural
+        # safety rows stay anchored to the accepted closed-core evaluation.
+        safety_checks = [
+            dict(check)
+            for check in existing.safety_checks
+            if str(check.get("key") or "") not in _LIVE_SAFETY_CHECK_KEYS
+        ]
+        safety_checks.extend(
+            dict(check)
+            for check in source.safety_checks
+            if str(check.get("key") or "") in _LIVE_SAFETY_CHECK_KEYS
+        )
+
+        refreshed = replace(
+            existing,
+            market_metrics=metrics,
+            evidence_groups=groups,
+            supporting_evidence=list(source.supporting_evidence),
+            conflicts=list(source.conflicts),
+            neutral_evidence=list(source.neutral_evidence),
+            safety_checks=safety_checks,
+            market_participation=dict(source.market_participation),
+            execution_quality=dict(source.execution_quality),
+            data_quality=data_quality,
+            market_story=story,
+        )
+        payload = json.dumps(_signal_payload(refreshed), ensure_ascii=False)
+        if payload == row["payload_json"]:
+            return self._unchanged_projection(refreshed)
+
+        participation = refreshed.market_participation.get("state")
+        quality = _number(refreshed.execution_quality.get("score"))
+        with self._write_scope():
+            cursor = self._connection.execute(
+                """
+                UPDATE signals SET
+                    updated_at=?, participation_state=?, execution_quality=?,
+                    payload_json=?
+                WHERE signal_id=? AND status='ACTIVE' AND payload_json=?
+                """,
+                (
+                    completed_at,
+                    participation,
+                    quality,
+                    payload,
+                    row["signal_id"],
+                    row["payload_json"],
+                ),
+            )
+            if cursor.rowcount <= 0:
+                current = self._connection.execute(
+                    "SELECT * FROM signals WHERE signal_id=?",
+                    (row["signal_id"],),
+                ).fetchone()
+                if current is None:
+                    return self._terminal_projection(row)
+                accepted = Signal.from_dict(json.loads(current["payload_json"]))
+                if current["status"] != "ACTIVE":
+                    return accepted
+                return self._unchanged_projection(accepted)
+        return self._unchanged_projection(refreshed)
+
     def _advance_existing(
         self,
         signal: Signal,
         row: sqlite3.Row,
         metrics: dict[str, Any],
         completed_at: str,
+        advisory_source: Signal | MarketState | None = None,
     ) -> Signal:
         stage_before = str(row["stage"])
         persisted = Signal.from_dict(json.loads(row["payload_json"]))
@@ -1043,17 +1256,29 @@ class SignalRepository:
         )
         if (
             previous_evaluated_core_ts > 0
-            and data_ts <= previous_evaluated_core_ts
+            and data_ts < previous_evaluated_core_ts
         ):
             # State-only carryover goes through this method too. Never let an
-            # older/equal state mutate lifecycle, metrics, or invalidate a plan
-            # that was already evaluated on a newer closed core candle.
+            # older state mutate lifecycle, metrics, or invalidate a plan that
+            # was already evaluated on a newer closed core candle.
             return self._unchanged_projection(persisted)
-        same_core_snapshot = bool(
-            data_ts
-            and previous_evaluated_core_ts
-            and data_ts <= previous_evaluated_core_ts
-        )
+        if (
+            previous_evaluated_core_ts > 0
+            and data_ts == previous_evaluated_core_ts
+        ):
+            if (
+                advisory_source is not None
+                and advisory_source.inst_id == persisted.inst_id
+                and advisory_source.radar_horizon == persisted.radar_horizon
+                and advisory_source.direction == persisted.direction
+            ):
+                return self._refresh_same_core_advisory(
+                    persisted,
+                    advisory_source,
+                    row,
+                    completed_at,
+                )
+            return self._unchanged_projection(persisted)
         interval_ms = 900_000 if signal.radar_horizon == "SHORT" else 14_400_000
         age_bars = max(0, int((data_ts - event_ts) / interval_ms)) if data_ts and event_ts else int(signal.market_story.get("trigger", {}).get("event_age_bars", 0) or 0)
         (
@@ -1090,10 +1315,6 @@ class SignalRepository:
         elif invalidated:
             outcome, final_r, order = "PRICE_INVALIDATED", -1.0, "SL_FIRST"
             stage, freshness, status = "INVALIDATED", "INVALIDATED", "CLOSED"
-        elif same_core_snapshot:
-            stage = stage_before
-            freshness = str(row["freshness"])
-            status = "ACTIVE"
         elif age_bars >= 3 and mfe_r < 0.25:
             stage, freshness, status = "NO_FOLLOW_THROUGH", "NO_FOLLOW_THROUGH", "ACTIVE"
         elif age_bars > (8 if signal.radar_horizon == "SHORT" else 6):

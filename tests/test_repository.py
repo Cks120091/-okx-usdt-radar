@@ -7,6 +7,7 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from unittest.mock import patch
 
+from radar.decision import build_decision_context
 from radar.models import MarketContext, MarketState, Signal
 from radar.repository import SignalRepository, classify_microstructure
 
@@ -399,6 +400,380 @@ class SignalRepositoryTests(unittest.TestCase):
         self.assertEqual(second.signal_stage, "EXTENDED")
         self.assertEqual(second.freshness, "EXTENDED")
         self.assertEqual(second.lifecycle["transition"], "UNCHANGED")
+
+    def test_same_core_raw_refreshes_live_advisory_without_rewriting_episode(self):
+        core_ts = 1_700_000_000_000
+        raw = replace(
+            signal_fixture(
+                "SAME-CORE-LIVE-USDT-SWAP",
+                event_ts=core_ts,
+                core_timestamp=core_ts,
+            ),
+            spread_pct=0.02,
+            quote_volume_24h=20_000_000,
+            supporting_evidence=["原始結構支持", "舊資金流說明"],
+            conflicts=["舊資金流反證"],
+            neutral_evidence=["舊資金流中性"],
+            safety_checks=[
+                {"key": "structure", "value": "KEEP"},
+                {"key": "open_interest", "value": None},
+                {"key": "execution_cost", "value": 12.0},
+                {"key": "execution_cost_warning", "value": "OLD"},
+            ],
+            evidence_groups={
+                "trend_momentum": {"marker": "KEEP"},
+                "participation_flow": {"marker": "OLD"},
+            },
+            market_participation={"state": "DATA_MISSING", "marker": "OLD"},
+            execution_quality={"score": 60.0, "marker": "OLD"},
+            data_quality={
+                "core": "AVAILABLE",
+                "core_marker": "KEEP",
+                "deep": "MISSING",
+                "missing_sources": ["open_interest"],
+            },
+            market_story={
+                "trigger": {
+                    "event_ts": core_ts,
+                    "trigger_event_key": (
+                        f"SHORT:LONG:BREAKOUT:{core_ts}:ZONE-A"
+                    ),
+                    "event_price": 100.0,
+                },
+                "raw": {"core_return_pct": 0.4, "marker": "KEEP"},
+                "context": {"marker": "OLD"},
+                "interpretation": {"marker": "OLD"},
+            },
+            market_metrics={
+                "core_timestamp": core_ts,
+                "core_high": 101.0,
+                "core_low": 99.0,
+                "core_close": 100.5,
+                "last_price": 100.5,
+                "open_interest_usd": None,
+                "open_interest_change_pct": None,
+                "oi_flow_state": "UNKNOWN",
+                "flow_oi_alignment": "UNKNOWN",
+                "flow_taker_state": "UNKNOWN",
+                "flow_valid_sample_count": 0,
+                "context_sampled_at": 100,
+                "volume_ratio_core": 0.8,
+                "non_advisory_marker": "KEEP",
+            },
+            entry_eligibility={"status": "ENTRY_READY", "marker": "KEEP"},
+            decision_context={"marker": "KEEP"},
+        )
+        created = self.repository.reconcile(
+            [raw],
+            [state_fixture(raw, core_ts)],
+            "2026-08-20T00:00:00+00:00",
+            "SHORT",
+        )[0]
+        event_count_before = self.repository._connection.execute(
+            "SELECT COUNT(*) FROM signal_events WHERE signal_id=?",
+            (created.trigger_id,),
+        ).fetchone()[0]
+        original_trigger = dict(created.market_story["trigger"])
+        original_lifecycle = dict(created.lifecycle)
+
+        enriched = replace(
+            raw,
+            score=1.0,
+            entry_low="999",
+            entry_high="999",
+            stop_loss="998",
+            take_profit_1="1000",
+            take_profit_2="1001",
+            spread_pct=0.03,
+            quote_volume_24h=25_000_000,
+            signal_stage="INVALIDATED",
+            supporting_evidence=["原始結構支持", "新資金流支持"],
+            conflicts=[],
+            neutral_evidence=["Funding 未過熱"],
+            safety_checks=[
+                {"key": "structure", "value": "MUST_NOT_REPLACE"},
+                {"key": "open_interest", "value": 12_500_000},
+                {"key": "execution_cost", "value": 4.0},
+                {"key": "execution_cost_warning", "value": "NEW"},
+                {"key": "slippage", "value": 0.04},
+            ],
+            evidence_groups={
+                "trend_momentum": {"marker": "MUST_NOT_REPLACE"},
+                "participation_flow": {"marker": "NEW", "stance": "SUPPORT"},
+            },
+            market_participation={"state": "SUPPORT", "marker": "NEW"},
+            execution_quality={"score": 91.0, "marker": "NEW"},
+            data_quality={
+                "core": "MUST_NOT_REPLACE",
+                "core_marker": "MUST_NOT_REPLACE",
+                "deep": "AVAILABLE",
+                "missing_sources": [],
+                "context_sampled_at": 200,
+            },
+            market_story={
+                "trigger": {
+                    "event_ts": core_ts + 123,
+                    "trigger_event_key": "MUST-NOT-REPLACE",
+                    "event_price": 999.0,
+                },
+                "raw": {"core_return_pct": -9.0, "marker": "MUST_NOT_REPLACE"},
+                "context": {"marker": "NEW"},
+                "interpretation": {"marker": "NEW"},
+            },
+            market_metrics={
+                **raw.market_metrics,
+                "core_high": 999.0,
+                "last_price": 100.8,
+                "open_interest_usd": 12_500_000,
+                "open_interest_change_pct": 0.8,
+                "oi_flow_state": "PRICE_UP_OI_UP",
+                "flow_oi_alignment": "SAME_DIRECTION_BUILD",
+                "flow_taker_state": "STRENGTHENING",
+                "flow_participation_state": "STRENGTHENING",
+                "flow_valid_sample_count": 3,
+                "taker_buy_pct": 66.0,
+                "taker_buy_volume": 660.0,
+                "taker_sell_volume": 340.0,
+                "cvd": 320.0,
+                "funding_rate_pct": 0.01,
+                "order_book_imbalance_pct": 18.0,
+                "order_book_sequence": {"state": "PERSISTENT_SUPPORT"},
+                "volume_ratio_core": 1.4,
+                "context_sampled_at": 200,
+                "source_timestamps": {
+                    "open_interest": 198,
+                    "funding": 199,
+                    "order_book": 200,
+                },
+                "bid_depth_usd": 500_000,
+                "ask_depth_usd": 400_000,
+                "buy_slippage_pct": 0.04,
+                "sell_slippage_pct": 0.05,
+                "non_advisory_marker": "MUST_NOT_REPLACE",
+            },
+            lifecycle={"transition": "MUST_NOT_REPLACE"},
+            entry_eligibility={"status": "MISSED_ENTRY", "marker": "MUST_NOT_REPLACE"},
+            decision_context={"marker": "MUST_NOT_REPLACE"},
+        )
+
+        returned = self.repository.reconcile(
+            [enriched],
+            [state_fixture(enriched, core_ts)],
+            "2026-08-20T00:00:05+00:00",
+            "SHORT",
+        )[0]
+        persisted = self.repository.load_active_signal(raw.inst_id, "SHORT")
+        row = self.repository._connection.execute(
+            """
+            SELECT stage, freshness, status, outcome, mfe_r, mae_r,
+                   participation_state, execution_quality
+            FROM signals WHERE signal_id=?
+            """,
+            (created.trigger_id,),
+        ).fetchone()
+        event_count_after = self.repository._connection.execute(
+            "SELECT COUNT(*) FROM signal_events WHERE signal_id=?",
+            (created.trigger_id,),
+        ).fetchone()[0]
+
+        self.assertEqual(returned.trigger_id, created.trigger_id)
+        self.assertEqual(returned.lifecycle["transition"], "UNCHANGED")
+        self.assertEqual(persisted.lifecycle, original_lifecycle)
+        self.assertEqual(event_count_after, event_count_before)
+        self.assertEqual(
+            (row["stage"], row["freshness"], row["status"], row["outcome"]),
+            ("CONFIRMED", "NEW", "ACTIVE", None),
+        )
+        self.assertEqual((row["mfe_r"], row["mae_r"]), (0.0, 0.0))
+        self.assertEqual(row["participation_state"], "SUPPORT")
+        self.assertEqual(row["execution_quality"], 91.0)
+
+        for signal in (returned, persisted):
+            self.assertEqual(signal.score, 86.0)
+            self.assertEqual(signal.entry_low, "100")
+            self.assertEqual(signal.entry_high, "100")
+            self.assertEqual(signal.stop_loss, "90")
+            self.assertEqual(signal.take_profit_1, "120")
+            self.assertEqual(signal.take_profit_2, "130")
+            self.assertEqual(signal.market_story["trigger"], original_trigger)
+            self.assertEqual(signal.market_story["raw"]["marker"], "KEEP")
+            self.assertEqual(signal.market_story["context"]["marker"], "NEW")
+            self.assertEqual(signal.market_story["interpretation"]["marker"], "NEW")
+            self.assertEqual(signal.market_metrics["core_high"], 101.0)
+            self.assertEqual(signal.market_metrics["non_advisory_marker"], "KEEP")
+            self.assertEqual(signal.market_metrics["open_interest_usd"], 12_500_000)
+            self.assertEqual(signal.market_metrics["open_interest_change_pct"], 0.8)
+            self.assertEqual(
+                signal.market_metrics["flow_oi_alignment"],
+                "SAME_DIRECTION_BUILD",
+            )
+            self.assertEqual(signal.market_metrics["taker_buy_pct"], 66.0)
+            self.assertEqual(signal.market_metrics["taker_buy_volume"], 660.0)
+            self.assertEqual(signal.market_metrics["taker_sell_volume"], 340.0)
+            self.assertEqual(signal.market_metrics["cvd"], 320.0)
+            self.assertEqual(signal.market_metrics["funding_rate_pct"], 0.01)
+            self.assertEqual(signal.market_metrics["volume_ratio_core"], 0.8)
+            self.assertEqual(signal.market_metrics["last_price"], 100.5)
+            self.assertEqual(signal.market_metrics["context_sampled_at"], 200)
+            self.assertEqual(
+                signal.market_metrics["source_timestamps"]["open_interest"],
+                198,
+            )
+            self.assertEqual(signal.market_participation["marker"], "NEW")
+            self.assertEqual(signal.execution_quality["marker"], "NEW")
+            self.assertEqual(signal.data_quality["core_marker"], "KEEP")
+            self.assertEqual(signal.data_quality["deep"], "AVAILABLE")
+            self.assertEqual(
+                signal.evidence_groups["trend_momentum"]["marker"],
+                "KEEP",
+            )
+            self.assertEqual(
+                signal.evidence_groups["participation_flow"]["marker"],
+                "NEW",
+            )
+            self.assertEqual(signal.entry_eligibility["marker"], "KEEP")
+            self.assertEqual(signal.decision_context["marker"], "KEEP")
+            self.assertEqual(signal.supporting_evidence[-1], "新資金流支持")
+            self.assertEqual(signal.spread_pct, 0.02)
+            self.assertEqual(signal.quote_volume_24h, 20_000_000)
+            refreshed_checks = {
+                check["key"]: check.get("value") for check in signal.safety_checks
+            }
+            self.assertEqual(refreshed_checks["structure"], "KEEP")
+            self.assertEqual(refreshed_checks["execution_cost"], 4.0)
+            self.assertEqual(refreshed_checks["execution_cost_warning"], "NEW")
+
+        recomputed = build_decision_context(returned)
+        self.assertEqual(
+            recomputed["continuation_confirmation"]["core_votes"]["OI"]["state"],
+            "SUPPORT",
+        )
+
+    def test_same_core_state_refreshes_advisory_but_older_state_is_rejected(self):
+        raw = replace(
+            signal_fixture("STATE-LIVE-USDT-SWAP"),
+            market_metrics={
+                **signal_fixture().market_metrics,
+                "open_interest_usd": None,
+                "open_interest_change_pct": None,
+                "context_sampled_at": 100,
+            },
+            market_participation={"state": "DATA_MISSING"},
+            execution_quality={"score": 60.0},
+            data_quality={
+                "core": "AVAILABLE",
+                "deep": "MISSING",
+                "missing_sources": ["open_interest"],
+            },
+        )
+        created = self.repository.reconcile(
+            [raw],
+            [state_fixture(raw, raw.data_timestamp)],
+            "2026-08-20T00:00:00+00:00",
+            "SHORT",
+        )[0]
+        event_count_before = self.repository._connection.execute(
+            "SELECT COUNT(*) FROM signal_events WHERE signal_id=?",
+            (created.trigger_id,),
+        ).fetchone()[0]
+        enriched_state = replace(
+            state_fixture(raw, raw.data_timestamp),
+            market_metrics={
+                **raw.market_metrics,
+                "open_interest_usd": 8_000_000,
+                "open_interest_change_pct": 0.7,
+                "oi_flow_state": "PRICE_UP_OI_UP",
+                "flow_oi_alignment": "SAME_DIRECTION_BUILD",
+                "context_sampled_at": 200,
+            },
+            market_story={
+                "context": {"marker": "STATE_NEW"},
+                "interpretation": {"marker": "STATE_NEW"},
+            },
+            market_participation={"state": "SUPPORT", "marker": "STATE_NEW"},
+            execution_quality={"score": 88.0, "marker": "STATE_NEW"},
+            data_quality={
+                "core": "MUST_NOT_REPLACE",
+                "deep": "AVAILABLE",
+                "missing_sources": [],
+                "context_sampled_at": 200,
+            },
+        )
+
+        same_core = self.repository.reconcile(
+            [],
+            [enriched_state],
+            "2026-08-20T00:00:05+00:00",
+            "SHORT",
+        )[0]
+        opposite = replace(
+            raw,
+            direction="SHORT",
+            market_metrics={
+                **raw.market_metrics,
+                "open_interest_usd": 777_000_000,
+                "open_interest_change_pct": -77.0,
+                "context_sampled_at": 777,
+            },
+            market_story={
+                "trigger": {
+                    "event_ts": raw.data_timestamp,
+                    "trigger_event_key": (
+                        f"SHORT:SHORT:BREAKOUT:{raw.data_timestamp}:ZONE-X"
+                    ),
+                },
+                "context": {"marker": "OPPOSITE"},
+            },
+            market_participation={"state": "CONFLICT", "marker": "OPPOSITE"},
+        )
+        opposite_result = self.repository.reconcile(
+            [opposite],
+            [],
+            "2026-08-20T00:00:06+00:00",
+            "SHORT",
+        )[0]
+        stale_ts = raw.data_timestamp - 1
+        stale_state = replace(
+            enriched_state,
+            closed_candle_ts=stale_ts,
+            market_metrics={
+                **enriched_state.market_metrics,
+                "core_timestamp": stale_ts,
+                "open_interest_usd": 999_000_000,
+                "open_interest_change_pct": -99.0,
+                "context_sampled_at": 999,
+            },
+            market_story={"context": {"marker": "STALE"}},
+            market_participation={"state": "CONFLICT", "marker": "STALE"},
+            execution_quality={"score": 1.0, "marker": "STALE"},
+        )
+        returned = self.repository.reconcile(
+            [],
+            [stale_state],
+            "2026-08-19T23:59:59+00:00",
+            "SHORT",
+        )[0]
+        persisted = self.repository.load_active_signal(raw.inst_id, "SHORT")
+        event_count_after = self.repository._connection.execute(
+            "SELECT COUNT(*) FROM signal_events WHERE signal_id=?",
+            (created.trigger_id,),
+        ).fetchone()[0]
+
+        self.assertEqual(same_core.market_metrics["open_interest_usd"], 8_000_000)
+        self.assertEqual(same_core.market_story["context"]["marker"], "STATE_NEW")
+        self.assertEqual(
+            opposite_result.market_metrics["open_interest_usd"],
+            8_000_000,
+        )
+        for signal in (returned, persisted):
+            self.assertEqual(signal.market_metrics["open_interest_usd"], 8_000_000)
+            self.assertEqual(signal.market_metrics["open_interest_change_pct"], 0.7)
+            self.assertEqual(signal.market_metrics["context_sampled_at"], 200)
+            self.assertEqual(signal.market_story["context"]["marker"], "STATE_NEW")
+            self.assertEqual(signal.market_participation["marker"], "STATE_NEW")
+            self.assertEqual(signal.execution_quality["score"], 88.0)
+        self.assertEqual(persisted.lifecycle, created.lifecycle)
+        self.assertEqual(event_count_after, event_count_before)
 
     def test_no_follow_through_is_a_lifecycle_state_not_a_new_signal(self):
         raw = signal_fixture()

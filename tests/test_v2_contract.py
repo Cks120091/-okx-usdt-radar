@@ -646,6 +646,49 @@ class V33ContractTests(unittest.TestCase):
             connection_error,
         )
 
+    def test_oi_ui_distinguishes_missing_baseline_and_below_threshold(self):
+        html = (
+            Path(__file__).parents[1] / "radar" / "static" / "pages.html"
+        ).read_text(encoding="utf-8")
+
+        availability = html.split("function oiAvailability(item)", 1)[1].split(
+            "function oiInterpretation", 1
+        )[0]
+        self.assertIn("metricNumber(m.open_interest_usd)", availability)
+        self.assertIn("metricNumber(m.open_interest_change_pct)", availability)
+        self.assertIn("key:'MISSING'", availability)
+        self.assertIn("key:'NO_BASELINE'", availability)
+        self.assertIn("key:'COMPARED'", availability)
+        self.assertIn("本輪未取得 OI 數值", availability)
+        self.assertIn("OI 數值已取得，但尚無上一輪比較基準", availability)
+
+        anomaly = html.split("function oiAnomalyEmptyState(markets)", 1)[1].split(
+            "function renderAnomalies", 1
+        )[0]
+        self.assertIn("目前沒有幣種達到異動門檻", anomaly)
+        self.assertIn("但尚無上一輪比較基準", anomaly)
+        self.assertIn("noBaselineCount", anomaly)
+        self.assertIn("已取得 OI、仍待下一輪基準", anomaly)
+        self.assertIn("OI API 或該幣資料可能暫時不可用", anomaly)
+        self.assertIn("oiAnomalyEmptyState(markets)", anomaly)
+        self.assertNotIn("至少需要連續兩輪", anomaly)
+        self.assertNotIn("需要至少兩輪掃描才能比較 OI", html)
+
+        continuation = html.split("function continuationCoreVote(item,key)", 1)[
+            1
+        ].split("function directionBadge", 1)[0]
+        self.assertIn("key==='OI'&&safeState==='NEUTRAL'", continuation)
+        self.assertIn("已取得・未達同向新增門檻", continuation)
+        self.assertIn("key==='OI'&&safeState==='UNKNOWN'", continuation)
+        self.assertIn("availability.key==='MISSING'", continuation)
+        self.assertIn("availability.key==='NO_BASELINE'", continuation)
+        self.assertIn("更新前保留資料未包含三項核心明細", continuation)
+        self.assertIn("仍沒有足夠證據確認續走", continuation)
+        self.assertNotIn(
+            "continuationItems(confirmation.missing,'核心資料已取得')",
+            continuation,
+        )
+
     def test_pwa_never_caches_live_market_api(self):
         root = Path(__file__).parents[1] / "radar" / "static"
         worker = (root / "service-worker.js").read_text(encoding="utf-8")
