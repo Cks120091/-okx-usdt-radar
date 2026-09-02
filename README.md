@@ -10,17 +10,18 @@
 
 OKX REST 預設使用官方目前建議的 `openapi.okx.com`，連線失敗時會自動改試 `www.okx.com`。兩個官方端點都無法連線時，頁面會明確標示為 OKX 行情連線問題；K 線歷史不足則會列出缺少的週期，不會再誤寫成幣種或訊號失效。
 
-V3.4 的核心原則是：**正式價格 Trigger 成立就保留卡片，風險檢查只提醒、不刪訊號**。先確認已收盤價格事件是否形成 Trigger，再依現價相對 Entry／SL／TP 的位置決定目前可進、等回踩、已錯過或失效。情境、資金與執行品質資料只負責補充說明，不建立反向訊號，也不會把原本可進的訊號移走。
+V3.4 的核心原則是：**正式價格 Trigger 成立就保留卡片，風險檢查只提醒、不刪訊號**。價格／結構與 MA／MACD 仍負責建立 Trigger；Trigger 成立後，系統另外用「同向延續確認」軟分級描述資金與量能是否支持行情繼續往同一方向走。這個分級不建立或取消 Trigger、不改變方向、不刪卡，也不新增或改動既有 Hard Gate。現價相對 Entry／SL／TP 的位置仍獨立決定目前可進、等回踩、已錯過或失效。
 
 ## 目前判定順序
 
 | 順序 | 回答的問題 | 規則 |
 | --- | --- | --- |
 | 1. Price Trigger（價格觸發） | 已收盤核心週期是否已形成正式方向與交易計畫 | 不用分數或參考資料憑空製造 Trigger |
-| 2. Entry Eligibility（進場資格） | 現價是否仍在合理 Entry，或應等回踩／禁止追價 | 走遠不等於訊號死亡 |
-| 3. Risk Review（風險提醒） | 流動性、Spread、Slippage、成本、SL 距離、R:R、深度與異常行情是否需要注意 | 只顯示提醒，不改寫 Price Trigger 或 Entry Eligibility |
+| 2. Continuation Confirmation（同向延續確認） | Trigger 後的 OI、Taker／CVD 與核心 K 線量比是否支持同向延續 | 軟分級為 `CONFIRMED`／`FORMING`／`CONFLICT`／`UNKNOWN`，不改寫 Trigger、方向或進場權限 |
+| 3. Entry Eligibility（進場資格） | 現價是否仍在合理 Entry，或應等回踩／禁止追價 | 走遠不等於訊號死亡 |
+| 4. Risk Review（風險提醒） | 流動性、Spread、Slippage、成本、SL 距離、R:R、深度與異常行情是否需要注意 | 只顯示提醒，不改寫 Price Trigger 或 Entry Eligibility |
 
-Market Context、OI、Taker、Funding 與 Order Book 仍會保存並放在詳細資料中，協助理解行情；它們不參與反向判定，但會在 Trigger 成立當下共同調整市場力度與止盈空間。資料缺失就顯示不知道，不用舊值、0 或中性假設補算。
+Market Context、OI、Taker、CVD、Funding 與 Order Book 仍會保存並放在詳細資料中，協助理解行情。只有 OI、Taker／CVD（同源合併為一票）及核心 K 線量比進入同向延續軟分級；Funding、BTC 與高週期背景只會降級為警告，不增加方向票、不參與反向判定。資料缺失就顯示不知道，不用舊值、0 或中性假設補算。
 
 ## 系統流程
 
@@ -81,15 +82,26 @@ Market Context、OI、Taker、Funding 與 Order Book 仍會保存並放在詳細
 
 | 資料 | V3.4 用法 |
 | --- | --- |
-| Taker Flow | 必須與價格成果一起看；量很強但價格推不動視為可能吸收 |
-| Open Interest | 本身沒有方向，只與價格變化組合描述新增部位、平倉或回補 |
-| CVD | 與價格同向才是支持；同向 CVD 但價格沒結果時標示可能吸收，僅供參考 |
-| Funding | 顯示擁擠程度，不直接判多空或取消 Trigger |
+| Open Interest | 第一類延續證據；本身沒有方向，必須與價格變化組合判斷同向新增部位、反向新增部位、平倉或回補 |
+| Taker Flow／CVD | 第二類延續證據；兩者同源、合併為一票，必須與價格成果一起看；流量很強但價格推不動視為可能吸收 |
+| 核心 K 線量比 | 第三類延續證據；量比達 1.2 倍且價格同向才支持延續，放量但價格反向則是衝突 |
+| Funding | 只顯示擁擠程度與降級警告，不是第四票，不直接判多空或取消 Trigger |
 | Order Book | 首張快照不當支撐壓力；跨掃描比較 persistence、撤單、補單、吸收與反向深度 |
-| BTC／全市場 | 辨識相對強弱、市場帶動、市場共振與可能重複曝險，不替個別標的建立 Trigger |
+| BTC／全市場／高週期 | 辨識相對強弱、市場帶動、逆高週期與重複曝險；只作降級警告，不替個別標的建立或取消 Trigger |
 | 三大盤別 | 作為流動性與預期波動背景，不因單一盤別直接禁止某種策略 |
 
-最近至少三筆可比較樣本存在時，系統會看 OI、Taker、Funding、深度與 Order Book 是正在增強、持平、轉弱或異常加速，而不是只看最後一個值；樣本不足、時間窗不一致或來源缺失時維持 `UNKNOWN`。Market Context 會整理 Regime（行情型態）、Phase（階段）、Volatility（波動）、BTC／市場帶動與三大交易時段。Deep Data 的一致或不一致狀態只放在詳細資料供參考，不會取消價格 Trigger、否決已通過的進場資格或生成反向正式訊號。
+同向延續確認共有四個結果：
+
+| 結果 | 意義 |
+| --- | --- |
+| `CONFIRMED` | 三類延續證據至少兩類同向支持、沒有方向反證，而且連續流樣本完整 |
+| `FORMING` | 已有部分同向證據，但票數、連續樣本或一致性尚不足以完整確認 |
+| `CONFLICT` | 出現嚴重吸收／反向新增部位，或至少兩類判定領域形成反證 |
+| `UNKNOWN` | 尚無明確方向或資金參與資料不足，不能把缺資料當成中性或支持 |
+
+連續資金流只能使用同一比較窗中至少三筆可比較、時間戳不重複的樣本；少於三筆、時間窗不一致或來源缺失時維持資料不足，不能升為 `CONFIRMED`。系統會看 OI 與 Taker 是正在增強、持平、轉弱或異常加速，而不是只看最後一筆；Funding、深度與 Order Book 的變化仍只作 Context／風險提醒。Market Context 另外整理 Regime（行情型態）、Phase（階段）、Volatility（波動）、BTC／市場帶動與三大交易時段。所有同向延續結果都只提供資訊，不會取消價格 Trigger、否決已通過的進場資格、刪除卡片、改變方向、生成反向正式訊號或改動既有 Hard Gate。
+
+`continuation_confirmation.score` 只表示三類延續證據的一致程度，不是勝率，也不是價格同向移動的機率。真正的 Win Rate 仍只由已完成 Signal Episode 的 TP／SL 與 Final R 樣本計算。
 
 瞬間插針、異常巨量、OI 快速清洗、Funding 極端、Spread／Slippage 急升或深度消失都會列為醒目風險提醒，但不取消正式 Trigger、不改成反向訊號，也不把仍在 Entry 的卡片移出可進區。
 
@@ -120,6 +132,8 @@ SQLite 以 Event Key 與唯一 active episode 鎖定同一個 Trigger，避免�
 
 第一個 `CONTINUATION` 事件是 `EARLY_SIGNAL`；只有同方向已有未失效的 active event，後續 continuation 才是 `REENTRY`。事件 age 從價格／動能開始反應的第一根 K 計算，不會因為後續 MA／MACD 仍然同向就每輪重置成 age 0。age 0、1、2 最多保留三根已收盤 15m K；若價格已從 Entry 結構或近期防守點推離超過 0.50 ATR，會立即轉為 `EXTENDED`，不再冒充早期訊號。
 
+早期訊號取得完整確認時，會在同一個 active Signal Episode 內由 `EARLY_SIGNAL` 升為 `CONFIRMED`；不建立第二個 Trigger、不更換 Trigger id，也不重算或改寫原始 Entry／SL／TP。升級後即使下一輪輸入暫時只呈現早期條件，也不會倒退成新的早期 Episode。
+
 Trigger 是否存在與「現在是否適合進場」分開顯示：
 
 - `ENTRY_READY`：仍在 Entry Zone 或只順向偏離最多 0.15 ATR；R:R 不足時附加提醒，但不移除可進卡片。
@@ -132,7 +146,7 @@ Trigger 是否存在與「現在是否適合進場」分開顯示：
 
 價格到達 TP1 或越過 SL／Invalidation 後，卡片分別顯示「已達止盈」或「已達止損」，並從 15m／4H 有效訊號頁移至獨立的「已結束」板塊。15m 結果卡保留 5 小時，4H 結果卡保留 24 小時；歷史紀錄仍依原本保存規則保留。同一 Signal Episode 結束後不會復活；若同幣出現較新的正式 Trigger，會建立另一個 Trigger id 與全新 Entry、SL、TP，新卡只出現在有效訊號頁。
 
-「可進」訊號先依交易品質由高至低排列；同分時依序比較資料新鮮度、剩餘 R:R，再比較較低滑價與較高流動性。掃描進行中保留上一輪卡片順序，本輪完整完成後才統一排序。同一 Episode 保留原 Entry／Stop／Target，不因刷新而漂移。
+「可進」訊號先依同向延續確認程度排列（`CONFIRMED` → `FORMING` → `UNKNOWN` → `CONFLICT`），再依交易品質由高至低；之後依序比較資料新鮮度、剩餘 R:R、較低滑價與較高流動性。這只是呈現順位，不會刪卡或改變進場權限。掃描進行中保留上一輪卡片順序，本輪完整完成後才統一排序。同一 Episode 保留原 Entry／Stop／Target，不因刷新而漂移。
 
 ## 真實歷史績效
 
@@ -158,7 +172,7 @@ Trigger 是否存在與「現在是否適合進場」分開顯示：
 
 - 公開 REST 請求有 process-wide rate limit、有限重試、退避、短 TTL cache 與 endpoint metrics。
 - 單一幣種短線核心資料失敗只排除該幣種，報告為 `PARTIAL_DATA`；所有短線核心標的失敗才是 `DATA_INCOMPLETE`。長線 1D 歷史不足獨立計數，不冒充短線核心失敗。
-- OI 或任一 Deep Data endpoint 失敗會明確列為資料缺失，不會偽造數值或讓整輪掃描崩潰；需要該資料才能核對的單一候選會維持不可進場。
+- OI 或任一 Deep Data endpoint 失敗會明確列為資料缺失，不會偽造數值或讓整輪掃描崩潰；既有價格 Trigger 仍保留，同向延續確認顯示 `UNKNOWN` 或 `FORMING`，不會僅因輔助資料缺失而刪卡或翻向。
 - 每輪記錄 core coverage、Deep Data completeness、來源成功／缺失、cache hit、retry、timeout 與 duration。
 - 1D／4H／1H K 線會在同一輪短長雷達間重用，報告發布後立即釋放；全市場 Map 只保留首頁、熱度、OI、收藏與搜尋需要的摘要欄位，完整 Market Story 仍保留在 Signal／Watchlist，避免小型 Web instance 因重複資料耗盡記憶體。
 - 沒有 fallback 數值、placeholder Signal 或用上一輪資料冒充最新 Trigger。
@@ -287,7 +301,7 @@ python -m unittest discover -s tests -v
 git diff --check
 ```
 
-測試涵蓋 Price Trigger 與進場資格分離、可進會員資格固定、Entry／SL／TP 不漂移、TP／SL 結果卡的 5／24 小時期限與獨立已結束板塊、股票型／非加密合約在全市場及單一合約入口被排除、單幣來源並行與短等待上限、結構＋波動分布止損、強弱 OI／Taker／CVD 自動目標、過近障礙不直接完成交易、流動性／Spread／Slippage／成交成本／R:R／異常行情只提醒不刪卡、資料不知道不冒充最新、Market Context／DST 時段、價格接受、控制權轉移、Signal Episode 去重與永久失效、舊資料／亂序資料不回寫、15m／4H 隔離、三種掃描、部分掃描與獨立新鮮度、`CORE_PREVIEW` 唯讀、可進排序、Scan Lock、舊請求不可覆蓋新結果、STALE 快照保留、API 失敗降級、Web Push、PWA 與 API contract。
+測試涵蓋 Price Trigger 與進場資格分離、OI／Taker-CVD／核心量比三票的同向延續軟分級、至少三筆連續流樣本、延續分級不刪卡不翻向、早期訊號在同一 Episode 升級且 Entry／SL／TP 不漂移、可進會員資格固定、TP／SL 結果卡的 5／24 小時期限與獨立已結束板塊、股票型／非加密合約在全市場及單一合約入口被排除、單幣來源並行與短等待上限、結構＋波動分布止損、強弱 OI／Taker／CVD 自動目標、過近障礙不直接完成交易、流動性／Spread／Slippage／成交成本／R:R／異常行情只提醒不刪卡、資料不知道不冒充最新、Market Context／DST 時段、價格接受、控制權轉移、Signal Episode 去重與永久失效、舊資料／亂序資料不回寫、15m／4H 隔離、三種掃描、部分掃描與獨立新鮮度、`CORE_PREVIEW` 唯讀、可進排序、Scan Lock、舊請求不可覆蓋新結果、STALE 快照保留、API 失敗降級、Web Push、PWA 與 API contract。
 
 ## 安全邊界與限制
 

@@ -1384,6 +1384,11 @@ class SignalRepository:
             signal_stage=(
                 "REENTRY"
                 if raw.signal_stage == "REENTRY"
+                else "CONFIRMED"
+                if (
+                    existing.signal_stage == "EARLY_SIGNAL"
+                    and raw.signal_stage == "CONFIRMED"
+                )
                 else existing.signal_stage
             ),
         )

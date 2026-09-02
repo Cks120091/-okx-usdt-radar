@@ -408,6 +408,19 @@ def _public_decision_context(decision: Any) -> dict[str, Any]:
             "opposite_signal_created",
         ),
     )
+    payload["continuation_confirmation"] = _select(
+        _read(decision, "continuation_confirmation", {}),
+        (
+            "key",
+            "label",
+            "score",
+            "supporting",
+            "conflicts",
+            "missing",
+            "warnings",
+            "meaning",
+        ),
+    )
     payload["quality"] = _select(
         _read(decision, "quality", {}),
         ("direction", "execution", "participation", "combined_score", "note"),

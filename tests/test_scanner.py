@@ -3,6 +3,7 @@ import unittest
 from dataclasses import replace
 from unittest.mock import patch
 
+from radar.context import summarize_flow_history
 from radar.models import Candle, Instrument, MarketContext, MarketState, Signal, Ticker
 from radar.scanner import MarketScanner, ScannerConfig, _compact_market_map_state
 from radar.strategy import AnalysisResult
@@ -690,6 +691,84 @@ class ScannerTests(unittest.TestCase):
         self.assertEqual(refreshed.entry_eligibility["hard_blockers"], [])
         self.assertTrue(refreshed.entry_eligibility["new_entry_allowed"])
 
+    def test_professional_context_uses_raw_history_and_deduplicates_current_sample(self):
+        scanner = MarketScanner(
+            FakeClient(),
+            ScannerConfig(min_quote_volume_24h=0, universe_max_spread_pct=1.0),
+        )
+        signal = qualified_signal()
+        result = AnalysisResult(signal, "qualified", qualified_state(signal))
+        raw_history = [
+            {
+                "timestamp_ms": timestamp,
+                "mid_price": price,
+                "open_interest_usd": open_interest,
+                "taker_buy_ratio": taker_ratio,
+                "funding_rate": funding,
+                "bid_depth_usd": bid_depth,
+                "ask_depth_usd": ask_depth,
+                "order_book_imbalance": imbalance,
+            }
+            for timestamp, price, open_interest, taker_ratio, funding, bid_depth, ask_depth, imbalance in (
+                (1_000, 100.0, 1_000.0, 0.52, 0.00010, 100.0, 100.0, 0.00),
+                (301_000, 101.0, 1_050.0, 0.58, 0.00015, 120.0, 95.0, 0.10),
+                (601_000, 102.0, 1_100.0, 0.64, 0.00020, 145.0, 90.0, 0.20),
+            )
+        ]
+        previous_micro = {
+            "sampled_at": 601_000,
+            "raw_history": raw_history,
+            "history": [{"timestamp_ms": 500}],
+        }
+        context = MarketContext(
+            inst_id=signal.inst_id,
+            open_interest_usd=1_100.0,
+            funding_rate=0.00020,
+            order_book_imbalance=0.20,
+            taker_buy_ratio=0.64,
+            sampled_at=601_000,
+            bid_depth_usd=145.0,
+            ask_depth_usd=90.0,
+        )
+
+        with patch(
+            "radar.scanner.summarize_flow_history",
+            wraps=summarize_flow_history,
+        ) as summarize:
+            contextual = scanner._apply_professional_context(
+                result,
+                context,
+                previous_micro=previous_micro,
+                market_bias={},
+                reference_price=102.0,
+            )
+
+        summarized_samples = summarize.call_args.args[0]
+        self.assertEqual(
+            [sample["timestamp_ms"] for sample in summarized_samples],
+            [1_000, 301_000, 601_000],
+        )
+        self.assertEqual(
+            contextual.market_state.market_metrics["flow_trend"],
+            "STRENGTHENING",
+        )
+        self.assertEqual(
+            contextual.market_state.market_metrics["flow_oi_alignment"],
+            "SAME_DIRECTION_BUILD",
+        )
+        self.assertEqual(
+            contextual.market_state.market_metrics["flow_taker_state"],
+            "STRENGTHENING",
+        )
+        self.assertEqual(
+            contextual.market_state.market_metrics["flow_valid_sample_count"],
+            3,
+        )
+        self.assertEqual(
+            contextual.market_state.market_participation["trend"]["state"],
+            "STRENGTHENING",
+        )
+
     def test_on_demand_scan_only_loads_the_requested_instrument(self):
         class SingleInstrumentClient(ContextFakeClient):
             def __init__(self):
@@ -1341,6 +1420,63 @@ class ScannerTests(unittest.TestCase):
                 "OLD",
                 "LOW-QUALITY",
             ],
+        )
+
+    def test_signal_sort_prefers_confirmed_continuation_before_execution_quality(self):
+        def candidate(inst_id, continuation, quality):
+            signal = qualified_signal(inst_id)
+            return replace(
+                signal,
+                execution_quality={**signal.execution_quality, "score": quality},
+                decision_context={
+                    "final": {
+                        "status": "ENTER",
+                        "new_entry_allowed": True,
+                    },
+                    "continuation_confirmation": {"key": continuation},
+                },
+            )
+
+        confirmed = candidate("CONFIRMED", "CONFIRMED", 10.0)
+        forming = candidate("FORMING", "FORMING", 99.0)
+
+        ordered = sorted(
+            [forming, confirmed],
+            key=MarketScanner._signal_sort_key,
+            reverse=True,
+        )
+
+        self.assertEqual([item.inst_id for item in ordered], ["CONFIRMED", "FORMING"])
+
+    def test_signal_sort_legacy_payload_without_continuation_keeps_original_order(self):
+        def candidate(inst_id, quality, timestamp):
+            signal = qualified_signal(inst_id)
+            return replace(
+                signal,
+                execution_quality={**signal.execution_quality, "score": quality},
+                closed_candle_ts=timestamp,
+                data_timestamp=timestamp,
+                decision_context={
+                    "final": {
+                        "status": "ENTER",
+                        "new_entry_allowed": True,
+                    }
+                },
+            )
+
+        high_quality = candidate("HIGH-QUALITY", 95.0, 1_000)
+        newer_same_quality = candidate("NEWER", 90.0, 2_000)
+        older_same_quality = candidate("OLDER", 90.0, 1_000)
+
+        ordered = sorted(
+            [older_same_quality, newer_same_quality, high_quality],
+            key=MarketScanner._signal_sort_key,
+            reverse=True,
+        )
+
+        self.assertEqual(
+            [item.inst_id for item in ordered],
+            ["HIGH-QUALITY", "NEWER", "OLDER"],
         )
 
     def test_signal_sort_uses_actual_data_timestamp_before_lifecycle_label(self):

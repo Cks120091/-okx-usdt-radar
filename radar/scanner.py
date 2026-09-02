@@ -2131,6 +2131,12 @@ class MarketScanner:
             "COMPLETED": 2,
             "INVALIDATED": 0,
         }
+        continuation_priority = {
+            "CONFIRMED": 4,
+            "FORMING": 3,
+            "UNKNOWN": 2,
+            "CONFLICT": 1,
+        }
         freshness_priority = {
             "NEW": 8,
             "REACTIVATED": 7,
@@ -2180,6 +2186,15 @@ class MarketScanner:
             if isinstance(signal.decision_context, dict)
             else {}
         )
+        continuation = decision.get("continuation_confirmation", {})
+        continuation = continuation if isinstance(continuation, dict) else {}
+        continuation_key = str(
+            continuation.get("key") or "UNKNOWN"
+        ).strip().upper()
+        continuation_rank = continuation_priority.get(
+            continuation_key,
+            continuation_priority["UNKNOWN"],
+        )
         final = decision.get("final", {})
         final = final if isinstance(final, dict) else {}
         final_status = str(final.get("status") or "").upper()
@@ -2212,6 +2227,7 @@ class MarketScanner:
         return (
             permission_priority,
             status_priority,
+            continuation_rank,
             execution_score,
             freshness_timestamp,
             freshness_priority.get(signal.freshness, 0),
@@ -2393,7 +2409,14 @@ class MarketScanner:
         if state is None:
             return result
         direction = state.direction if state.direction in {"LONG", "SHORT"} else "NEUTRAL"
-        history = list((previous_micro or {}).get("history", []) or [])
+        stored_history = (previous_micro or {}).get("raw_history")
+        if not stored_history:
+            stored_history = (previous_micro or {}).get("history", [])
+        history = [
+            dict(sample)
+            for sample in (stored_history or [])
+            if isinstance(sample, dict)
+        ]
         if not history and previous_micro and previous_micro.get("sampled_at"):
             history.append(dict(previous_micro))
         current_sample = {
@@ -2406,7 +2429,17 @@ class MarketScanner:
             "ask_depth_usd": context.ask_depth_usd,
             "order_book_imbalance": context.order_book_imbalance,
         }
-        if current_sample["timestamp_ms"] > 0:
+        history_timestamps: set[int] = set()
+        for sample in history:
+            for key in ("timestamp_ms", "sampled_at", "timestamp", "ts"):
+                timestamp = _finite_number(sample.get(key))
+                if timestamp is not None and timestamp >= 0:
+                    history_timestamps.add(int(timestamp))
+                    break
+        if (
+            current_sample["timestamp_ms"] > 0
+            and current_sample["timestamp_ms"] not in history_timestamps
+        ):
             history.append(current_sample)
         flow = summarize_flow_history(history[-8:], direction)
 
@@ -2501,6 +2534,22 @@ class MarketScanner:
         metrics.update(
             {
                 "flow_trend": flow.get("state"),
+                # Preserve the three-sample, direction-aware facts separately
+                # for the continuation-confirmation layer.  The aggregate
+                # state also contains Funding / depth / book context, so it
+                # must never be counted as an extra directional vote.
+                "flow_oi_alignment": (
+                    flow.get("oi", {}).get("alignment")
+                    if isinstance(flow.get("oi"), dict)
+                    else None
+                ),
+                "flow_taker_state": (
+                    flow.get("taker", {}).get("state")
+                    if isinstance(flow.get("taker"), dict)
+                    else None
+                ),
+                "flow_participation_state": flow.get("state"),
+                "flow_valid_sample_count": flow.get("valid_sample_count"),
                 "flow_velocity_abnormal": flow.get("abnormal_speed"),
                 "market_driver": driver,
                 "relative_strength": driver.get("relative_strength"),

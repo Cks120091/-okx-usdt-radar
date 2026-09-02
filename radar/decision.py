@@ -92,6 +92,16 @@ def build_decision_context(
         anomaly_warnings,
     )
     conflict = _conflict_layer(item, direction, groups)
+    continuation_confirmation = _continuation_confirmation_layer(
+        item=item,
+        direction=direction,
+        metrics=metrics,
+        story=story,
+        trigger=trigger,
+        groups=groups,
+        terminal_invalidation=terminal_invalidation,
+        target_completed=target_completed,
+    )
     quality = _quality_layer(evidence, execution)
     confidence = _confidence_layer(
         direction,
@@ -130,6 +140,7 @@ def build_decision_context(
         "evidence": evidence,
         "market_context": market_context,
         "conflict": conflict,
+        "continuation_confirmation": continuation_confirmation,
         "quality": quality,
         "confidence": confidence,
         "episode": episode,
@@ -762,6 +773,456 @@ def _conflict_layer(
         "countertrend": context_countertrend,
         "opposite_signal_created": False,
     }
+
+
+def _continuation_confirmation_layer(
+    *,
+    item: Any,
+    direction: str,
+    metrics: dict[str, Any],
+    story: dict[str, Any],
+    trigger: dict[str, Any],
+    groups: dict[str, Any],
+    terminal_invalidation: bool,
+    target_completed: bool,
+) -> dict[str, Any]:
+    """Explain whether an existing price Trigger has follow-through support.
+
+    This layer is deliberately informational.  Price structure and MA/MACD
+    keep using the facts already produced by Market Story, while directional
+    participation has exactly three votes: OI, Taker/CVD (one shared vote),
+    and closed-candle volume.  Funding, BTC and higher-timeframe context are
+    warnings only and can never become a fourth vote.
+    """
+
+    participation = _mapping(_read(item, "market_participation", {}))
+    participation_group = _mapping(groups.get("participation_flow", {}))
+    conflict_texts = _unique(
+        [
+            *_strings(_read(item, "conflicts", [])),
+            *_strings(participation.get("conflicts", [])),
+            *_strings(participation_group.get("conflicts", [])),
+            *_strings(trigger.get("conflicts", [])),
+        ]
+    )
+    short_horizon = str(
+        _read(item, "radar_horizon", "SHORT") or "SHORT"
+    ).upper() == "SHORT"
+
+    supporting: list[str] = []
+    conflicts: list[str] = []
+    missing: list[str] = []
+    # Existing prose can come from another timeframe or an older payload.
+    # Keep it visible as context, but only structured current-scan facts below
+    # may cast one of the three continuation votes.
+    warnings = list(conflict_texts)
+    story_counterevidence = False
+    counter_domains: set[str] = set()
+
+    position = _mapping(groups.get("position_structure", {}))
+    position_state = str(position.get("stance") or "").upper()
+    acceptance = _mapping(story.get("price_acceptance", {}))
+    acceptance_state = _state_key(acceptance)
+    if acceptance_state in {"ACCEPTED", "ROLE_REVERSAL_RETEST"}:
+        supporting.append(str(acceptance.get("label") or "價格已接受突破區外位置"))
+    elif acceptance_state == "BREAKING":
+        supporting.append(str(acceptance.get("label") or "價格正在突破形成中"))
+    elif acceptance_state == "REJECTED":
+        warnings.append(str(acceptance.get("label") or "價格未接受突破區外位置"))
+        story_counterevidence = True
+    elif position_state == "SUPPORT":
+        supporting.append(
+            str(position.get("label") or "結構／價格位置支持 Trigger 方向")
+        )
+    elif position_state == "CONFLICT":
+        position_conflicts = _strings(position.get("conflicts", []))
+        warnings.extend(
+            position_conflicts
+            or [str(position.get("label") or "結構／價格位置出現反證")]
+        )
+        story_counterevidence = True
+    elif acceptance_state in {"", "UNKNOWN", "NO_ZONE"}:
+        missing.append("結構／價格接受資料")
+
+    trend = _mapping(groups.get("trend_momentum", {}))
+    trend_state = str(trend.get("stance") or "").upper()
+    momentum = _mapping(trigger.get("momentum_confirmation", {}))
+    if momentum.get("confirmed") is True or momentum.get("full_confirmation") is True:
+        supporting.append(str(momentum.get("label") or "MA／MACD 已同向呼應"))
+    elif momentum.get("partial") is True:
+        supporting.append(str(momentum.get("label") or "MA 或 MACD 已先轉向"))
+    elif momentum and (
+        momentum.get("confirmed") is False and momentum.get("partial") is False
+    ):
+        warnings.append(str(momentum.get("label") or "MA／MACD 尚未同向呼應"))
+        story_counterevidence = True
+    elif trend_state == "SUPPORT":
+        supporting.append(str(trend.get("label") or "MA／MACD 支持 Trigger 方向"))
+    elif trend_state == "CONFLICT":
+        trend_conflicts = _strings(trend.get("conflicts", []))
+        warnings.extend(
+            trend_conflicts
+            or [str(trend.get("label") or "MA／MACD 尚未同向呼應")]
+        )
+        story_counterevidence = True
+    elif not trend:
+        missing.append("MA／MACD 動能資料")
+
+    directional_return = _directional_core_return(direction, story)
+    oi_vote = _continuation_oi_vote(
+        metrics,
+        directional_return,
+    )
+    taker_vote = _continuation_taker_cvd_vote(
+        direction,
+        metrics,
+        directional_return,
+    )
+    volume_vote = _continuation_volume_vote(
+        metrics,
+        directional_return,
+        allow_15m_fallback=short_horizon,
+    )
+    votes = {
+        "OI": oi_vote,
+        "TAKER_CVD": taker_vote,
+        "VOLUME": volume_vote,
+    }
+    for domain, vote in votes.items():
+        state = vote["state"]
+        if state == "SUPPORT":
+            supporting.extend(vote["reasons"])
+        elif state == "CONFLICT":
+            conflicts.extend(vote["reasons"])
+            counter_domains.add(domain)
+        elif state == "UNKNOWN":
+            missing.extend(vote["missing"])
+        warnings.extend(vote["warnings"])
+
+    flow_history_state = _state_key(
+        metrics.get("flow_participation_state")
+        if metrics.get("flow_participation_state") is not None
+        else metrics.get("flow_trend")
+        if metrics.get("flow_trend") is not None
+        else _mapping(participation.get("trend", {}))
+    )
+    structured_history_complete = all(
+        _state_key(metrics.get(key)) not in {"", "UNKNOWN"}
+        for key in ("flow_oi_alignment", "flow_taker_state")
+    )
+    valid_history_samples = _number(metrics.get("flow_valid_sample_count"))
+    history_insufficient = (
+        not structured_history_complete
+        or valid_history_samples is None
+        or (
+            valid_history_samples is not None
+            and valid_history_samples < 3
+        )
+    )
+    if history_insufficient:
+        missing.append("連續資金流歷史（至少 3 筆）")
+    elif flow_history_state == "WEAKENING":
+        warnings.append("整體資金參與歷史正在轉弱（僅作提醒，不計方向票）")
+    elif flow_history_state == "MIXED":
+        warnings.append("整體資金參與歷史分歧（僅作提醒，不計方向票）")
+
+    support_count = sum(
+        vote["state"] == "SUPPORT" for vote in votes.values()
+    )
+    capital_conflict_count = sum(
+        vote["state"] == "CONFLICT" for vote in votes.values()
+    )
+    known_count = sum(vote["state"] != "UNKNOWN" for vote in votes.values())
+    severe_counterevidence = any(vote["severe"] for vote in votes.values())
+    capital_observed = known_count > 0
+
+    explicit_triggered = trigger.get("triggered")
+    source_stage = _stage(item)
+    trade_plan_present = all(
+        _number(_read(item, key, None)) is not None
+        for key in ("entry_low", "entry_high", "stop_loss", "take_profit_1")
+    )
+    trigger_active = (
+        not terminal_invalidation
+        and not target_completed
+        and trade_plan_present
+        and source_stage in _FORMAL_STAGES
+        and (
+            trigger.get("active_episode_preserved") is True
+            or explicit_triggered is True
+            or (explicit_triggered is not False and "triggered" not in trigger)
+        )
+    )
+
+    if (
+        not trigger_active
+        or direction == "NEUTRAL"
+        or not capital_observed
+        or (support_count == 0 and capital_conflict_count == 0)
+    ):
+        key = "UNKNOWN"
+        score = None
+    elif severe_counterevidence or len(counter_domains) >= 2:
+        key = "CONFLICT"
+        score = min(
+            35.0,
+            _continuation_score(support_count, capital_conflict_count),
+        )
+    elif (
+        support_count >= 2
+        and not counter_domains
+        and not story_counterevidence
+        and not history_insufficient
+    ):
+        key = "CONFIRMED"
+        score = max(
+            75.0,
+            _continuation_score(support_count, capital_conflict_count),
+        )
+    else:
+        key = "FORMING"
+        score = min(
+            70.0,
+            _continuation_score(support_count, capital_conflict_count),
+        )
+
+    if direction == "NEUTRAL":
+        missing.append("明確 Trigger 方向")
+    if not trigger_active:
+        missing.append("有效中的正式價格 Trigger")
+    if support_count == 0 and capital_conflict_count == 0:
+        missing.append("至少一項同向資金證據")
+    labels = {
+        "CONFIRMED": "高｜同向延續已確認",
+        "FORMING": "中｜同向延續形成中",
+        "CONFLICT": "低｜延續證據衝突",
+        "UNKNOWN": "未知｜延續資料不足",
+    }
+    return {
+        "key": key,
+        "label": labels[key],
+        "score": round(score, 1) if score is not None else None,
+        "supporting": _unique(supporting)[:8],
+        "conflicts": _unique(conflicts)[:8],
+        "missing": _unique(missing)[:8],
+        "warnings": _unique(warnings)[:6],
+        "meaning": (
+            "score 代表同向延續證據的一致度，不是勝率或價格上漲／下跌概率；"
+            "本層只提供資訊，不會取消 Trigger、改變方向或改寫進場權限。"
+        ),
+    }
+
+
+def _continuation_oi_vote(
+    metrics: dict[str, Any],
+    directional_return: float | None,
+) -> dict[str, Any]:
+    alignment = _state_key(metrics.get("flow_oi_alignment"))
+    structured = "flow_oi_alignment" in metrics
+    if alignment in {"SAME_DIRECTION_BUILD", "ALIGNED", "SUPPORT"}:
+        return _vote("SUPPORT", "OI 新增部位與 Trigger 方向同向")
+    if alignment in {"OPPOSITE_BUILD", "OPPOSITE_DIRECTION_BUILD"}:
+        return _vote(
+            "CONFLICT",
+            "OI 顯示反方向新增部位（opposite build）",
+            severe=True,
+        )
+    if alignment in {"UNRESOLVED_BUILD", "POSITION_EXIT", "STABLE", "MIXED"}:
+        warning = {
+            "UNRESOLVED_BUILD": "OI 正在增加，但價格方向仍未解開",
+            "POSITION_EXIT": "OI 下降，較像平倉／回補而非新增部位延續",
+            "STABLE": "OI 目前穩定，未提供新增部位票",
+            "MIXED": "OI 歷史分歧，未提供方向票",
+        }[alignment]
+        return _vote("NEUTRAL", warnings=[warning])
+    oi_change = _number(metrics.get("open_interest_change_pct"))
+    if oi_change is not None and directional_return is not None:
+        if oi_change >= 0.5 and directional_return > 0:
+            return _vote("SUPPORT", "價格與 OI 同向增加（單次快照）")
+        if oi_change >= 0.5 and directional_return < 0:
+            return _vote(
+                "CONFLICT",
+                "價格反向且 OI 增加（單次快照），可能有反方向新增部位",
+                severe=True,
+            )
+        return _vote(
+            "NEUTRAL",
+            warnings=["OI 未形成同方向新增部位支持"],
+        )
+    if structured:
+        return _vote("UNKNOWN", missing=["OI 連續變化歷史"])
+    return _vote("UNKNOWN", missing=["OI 方向資料"])
+
+
+def _continuation_taker_cvd_vote(
+    direction: str,
+    metrics: dict[str, Any],
+    directional_return: float | None,
+) -> dict[str, Any]:
+    states: list[str] = []
+    reasons: list[str] = []
+    warnings: list[str] = []
+    missing: list[str] = []
+    severe = False
+
+    structured = "flow_taker_state" in metrics
+    flow_state = _state_key(metrics.get("flow_taker_state"))
+    if flow_state == "STRENGTHENING":
+        # STRENGTHENING only says the directional share rose over the history
+        # window.  It does not say that side is currently dominant (for
+        # example, LONG 20% -> 30% is still seller-dominated), so the absolute
+        # snapshot below must earn the directional vote.
+        states.append("NEUTRAL")
+        warnings.append("Taker 同向占比正在增加，仍需目前占比確認主導方")
+    elif flow_state == "WEAKENING":
+        if directional_return is not None and directional_return < 0.0:
+            states.append("CONFLICT")
+            reasons.append("Taker 主動成交轉弱且價格反向")
+        else:
+            states.append("NEUTRAL")
+            warnings.append("Taker 主動成交歷史沿 Trigger 方向轉弱")
+    elif flow_state in {"STABLE", "MIXED"}:
+        states.append("NEUTRAL")
+    elif flow_state == "UNKNOWN" and structured:
+        missing.append("Taker／CVD 連續變化歷史")
+
+    taker_buy_pct = _number(metrics.get("taker_buy_pct"))
+    raw_seen = taker_buy_pct is not None and 0.0 <= taker_buy_pct <= 100.0
+    if raw_seen:
+        buy_share = taker_buy_pct / 100.0
+        directional_share = buy_share if direction == "LONG" else 1.0 - buy_share
+        if directional_return is None:
+            missing.append("Taker 缺少已收盤核心 K 線價格成果")
+        elif directional_share >= 0.62 and directional_return <= 0.0:
+            states.append("CONFLICT")
+            reasons.append("Taker 很強但價格推不動，可能遭對手吸收")
+            severe = True
+        elif (
+            directional_share >= 0.60
+            and directional_return > 0.02
+            and flow_state not in {"WEAKENING", "MIXED"}
+        ):
+            states.append("SUPPORT")
+            reasons.append("Taker 主動成交與價格成果同向")
+        elif directional_share <= 0.35 and directional_return < 0.0:
+            states.append("CONFLICT")
+            reasons.append("Taker 主動成交與價格反應明顯反向")
+        else:
+            states.append("NEUTRAL")
+
+    cvd = _number(metrics.get("cvd"))
+    if cvd is not None:
+        raw_seen = True
+        directional_cvd = cvd if direction == "LONG" else -cvd
+        if directional_return is None:
+            missing.append("CVD 缺少已收盤核心 K 線價格成果")
+        elif directional_cvd > 0 and directional_return <= 0:
+            states.append("CONFLICT")
+            reasons.append("CVD 同向但價格未跟進，可能存在吸收")
+            severe = True
+        elif (
+            directional_cvd > 0
+            and directional_return > 0
+            and flow_state not in {"WEAKENING", "MIXED"}
+        ):
+            states.append("SUPPORT")
+            reasons.append("CVD 與價格成果同向")
+        elif directional_cvd < 0 and directional_return < 0:
+            states.append("CONFLICT")
+            reasons.append("CVD 與 Trigger 方向相反")
+        else:
+            states.append("NEUTRAL")
+
+    if severe:
+        return _vote("CONFLICT", *reasons, severe=True)
+    if "CONFLICT" in states:
+        return _vote("CONFLICT", *reasons)
+    if "SUPPORT" in states:
+        return _vote("SUPPORT", *reasons)
+    if "NEUTRAL" in states:
+        return _vote("NEUTRAL", warnings=warnings)
+    return _vote(
+        "UNKNOWN",
+        missing=missing or ["Taker／CVD 方向資料"],
+    )
+
+
+def _continuation_volume_vote(
+    metrics: dict[str, Any],
+    directional_return: float | None,
+    *,
+    allow_15m_fallback: bool,
+) -> dict[str, Any]:
+    ratio = _number(
+        metrics.get("volume_ratio_core")
+        if metrics.get("volume_ratio_core") is not None
+        else metrics.get("volume_ratio_15m")
+        if allow_15m_fallback
+        else None
+    )
+    if ratio is not None and directional_return is not None:
+        if ratio >= 1.2 and directional_return > 0:
+            return _vote("SUPPORT", f"K 線量能放大至 {ratio:.2f} 倍且價格同向")
+        if ratio >= 1.2 and directional_return < 0:
+            return _vote(
+                "CONFLICT",
+                f"K 線量能放大至 {ratio:.2f} 倍但價格反向",
+            )
+        return _vote(
+            "NEUTRAL",
+            warnings=[f"K 線量能 {ratio:.2f} 倍，尚未形成同向放量票"],
+        )
+
+    if ratio is not None:
+        return _vote("UNKNOWN", missing=["K 線量能對應的價格方向"])
+    return _vote("UNKNOWN", missing=["K 線量能資料"])
+
+
+def _vote(
+    state: str,
+    *reasons: str,
+    severe: bool = False,
+    warnings: Sequence[str] | None = None,
+    missing: Sequence[str] | None = None,
+) -> dict[str, Any]:
+    return {
+        "state": state,
+        "reasons": _unique([str(reason) for reason in reasons if reason]),
+        "severe": severe,
+        "warnings": _unique([str(value) for value in (warnings or []) if value]),
+        "missing": _unique([str(value) for value in (missing or []) if value]),
+    }
+
+
+def _continuation_score(support_count: int, conflict_count: int) -> float:
+    return round(
+        max(0.0, min(100.0, 50.0 + (support_count - conflict_count) * (50.0 / 3.0))),
+        1,
+    )
+
+
+def _directional_core_return(
+    direction: str,
+    story: dict[str, Any],
+) -> float | None:
+    raw = _mapping(story.get("raw", {}))
+    value = _number(raw.get("core_return_pct"))
+    if value is None or direction not in {"LONG", "SHORT"}:
+        return None
+    return value if direction == "LONG" else -value
+
+
+def _state_key(value: Any) -> str:
+    if isinstance(value, Mapping):
+        value = next(
+            (
+                value.get(key)
+                for key in ("alignment", "state", "key", "value")
+                if value.get(key) not in (None, "")
+            ),
+            "",
+        )
+    return str(value or "").strip().upper()
 
 
 def _quality_layer(

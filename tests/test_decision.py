@@ -2,6 +2,7 @@ import copy
 import unittest
 
 from radar.decision import build_decision_context
+from radar.public_payload import public_candidate_payload
 
 
 def complete_signal():
@@ -59,7 +60,10 @@ def complete_signal():
                 {"key": "LONDON", "label": "倫敦盤", "active": True}
             ],
         },
-        "market_story": {"trigger": {"triggered": True, "type": "BREAKOUT"}},
+        "market_story": {
+            "trigger": {"triggered": True, "type": "BREAKOUT"},
+            "raw": {"core_return_pct": 0.3},
+        },
         "evidence_groups": {
             "position_structure": {
                 "label": "位置／價格行為",
@@ -799,6 +803,627 @@ class DecisionContextTests(unittest.TestCase):
         self.assertEqual(result["market_context"]["driver"]["state"], "UNKNOWN")
         self.assertEqual(result["market_context"]["relative_strength"]["state"], "UNKNOWN")
         self.assertEqual(result["market_context"]["resonance"]["state"], "UNKNOWN")
+
+    def test_two_of_three_directional_votes_confirm_continuation(self):
+        item = complete_signal()
+        item["market_metrics"].update(
+            {
+                "flow_oi_alignment": "SAME_DIRECTION_BUILD",
+                "flow_taker_state": "STRENGTHENING",
+                "flow_participation_state": "STRENGTHENING",
+                "flow_valid_sample_count": 3,
+                "price_change_core_pct": 0.42,
+                "taker_buy_pct": 65.0,
+                "volume_ratio_core": 0.95,
+            }
+        )
+        item["market_story"].update(
+            {
+                "price_acceptance": {
+                    "state": "ACCEPTED",
+                    "label": "Zone 外新價格獲得接受",
+                },
+                "trigger": {
+                    "triggered": True,
+                    "type": "BREAKOUT",
+                    "momentum_confirmation": {
+                        "confirmed": True,
+                        "partial": True,
+                        "label": "MA5/10 與 MACD 已同向呼應",
+                    },
+                },
+            }
+        )
+
+        result = build_decision_context(item)
+        continuation = result["continuation_confirmation"]
+
+        self.assertEqual(continuation["key"], "CONFIRMED")
+        self.assertEqual(continuation["score"], 83.3)
+        self.assertTrue(any("OI" in text for text in continuation["supporting"]))
+        self.assertTrue(any("Taker" in text for text in continuation["supporting"]))
+        self.assertEqual(continuation["conflicts"], [])
+        self.assertEqual(result["final"]["status"], "ENTER")
+        self.assertTrue(result["final"]["new_entry_allowed"])
+
+    def test_taker_and_cvd_share_one_vote_instead_of_double_counting(self):
+        item = complete_signal()
+        item["supporting_evidence"] = ["15m 結構轉多"]
+        item["market_participation"] = {
+            "state": "SUPPORT",
+            "supporting": [
+                "主動成交與價格成果同向",
+                "近期 CVD 與價格成果同向",
+            ],
+            "trend": {"state": "STRENGTHENING"},
+        }
+        item["market_metrics"].update(
+            {
+                "flow_oi_alignment": "STABLE",
+                "flow_taker_state": "STRENGTHENING",
+                "flow_participation_state": "STRENGTHENING",
+                "flow_valid_sample_count": 3,
+                "price_change_core_pct": 0.35,
+                "volume_ratio_core": 0.8,
+                "cvd": 500.0,
+            }
+        )
+
+        result = build_decision_context(item)
+        continuation = result["continuation_confirmation"]
+
+        self.assertEqual(continuation["key"], "FORMING")
+        self.assertEqual(continuation["score"], 66.7)
+        self.assertEqual(result["final"]["status"], "ENTER")
+
+    def test_insufficient_flow_history_is_forming_not_fake_confirmation(self):
+        item = complete_signal()
+        item["supporting_evidence"] = ["15m 結構轉多"]
+        item["market_participation"] = {
+            "state": "DATA_MISSING",
+            "supporting": [],
+            "conflicts": [],
+            "trend": {"state": "UNKNOWN", "label": "資料不足"},
+        }
+        item["market_metrics"].update(
+            {
+                "flow_oi_alignment": "UNKNOWN",
+                "flow_taker_state": "UNKNOWN",
+                "flow_participation_state": "UNKNOWN",
+                "flow_valid_sample_count": 2,
+                "price_change_core_pct": 0.3,
+                "volume_ratio_core": 1.4,
+            }
+        )
+
+        result = build_decision_context(item)
+        continuation = result["continuation_confirmation"]
+
+        self.assertEqual(continuation["key"], "FORMING")
+        self.assertIn("連續資金流歷史（至少 3 筆）", continuation["missing"])
+        self.assertEqual(result["final"]["status"], "ENTER")
+
+    def test_absorption_is_low_conflict_but_never_cancels_entry(self):
+        item = complete_signal()
+        item["supporting_evidence"] = ["15m 結構轉多"]
+        item["market_participation"] = {"state": "NEUTRAL"}
+        item["market_story"]["raw"]["core_return_pct"] = -0.02
+        item["market_metrics"].update(
+            {
+                "flow_oi_alignment": "SAME_DIRECTION_BUILD",
+                "flow_taker_state": "STRENGTHENING",
+                "flow_participation_state": "MIXED",
+                "flow_valid_sample_count": 3,
+                "price_change_core_pct": -0.02,
+                "taker_buy_pct": 68.0,
+                "volume_ratio_core": 0.9,
+            }
+        )
+
+        result = build_decision_context(item)
+        continuation = result["continuation_confirmation"]
+
+        self.assertEqual(continuation["key"], "CONFLICT")
+        self.assertTrue(any("吸收" in text for text in continuation["conflicts"]))
+        self.assertEqual(result["final"]["status"], "ENTER")
+        self.assertTrue(result["final"]["new_entry_allowed"])
+        self.assertEqual(result["final"]["direction"], "LONG")
+
+    def test_opposite_oi_build_overrides_two_support_votes_as_information_only(self):
+        item = complete_signal()
+        item["supporting_evidence"] = ["15m 結構轉多"]
+        item["market_participation"] = {"state": "NEUTRAL"}
+        item["market_metrics"].update(
+            {
+                "flow_oi_alignment": "OPPOSITE_BUILD",
+                "flow_taker_state": "STRENGTHENING",
+                "flow_participation_state": "MIXED",
+                "flow_valid_sample_count": 3,
+                "price_change_core_pct": 0.4,
+                "volume_ratio_core": 1.5,
+            }
+        )
+
+        result = build_decision_context(item)
+        continuation = result["continuation_confirmation"]
+
+        self.assertEqual(continuation["key"], "CONFLICT")
+        self.assertLessEqual(continuation["score"], 35.0)
+        self.assertTrue(any("opposite build" in text for text in continuation["conflicts"]))
+        self.assertEqual(result["final"]["status"], "ENTER")
+        self.assertTrue(result["final"]["trigger_preserved"])
+
+    def test_funding_btc_and_higher_timeframe_are_warnings_not_votes(self):
+        item = complete_signal()
+        item["conflicts"] = [
+            "同方向 Funding 極端擁擠",
+            "BTC 大盤轉弱",
+            "4H 高週期背景反向（逆勢）",
+        ]
+        item["market_participation"] = {"state": "NEUTRAL"}
+        item["supporting_evidence"] = ["15m 結構轉多"]
+        item["market_metrics"].update(
+            {
+                "flow_oi_alignment": "SAME_DIRECTION_BUILD",
+                "flow_taker_state": "STRENGTHENING",
+                "flow_participation_state": "STRENGTHENING",
+                "flow_valid_sample_count": 3,
+                "price_change_core_pct": 0.35,
+                "taker_buy_pct": 65.0,
+                "volume_ratio_core": 0.9,
+            }
+        )
+
+        result = build_decision_context(item)
+        continuation = result["continuation_confirmation"]
+
+        self.assertEqual(continuation["key"], "CONFIRMED")
+        self.assertEqual(continuation["conflicts"], [])
+        self.assertTrue(
+            all(
+                warning in continuation["warnings"]
+                for warning in item["conflicts"]
+            )
+        )
+        self.assertEqual(result["final"]["status"], "ENTER")
+
+    def test_multiple_counterevidence_domains_are_low_conflict(self):
+        item = complete_signal()
+        item["supporting_evidence"] = ["15m 結構轉多"]
+        item["market_participation"] = {"state": "NEUTRAL"}
+        item["market_story"]["raw"]["core_return_pct"] = -0.3
+        item["market_metrics"].update(
+            {
+                "flow_oi_alignment": "SAME_DIRECTION_BUILD",
+                "flow_taker_state": "WEAKENING",
+                "flow_participation_state": "MIXED",
+                "flow_valid_sample_count": 3,
+                "price_change_core_pct": -0.3,
+                "volume_ratio_core": 1.6,
+            }
+        )
+
+        result = build_decision_context(item)
+        continuation = result["continuation_confirmation"]
+
+        self.assertEqual(continuation["key"], "CONFLICT")
+        self.assertTrue(any("Taker" in text for text in continuation["conflicts"]))
+        self.assertTrue(any("量能" in text for text in continuation["conflicts"]))
+        self.assertEqual(result["final"]["status"], "ENTER")
+
+    def test_absent_participation_sources_are_explicitly_unknown(self):
+        item = complete_signal()
+        item["supporting_evidence"] = ["15m 結構轉多"]
+        item["market_participation"] = {}
+        for key in (
+            "flow_oi_alignment",
+            "flow_taker_state",
+            "flow_participation_state",
+            "flow_trend",
+            "oi_flow_state",
+            "open_interest_change_pct",
+            "taker_buy_pct",
+            "cvd",
+            "volume_ratio_core",
+            "volume_ratio_15m",
+            "price_change_core_pct",
+            "price_change_15m_pct",
+        ):
+            item["market_metrics"].pop(key, None)
+
+        result = build_decision_context(item)
+        continuation = result["continuation_confirmation"]
+
+        self.assertEqual(continuation["key"], "UNKNOWN")
+        self.assertIsNone(continuation["score"])
+        self.assertIn("OI 方向資料", continuation["missing"])
+        self.assertIn("Taker／CVD 方向資料", continuation["missing"])
+        self.assertIn("K 線量能資料", continuation["missing"])
+        self.assertEqual(result["final"]["status"], "ENTER")
+
+    def test_short_direction_uses_directional_volume_and_taker(self):
+        item = complete_signal()
+        item["direction"] = "SHORT"
+        item["supporting_evidence"] = ["15m 結構轉空"]
+        item["market_participation"] = {"state": "NEUTRAL"}
+        item["market_story"]["raw"]["core_return_pct"] = -0.4
+        item["market_metrics"].update(
+            {
+                "flow_oi_alignment": "SAME_DIRECTION_BUILD",
+                "flow_taker_state": "STRENGTHENING",
+                "flow_participation_state": "STRENGTHENING",
+                "flow_valid_sample_count": 3,
+                "price_change_core_pct": -0.4,
+                "volume_ratio_core": 1.5,
+                "taker_buy_pct": 30.0,
+            }
+        )
+
+        result = build_decision_context(item)
+
+        self.assertEqual(result["continuation_confirmation"]["key"], "CONFIRMED")
+        self.assertEqual(result["final"]["direction"], "SHORT")
+        self.assertEqual(result["final"]["status"], "ENTER")
+
+    def test_aggregate_flow_cannot_clear_missing_directional_history(self):
+        item = complete_signal()
+        item["supporting_evidence"] = ["15m 結構轉多"]
+        item["market_participation"] = {"state": "NEUTRAL"}
+        item["market_metrics"].update(
+            {
+                "flow_oi_alignment": "UNKNOWN",
+                "flow_taker_state": "UNKNOWN",
+                # This can be driven by Funding / depth / book and is not a vote.
+                "flow_participation_state": "STRENGTHENING",
+                "flow_valid_sample_count": 3,
+                "price_change_core_pct": 0.4,
+                "taker_buy_pct": 68.0,
+                "volume_ratio_core": 1.5,
+            }
+        )
+
+        result = build_decision_context(item)
+        continuation = result["continuation_confirmation"]
+
+        self.assertEqual(continuation["key"], "FORMING")
+        self.assertIn("連續資金流歷史（至少 3 筆）", continuation["missing"])
+        self.assertEqual(result["final"]["status"], "ENTER")
+
+    def test_no_price_trigger_can_never_have_confirmed_follow_through(self):
+        item = complete_signal()
+        item["signal_stage"] = "NEAR_TRIGGER"
+        item["lifecycle"]["current_stage"] = "NEAR_TRIGGER"
+        item["market_story"]["trigger"] = {
+            "triggered": False,
+            "type": "NONE",
+        }
+        item["market_metrics"].update(
+            {
+                "flow_oi_alignment": "SAME_DIRECTION_BUILD",
+                "flow_taker_state": "STRENGTHENING",
+                "flow_participation_state": "STRENGTHENING",
+                "flow_valid_sample_count": 3,
+                "price_change_core_pct": 0.4,
+                "volume_ratio_core": 1.5,
+            }
+        )
+
+        result = build_decision_context(item)
+
+        self.assertEqual(result["continuation_confirmation"]["key"], "UNKNOWN")
+        self.assertIn(
+            "有效中的正式價格 Trigger",
+            result["continuation_confirmation"]["missing"],
+        )
+        self.assertEqual(result["final"]["status"], "WAIT")
+
+    def test_preserved_active_episode_can_still_confirm_follow_through(self):
+        item = complete_signal()
+        item["market_story"].update(
+            {
+                "raw": {"core_return_pct": 0.4},
+                "trigger": {
+                    "triggered": False,
+                    "type": "ACTIVE_EPISODE",
+                    "active_episode_preserved": True,
+                },
+            }
+        )
+        item["market_metrics"].update(
+            {
+                "flow_oi_alignment": "SAME_DIRECTION_BUILD",
+                "flow_taker_state": "STRENGTHENING",
+                "flow_participation_state": "STRENGTHENING",
+                "flow_valid_sample_count": 3,
+                "taker_buy_pct": 65.0,
+                "volume_ratio_core": 0.9,
+            }
+        )
+
+        result = build_decision_context(item)
+
+        self.assertEqual(result["continuation_confirmation"]["key"], "CONFIRMED")
+        self.assertEqual(result["final"]["status"], "ENTER")
+
+    def test_closed_candle_return_wins_over_live_price_for_volume_vote(self):
+        item = complete_signal()
+        item["supporting_evidence"] = ["15m 結構轉多"]
+        item["market_participation"] = {"state": "NEUTRAL"}
+        item["market_story"]["raw"] = {"core_return_pct": -0.3}
+        item["market_metrics"].update(
+            {
+                "flow_oi_alignment": "STABLE",
+                "flow_taker_state": "STABLE",
+                "flow_participation_state": "STABLE",
+                "flow_valid_sample_count": 3,
+                "price_change_core_pct": 0.4,
+                "volume_ratio_core": 1.5,
+            }
+        )
+
+        result = build_decision_context(item)
+        continuation = result["continuation_confirmation"]
+
+        self.assertNotEqual(continuation["key"], "CONFIRMED")
+        self.assertTrue(any("價格反向" in text for text in continuation["conflicts"]))
+
+    def test_taker_buy_pct_is_always_percentage_not_ambiguous_ratio(self):
+        item = complete_signal()
+        item["supporting_evidence"] = ["15m 結構轉多"]
+        item["market_participation"] = {"state": "NEUTRAL"}
+        item["market_metrics"].update(
+            {
+                "flow_oi_alignment": "STABLE",
+                "flow_taker_state": "STABLE",
+                "flow_participation_state": "STABLE",
+                "flow_valid_sample_count": 3,
+                "price_change_core_pct": 0.4,
+                "taker_buy_pct": 1.0,
+                "volume_ratio_core": 0.8,
+            }
+        )
+
+        continuation = build_decision_context(item)["continuation_confirmation"]
+
+        self.assertFalse(any("Taker" in text for text in continuation["supporting"]))
+        self.assertEqual(continuation["key"], "UNKNOWN")
+
+    def test_explicit_unknown_flow_does_not_trust_stale_prose(self):
+        item = complete_signal()
+        item["supporting_evidence"] = ["15m 結構轉多"]
+        item["market_participation"] = {
+            "state": "SUPPORT",
+            "supporting": [
+                "價格與持倉量同向增加，顯示新增部位參與",
+                "主動成交與價格成果同向",
+            ],
+        }
+        item["market_metrics"].update(
+            {
+                "flow_oi_alignment": "UNKNOWN",
+                "flow_taker_state": "UNKNOWN",
+                "flow_participation_state": "UNKNOWN",
+                "flow_valid_sample_count": 2,
+                "price_change_core_pct": 0.3,
+                "volume_ratio_core": 0.8,
+            }
+        )
+
+        continuation = build_decision_context(item)["continuation_confirmation"]
+
+        self.assertFalse(any("持倉量同向" in text for text in continuation["supporting"]))
+        self.assertFalse(any("主動成交" in text for text in continuation["supporting"]))
+        self.assertEqual(continuation["key"], "UNKNOWN")
+
+    def test_strengthening_taker_history_needs_current_directional_dominance(self):
+        item = complete_signal()
+        item["market_metrics"].update(
+            {
+                "flow_oi_alignment": "SAME_DIRECTION_BUILD",
+                "flow_taker_state": "STRENGTHENING",
+                "flow_participation_state": "STRENGTHENING",
+                "flow_valid_sample_count": 3,
+                # LONG taker share may have risen from 20% to 30%, but sellers
+                # still dominate.  STRENGTHENING alone is not a direction vote.
+                "taker_buy_pct": 30.0,
+                "volume_ratio_core": 0.9,
+            }
+        )
+
+        continuation = build_decision_context(item)["continuation_confirmation"]
+
+        self.assertEqual(continuation["key"], "FORMING")
+        self.assertFalse(any("Taker 主動成交與價格成果同向" in text for text in continuation["supporting"]))
+
+    def test_price_rejection_prevents_high_confirmation(self):
+        item = complete_signal()
+        item["market_story"]["price_acceptance"] = {
+            "state": "REJECTED",
+            "label": "突破區外價格遭拒絕",
+        }
+        item["market_metrics"].update(
+            {
+                "flow_oi_alignment": "SAME_DIRECTION_BUILD",
+                "flow_taker_state": "STRENGTHENING",
+                "flow_participation_state": "STRENGTHENING",
+                "flow_valid_sample_count": 3,
+                "taker_buy_pct": 65.0,
+                "volume_ratio_core": 1.5,
+            }
+        )
+
+        result = build_decision_context(item)
+
+        self.assertEqual(result["continuation_confirmation"]["key"], "FORMING")
+        self.assertEqual(result["final"]["status"], "ENTER")
+
+    def test_ma_macd_counterevidence_prevents_high_confirmation(self):
+        item = complete_signal()
+        item["market_story"]["trigger"]["momentum_confirmation"] = {
+            "confirmed": False,
+            "partial": False,
+            "label": "MA／MACD 尚未同向呼應",
+        }
+        item["market_metrics"].update(
+            {
+                "flow_oi_alignment": "SAME_DIRECTION_BUILD",
+                "flow_taker_state": "STRENGTHENING",
+                "flow_participation_state": "STRENGTHENING",
+                "flow_valid_sample_count": 3,
+                "taker_buy_pct": 65.0,
+                "volume_ratio_core": 1.5,
+            }
+        )
+
+        result = build_decision_context(item)
+
+        self.assertEqual(result["continuation_confirmation"]["key"], "FORMING")
+        self.assertEqual(result["final"]["status"], "ENTER")
+
+    def test_trigger_without_a_trade_plan_has_unknown_confirmation(self):
+        item = complete_signal()
+        for key in ("entry_low", "entry_high", "stop_loss", "take_profit_1"):
+            item.pop(key)
+        item["market_metrics"].update(
+            {
+                "flow_oi_alignment": "SAME_DIRECTION_BUILD",
+                "flow_taker_state": "STRENGTHENING",
+                "flow_participation_state": "STRENGTHENING",
+                "flow_valid_sample_count": 3,
+                "taker_buy_pct": 65.0,
+                "volume_ratio_core": 1.5,
+            }
+        )
+
+        continuation = build_decision_context(item)["continuation_confirmation"]
+
+        self.assertEqual(continuation["key"], "UNKNOWN")
+        self.assertIn("有效中的正式價格 Trigger", continuation["missing"])
+
+    def test_long_horizon_core_4h_volume_conflict_is_not_context_warning(self):
+        item = complete_signal()
+        item["radar_horizon"] = "LONG"
+        item["supporting_evidence"] = ["4H 結構轉多"]
+        item["conflicts"] = []
+        item["market_participation"] = {"state": "NEUTRAL"}
+        item["market_story"]["raw"] = {"core_return_pct": -0.4}
+        item["market_metrics"].update(
+            {
+                "flow_oi_alignment": "STABLE",
+                "flow_taker_state": "STABLE",
+                "flow_participation_state": "STABLE",
+                "flow_valid_sample_count": 3,
+                "volume_ratio_core": 1.5,
+            }
+        )
+
+        continuation = build_decision_context(item)["continuation_confirmation"]
+
+        self.assertTrue(any("K 線量能" in text for text in continuation["conflicts"]))
+        self.assertFalse(any("K 線量能" in text for text in continuation["warnings"]))
+
+    def test_short_horizon_does_not_count_noncore_volume_text_as_core_vote(self):
+        for warning in (
+            "4H 成交量放大但價格反向",
+            "5m 成交量放大但價格反向",
+        ):
+            with self.subTest(warning=warning):
+                item = complete_signal()
+                item["conflicts"] = [warning]
+                item["market_participation"] = {"state": "NEUTRAL"}
+                item["market_metrics"].update(
+                    {
+                        "flow_oi_alignment": "STABLE",
+                        "flow_taker_state": "STABLE",
+                        "flow_participation_state": "STABLE",
+                        "flow_valid_sample_count": 3,
+                    }
+                )
+                item["market_metrics"].pop("volume_ratio_core", None)
+                item["market_metrics"].pop("volume_ratio_15m", None)
+
+                continuation = build_decision_context(item)[
+                    "continuation_confirmation"
+                ]
+
+                self.assertNotIn(warning, continuation["conflicts"])
+                self.assertIn(warning, continuation["warnings"])
+
+        item = complete_signal()
+        item["supporting_evidence"] = ["5m 成交量放大且價格同向"]
+        item["market_participation"] = {"state": "NEUTRAL"}
+        item["market_metrics"].update(
+            {
+                "flow_oi_alignment": "SAME_DIRECTION_BUILD",
+                "flow_taker_state": "STABLE",
+                "flow_participation_state": "STABLE",
+                "flow_valid_sample_count": 3,
+            }
+        )
+        item["market_metrics"].pop("volume_ratio_core", None)
+        item["market_metrics"].pop("volume_ratio_15m", None)
+
+        continuation = build_decision_context(item)["continuation_confirmation"]
+
+        self.assertEqual(continuation["key"], "FORMING")
+        self.assertNotIn(
+            "5m 成交量放大且價格同向",
+            continuation["supporting"],
+        )
+
+    def test_short_horizon_keeps_noncore_oi_and_cvd_prose_warning_only(self):
+        for warning in (
+            "4H OI opposite build",
+            "5m CVD 同向但價格未跟進",
+        ):
+            with self.subTest(warning=warning):
+                item = complete_signal()
+                item["supporting_evidence"] = ["15m 結構轉多"]
+                item["conflicts"] = [warning]
+                item["market_participation"] = {"state": "NEUTRAL"}
+                for key in (
+                    "flow_oi_alignment",
+                    "flow_taker_state",
+                    "open_interest_change_pct",
+                    "taker_buy_pct",
+                    "cvd",
+                    "volume_ratio_core",
+                    "volume_ratio_15m",
+                ):
+                    item["market_metrics"].pop(key, None)
+
+                continuation = build_decision_context(item)[
+                    "continuation_confirmation"
+                ]
+
+                self.assertNotIn(warning, continuation["conflicts"])
+                self.assertIn(warning, continuation["warnings"])
+
+    def test_public_projection_exposes_only_continuation_summary(self):
+        item = complete_signal()
+        item["market_metrics"].update(
+            {
+                "flow_oi_alignment": "SAME_DIRECTION_BUILD",
+                "flow_taker_state": "STRENGTHENING",
+                "flow_participation_state": "STRENGTHENING",
+                "flow_valid_sample_count": 3,
+                "price_change_core_pct": 0.4,
+                "taker_buy_pct": 65.0,
+                "volume_ratio_core": 0.9,
+            }
+        )
+        item["decision_context"] = build_decision_context(item)
+
+        public = public_candidate_payload(item, signal=True)
+        continuation = public["decision_context"]["continuation_confirmation"]
+
+        self.assertEqual(continuation["key"], "CONFIRMED")
+        self.assertIn("score", continuation)
+        self.assertIn("supporting", continuation)
+        self.assertIn("conflicts", continuation)
+        self.assertIn("missing", continuation)
+        self.assertIn("meaning", continuation)
+        self.assertNotIn("flow_oi_alignment", public["market_metrics"])
 
     def test_market_state_without_plan_is_no_edge_not_a_fake_entry(self):
         item = complete_signal()

@@ -451,6 +451,108 @@ class SignalRepositoryTests(unittest.TestCase):
         self.assertEqual(later.signal_stage, "EARLY_SIGNAL")
         self.assertEqual(later.freshness, "NEW")
 
+    def test_early_signal_upgrades_once_without_replacing_or_regressing_episode(self):
+        early = replace(
+            signal_fixture("EARLY-UPGRADE-USDT-SWAP"),
+            signal_stage="EARLY_SIGNAL",
+            freshness="NEW",
+        )
+        created = self.repository.reconcile(
+            [early],
+            [state_fixture(early, early.data_timestamp)],
+            "2026-08-20T00:00:00+00:00",
+            "SHORT",
+        )[0]
+        original_trigger = dict(created.market_story["trigger"])
+        next_ts = early.data_timestamp + 900_000
+        confirmed = replace(
+            early,
+            signal_stage="CONFIRMED",
+            freshness="ACTIVE",
+            entry_low="105",
+            entry_high="106",
+            stop_loss="95",
+            take_profit_1="125",
+            take_profit_2="135",
+            data_timestamp=next_ts,
+            closed_candle_ts=next_ts,
+            market_story={
+                "trigger": {
+                    "event_ts": next_ts,
+                    "trigger_event_key": (
+                        f"SHORT:LONG:BREAKOUT:{next_ts}:ZONE-B"
+                    ),
+                }
+            },
+            market_metrics={
+                **early.market_metrics,
+                "core_timestamp": next_ts,
+            },
+        )
+
+        upgraded = self.repository.reconcile(
+            [confirmed],
+            [state_fixture(confirmed, next_ts)],
+            "2026-08-20T00:15:00+00:00",
+            "SHORT",
+        )[0]
+
+        later_ts = next_ts + 900_000
+        early_again = replace(
+            confirmed,
+            signal_stage="EARLY_SIGNAL",
+            freshness="NEW",
+            data_timestamp=later_ts,
+            closed_candle_ts=later_ts,
+            market_metrics={
+                **confirmed.market_metrics,
+                "core_timestamp": later_ts,
+            },
+        )
+        retained = self.repository.reconcile(
+            [early_again],
+            [state_fixture(early_again, later_ts)],
+            "2026-08-20T00:30:00+00:00",
+            "SHORT",
+        )[0]
+        row = self.repository._connection.execute(
+            """
+            SELECT event_key, event_ts, stage FROM signals
+            WHERE signal_id=?
+            """,
+            (created.trigger_id,),
+        ).fetchone()
+        events = self.repository._connection.execute(
+            """
+            SELECT from_stage, to_stage, event_type FROM signal_events
+            WHERE signal_id=? ORDER BY id
+            """,
+            (created.trigger_id,),
+        ).fetchall()
+
+        self.assertEqual(upgraded.trigger_id, created.trigger_id)
+        self.assertEqual(upgraded.signal_stage, "CONFIRMED")
+        self.assertEqual(upgraded.lifecycle["transition"], "UPGRADED")
+        self.assertEqual(retained.trigger_id, created.trigger_id)
+        self.assertEqual(retained.signal_stage, "CONFIRMED")
+        self.assertEqual(retained.lifecycle["transition"], "UNCHANGED")
+        self.assertEqual(retained.entry_low, created.entry_low)
+        self.assertEqual(retained.entry_high, created.entry_high)
+        self.assertEqual(retained.stop_loss, created.stop_loss)
+        self.assertEqual(retained.take_profit_1, created.take_profit_1)
+        self.assertEqual(retained.take_profit_2, created.take_profit_2)
+        self.assertEqual(retained.market_story["trigger"], original_trigger)
+        self.assertEqual(row["event_key"], original_trigger["trigger_event_key"])
+        self.assertEqual(row["event_ts"], original_trigger["event_ts"])
+        self.assertEqual(row["stage"], "CONFIRMED")
+        self.assertEqual(
+            [tuple(event) for event in events],
+            [
+                (None, "EARLY_SIGNAL", "CREATED"),
+                ("EARLY_SIGNAL", "CONFIRMED", "UPGRADED"),
+            ],
+        )
+
     def test_missing_core_interval_closes_without_fabricating_performance(self):
         raw = signal_fixture("GAP-USDT-SWAP")
         created = self.repository.reconcile(
