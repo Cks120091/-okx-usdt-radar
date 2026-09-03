@@ -113,7 +113,7 @@ class V33ContractTests(unittest.TestCase):
         self.assertIn('<body data-active-group="home">', html)
         self.assertIn('body:not([data-active-group="home"]) .command-deck', html)
         self.assertIn("document.body.dataset.activeGroup=group", html)
-        self.assertIn("okx-radar-shell-v3.9-radar-clarity-1", service_worker)
+        self.assertIn("okx-radar-shell-v4.0-radar-compact-1", service_worker)
         self.assertIn("市場自動計畫", html)
         self.assertIn("plan.adaptive_market_plan", html)
         self.assertIn("plan.market_plan_sources", html)
@@ -224,7 +224,7 @@ class V33ContractTests(unittest.TestCase):
         self.assertIn("function signalTriggerTime(item)", html)
         self.assertIn("訊號觸發時間（台灣）", html)
         self.assertNotIn("status!=='ENTRY_READY'&&status!=='MISSED_ENTRY'", html)
-        self.assertIn("okx-radar-shell-v3.9-radar-clarity-1", service_worker)
+        self.assertIn("okx-radar-shell-v4.0-radar-compact-1", service_worker)
         self.assertIn("$('#preflightRefresh').addEventListener('click',loadPreflight)", html)
         self.assertIn("${decisionPanel(item)}", html)
         self.assertNotIn("showPreflight", html)
@@ -501,7 +501,7 @@ class V33ContractTests(unittest.TestCase):
             "longMissed=activeLong.filter(x=>!isPreviewItem(x)&&!itemWasEntryReady(x)&&itemEntryStatus(x)==='MISSED_ENTRY').sort(signalSortComparator)",
             report,
         )
-        self.assertGreaterEqual(html.count("交易品質由高至低"), 10)
+        self.assertGreaterEqual(html.count("品質高 → 低"), 10)
 
         comparator = html.split("function signalSortComparator(a,b){", 1)[1].split(
             "function renderContextCoverage", 1
@@ -608,7 +608,7 @@ class V33ContractTests(unittest.TestCase):
         self.assertIn("訊號後平均走向", continuation)
         self.assertIn("最高等級門檻：OI 支持＋至少 1 項加成", continuation)
         self.assertIn("目前：OI", continuation)
-        self.assertIn("查看採樣與三項平均依據", continuation)
+        self.assertIn("採樣與 OI／Taker／量能依據", continuation)
         self.assertIn('role="progressbar"', continuation)
         self.assertIn('aria-valuenow="${num(progress,0)}"', continuation)
         self.assertIn('aria-valuetext="已完成 ${count}/${target} 個完整區間"', continuation)
@@ -617,6 +617,9 @@ class V33ContractTests(unittest.TestCase):
         self.assertIn("function signalTradeGrid(item,options={})", html)
         self.assertIn("signal-plan-grid", html)
         self.assertIn("R:R｜${esc(rrLabel)}", html)
+        self.assertIn("function signalMore(item,horizon,reason", html)
+        self.assertIn("原因、時間與其他操作", html)
+        self.assertNotIn("<small>", html.split("function signalTradeGrid(item,options={})", 1)[1].split("function signalTriggerTime", 1)[0])
 
         # 延續確認只負責說明與重繪，不參與排序，也不得變成進場硬門檻。
         self.assertNotIn("continuationConfirmation", entry_status)
@@ -787,11 +790,11 @@ class V33ContractTests(unittest.TestCase):
         self.assertIn("已達止盈｜本次交易計畫完成", html)
         self.assertIn("已達止損｜本次交易計畫結束", html)
         self.assertIn('data-trigger-id="${esc(item.trigger_id||\'\')}"', html)
-        self.assertIn("等待新的 Trigger 與全新交易計畫", html)
+        self.assertIn("等待新的 Trigger；舊 Entry／SL／TP 不會復活", html)
         self.assertIn("舊 Entry／SL／TP 不會復活", html)
         self.assertIn("舊交易計畫已結束", html)
         self.assertIn("signalTradeGrid(item,{prefix:'原始 ',original:true})", html)
-        self.assertIn("okx-radar-shell-v3.9-radar-clarity-1", worker)
+        self.assertIn("okx-radar-shell-v4.0-radar-compact-1", worker)
 
     def test_market_scan_has_no_github_schedule(self):
         root = Path(__file__).parents[1]
