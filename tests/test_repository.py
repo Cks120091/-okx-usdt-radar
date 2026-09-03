@@ -9,6 +9,7 @@ from unittest.mock import patch
 
 from radar.decision import build_decision_context
 from radar.models import MarketContext, MarketState, Signal
+from radar.public_payload import public_candidate_payload
 from radar.repository import SignalRepository, classify_microstructure
 
 
@@ -2662,6 +2663,189 @@ class SignalRepositoryTests(unittest.TestCase):
             self.repository.load_microstructure(inst_id)["raw_history"],
             history,
         )
+
+    def test_continuation_observer_updates_only_advisory_projection(self):
+        completed_at = "2026-09-03T00:00:00+00:00"
+        raw = signal_fixture("AVERAGE-USDT-SWAP")
+        committed = self.repository.reconcile(
+            [raw],
+            [state_fixture(raw, raw.closed_candle_ts)],
+            completed_at,
+            "SHORT",
+        )[0]
+        before = self.repository.load_active_signal(
+            committed.inst_id,
+            committed.radar_horizon,
+        )
+        event_count_before = self.repository._connection.execute(
+            "SELECT COUNT(*) FROM signal_events WHERE signal_id=?",
+            (committed.trigger_id,),
+        ).fetchone()[0]
+        protected = {
+            key: getattr(before, key)
+            for key in (
+                "direction",
+                "entry_low",
+                "entry_high",
+                "stop_loss",
+                "take_profit_1",
+                "take_profit_2",
+                "score",
+                "readiness_score",
+                "signal_stage",
+                "freshness",
+                "trigger_type",
+                "lifecycle",
+                "entry_eligibility",
+                "actionable",
+            )
+        }
+        decision_without_continuation = {
+            key: value
+            for key, value in before.decision_context.items()
+            if key != "continuation_confirmation"
+        }
+        metrics_without_observer = {
+            key: value
+            for key, value in before.market_metrics.items()
+            if key != "continuation_observer"
+        }
+
+        base_ms = 1_800_000_000_000
+        updated = None
+        for index in range(11):
+            updated = self.repository.record_continuation_snapshot(
+                committed.trigger_id,
+                raw.closed_candle_ts,
+                {
+                    "observed_at_ms": base_ms + index * 60_000 + 3_000,
+                    "bucket_start_ms": base_ms + (index - 1) * 60_000,
+                    "bucket_end_ms": base_ms + index * 60_000,
+                    "open_interest_contracts": 1_000.0 + index * 2.0,
+                    "open_interest_usd": 5_000_000.0 + index * 100_000.0,
+                    "price": 100.0 + index * 0.05,
+                    "trades_coverage": "BASELINE" if index == 0 else "COMPLETE",
+                    "taker_buy_volume": 0.0 if index == 0 else 70.0,
+                    "taker_sell_volume": 0.0 if index == 0 else 30.0,
+                    "candle_ts": base_ms + (index - 1) * 60_000,
+                    "candle_close_ts": base_ms + index * 60_000,
+                    "quote_volume": 150.0,
+                    "volume_baseline": 100.0,
+                    "source_timestamps": {
+                        "open_interest": base_ms + index * 60_000 + 2_000,
+                    },
+                },
+                f"2026-09-03T00:{index:02d}:00+00:00",
+            )
+
+        self.assertIsNotNone(updated)
+        observer = updated.market_metrics["continuation_observer"]
+        self.assertEqual(observer["status"], "READY")
+        self.assertTrue(observer["windows"]["10m"]["ready"])
+        self.assertEqual(
+            updated.decision_context["continuation_confirmation"]["key"],
+            "CONFIRMED",
+        )
+        for key, value in protected.items():
+            self.assertEqual(getattr(updated, key), value, key)
+        self.assertEqual(
+            {
+                key: value
+                for key, value in updated.decision_context.items()
+                if key != "continuation_confirmation"
+            },
+            decision_without_continuation,
+        )
+        self.assertEqual(
+            {
+                key: value
+                for key, value in updated.market_metrics.items()
+                if key != "continuation_observer"
+            },
+            metrics_without_observer,
+        )
+        event_count_after = self.repository._connection.execute(
+            "SELECT COUNT(*) FROM signal_events WHERE signal_id=?",
+            (committed.trigger_id,),
+        ).fetchone()[0]
+        self.assertEqual(event_count_after, event_count_before)
+
+        state = self.repository.load_continuation_observer(committed.trigger_id)
+        self.assertEqual(state["signal_id"], committed.trigger_id)
+        self.assertEqual(len(state["samples"]), 11)
+        self.assertIsNone(
+            self.repository.record_continuation_snapshot(
+                committed.trigger_id,
+                raw.closed_candle_ts - 1,
+                {
+                    "observed_at_ms": base_ms + 12 * 60_000 + 3_000,
+                    "bucket_start_ms": base_ms + 11 * 60_000,
+                    "bucket_end_ms": base_ms + 12 * 60_000,
+                },
+                "2026-09-03T00:12:00+00:00",
+            )
+        )
+
+    def test_state_only_new_core_drops_previous_continuation_generation(self):
+        raw = signal_fixture("AVERAGE-ROLLOVER-USDT-SWAP")
+        committed = self.repository.reconcile(
+            [raw],
+            [state_fixture(raw, raw.closed_candle_ts)],
+            "2026-09-03T00:00:00+00:00",
+            "SHORT",
+        )[0]
+        base_ms = 1_800_000_000_000
+        observed = None
+        for index in range(11):
+            observed = self.repository.record_continuation_snapshot(
+                committed.trigger_id,
+                raw.closed_candle_ts,
+                {
+                    "observed_at_ms": base_ms + index * 60_000 + 3_000,
+                    "bucket_start_ms": base_ms + (index - 1) * 60_000,
+                    "bucket_end_ms": base_ms + index * 60_000,
+                    "open_interest_contracts": 1_000.0 + index * 2.0,
+                    "price": 100.0 + index * 0.05,
+                    "trades_coverage": "BASELINE" if index == 0 else "COMPLETE",
+                    "taker_buy_volume": 0.0 if index == 0 else 70.0,
+                    "taker_sell_volume": 0.0 if index == 0 else 30.0,
+                    "candle_ts": base_ms + (index - 1) * 60_000,
+                    "candle_close_ts": base_ms + index * 60_000,
+                    "quote_volume": 150.0,
+                    "volume_baseline": 100.0,
+                    "source_timestamps": {
+                        "open_interest": base_ms + index * 60_000 + 2_000,
+                    },
+                },
+                f"2026-09-03T00:{index:02d}:00+00:00",
+            )
+
+        self.assertIn("continuation_observer", observed.market_metrics)
+        self.assertEqual(
+            observed.decision_context["continuation_confirmation"]["key"],
+            "CONFIRMED",
+        )
+
+        next_core_ts = raw.closed_candle_ts + 900_000
+        advanced = self.repository.reconcile(
+            [],
+            [state_fixture(raw, next_core_ts)],
+            "2026-09-03T00:15:00+00:00",
+            "SHORT",
+        )[0]
+        persisted = self.repository.load_active_signal(raw.inst_id, "SHORT")
+
+        for item in (advanced, persisted):
+            self.assertNotIn("continuation_observer", item.market_metrics)
+            self.assertNotIn(
+                "continuation_confirmation",
+                item.decision_context,
+            )
+            public = public_candidate_payload(item, signal=True)
+            self.assertEqual(
+                public["decision_context"]["continuation_confirmation"]["key"],
+                "UNKNOWN",
+            )
 
 
 if __name__ == "__main__":

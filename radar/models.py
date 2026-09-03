@@ -256,6 +256,9 @@ class RadarReport:
     long_completed_at: str = ""
     strategy_version: str = "V3.4_CONTEXT"
     feature_schema_version: str = "3.4.0"
+    # Independent from generated_at/completed_at: continuation observations
+    # must never make the closed-core market snapshot appear newer.
+    observer_updated_at: str = ""
 
     def to_dict(self) -> dict[str, Any]:
         # Avoid ``asdict(self)`` here: it recursively copies every signal and

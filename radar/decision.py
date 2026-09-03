@@ -869,20 +869,42 @@ def _continuation_confirmation_layer(
         missing.append("MA／MACD 動能資料")
 
     directional_return = _directional_core_return(direction, story)
-    oi_vote = _continuation_oi_vote(
-        metrics,
-        directional_return,
-    )
-    taker_vote = _continuation_taker_cvd_vote(
-        direction,
-        metrics,
-        directional_return,
-    )
-    volume_vote = _continuation_volume_vote(
-        metrics,
-        directional_return,
-        allow_15m_fallback=short_horizon,
-    )
+    observer = _mapping(metrics.get("continuation_observer"))
+    observer_selected = _mapping(observer.get("selected"))
+    observer_present = bool(observer.get("algorithm_version"))
+    observer_ready = observer_selected.get("ready") is True
+    if observer_present:
+        observer_domains = _mapping(observer_selected.get("domains"))
+        oi_vote = _continuation_observer_vote(
+            _mapping(observer_domains.get("OI")),
+            "OI 固定平均窗",
+            ready=observer_ready,
+        )
+        taker_vote = _continuation_observer_vote(
+            _mapping(observer_domains.get("TAKER_CVD")),
+            "Taker／CVD 固定平均窗",
+            ready=observer_ready,
+        )
+        volume_vote = _continuation_observer_vote(
+            _mapping(observer_domains.get("VOLUME")),
+            "成交量固定平均窗",
+            ready=observer_ready,
+        )
+    else:
+        oi_vote = _continuation_oi_vote(
+            metrics,
+            directional_return,
+        )
+        taker_vote = _continuation_taker_cvd_vote(
+            direction,
+            metrics,
+            directional_return,
+        )
+        volume_vote = _continuation_volume_vote(
+            metrics,
+            directional_return,
+            allow_15m_fallback=short_horizon,
+        )
     votes = {
         "OI": oi_vote,
         "TAKER_CVD": taker_vote,
@@ -911,16 +933,45 @@ def _continuation_confirmation_layer(
         for key in ("flow_oi_alignment", "flow_taker_state")
     )
     valid_history_samples = _number(metrics.get("flow_valid_sample_count"))
+    observer_primary_ready = bool(
+        observer_present
+        and observer_ready
+        and str(observer.get("selected_window") or "")
+        == str(observer.get("primary_window") or "")
+    )
+    if observer_primary_ready:
+        observer_windows = _mapping(observer.get("windows"))
+        early_window = _mapping(
+            observer_windows.get(str(observer.get("early_window") or ""))
+        )
+        if str(early_window.get("state") or "").upper() in {"CONFLICT", "MIXED"}:
+            # The full window still describes the original post-trigger move,
+            # but a reversing fast half-window must keep the current advisory
+            # out of the top tier.
+            story_counterevidence = True
+            warnings.append("快速平均窗已轉弱；基準窗仍在，但近期接力不一致")
     history_insufficient = (
-        not structured_history_complete
-        or valid_history_samples is None
-        or (
-            valid_history_samples is not None
-            and valid_history_samples < 3
+        not observer_primary_ready
+        if observer_present
+        else (
+            not structured_history_complete
+            or valid_history_samples is None
+            or (
+                valid_history_samples is not None
+                and valid_history_samples < 3
+            )
         )
     )
     if history_insufficient:
-        missing.append("連續資金流歷史（至少 3 筆）")
+        if observer_present:
+            primary_window = str(observer.get("primary_window") or "完整")
+            bucket_count = int(_number(observer.get("bucket_count")) or 0)
+            target_buckets = int(_number(observer.get("target_buckets")) or 0)
+            missing.append(
+                f"{primary_window} 固定平均窗（{bucket_count}/{target_buckets} 區間）"
+            )
+        else:
+            missing.append("連續資金流歷史（至少 3 筆）")
     elif flow_history_state == "WEAKENING":
         warnings.append("整體資金參與歷史正在轉弱（僅作提醒，不計方向票）")
     elif flow_history_state == "MIXED":
@@ -970,6 +1021,7 @@ def _continuation_confirmation_layer(
         )
     elif (
         support_count >= 2
+        and oi_vote["state"] == "SUPPORT"
         and not counter_domains
         and not story_counterevidence
         and not history_insufficient
@@ -1014,7 +1066,36 @@ def _continuation_confirmation_layer(
             "score 代表同向延續證據的一致度，不是勝率或價格上漲／下跌概率；"
             "本層只提供資訊，不會取消 Trigger、改變方向或改寫進場權限。"
         ),
+        "observer": dict(observer) if observer_present else {},
     }
+
+
+def _continuation_observer_vote(
+    domain: Mapping[str, Any],
+    label: str,
+    *,
+    ready: bool,
+) -> dict[str, Any]:
+    """Translate one same-window average domain into the existing 3-vote model."""
+
+    if not ready:
+        return _vote("UNKNOWN", missing=[f"{label}仍在採樣"])
+    state = str(domain.get("state") or "UNKNOWN").strip().upper()
+    reason = str(domain.get("reason") or domain.get("detail") or label)
+    if state == "SUPPORT":
+        return _vote("SUPPORT", reason)
+    if state == "CONFLICT":
+        return _vote(
+            "CONFLICT",
+            reason,
+            severe=domain.get("severe") is True,
+        )
+    if state == "NEUTRAL":
+        return _vote("NEUTRAL", warnings=[reason])
+    return _vote(
+        "UNKNOWN",
+        missing=[str(domain.get("missing") or f"{label}資料不足")],
+    )
 
 
 def _continuation_oi_vote(

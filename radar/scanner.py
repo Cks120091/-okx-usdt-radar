@@ -2131,12 +2131,6 @@ class MarketScanner:
             "COMPLETED": 2,
             "INVALIDATED": 0,
         }
-        continuation_priority = {
-            "CONFIRMED": 4,
-            "FORMING": 3,
-            "UNKNOWN": 2,
-            "CONFLICT": 1,
-        }
         freshness_priority = {
             "NEW": 8,
             "REACTIVATED": 7,
@@ -2186,15 +2180,6 @@ class MarketScanner:
             if isinstance(signal.decision_context, dict)
             else {}
         )
-        continuation = decision.get("continuation_confirmation", {})
-        continuation = continuation if isinstance(continuation, dict) else {}
-        continuation_key = str(
-            continuation.get("key") or "UNKNOWN"
-        ).strip().upper()
-        continuation_rank = continuation_priority.get(
-            continuation_key,
-            continuation_priority["UNKNOWN"],
-        )
         final = decision.get("final", {})
         final = final if isinstance(final, dict) else {}
         final_status = str(final.get("status") or "").upper()
@@ -2227,7 +2212,6 @@ class MarketScanner:
         return (
             permission_priority,
             status_priority,
-            continuation_rank,
             execution_score,
             freshness_timestamp,
             freshness_priority.get(signal.freshness, 0),

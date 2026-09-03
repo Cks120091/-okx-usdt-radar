@@ -7,6 +7,7 @@ import re
 import threading
 import time
 import uuid
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from copy import deepcopy
 from dataclasses import replace
 from datetime import datetime, timezone
@@ -19,6 +20,7 @@ from urllib.parse import parse_qs, urlparse
 
 from .api import OKXAPIError
 from .config import AppConfig
+from .continuation import ALGORITHM_VERSION, observer_schedule
 from .models import RadarReport
 from .price_display import signal_plan_display_fields
 from .preflight import build_preflight_payload
@@ -36,6 +38,9 @@ from .scanner import MarketScanner
 
 
 LOGGER = logging.getLogger("okx_radar")
+
+_OBSERVER_SETTLE_DELAY_MS = 2_000
+_OBSERVER_START_WINDOW_MS = 8_000
 
 
 def _normalize_scan_mode(value: Any) -> str:
@@ -910,6 +915,11 @@ class RadarRuntime:
             else None
         )
         self._progress: dict[str, Any] = self._idle_progress()
+        self._observer_stop = threading.Event()
+        self._observer_thread: threading.Thread | None = None
+        # max_signals is capped at twenty per horizon, so forty covers every
+        # visible formal card without rotating away required one-minute buckets.
+        self._observer_max_targets = min(40, max(0, int(config.max_signals) * 2))
 
     def _prune_restored_terminal_cards(self) -> None:
         """Move exact CLOSED episodes into their bounded review collections.
@@ -984,8 +994,309 @@ class RadarRuntime:
             # restart repeats the exact repository reconciliation.
             LOGGER.exception("Failed to persist restored terminal-card cleanup")
 
+    def start(self) -> bool:
+        """Start the lightweight post-signal observer for web-service mode."""
+
+        client = getattr(self.scanner, "client", None)
+        repository = getattr(self.scanner, "repository", None)
+        if not callable(getattr(client, "get_continuation_snapshot", None)):
+            return False
+        if not callable(getattr(repository, "record_continuation_snapshot", None)):
+            return False
+        with self._state_lock:
+            if self._observer_thread is not None and self._observer_thread.is_alive():
+                return False
+            self._observer_stop.clear()
+            self._observer_thread = threading.Thread(
+                target=self._observer_worker,
+                name="radar-continuation-observer",
+                daemon=True,
+            )
+            self._observer_thread.start()
+        return True
+
     def stop(self) -> None:
-        return
+        self._observer_stop.set()
+        thread = self._observer_thread
+        if thread is not None and thread.is_alive():
+            thread.join(timeout=2.0)
+
+    def _observer_worker(self) -> None:
+        """Coordinate at most twenty Episodes without rerunning the scanner."""
+
+        while not self._observer_stop.is_set():
+            try:
+                self._run_observer_cycle()
+            except Exception:
+                LOGGER.exception("Continuation observer cycle failed")
+            self._observer_stop.wait(1.0)
+
+    def _run_observer_cycle(self) -> int:
+        client = getattr(self.scanner, "client", None)
+        repository = getattr(self.scanner, "repository", None)
+        loader = getattr(repository, "load_continuation_observer", None)
+        recorder = getattr(repository, "record_continuation_snapshot", None)
+        active_loader = getattr(repository, "load_active_signal", None)
+        fetcher = getattr(client, "get_continuation_snapshot", None)
+        if not all(callable(value) for value in (loader, recorder, fetcher)):
+            return 0
+
+        with self._state_lock:
+            if self._running or self._latest is None:
+                return 0
+            targets = self._observer_targets_locked()
+
+        now_ms = int(time.time() * 1000)
+        due: list[tuple[Any, int | None, int]] = []
+        recoveries: list[tuple[Any, Any]] = []
+        for signal in targets:
+            state = loader(signal.trigger_id) or {}
+            current_core_ts = _observer_core_timestamp(signal)
+            same_generation = bool(
+                isinstance(state, dict)
+                and str(state.get("inst_id") or "") == signal.inst_id
+                and str(state.get("horizon") or "") == signal.radar_horizon
+                and str(state.get("direction") or "") == signal.direction
+                and int(state.get("core_ts") or 0) == current_core_ts
+                and str(state.get("algorithm_version") or "")
+                == ALGORITHM_VERSION
+            )
+            if not same_generation:
+                # A newer accepted core candle starts from a fresh baseline.
+                # Never let an old completed observer suppress the new one.
+                state = {}
+            summary = state.get("summary", {}) if isinstance(state, dict) else {}
+            primary = (
+                summary.get("windows", {}).get(summary.get("primary_window"), {})
+                if isinstance(summary, dict)
+                and isinstance(summary.get("windows"), dict)
+                else {}
+            )
+            if isinstance(primary, dict) and primary.get("ready") is True:
+                reported_observer = signal.market_metrics.get(
+                    "continuation_observer",
+                    {},
+                )
+                report_has_state = bool(
+                    isinstance(reported_observer, dict)
+                    and reported_observer.get("algorithm_version")
+                    == summary.get("algorithm_version")
+                    and int(reported_observer.get("updated_at_ms") or 0)
+                    >= int(summary.get("updated_at_ms") or 0)
+                )
+                if not report_has_state and callable(active_loader):
+                    try:
+                        persisted = active_loader(
+                            signal.inst_id,
+                            signal.radar_horizon,
+                        )
+                    except Exception:
+                        LOGGER.exception(
+                            "Failed to restore continuation projection inst=%s horizon=%s",
+                            signal.inst_id,
+                            signal.radar_horizon,
+                        )
+                    else:
+                        persisted_observer = (
+                            persisted.market_metrics.get("continuation_observer", {})
+                            if persisted is not None
+                            else {}
+                        )
+                        if (
+                            persisted is not None
+                            and persisted.trigger_id == signal.trigger_id
+                            and persisted.direction == signal.direction
+                            and _observer_core_timestamp(persisted) == current_core_ts
+                            and isinstance(persisted_observer, dict)
+                            and persisted_observer.get("algorithm_version")
+                        ):
+                            recoveries.append((signal, persisted))
+                continue
+            samples = state.get("samples", []) if isinstance(state, dict) else []
+            latest_sample_ms = max(
+                (
+                    int(item.get("observed_at_ms") or 0)
+                    for item in samples
+                    if isinstance(item, dict)
+                ),
+                default=0,
+            )
+            interval_ms = observer_schedule(signal.radar_horizon)["interval_seconds"] * 1000
+            target_bucket_end_ms = _observer_due_bucket_end(now_ms, interval_ms)
+            if target_bucket_end_ms is None:
+                continue
+            latest_bucket_end_ms = max(
+                (
+                    int(item.get("bucket_end_ms") or 0)
+                    for item in samples
+                    if isinstance(item, dict)
+                ),
+                default=0,
+            )
+            if latest_bucket_end_ms >= target_bucket_end_ms:
+                continue
+            due.append(
+                (signal, latest_sample_ms or None, target_bucket_end_ms)
+            )
+
+        if not due and not recoveries:
+            return 0
+
+        fetched: list[tuple[Any, dict[str, Any]]] = []
+        if due:
+            with ThreadPoolExecutor(max_workers=min(4, len(due))) as executor:
+                futures = {
+                    executor.submit(
+                        fetcher,
+                        signal.inst_id,
+                        signal.radar_horizon,
+                        since_ms=since_ms,
+                        bucket_end_ms=bucket_end_ms,
+                    ): signal
+                    for signal, since_ms, bucket_end_ms in due
+                }
+                for future in as_completed(futures):
+                    signal = futures[future]
+                    try:
+                        sample = future.result()
+                    except Exception as exc:
+                        LOGGER.warning(
+                            "Continuation sample failed inst=%s horizon=%s error=%s",
+                            signal.inst_id,
+                            signal.radar_horizon,
+                            type(exc).__name__,
+                        )
+                        continue
+                    if isinstance(sample, dict):
+                        fetched.append((signal, sample))
+
+        if not fetched and not recoveries:
+            return 0
+
+        updated_count = 0
+        with self._state_lock:
+            # A manual scan that started while REST calls were in flight owns
+            # the current generation; discard this entire late batch.
+            if self._running or self._latest is None:
+                return 0
+            report = self._latest
+            short_signals = list(report.signals)
+            long_signals = list(report.long_signals)
+            for requested, recovered in recoveries:
+                collection = (
+                    long_signals
+                    if requested.radar_horizon == "LONG"
+                    else short_signals
+                )
+                index = next(
+                    (
+                        position
+                        for position, current in enumerate(collection)
+                        if current.trigger_id == requested.trigger_id
+                        and current.direction == requested.direction
+                    ),
+                    None,
+                )
+                if index is None:
+                    continue
+                current = collection[index]
+                if (
+                    _observer_core_timestamp(current)
+                    != _observer_core_timestamp(requested)
+                    or _observer_core_timestamp(recovered)
+                    != _observer_core_timestamp(requested)
+                ):
+                    continue
+                recovered_observer = recovered.market_metrics.get(
+                    "continuation_observer",
+                    {},
+                )
+                recovered_continuation = recovered.decision_context.get(
+                    "continuation_confirmation",
+                    {},
+                )
+                if not isinstance(recovered_observer, dict):
+                    continue
+                metrics = dict(current.market_metrics)
+                metrics["continuation_observer"] = dict(recovered_observer)
+                decision = dict(current.decision_context)
+                if isinstance(recovered_continuation, dict):
+                    decision["continuation_confirmation"] = dict(
+                        recovered_continuation
+                    )
+                collection[index] = replace(
+                    current,
+                    market_metrics=metrics,
+                    decision_context=decision,
+                )
+                updated_count += 1
+            for requested, sample in fetched:
+                collection = (
+                    long_signals
+                    if requested.radar_horizon == "LONG"
+                    else short_signals
+                )
+                index = next(
+                    (
+                        position
+                        for position, current in enumerate(collection)
+                        if current.trigger_id == requested.trigger_id
+                        and current.direction == requested.direction
+                    ),
+                    None,
+                )
+                if index is None:
+                    continue
+                current = collection[index]
+                core_ts = _observer_core_timestamp(current)
+                if core_ts != _observer_core_timestamp(requested):
+                    continue
+                updated = recorder(
+                    current.trigger_id,
+                    core_ts,
+                    sample,
+                    datetime.now(timezone.utc).isoformat(),
+                    self.config,
+                )
+                if updated is None:
+                    continue
+                collection[index] = updated
+                updated_count += 1
+            if updated_count:
+                observed_at = datetime.now(timezone.utc).isoformat()
+                report = replace(
+                    report,
+                    signals=short_signals,
+                    long_signals=long_signals,
+                    observer_updated_at=observed_at,
+                )
+                self._latest = report
+                save_report(report, self.config.data_dir)
+        return updated_count
+
+    def _observer_targets_locked(self) -> list[Any]:
+        if self._latest is None:
+            return []
+
+        def active(items: list[Any]) -> list[Any]:
+            return [
+                deepcopy(item)
+                for item in items
+                if item.trigger_id
+                and item.direction in {"LONG", "SHORT"}
+                and item.signal_stage not in {"COMPLETED", "INVALIDATED", "CLOSED_UNKNOWN"}
+                and not bool(item.lifecycle.get("terminal"))
+            ]
+
+        short = active(list(self._latest.signals))
+        long = active(list(self._latest.long_signals))
+        output: list[Any] = []
+        while (short or long) and len(output) < self._observer_max_targets:
+            if short:
+                output.append(short.pop(0))
+            if long and len(output) < self._observer_max_targets:
+                output.append(long.pop(0))
+        return output
 
     def trigger_scan(
         self,
@@ -1088,6 +1399,13 @@ class RadarRuntime:
                 "scan_mode_label": _SCAN_MODE_LABELS[self._scan_mode],
                 "horizon_freshness": horizon_freshness,
                 "progress": dict(self._progress),
+                "observer_running": bool(
+                    self._observer_thread is not None
+                    and self._observer_thread.is_alive()
+                ),
+                "observer_updated_at": (
+                    self._latest.observer_updated_at if self._latest else ""
+                ),
                 "analysis_only": True,
                 "auto_ordering": False,
             }
@@ -2908,6 +3226,11 @@ class RadarRuntime:
                             actionable=True,
                             max_signals=self.config.max_signals,
                             scan_mode=scan_mode,
+                            observer_updated_at=(
+                                self._latest.observer_updated_at
+                                if self._latest is not None
+                                else ""
+                            ),
                         )
                     save_report(report, self.config.data_dir)
                     self._latest = report
@@ -2996,6 +3319,9 @@ class RadarRuntime:
                 report,
                 short_completed_at=completed_at,
                 long_completed_at=completed_at,
+                observer_updated_at=(
+                    previous.observer_updated_at if previous is not None else ""
+                ),
             )
         quality = deepcopy(report.data_quality)
         if scan_mode == "SHORT":
@@ -3030,6 +3356,7 @@ class RadarRuntime:
                 short_completed_at=completed_at,
                 data_quality=quality,
                 message=f"{report.message} 4H 沿用上一輪資料。",
+                observer_updated_at=previous.observer_updated_at,
             )
         previous_short_completed_at = (
             self._previous_horizon_timestamp(previous, "SHORT")
@@ -3064,6 +3391,7 @@ class RadarRuntime:
             long_completed_at=completed_at,
             data_quality=quality,
             message=f"{report.message} 15m 沿用上一輪資料。",
+            observer_updated_at=previous.observer_updated_at,
         )
 
     @staticmethod
@@ -3495,6 +3823,40 @@ def _normalize_usdt_swap_id(value: str) -> str:
     return f"{base}-USDT-SWAP"
 
 
+def _observer_core_timestamp(signal: Any) -> int:
+    lifecycle = getattr(signal, "lifecycle", {}) or {}
+    metrics = getattr(signal, "market_metrics", {}) or {}
+    values = (
+        lifecycle.get("last_evaluated_core_ts"),
+        metrics.get("core_timestamp"),
+        getattr(signal, "data_timestamp", 0),
+        getattr(signal, "closed_candle_ts", 0),
+    )
+    output = 0
+    for value in values:
+        try:
+            output = max(output, int(float(value or 0)))
+        except (TypeError, ValueError):
+            continue
+    return output
+
+
+def _observer_due_bucket_end(now_ms: int, interval_ms: int) -> int | None:
+    """Return one exchange-aligned bucket only just after it closes."""
+
+    if now_ms <= 0 or interval_ms <= 0:
+        return None
+    bucket_end_ms = now_ms - (now_ms % interval_ms)
+    elapsed_ms = now_ms - bucket_end_ms
+    if not (
+        _OBSERVER_SETTLE_DELAY_MS
+        <= elapsed_ms
+        <= _OBSERVER_START_WINDOW_MS
+    ):
+        return None
+    return bucket_end_ms
+
+
 def serve(runtime: RadarRuntime, host: str, port: int) -> None:
     static_dir = Path(__file__).parent / "static"
     dashboard_path = static_dir / "pages.html"
@@ -3722,6 +4084,9 @@ def serve(runtime: RadarRuntime, host: str, port: int) -> None:
             self.wfile.write(body)
 
     server = ThreadingHTTPServer((host, port), Handler)
+    starter = getattr(runtime, "start", None)
+    if callable(starter):
+        starter()
     LOGGER.info("Radar dashboard listening on http://%s:%d", host, port)
     try:
         server.serve_forever(poll_interval=0.5)

@@ -1422,7 +1422,7 @@ class ScannerTests(unittest.TestCase):
             ],
         )
 
-    def test_signal_sort_prefers_confirmed_continuation_before_execution_quality(self):
+    def test_signal_sort_never_uses_advisory_continuation_to_select_cards(self):
         def candidate(inst_id, continuation, quality):
             signal = qualified_signal(inst_id)
             return replace(
@@ -1446,7 +1446,7 @@ class ScannerTests(unittest.TestCase):
             reverse=True,
         )
 
-        self.assertEqual([item.inst_id for item in ordered], ["CONFIRMED", "FORMING"])
+        self.assertEqual([item.inst_id for item in ordered], ["FORMING", "CONFIRMED"])
 
     def test_signal_sort_legacy_payload_without_continuation_keeps_original_order(self):
         def candidate(inst_id, quality, timestamp):

@@ -582,6 +582,255 @@ class OKXPublicClient:
             self._open_interest_timestamps = timestamps
         return _float_or_none(row.get("oiUsd"))
 
+    def get_continuation_snapshot(
+        self,
+        inst_id: str,
+        horizon: str,
+        *,
+        since_ms: int | None = None,
+        bucket_end_ms: int | None = None,
+        request_retries: int | None = 0,
+        request_timeout_seconds: float | None = 5.0,
+    ) -> dict[str, Any]:
+        """Fetch one lightweight, post-signal continuation sample.
+
+        The observer deliberately avoids ``get_market_context``: that method's
+        latest-N trade snapshot overlaps between scans and cannot represent a
+        fixed one/five-minute average.  Here each trade bucket begins strictly
+        after ``since_ms`` and advertises incomplete coverage instead of
+        silently treating the latest 500 trades as the whole interval.
+        """
+
+        normalized_horizon = str(horizon or "").strip().upper()
+        if normalized_horizon not in {"SHORT", "LONG"}:
+            raise ValueError("continuation horizon must be SHORT or LONG")
+        interval_ms = 60_000 if normalized_horizon == "SHORT" else 300_000
+        observed_at_ms = int(time.time() * 1000)
+        # Taker flow and K-line price/volume must describe the same exchange-
+        # aligned closed bucket.  ``since_ms`` is the prior poll clock and can
+        # be almost one full candle out of phase (for example every minute at
+        # :59), so it is retained only as observation context and never used
+        # as the trade-window boundary.
+        if bucket_end_ms is None:
+            bucket_end_ms = observed_at_ms - (observed_at_ms % interval_ms)
+        else:
+            bucket_end_ms = int(bucket_end_ms)
+            if (
+                bucket_end_ms <= 0
+                or bucket_end_ms % interval_ms != 0
+                or bucket_end_ms > observed_at_ms
+            ):
+                raise ValueError("continuation bucket end must be a closed bar boundary")
+        bucket_start_ms = bucket_end_ms - interval_ms
+        options = _request_overrides(
+            request_retries,
+            request_timeout_seconds,
+        )
+        sample: dict[str, Any] = {
+            "observed_at_ms": observed_at_ms,
+            "bucket_start_ms": bucket_start_ms,
+            "bucket_end_ms": bucket_end_ms,
+            "previous_observed_at_ms": (
+                int(since_ms)
+                if isinstance(since_ms, (int, float)) and int(since_ms) > 0
+                else None
+            ),
+            "horizon": normalized_horizon,
+            "failures": [],
+            "source_timestamps": {},
+        }
+
+        try:
+            rows = self._get(
+                "/api/v5/public/open-interest",
+                {"instType": "SWAP", "instId": inst_id},
+                **options,
+            )
+            row = next(
+                (item for item in rows if str(item.get("instId", "")) == inst_id),
+                None,
+            )
+            if row is None:
+                raise OKXAPIError("empty open-interest response")
+            oi_timestamp = _int(row.get("ts"))
+            oi_checked_at_ms = int(time.time() * 1000)
+            if (
+                oi_timestamp <= 0
+                or abs(oi_timestamp - bucket_end_ms) > 15_000
+                or oi_timestamp > oi_checked_at_ms + 5_000
+            ):
+                raise OKXAPIError("stale or invalid open-interest timestamp")
+            sample.update(
+                {
+                    # Contracts are the primary level for trend calculations.
+                    # oiUsd remains display/liquidity context only because it
+                    # can rise mechanically when the contract price rises.
+                    "open_interest_contracts": _float_or_none(row.get("oi")),
+                    "open_interest_ccy": _float_or_none(row.get("oiCcy")),
+                    "open_interest_usd": _float_or_none(row.get("oiUsd")),
+                }
+            )
+            sample["source_timestamps"]["open_interest"] = oi_timestamp
+        except Exception as exc:
+            sample["failures"].append(f"open_interest: {exc}")
+
+        trade_limit = 500
+        try:
+            rows = self._get(
+                "/api/v5/market/trades",
+                {"instId": inst_id, "limit": trade_limit},
+                **options,
+            )
+            deduplicated: dict[str, dict[str, Any]] = {}
+            malformed_rows = 0
+            duplicate_rows = 0
+            for index, row in enumerate(rows):
+                timestamp = _int(row.get("ts"))
+                trade_id = str(row.get("tradeId") or "").strip()
+                side = str(row.get("side") or "").strip().lower()
+                size = _float_or_none(row.get("sz"))
+                if (
+                    timestamp <= 0
+                    or not trade_id
+                    or side not in {"buy", "sell"}
+                    or size is None
+                    or size < 0
+                ):
+                    malformed_rows += 1
+                    continue
+                if trade_id in deduplicated:
+                    duplicate_rows += 1
+                deduplicated[trade_id] = {
+                    "tradeId": trade_id,
+                    "side": side,
+                    "sz": size,
+                    "px": _float_or_none(row.get("px")),
+                    "ts": timestamp,
+                }
+            ordered_trades = sorted(
+                deduplicated.values(),
+                key=lambda row: (_int(row.get("ts")), str(row.get("tradeId") or "")),
+            )
+            interval_trades = [
+                row
+                for row in ordered_trades
+                if bucket_start_ms < _int(row.get("ts")) <= bucket_end_ms
+            ]
+            oldest_timestamp = min(
+                (_int(row.get("ts")) for row in ordered_trades),
+                default=0,
+            )
+            coverage = "PARTIAL" if malformed_rows or duplicate_rows else (
+                "COMPLETE"
+                if len(rows) < trade_limit or oldest_timestamp <= bucket_start_ms
+                else "PARTIAL"
+            )
+            buy_size = sum(
+                _float(row.get("sz"))
+                for row in interval_trades
+                if str(row.get("side")) == "buy"
+            )
+            sell_size = sum(
+                _float(row.get("sz"))
+                for row in interval_trades
+                if str(row.get("side")) == "sell"
+            )
+            sample.update(
+                {
+                    "taker_buy_volume": buy_size,
+                    "taker_sell_volume": sell_size,
+                    "cvd": buy_size - sell_size,
+                    "trade_count": len(interval_trades),
+                    "trades_coverage": coverage,
+                }
+            )
+            latest_bucket_trade = interval_trades[-1] if interval_trades else None
+            if latest_bucket_trade is not None:
+                sample["source_timestamps"]["trades"] = _int(
+                    latest_bucket_trade.get("ts")
+                )
+            observation_trades = [
+                row
+                for row in ordered_trades
+                if _int(row.get("ts")) <= observed_at_ms
+            ]
+            latest_trade = observation_trades[-1] if observation_trades else None
+            if latest_trade is not None:
+                trade_timestamp = _int(latest_trade.get("ts"))
+                latest_price = _float_or_none(latest_trade.get("px"))
+                source_lag_limit_ms = max(10_000, int(interval_ms * 0.10))
+                trade_checked_at_ms = int(time.time() * 1000)
+                if (
+                    latest_price is not None
+                    and trade_timestamp <= trade_checked_at_ms + 5_000
+                    and trade_checked_at_ms - trade_timestamp <= source_lag_limit_ms
+                ):
+                    # OI is sampled near the REST observation clock rather
+                    # than at the prior candle close.  Pair it with this fresh
+                    # observation price; Taker and Volume continue to use the
+                    # exchange-aligned closed-candle price below.
+                    sample["latest_trade_price"] = latest_price
+                    sample["observation_price"] = latest_price
+                    sample["source_timestamps"][
+                        "observation_price"
+                    ] = trade_timestamp
+        except Exception as exc:
+            sample["trades_coverage"] = "UNKNOWN"
+            sample["failures"].append(f"taker_trades: {exc}")
+
+        bar = "1m" if normalized_horizon == "SHORT" else "5m"
+        try:
+            candles = self.get_candles(
+                inst_id,
+                bar,
+                limit=30,
+                **options,
+            )
+            if not candles:
+                raise OKXAPIError(f"empty {bar} candle response")
+            eligible = [
+                item
+                for item in candles
+                if item.ts + interval_ms <= observed_at_ms
+            ]
+            if not eligible:
+                raise OKXAPIError(f"no completed {bar} candle at observation time")
+            latest = eligible[-1]
+            candle_close_ts = latest.ts + interval_ms
+            if candle_close_ts != bucket_end_ms:
+                raise OKXAPIError(
+                    f"latest completed {bar} candle does not match trade bucket"
+                )
+            previous = eligible[:-1][-20:]
+            baseline = (
+                sum(item.quote_volume for item in previous) / len(previous)
+                if len(previous) == 20
+                else None
+            )
+            sample.update(
+                {
+                    "candle_ts": latest.ts,
+                    "candle_close_ts": candle_close_ts,
+                    "candle_bar": bar,
+                    "candle_open": latest.open,
+                    "candle_close": latest.close,
+                    # Price response must share the same completed micro-candle
+                    # clock as volume.  A live last trade is retained only as
+                    # source context and never drives the average-window vote.
+                    "price": latest.close,
+                    "quote_volume": latest.quote_volume,
+                    "volume_baseline": baseline,
+                }
+            )
+            sample["source_timestamps"]["candle"] = latest.ts
+        except Exception as exc:
+            sample["failures"].append(f"{bar}_candles: {exc}")
+
+        # Network/rate-limit waits are not part of the canonical market
+        # bucket.  Keep their actual completion clock only as source context.
+        sample["observed_at_ms"] = int(time.time() * 1000)
+        return sample
+
     def get_market_context(
         self,
         inst_id: str,

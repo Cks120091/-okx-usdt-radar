@@ -11,6 +11,12 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any
 
+from .continuation import (
+    ALGORITHM_VERSION,
+    bounded_observer_samples,
+    summarize_continuation_samples,
+)
+from .decision import build_decision_context
 from .models import MarketContext, MarketState, Signal
 from .price_display import signal_plan_display_fields
 
@@ -205,6 +211,17 @@ class SignalRepository:
                     payload_json TEXT NOT NULL
                 );
 
+                CREATE TABLE IF NOT EXISTS continuation_observer_state (
+                    signal_id TEXT PRIMARY KEY,
+                    inst_id TEXT NOT NULL,
+                    horizon TEXT NOT NULL,
+                    direction TEXT NOT NULL,
+                    core_ts INTEGER NOT NULL,
+                    updated_at TEXT NOT NULL,
+                    payload_json TEXT NOT NULL,
+                    FOREIGN KEY(signal_id) REFERENCES signals(signal_id)
+                );
+
                 CREATE TABLE IF NOT EXISTS scan_runs (
                     scan_id TEXT PRIMARY KEY,
                     started_at TEXT,
@@ -354,6 +371,191 @@ class SignalRepository:
         if row is None:
             return None
         return Signal.from_dict(json.loads(row["payload_json"]))
+
+    def load_continuation_observer(self, signal_id: str) -> dict[str, Any] | None:
+        """Return private fixed-window observer state for one Signal Episode."""
+
+        normalized_id = str(signal_id or "").strip()
+        if not normalized_id:
+            return None
+        with self._lock:
+            row = self._connection.execute(
+                """
+                SELECT payload_json FROM continuation_observer_state
+                WHERE signal_id=?
+                """,
+                (normalized_id,),
+            ).fetchone()
+        return json.loads(row["payload_json"]) if row else None
+
+    def record_continuation_snapshot(
+        self,
+        signal_id: str,
+        expected_core_ts: int,
+        snapshot: dict[str, Any],
+        updated_at: str,
+        thresholds: Any | None = None,
+    ) -> Signal | None:
+        """Append one exact Episode sample and refresh only continuation data.
+
+        The compare boundary is ``signal_id + accepted core timestamp``.  A
+        delayed observer request therefore cannot land on a newer core
+        evaluation, a different direction, or a closed Episode.  The method
+        intentionally leaves the plan, core score, lifecycle, entry
+        eligibility and final permission untouched and emits no signal event.
+        """
+
+        normalized_id = str(signal_id or "").strip()
+        snapshot_ts = int(_number(snapshot.get("observed_at_ms")) or 0)
+        if not normalized_id or snapshot_ts <= 0:
+            return None
+
+        with self._lock, self._connection:
+            row = self._connection.execute(
+                """
+                SELECT * FROM signals
+                WHERE signal_id=? AND status='ACTIVE'
+                """,
+                (normalized_id,),
+            ).fetchone()
+            if row is None:
+                return None
+            current = Signal.from_dict(json.loads(row["payload_json"]))
+            accepted_core_ts = max(
+                int(current.lifecycle.get("last_evaluated_core_ts") or 0),
+                _signal_core_timestamp(current),
+            )
+            if (
+                accepted_core_ts <= 0
+                or int(expected_core_ts or 0) != accepted_core_ts
+            ):
+                return None
+
+            state_row = self._connection.execute(
+                """
+                SELECT * FROM continuation_observer_state
+                WHERE signal_id=?
+                """,
+                (normalized_id,),
+            ).fetchone()
+            state = json.loads(state_row["payload_json"]) if state_row else {}
+            same_generation = bool(
+                state_row is not None
+                and str(state_row["inst_id"]) == current.inst_id
+                and str(state_row["horizon"]) == current.radar_horizon
+                and str(state_row["direction"]) == current.direction
+                and int(state_row["core_ts"] or 0) == accepted_core_ts
+                and str(state.get("algorithm_version") or "")
+                == ALGORITHM_VERSION
+            )
+            existing_samples = state.get("samples", []) if same_generation else []
+            interval_ms = (
+                60_000 if current.radar_horizon == "SHORT" else 300_000
+            )
+            snapshot_bucket_end = int(
+                _number(snapshot.get("bucket_end_ms")) or 0
+            )
+            if (
+                snapshot_bucket_end <= 0
+                or snapshot_bucket_end % interval_ms != 0
+                or snapshot_ts < snapshot_bucket_end
+            ):
+                return None
+            previous_bucket_end = max(
+                (
+                    int(_number(item.get("bucket_end_ms")) or 0)
+                    for item in existing_samples
+                    if isinstance(item, dict)
+                ),
+                default=0,
+            )
+            if previous_bucket_end and snapshot_bucket_end <= previous_bucket_end:
+                return current
+            samples = bounded_observer_samples(
+                [*existing_samples, dict(snapshot)],
+                current.radar_horizon,
+            )
+            if not samples:
+                return None
+
+            observer = summarize_continuation_samples(
+                samples,
+                current.radar_horizon,
+                current.direction,
+            )
+            poll_count = (
+                int(_number(state.get("poll_count")) or 0) + 1
+                if same_generation
+                else 1
+            )
+            state_payload = {
+                "algorithm_version": observer.get("algorithm_version"),
+                "signal_id": normalized_id,
+                "inst_id": current.inst_id,
+                "horizon": current.radar_horizon,
+                "direction": current.direction,
+                "core_ts": accepted_core_ts,
+                "started_at_ms": int(samples[0]["observed_at_ms"]),
+                "updated_at_ms": snapshot_ts,
+                "poll_count": poll_count,
+                "samples": samples,
+                "summary": observer,
+            }
+
+            metrics = dict(current.market_metrics)
+            metrics["continuation_observer"] = observer
+            candidate = replace(current, market_metrics=metrics)
+            recomputed = build_decision_context(candidate, thresholds)
+            continuation = dict(
+                recomputed.get("continuation_confirmation", {}) or {}
+            )
+            decision = dict(current.decision_context)
+            decision["continuation_confirmation"] = continuation
+            updated = replace(
+                current,
+                market_metrics=metrics,
+                decision_context=decision,
+            )
+            payload = json.dumps(_signal_payload(updated), ensure_ascii=False)
+            cursor = self._connection.execute(
+                """
+                UPDATE signals SET updated_at=?, payload_json=?
+                WHERE signal_id=? AND status='ACTIVE' AND payload_json=?
+                """,
+                (
+                    updated_at,
+                    payload,
+                    normalized_id,
+                    row["payload_json"],
+                ),
+            )
+            if cursor.rowcount <= 0:
+                return None
+            self._connection.execute(
+                """
+                INSERT INTO continuation_observer_state(
+                    signal_id, inst_id, horizon, direction, core_ts,
+                    updated_at, payload_json
+                ) VALUES(?, ?, ?, ?, ?, ?, ?)
+                ON CONFLICT(signal_id) DO UPDATE SET
+                    inst_id=excluded.inst_id,
+                    horizon=excluded.horizon,
+                    direction=excluded.direction,
+                    core_ts=excluded.core_ts,
+                    updated_at=excluded.updated_at,
+                    payload_json=excluded.payload_json
+                """,
+                (
+                    normalized_id,
+                    current.inst_id,
+                    current.radar_horizon,
+                    current.direction,
+                    accepted_core_ts,
+                    updated_at,
+                    json.dumps(state_payload, ensure_ascii=False),
+                ),
+            )
+        return updated
 
     def save_story(self, state: MarketState, updated_at: str) -> None:
         payload = {
@@ -1397,8 +1599,15 @@ class SignalRepository:
             lifecycle.update({"status": "ACTIVE", "terminal": False})
         merged_metrics = dict(signal.market_metrics)
         merged_metrics.update(metrics)
+        # A fixed-window continuation summary belongs to one exact accepted
+        # core candle.  State-only reconciliation can advance that candle
+        # without supplying a fresh Signal payload, so explicitly discard the
+        # previous observer generation instead of carrying its completed
+        # average into the new price fact.
+        merged_metrics.pop("continuation_observer", None)
         entry_eligibility = dict(signal.entry_eligibility)
         decision_context = dict(signal.decision_context)
+        decision_context.pop("continuation_confirmation", None)
         if terminal:
             if stage == "COMPLETED":
                 terminal_label = "已達止盈｜本次交易計畫完成"
@@ -1572,6 +1781,13 @@ class SignalRepository:
             _signal_trigger_event_timestamp(existing),
             _signal_trigger_event_timestamp(raw),
         )
+        decision_context = dict(existing.decision_context)
+        raw_continuation = raw.decision_context.get("continuation_confirmation")
+        if isinstance(raw_continuation, dict):
+            # A newer accepted core candle starts a new observation generation.
+            # Never carry a completed 5/10m or 30/60m average forward and label
+            # it as evidence for the newer price fact.
+            decision_context["continuation_confirmation"] = dict(raw_continuation)
         return replace(
             existing,
             score=raw.score,
@@ -1602,6 +1818,7 @@ class SignalRepository:
             lifecycle=lifecycle,
             data_timestamp=raw.data_timestamp,
             entry_eligibility=raw.entry_eligibility,
+            decision_context=decision_context,
             signal_stage=(
                 "REENTRY"
                 if raw.signal_stage == "REENTRY"

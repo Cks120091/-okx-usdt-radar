@@ -2807,6 +2807,353 @@ class RuntimeSafetyTests(unittest.TestCase):
             self.assertEqual(runtime.status()["system_status"], "FRESH")
             self.assertEqual(len(runtime.latest_dict()["signals"]), 1)
 
+    def test_observer_cycle_updates_revision_without_refreshing_core_timestamp(self):
+        class ObserverClient:
+            def get_continuation_snapshot(
+                self,
+                inst_id,
+                horizon,
+                since_ms=None,
+                bucket_end_ms=None,
+            ):
+                return {
+                    "observed_at_ms": bucket_end_ms + 3_000,
+                    "bucket_start_ms": bucket_end_ms - 60_000,
+                    "bucket_end_ms": bucket_end_ms,
+                    "open_interest_contracts": 1_000.0,
+                    "price": 100.5,
+                    "trades_coverage": "BASELINE",
+                    "candle_ts": bucket_end_ms - 60_000,
+                    "candle_close_ts": bucket_end_ms,
+                    "quote_volume": 100.0,
+                    "volume_baseline": 100.0,
+                }
+
+        class ObserverRepository:
+            def __init__(self, item):
+                self.item = item
+                self.calls = []
+
+            def load_continuation_observer(self, signal_id):
+                return None
+
+            def record_continuation_snapshot(
+                self,
+                signal_id,
+                expected_core_ts,
+                snapshot,
+                updated_at,
+                thresholds,
+            ):
+                self.calls.append((signal_id, expected_core_ts, snapshot))
+                metrics = dict(self.item.market_metrics)
+                metrics["continuation_observer"] = {
+                    "algorithm_version": "CONTINUATION_AVG_V2",
+                    "status": "COLLECTING",
+                    "bucket_count": 0,
+                    "target_buckets": 10,
+                }
+                self.item = replace(self.item, market_metrics=metrics)
+                return self.item
+
+        with tempfile.TemporaryDirectory() as directory:
+            item = signal()
+            item.trigger_id = "observer-episode"
+            item.lifecycle = {
+                "terminal": False,
+                "last_evaluated_core_ts": item.closed_candle_ts,
+            }
+            repository = ObserverRepository(item)
+            scanner = SimpleNamespace(
+                client=ObserverClient(),
+                repository=repository,
+            )
+            runtime = RadarRuntime(scanner, AppConfig(data_dir=directory))
+            original = report()
+            original.signals = [item]
+            runtime._latest = original
+
+            with patch(
+                "radar.service.time.time",
+                return_value=(1_800_000_000_000 + 3_000) / 1000,
+            ):
+                updated = runtime._run_observer_cycle()
+
+            self.assertEqual(updated, 1)
+            self.assertEqual(len(repository.calls), 1)
+            self.assertEqual(runtime._latest.generated_at, original.generated_at)
+            self.assertEqual(runtime._latest.completed_at, original.completed_at)
+            self.assertTrue(runtime._latest.observer_updated_at)
+            self.assertEqual(
+                runtime.status()["observer_updated_at"],
+                runtime._latest.observer_updated_at,
+            )
+
+    def test_observer_target_cap_balances_short_and_long_cards(self):
+        with tempfile.TemporaryDirectory() as directory:
+            runtime = RadarRuntime(ImmediateScanner(), AppConfig(data_dir=directory))
+            current = report()
+            current.signals = []
+            current.long_signals = []
+            for index in range(20):
+                short = signal()
+                short.inst_id = f"S{index}-USDT-SWAP"
+                short.trigger_id = f"short-{index}"
+                current.signals.append(short)
+                long = signal()
+                long.inst_id = f"L{index}-USDT-SWAP"
+                long.trigger_id = f"long-{index}"
+                long.radar_horizon = "LONG"
+                current.long_signals.append(long)
+            runtime._latest = current
+
+            with runtime._state_lock:
+                targets = runtime._observer_targets_locked()
+
+            self.assertEqual(len(targets), 40)
+            self.assertEqual(
+                sum(item.radar_horizon == "SHORT" for item in targets),
+                20,
+            )
+            self.assertEqual(
+                sum(item.radar_horizon == "LONG" for item in targets),
+                20,
+            )
+
+    def test_observer_waits_for_close_and_workers_share_canonical_bucket(self):
+        class ObserverClient:
+            def __init__(self):
+                self.calls = []
+
+            def get_continuation_snapshot(
+                self,
+                inst_id,
+                horizon,
+                since_ms=None,
+                bucket_end_ms=None,
+            ):
+                self.calls.append((inst_id, bucket_end_ms))
+                return {
+                    "observed_at_ms": bucket_end_ms + 3_000,
+                    "bucket_start_ms": bucket_end_ms - 60_000,
+                    "bucket_end_ms": bucket_end_ms,
+                }
+
+        class ObserverRepository:
+            def __init__(self, items):
+                self.items = {item.trigger_id: item for item in items}
+
+            def load_continuation_observer(self, signal_id):
+                return None
+
+            def record_continuation_snapshot(
+                self,
+                signal_id,
+                expected_core_ts,
+                snapshot,
+                updated_at,
+                thresholds,
+            ):
+                return self.items[signal_id]
+
+        with tempfile.TemporaryDirectory() as directory:
+            items = []
+            for index in range(2):
+                item = signal()
+                item.inst_id = f"ALIGN-{index}-USDT-SWAP"
+                item.trigger_id = f"align-{index}"
+                item.lifecycle = {
+                    "terminal": False,
+                    "last_evaluated_core_ts": item.closed_candle_ts,
+                }
+                items.append(item)
+            client = ObserverClient()
+            runtime = RadarRuntime(
+                SimpleNamespace(
+                    client=client,
+                    repository=ObserverRepository(items),
+                ),
+                AppConfig(data_dir=directory),
+            )
+            current = report()
+            current.signals = items
+            runtime._latest = current
+            boundary_ms = 1_800_000_000_000
+
+            with patch(
+                "radar.service.time.time",
+                return_value=(boundary_ms + 59_000) / 1000,
+            ):
+                self.assertEqual(runtime._run_observer_cycle(), 0)
+            self.assertEqual(client.calls, [])
+
+            next_boundary_ms = boundary_ms + 60_000
+            with patch(
+                "radar.service.time.time",
+                return_value=(next_boundary_ms + 3_000) / 1000,
+            ):
+                self.assertEqual(runtime._run_observer_cycle(), 2)
+
+            self.assertEqual(len(client.calls), 2)
+            self.assertEqual(
+                {bucket_end for _inst_id, bucket_end in client.calls},
+                {next_boundary_ms},
+            )
+
+    def test_observer_restarts_when_stored_window_uses_older_algorithm(self):
+        class ObserverClient:
+            def __init__(self):
+                self.calls = 0
+
+            def get_continuation_snapshot(
+                self,
+                inst_id,
+                horizon,
+                since_ms=None,
+                bucket_end_ms=None,
+            ):
+                self.calls += 1
+                return {
+                    "observed_at_ms": bucket_end_ms + 3_000,
+                    "bucket_start_ms": bucket_end_ms - 60_000,
+                    "bucket_end_ms": bucket_end_ms,
+                    "open_interest_contracts": 1_000.0,
+                    "price": 100.0,
+                    "candle_ts": bucket_end_ms - 60_000,
+                    "candle_close_ts": bucket_end_ms,
+                    "trades_coverage": "BASELINE",
+                    "quote_volume": 100.0,
+                    "volume_baseline": 100.0,
+                }
+
+        class ObserverRepository:
+            def __init__(self, item):
+                self.item = item
+                self.since_ms = None
+
+            def load_continuation_observer(self, signal_id):
+                return {
+                    "algorithm_version": "CONTINUATION_AVG_V1",
+                    "signal_id": signal_id,
+                    "inst_id": self.item.inst_id,
+                    "horizon": self.item.radar_horizon,
+                    "direction": self.item.direction,
+                    "core_ts": self.item.closed_candle_ts,
+                    "samples": [{"observed_at_ms": 123_000}],
+                    "summary": {
+                        "status": "READY",
+                        "primary_window": "10m",
+                        "windows": {"10m": {"ready": True}},
+                    },
+                }
+
+            def record_continuation_snapshot(
+                self,
+                signal_id,
+                expected_core_ts,
+                snapshot,
+                updated_at,
+                thresholds,
+            ):
+                self.since_ms = snapshot.get("bucket_start_ms")
+                return self.item
+
+        with tempfile.TemporaryDirectory() as directory:
+            item = signal()
+            item.trigger_id = "rollover-episode"
+            item.lifecycle = {
+                "terminal": False,
+                "last_evaluated_core_ts": item.closed_candle_ts,
+            }
+            client = ObserverClient()
+            repository = ObserverRepository(item)
+            runtime = RadarRuntime(
+                SimpleNamespace(client=client, repository=repository),
+                AppConfig(data_dir=directory),
+            )
+            current = report()
+            current.signals = [item]
+            runtime._latest = current
+
+            with patch(
+                "radar.service.time.time",
+                return_value=(1_800_000_000_000 + 3_000) / 1000,
+            ):
+                updated = runtime._run_observer_cycle()
+
+            self.assertEqual(updated, 1)
+            self.assertEqual(client.calls, 1)
+
+    def test_ready_observer_rehydrates_report_after_file_publication_gap(self):
+        class ObserverClient:
+            def __init__(self):
+                self.calls = 0
+
+            def get_continuation_snapshot(self, *args, **kwargs):
+                self.calls += 1
+                raise AssertionError("ready state should be restored without refetching")
+
+        with tempfile.TemporaryDirectory() as directory:
+            visible = signal()
+            visible.trigger_id = "restore-observer-episode"
+            visible.lifecycle = {
+                "terminal": False,
+                "last_evaluated_core_ts": visible.closed_candle_ts,
+            }
+            summary = {
+                "algorithm_version": "CONTINUATION_AVG_V2",
+                "status": "READY",
+                "updated_at_ms": 1_800_000_600_000,
+                "primary_window": "10m",
+                "windows": {"10m": {"ready": True}},
+            }
+            persisted_metrics = dict(visible.market_metrics)
+            persisted_metrics["continuation_observer"] = summary
+            persisted = replace(
+                visible,
+                market_metrics=persisted_metrics,
+                # Recovery is allowed to copy only observer advisory fields.
+                entry_low=str(float(visible.entry_low) + 999.0),
+            )
+
+            class ObserverRepository:
+                def load_continuation_observer(self, signal_id):
+                    return {
+                        "algorithm_version": "CONTINUATION_AVG_V2",
+                        "signal_id": signal_id,
+                        "inst_id": visible.inst_id,
+                        "horizon": visible.radar_horizon,
+                        "direction": visible.direction,
+                        "core_ts": visible.closed_candle_ts,
+                        "summary": summary,
+                        "samples": [],
+                    }
+
+                def load_active_signal(self, inst_id, horizon):
+                    return persisted
+
+                def record_continuation_snapshot(self, *args, **kwargs):
+                    raise AssertionError("ready state should not be recorded again")
+
+            client = ObserverClient()
+            runtime = RadarRuntime(
+                SimpleNamespace(client=client, repository=ObserverRepository()),
+                AppConfig(data_dir=directory),
+            )
+            current = report()
+            current.signals = [visible]
+            runtime._latest = current
+
+            updated = runtime._run_observer_cycle()
+
+            self.assertEqual(updated, 1)
+            self.assertEqual(client.calls, 0)
+            restored = runtime._latest.signals[0].market_metrics[
+                "continuation_observer"
+            ]
+            self.assertEqual(restored["updated_at_ms"], summary["updated_at_ms"])
+            self.assertEqual(runtime._latest.signals[0].entry_low, visible.entry_low)
+
 
 if __name__ == "__main__":
     unittest.main()

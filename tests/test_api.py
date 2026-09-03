@@ -182,6 +182,255 @@ class APITests(unittest.TestCase):
         self.assertEqual(open_interest, 25_000_000.0)
         self.assertEqual(client._open_interest_timestamps["BTC-USDT-SWAP"], 999)
 
+    def test_continuation_snapshot_keeps_raw_oi_and_fixed_trade_bucket(self):
+        now_ms = 1_800_000_000_000
+
+        class ObserverClient(OKXPublicClient):
+            def __init__(self):
+                pass
+
+            def _get(self, path, params, **kwargs):
+                if path.endswith("open-interest"):
+                    return [
+                        {
+                            "instId": "BTC-USDT-SWAP",
+                            "oi": "12345",
+                            "oiCcy": "123.45",
+                            "oiUsd": "25000000",
+                            "ts": str(now_ms - 500),
+                        }
+                    ]
+                if path.endswith("trades"):
+                    return [
+                        {
+                            "tradeId": "2",
+                            "side": " BUY ",
+                            "sz": "7",
+                            "px": "103",
+                            "ts": str(now_ms - 1_000),
+                        },
+                        {
+                            "tradeId": "1",
+                            "side": "sell",
+                            "sz": "3",
+                            "px": "100",
+                            "ts": str(now_ms - 30_000),
+                        },
+                    ]
+                if path.endswith("candles"):
+                    return [
+                        [
+                            str(now_ms - index * 60_000),
+                            "100",
+                            "102",
+                            "99",
+                            "101",
+                            "10",
+                            "10",
+                            str(100 + index),
+                            "1",
+                        ]
+                        for index in range(22)
+                    ]
+                raise AssertionError(path)
+
+        with patch("radar.api.time.time", return_value=now_ms / 1000):
+            sample = ObserverClient().get_continuation_snapshot(
+                "BTC-USDT-SWAP",
+                "SHORT",
+                since_ms=now_ms - 60_000,
+            )
+
+        self.assertEqual(sample["open_interest_contracts"], 12_345.0)
+        self.assertEqual(sample["open_interest_ccy"], 123.45)
+        self.assertEqual(sample["open_interest_usd"], 25_000_000.0)
+        self.assertEqual(sample["trades_coverage"], "COMPLETE")
+        self.assertEqual(sample["taker_buy_volume"], 7.0)
+        self.assertEqual(sample["taker_sell_volume"], 3.0)
+        self.assertEqual(sample["cvd"], 4.0)
+        self.assertEqual(sample["latest_trade_price"], 103.0)
+        # Continuation price must use the same confirmed candle clock as
+        # volume, not whichever live trade happened to arrive last.
+        self.assertEqual(sample["price"], 101.0)
+        self.assertEqual(sample["candle_bar"], "1m")
+        self.assertEqual(sample["bucket_start_ms"], now_ms - 60_000)
+        self.assertEqual(sample["bucket_end_ms"], now_ms)
+        self.assertEqual(sample["candle_ts"], now_ms - 60_000)
+        self.assertEqual(sample["candle_close_ts"], now_ms)
+        self.assertIsNotNone(sample["volume_baseline"])
+
+    def test_truncated_continuation_trade_bucket_is_partial_not_neutral(self):
+        now_ms = 1_800_000_000_000
+
+        class TruncatedObserverClient(OKXPublicClient):
+            def __init__(self):
+                pass
+
+            def _get(self, path, params, **kwargs):
+                if path.endswith("open-interest"):
+                    return [
+                        {
+                            "instId": "BTC-USDT-SWAP",
+                            "oi": "12345",
+                            "oiCcy": "123.45",
+                            "oiUsd": "25000000",
+                            "ts": str(now_ms),
+                        }
+                    ]
+                if path.endswith("trades"):
+                    return [
+                        {
+                            "tradeId": str(index),
+                            "side": "buy" if index % 2 else "sell",
+                            "sz": "1",
+                            "px": "101",
+                            # All 500 rows are newer than the requested bucket
+                            # start, so older in-window trades may be missing.
+                            "ts": str(now_ms - 10_000 + index),
+                        }
+                        for index in range(500)
+                    ]
+                if path.endswith("candles"):
+                    return [
+                        [str(now_ms), "100", "101", "99", "100", "1", "1", "1", "1"]
+                    ]
+                raise AssertionError(path)
+
+        with patch("radar.api.time.time", return_value=now_ms / 1000):
+            sample = TruncatedObserverClient().get_continuation_snapshot(
+                "BTC-USDT-SWAP",
+                "SHORT",
+                since_ms=now_ms - 60_000,
+            )
+
+        self.assertEqual(sample["trades_coverage"], "PARTIAL")
+
+    def test_continuation_trade_bucket_ignores_second_fifty_nine_poll_phase(self):
+        bucket_end_ms = 1_800_000_000_000
+        now_ms = bucket_end_ms + 59_000
+
+        class PhaseShiftObserverClient(OKXPublicClient):
+            def __init__(self):
+                pass
+
+            def _get(self, path, params, **kwargs):
+                if path.endswith("open-interest"):
+                    return [
+                        {
+                            "instId": "BTC-USDT-SWAP",
+                            "oi": "12345",
+                            # Fresh to the arbitrary poll clock, but too far
+                            # from the canonical candle boundary.
+                            "ts": str(now_ms - 500),
+                        }
+                    ]
+                if path.endswith("trades"):
+                    return [
+                        {
+                            "tradeId": "start",
+                            "side": "buy",
+                            "sz": "50",
+                            "px": "99",
+                            "ts": str(bucket_end_ms - 60_000),
+                        },
+                        {
+                            "tradeId": "inside-sell",
+                            "side": "sell",
+                            "sz": "2",
+                            "px": "100",
+                            "ts": str(bucket_end_ms - 30_000),
+                        },
+                        {
+                            "tradeId": "end",
+                            "side": "buy",
+                            "sz": "3",
+                            "px": "101",
+                            "ts": str(bucket_end_ms),
+                        },
+                        {
+                            "tradeId": "after-end",
+                            "side": "buy",
+                            "sz": "100",
+                            "px": "150",
+                            "ts": str(bucket_end_ms + 55_000),
+                        },
+                    ]
+                if path.endswith("candles"):
+                    return [
+                        [
+                            str(bucket_end_ms - (index + 1) * 60_000),
+                            "100",
+                            "102",
+                            "99",
+                            "101",
+                            "10",
+                            "10",
+                            str(100 + index),
+                            "1",
+                        ]
+                        for index in range(22)
+                    ]
+                raise AssertionError(path)
+
+        with patch("radar.api.time.time", return_value=now_ms / 1000):
+            sample = PhaseShiftObserverClient().get_continuation_snapshot(
+                "BTC-USDT-SWAP",
+                "SHORT",
+                since_ms=now_ms - 60_000,
+            )
+
+        self.assertEqual(sample["bucket_end_ms"], bucket_end_ms)
+        self.assertEqual(sample["bucket_start_ms"], bucket_end_ms - 60_000)
+        self.assertEqual(sample["taker_buy_volume"], 3.0)
+        self.assertEqual(sample["taker_sell_volume"], 2.0)
+        self.assertEqual(sample["latest_trade_price"], 150.0)
+        self.assertNotIn("open_interest_contracts", sample)
+        self.assertTrue(
+            any("open_interest" in failure for failure in sample["failures"])
+        )
+
+    def test_malformed_continuation_trade_row_downgrades_coverage(self):
+        now_ms = 1_800_000_000_000
+
+        class MalformedObserverClient(OKXPublicClient):
+            def __init__(self):
+                pass
+
+            def _get(self, path, params, **kwargs):
+                if path.endswith("open-interest"):
+                    return [{"instId": "BTC-USDT-SWAP", "oi": "100", "ts": str(now_ms)}]
+                if path.endswith("trades"):
+                    return [
+                        {
+                            "tradeId": "valid",
+                            "side": "buy",
+                            "sz": "2",
+                            "px": "101",
+                            "ts": str(now_ms - 1_000),
+                        },
+                        {
+                            "tradeId": "broken",
+                            "side": "unknown",
+                            "sz": "not-a-number",
+                            "px": "101",
+                            "ts": str(now_ms - 2_000),
+                        },
+                    ]
+                if path.endswith("candles"):
+                    return [
+                        [str(now_ms), "100", "101", "99", "100", "1", "1", "1", "1"]
+                    ]
+                raise AssertionError(path)
+
+        with patch("radar.api.time.time", return_value=now_ms / 1000):
+            sample = MalformedObserverClient().get_continuation_snapshot(
+                "BTC-USDT-SWAP",
+                "SHORT",
+                since_ms=now_ms - 60_000,
+            )
+
+        self.assertEqual(sample["trades_coverage"], "PARTIAL")
+
     def test_recent_full_scan_metadata_skips_targeted_network_request(self):
         client = OKXPublicClient(retries=0)
         instrument = Instrument(

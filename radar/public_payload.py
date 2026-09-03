@@ -3,6 +3,7 @@ from __future__ import annotations
 from collections.abc import Mapping
 from typing import Any
 
+from .continuation import ALGORITHM_VERSION
 from .price_display import signal_plan_display_fields
 
 
@@ -29,6 +30,7 @@ _REPORT_FIELDS = (
     "scan_mode",
     "short_completed_at",
     "long_completed_at",
+    "observer_updated_at",
 )
 
 _SIGNAL_FIELDS = (
@@ -428,6 +430,36 @@ def _public_decision_context(decision: Any) -> dict[str, Any]:
         for key in ("OI", "TAKER_CVD", "VOLUME")
         if isinstance((value := _read(core_votes, key, None)), Mapping)
     }
+    observer_payload = _public_continuation_observer(
+        _read(continuation, "observer", {})
+    )
+    payload["continuation_confirmation"]["observer"] = observer_payload
+    if not observer_payload:
+        # The previous scanner-only continuation fields remain available
+        # internally for backward compatibility, but the public radar must not
+        # present one snapshot as the new fixed-window average.
+        payload["continuation_confirmation"].update(
+            {
+                "key": "UNKNOWN",
+                "label": "未知｜等待固定平均採樣",
+                "score": None,
+                "supporting": [],
+                "conflicts": [],
+                "warnings": [],
+                "missing": ["固定平均觀察尚未建立"],
+                "meaning": (
+                    "完成多筆固定節奏樣本前，不使用單一快照宣稱同向續走。"
+                ),
+                "core_votes": {
+                    key: {
+                        "state": "UNKNOWN",
+                        "label": "等待平均採樣",
+                        "detail": "固定平均觀察尚未建立",
+                    }
+                    for key in ("OI", "TAKER_CVD", "VOLUME")
+                },
+            }
+        )
     payload["quality"] = _select(
         _read(decision, "quality", {}),
         ("direction", "execution", "participation", "combined_score", "note"),
@@ -444,6 +476,67 @@ def _public_decision_context(decision: Any) -> dict[str, Any]:
         _read(decision, "final", {}),
         ("status", "label", "direction", "direction_label", "new_entry_allowed", "trigger_preserved", "reasons", "wait_reason", "weakening_conditions", "invalidation_condition", "confidence", "warnings"),
     )
+    return payload
+
+
+def _public_continuation_observer(observer: Any) -> dict[str, Any]:
+    if (
+        not isinstance(observer, Mapping)
+        or observer.get("algorithm_version") != ALGORITHM_VERSION
+    ):
+        return {}
+    payload = _select(
+        observer,
+        (
+            "algorithm_version",
+            "status",
+            "label",
+            "horizon",
+            "direction",
+            "interval_seconds",
+            "cadence_label",
+            "sample_count",
+            "bucket_count",
+            "target_samples",
+            "target_buckets",
+            "continuity_reset",
+            "early_window",
+            "primary_window",
+            "selected_window",
+            "averaging_ready",
+            "updated_at_ms",
+            "meaning",
+            "permission",
+        ),
+    )
+    windows = _read(observer, "windows", {})
+    payload["windows"] = {}
+    for key in ("5m", "10m", "30m", "60m"):
+        source = _read(windows, key, None)
+        if not isinstance(source, Mapping):
+            continue
+        payload["windows"][key] = _select(
+            source,
+            (
+                "key",
+                "minutes",
+                "ready",
+                "sample_count",
+                "bucket_count",
+                "required_buckets",
+                "progress_pct",
+                "elapsed_minutes",
+                "state",
+                "label",
+                "price_return_pct",
+                "directional_price_return_pct",
+                "directional_consistency_pct",
+                "support_count",
+                "conflict_count",
+                "known_count",
+                "unknown_count",
+            ),
+        )
     return payload
 
 

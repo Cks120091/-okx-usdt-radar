@@ -1413,11 +1413,15 @@ class DecisionContextTests(unittest.TestCase):
             }
         )
         item["decision_context"] = build_decision_context(item)
+        self.assertEqual(
+            item["decision_context"]["continuation_confirmation"]["key"],
+            "CONFIRMED",
+        )
 
         public = public_candidate_payload(item, signal=True)
         continuation = public["decision_context"]["continuation_confirmation"]
 
-        self.assertEqual(continuation["key"], "CONFIRMED")
+        self.assertEqual(continuation["key"], "UNKNOWN")
         self.assertIn("score", continuation)
         self.assertIn("supporting", continuation)
         self.assertIn("conflicts", continuation)
@@ -1429,7 +1433,7 @@ class DecisionContextTests(unittest.TestCase):
         )
         self.assertEqual(
             continuation["core_votes"]["OI"]["state"],
-            "SUPPORT",
+            "UNKNOWN",
         )
         self.assertEqual(
             set(continuation["core_votes"]["OI"]),
@@ -1437,6 +1441,207 @@ class DecisionContextTests(unittest.TestCase):
         )
         self.assertNotIn("severe", continuation["core_votes"]["OI"])
         self.assertNotIn("flow_oi_alignment", public["market_metrics"])
+
+    def test_fixed_average_observer_replaces_legacy_snapshot_votes(self):
+        item = complete_signal()
+        item["market_metrics"].update(
+            {
+                # These old scan-snapshot fields would otherwise confirm all
+                # three domains. Once the fixed observer exists, they must not
+                # masquerade as the requested 5/10m average.
+                "flow_oi_alignment": "SAME_DIRECTION_BUILD",
+                "flow_taker_state": "STRENGTHENING",
+                "flow_valid_sample_count": 3,
+                "taker_buy_pct": 70.0,
+                "volume_ratio_core": 1.5,
+                "continuation_observer": {
+                    "algorithm_version": "CONTINUATION_AVG_V2",
+                    "status": "COLLECTING",
+                    "bucket_count": 2,
+                    "target_buckets": 10,
+                    "early_window": "5m",
+                    "primary_window": "10m",
+                    "selected_window": "5m",
+                    "selected": {
+                        "ready": False,
+                        "domains": {},
+                    },
+                    "windows": {
+                        "5m": {"ready": False},
+                        "10m": {"ready": False},
+                    },
+                },
+            }
+        )
+
+        result = build_decision_context(item)
+        continuation = result["continuation_confirmation"]
+
+        self.assertEqual(continuation["key"], "UNKNOWN")
+        self.assertTrue(
+            all(
+                vote["state"] == "UNKNOWN"
+                for vote in continuation["core_votes"].values()
+            )
+        )
+        self.assertEqual(result["final"]["status"], "ENTER")
+        self.assertTrue(result["final"]["new_entry_allowed"])
+
+    def test_fast_average_can_only_form_until_base_window_is_ready(self):
+        item = complete_signal()
+        support_domains = {
+            key: {
+                "state": "SUPPORT",
+                "reason": f"{key} 多筆平均同向",
+                "severe": False,
+            }
+            for key in ("OI", "TAKER_CVD", "VOLUME")
+        }
+        observer = {
+            "algorithm_version": "CONTINUATION_AVG_V2",
+            "status": "EARLY_READY",
+            "bucket_count": 5,
+            "target_buckets": 10,
+            "early_window": "5m",
+            "primary_window": "10m",
+            "selected_window": "5m",
+            "selected": {"ready": True, "domains": support_domains},
+            "windows": {
+                "5m": {"ready": True},
+                "10m": {"ready": False},
+            },
+        }
+        item["market_metrics"]["continuation_observer"] = observer
+
+        early = build_decision_context(item)
+        self.assertEqual(early["continuation_confirmation"]["key"], "FORMING")
+        self.assertEqual(early["final"]["status"], "ENTER")
+
+        observer["status"] = "READY"
+        observer["bucket_count"] = 10
+        observer["selected_window"] = "10m"
+        observer["selected"] = {"ready": True, "domains": support_domains}
+        observer["windows"]["10m"] = {"ready": True}
+        completed = build_decision_context(item)
+
+        self.assertEqual(
+            completed["continuation_confirmation"]["key"],
+            "CONFIRMED",
+        )
+        self.assertEqual(completed["final"]["status"], "ENTER")
+        item["decision_context"] = completed
+        self.assertEqual(
+            public_candidate_payload(item, signal=True)["decision_context"]
+            ["continuation_confirmation"]["key"],
+            "CONFIRMED",
+        )
+
+    def test_base_window_requires_oi_support_for_top_confirmation(self):
+        item = complete_signal()
+        domains = {
+            "OI": {"state": "UNKNOWN", "missing": "OI 平均樣本"},
+            "TAKER_CVD": {"state": "SUPPORT", "reason": "主動成交平均同向"},
+            "VOLUME": {"state": "SUPPORT", "reason": "平均量價同向"},
+        }
+        item["market_metrics"]["continuation_observer"] = {
+            "algorithm_version": "CONTINUATION_AVG_V2",
+            "status": "PARTIAL",
+            "bucket_count": 10,
+            "target_buckets": 10,
+            "early_window": "5m",
+            "primary_window": "10m",
+            "selected_window": "10m",
+            "selected": {"ready": True, "domains": domains},
+            "windows": {"5m": {"ready": True}, "10m": {"ready": True}},
+        }
+
+        result = build_decision_context(item)
+
+        self.assertEqual(result["continuation_confirmation"]["key"], "FORMING")
+        self.assertEqual(result["final"]["status"], "ENTER")
+
+    def test_recent_fast_window_conflict_downgrades_aligned_base_window(self):
+        item = complete_signal()
+        support_domains = {
+            key: {"state": "SUPPORT", "reason": f"{key} 基準窗同向"}
+            for key in ("OI", "TAKER_CVD", "VOLUME")
+        }
+        item["market_metrics"]["continuation_observer"] = {
+            "algorithm_version": "CONTINUATION_AVG_V2",
+            "status": "READY",
+            "bucket_count": 10,
+            "target_buckets": 10,
+            "early_window": "5m",
+            "primary_window": "10m",
+            "selected_window": "10m",
+            "selected": {"ready": True, "domains": support_domains},
+            "windows": {
+                "5m": {"ready": True, "state": "CONFLICT"},
+                "10m": {"ready": True, "state": "ALIGNED"},
+            },
+        }
+
+        result = build_decision_context(item)
+
+        continuation = result["continuation_confirmation"]
+        self.assertEqual(continuation["key"], "FORMING")
+        self.assertTrue(any("快速平均窗" in item for item in continuation["warnings"]))
+        self.assertEqual(result["final"]["status"], "ENTER")
+
+    def test_public_observer_projection_never_exposes_raw_samples(self):
+        item = complete_signal()
+        item["market_metrics"]["continuation_observer"] = {
+            "algorithm_version": "CONTINUATION_AVG_V2",
+            "status": "COLLECTING",
+            "cadence_label": "每 1 分鐘採樣",
+            "bucket_count": 3,
+            "target_buckets": 10,
+            "early_window": "5m",
+            "primary_window": "10m",
+            "selected_window": "5m",
+            "selected": {"ready": False, "domains": {}},
+            "windows": {
+                "5m": {
+                    "key": "5m",
+                    "ready": False,
+                    "bucket_count": 3,
+                    "required_buckets": 5,
+                    "state": "COLLECTING",
+                }
+            },
+            "samples": [{"tradeId": "must-not-leak"}],
+        }
+        item["decision_context"] = build_decision_context(item)
+
+        public = public_candidate_payload(item, signal=True)
+        observer = public["decision_context"]["continuation_confirmation"]["observer"]
+
+        self.assertEqual(observer["bucket_count"], 3)
+        self.assertNotIn("samples", observer)
+        self.assertNotIn("selected", observer)
+        self.assertNotIn("continuation_observer", public["market_metrics"])
+
+    def test_public_projection_hides_stale_observer_algorithm(self):
+        item = complete_signal()
+        item["market_metrics"]["continuation_observer"] = {
+            "algorithm_version": "CONTINUATION_AVG_V1",
+            "status": "READY",
+            "selected_window": "10m",
+            "selected": {
+                "ready": True,
+                "domains": {
+                    key: {"state": "SUPPORT"}
+                    for key in ("OI", "TAKER_CVD", "VOLUME")
+                },
+            },
+        }
+        item["decision_context"] = build_decision_context(item)
+
+        public = public_candidate_payload(item, signal=True)
+        continuation = public["decision_context"]["continuation_confirmation"]
+
+        self.assertEqual(continuation["key"], "UNKNOWN")
+        self.assertEqual(continuation["observer"], {})
 
     def test_market_state_without_plan_is_no_edge_not_a_fake_entry(self):
         item = complete_signal()
