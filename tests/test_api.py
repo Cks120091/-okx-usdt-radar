@@ -182,6 +182,128 @@ class APITests(unittest.TestCase):
         self.assertEqual(open_interest, 25_000_000.0)
         self.assertEqual(client._open_interest_timestamps["BTC-USDT-SWAP"], 999)
 
+    def test_open_interest_history_normalizes_sorts_and_deduplicates_raw_oi(self):
+        class HistoryClient(OKXPublicClient):
+            def __init__(self):
+                self.calls = []
+
+            def _get(self, path, params, **kwargs):
+                self.calls.append((path, params, kwargs))
+                return [
+                    {"ts": "3000", "oi": "30", "oiCcy": "3", "oiUsd": "300"},
+                    {"ts": "1000", "oi": "10", "oiCcy": "1", "oiUsd": "100"},
+                    # Conflicting raw OI at one timestamp must invalidate the
+                    # endpoint instead of letting response order pick a trend.
+                    {"ts": "3000", "oi": "31", "oiCcy": "3.1", "oiUsd": "nan"},
+                    {"ts": "0", "oi": "20", "oiCcy": "2"},
+                    {"ts": "4000", "oi": "0", "oiCcy": "4"},
+                    {"ts": "5000", "oi": "nan", "oiCcy": "5"},
+                    {"ts": "6000", "oi": "60", "oiCcy": "inf"},
+                    ["7000", "70", "7", "700"],
+                    ["8000", "80"],
+                ]
+
+        client = HistoryClient()
+        history = client.get_open_interest_history(
+            "BTC-USDT-SWAP",
+            period="5m",
+            limit=7,
+            end_ms=9_000,
+            request_retries=0,
+            request_timeout_seconds=2.5,
+        )
+
+        self.assertEqual(
+            client.calls,
+            [
+                (
+                    "/api/v5/rubik/stat/contracts/open-interest-history",
+                    {
+                        "instId": "BTC-USDT-SWAP",
+                        "period": "5m",
+                        "limit": 7,
+                        "end": 9_000,
+                    },
+                    {"request_retries": 0, "request_timeout_seconds": 2.5},
+                )
+            ],
+        )
+        self.assertEqual(
+            history,
+            [
+                {"ts": 1000, "oi": 10.0, "oiCcy": 1.0, "oiUsd": 100.0},
+                {"ts": 4000, "oiCcy": 4.0},
+                {"ts": 5000, "oiCcy": 5.0},
+                {"ts": 6000, "oi": 60.0},
+                {"ts": 7000, "oi": 70.0, "oiCcy": 7.0, "oiUsd": 700.0},
+                {"ts": 8000, "oi": 80.0},
+            ],
+        )
+
+    def test_open_interest_history_validates_contract_limit_and_end(self):
+        client = OKXPublicClient(retries=0)
+        with patch.object(client, "_get", return_value=[]) as getter:
+            client.get_open_interest_history("BTC-USDT-260925")
+            self.assertEqual(
+                getter.call_args.args,
+                (
+                    "/api/v5/rubik/stat/contracts/open-interest-history",
+                    {"instId": "BTC-USDT-260925", "period": "5m", "limit": 20},
+                ),
+            )
+
+            for inst_id in (
+                "BTC-USDC-SWAP",
+                "BTC-USDT-SWAP,ETH-USDT-SWAP",
+                "BTC-USDT",
+                "btc-usdt-swap",
+            ):
+                with self.subTest(inst_id=inst_id), self.assertRaises(ValueError):
+                    client.get_open_interest_history(inst_id)
+
+            for invalid_limit in (0, 101, True, 2.5):
+                with self.subTest(limit=invalid_limit), self.assertRaises(ValueError):
+                    client.get_open_interest_history(
+                        "BTC-USDT-SWAP",
+                        limit=invalid_limit,
+                    )
+
+            for invalid_end in (0, -1, True, "not-a-timestamp"):
+                with self.subTest(end=invalid_end), self.assertRaises(ValueError):
+                    client.get_open_interest_history(
+                        "BTC-USDT-SWAP",
+                        end_ms=invalid_end,
+                    )
+
+        self.assertEqual(getter.call_count, 1)
+
+    def test_open_interest_history_uses_dedicated_rate_limiter(self):
+        client = OKXPublicClient(retries=0)
+        self.assertEqual(client.open_interest_history_rate_limiter.max_requests, 10)
+        self.assertEqual(
+            client.open_interest_history_rate_limiter.window_seconds,
+            2.0,
+        )
+        history_limiter = MagicMock()
+        client.open_interest_history_rate_limiter = history_limiter
+        client.rate_limiter = MagicMock()
+        client.candle_rate_limiter = MagicMock()
+        payload = (
+            b'{"code":"0","msg":"","data":'
+            b'[{"ts":"1000","oi":"10","oiCcy":"1"}]}'
+        )
+
+        with patch("radar.api.urlopen", return_value=self._json_response(payload)):
+            history = client.get_open_interest_history(
+                "BTC-USDT-SWAP",
+                request_retries=0,
+            )
+
+        self.assertEqual(history, [{"ts": 1000, "oi": 10.0, "oiCcy": 1.0}])
+        history_limiter.acquire.assert_called_once_with()
+        client.rate_limiter.acquire.assert_not_called()
+        client.candle_rate_limiter.acquire.assert_not_called()
+
     def test_continuation_snapshot_keeps_raw_oi_and_fixed_trade_bucket(self):
         now_ms = 1_800_000_000_000
 

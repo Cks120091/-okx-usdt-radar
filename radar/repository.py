@@ -53,6 +53,7 @@ _LIVE_ADVISORY_METRIC_KEYS = frozenset(
         "market_sessions",
         "anomaly_state",
         "anomalies",
+        "continuation_lookback",
     }
 )
 _LIVE_ADVISORY_METRIC_PREFIXES = (
@@ -1197,10 +1198,16 @@ class SignalRepository:
                 # Opposite evidence may update the original plan's observed
                 # price path, but it is not a second formal direction while
                 # the current episode remains ACTIVE.
+                opposite_metrics = dict(raw.market_metrics)
+                # This advisory was scored against raw.direction.  Attaching
+                # it to the still-active opposite Episode would invert its
+                # meaning, so leave that Episode without a continuation grade
+                # until a lookback is evaluated for its own direction.
+                opposite_metrics.pop("continuation_lookback", None)
                 advanced = self._advance_existing(
                     existing,
                     active,
-                    raw.market_metrics,
+                    opposite_metrics,
                     completed_at,
                 )
                 if advanced.lifecycle.get("terminal") and not active_claims_event:
@@ -1348,6 +1355,43 @@ class SignalRepository:
                 normalized in _LIVE_ADVISORY_METRIC_KEYS
                 or normalized.startswith(_LIVE_ADVISORY_METRIC_PREFIXES)
             ):
+                if normalized == "continuation_lookback":
+                    previous = metrics.get(normalized)
+                    previous_attempt = (
+                        _number(previous.get("attempted_at_ms"))
+                        if isinstance(previous, dict)
+                        else None
+                    )
+                    incoming_attempt = (
+                        _number(value.get("attempted_at_ms"))
+                        if isinstance(value, dict)
+                        else None
+                    )
+                    previous_close = (
+                        _number(previous.get("as_of_close_ms"))
+                        if isinstance(previous, dict)
+                        else None
+                    )
+                    incoming_close = (
+                        _number(value.get("as_of_close_ms"))
+                        if isinstance(value, dict)
+                        else None
+                    )
+                    if previous_attempt is not None:
+                        if (
+                            incoming_attempt is None
+                            or incoming_attempt < previous_attempt
+                        ):
+                            continue
+                    elif (
+                        incoming_attempt is None
+                        and previous_close is not None
+                        and (
+                            incoming_close is None
+                            or incoming_close < previous_close
+                        )
+                    ):
+                        continue
                 metrics[normalized] = value
 
         story = dict(existing.market_story)
@@ -1599,11 +1643,14 @@ class SignalRepository:
             lifecycle.update({"status": "ACTIVE", "terminal": False})
         merged_metrics = dict(signal.market_metrics)
         merged_metrics.update(metrics)
-        # A fixed-window continuation summary belongs to one exact accepted
-        # core candle.  State-only reconciliation can advance that candle
-        # without supplying a fresh Signal payload, so explicitly discard the
-        # previous observer generation instead of carrying its completed
-        # average into the new price fact.
+        # A fixed-window continuation summary belongs to one exact scan/core
+        # generation.  If the newly accepted core did not obtain historical
+        # OI, do not carry the prior scan's lookback forward as if it described
+        # the latest completed OI endpoint.
+        if "continuation_lookback" not in metrics:
+            merged_metrics.pop("continuation_lookback", None)
+        # Legacy post-signal observer generations never participate in the
+        # historical closed-bar contract.
         merged_metrics.pop("continuation_observer", None)
         entry_eligibility = dict(signal.entry_eligibility)
         decision_context = dict(signal.decision_context)

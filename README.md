@@ -2,7 +2,7 @@
 
 以 OKX 公開市場資料運作的加密資產 USDT 線性永續合約雙雷達。Universe 只接受 OKX `instCategory=1`；股票型永續（`instCategory=3`）與其他非加密分類會在合約清單入口直接排除，不進入個別行情與策略分析。系統只做分析，不接受 API Key、Secret 或 Passphrase，也沒有自動下單、Paper Trading 或 Live Trading 路徑。V3.4 延續既有 Price-first（價格優先）Trigger 與 Signal Episode（訊號生命週期）。Market Context、流動性、Spread、Slippage、成交成本、R:R 與異常行情都保留為詳細風險提醒，不再作反向判定或硬性否決正式訊號。
 
-手機介面將 Entry Zone 統一顯示為「Entry（最佳進場點位）」，並依「方向 → 現在能否進場 → 同向續走力道 → Entry／SL／TP／R:R」排列。續走區只回答「多頭／空頭續走力道：強、中等、偏弱或資料累積中」，不再顯示 OI、Taker／CVD、成交量、加分或一致度分數。系統內部仍以 OI 兩倍權重、Taker／CVD 與成交量各一倍權重計算，完整原始依據只保留在「完整判定資料」。首頁把可進候選與交易品質排序放在最前面，只保留更新時間、15m／4H 訊號數與市場方向；通知與收藏改為收合，完整 OI 異動雷達移到「更多」。Funding（資金費率）、Spread（買賣價差）、Slippage（滑價）與 Order Book（訂單簿）仍收進詳細資料。單幣請求期間只使用輕量 CSS 掃描動畫，不載入 GIF、影片、Canvas 或大型外部資源。
+手機介面將 Entry Zone 統一顯示為「Entry（最佳進場點位）」，並依「方向 → 現在能否進場 → 同向續走力道 → Entry／SL／TP／R:R」排列。續走區只回答「多頭／空頭續走力道：強、中等、偏弱或資料不足」，不再顯示 OI、Taker／CVD、成交量、加分或一致度分數。系統內部仍以 OI 兩倍權重、Taker／CVD 與成交量各一倍權重計算，完整原始依據只保留在「完整判定資料」。首頁把可進候選與交易品質排序放在最前面，只保留更新時間、15m／4H 訊號數與市場方向；通知與收藏改為收合，完整 OI 異動雷達移到「更多」。Funding（資金費率）、Spread（買賣價差）、Slippage（滑價）與 Order Book（訂單簿）仍收進詳細資料。單幣請求期間只使用輕量 CSS 掃描動畫，不載入 GIF、影片、Canvas 或大型外部資源。
 
 每張已有正式 Entry／SL／TP 的訊號卡都提供複製交易計畫按鈕，包括可進、等回踩、已錯過與已達 TP／SL 的結果卡；未形成正式 Trigger 的觀察卡不顯示不存在的交易計畫。
 
@@ -10,14 +10,14 @@
 
 OKX REST 預設使用官方目前建議的 `openapi.okx.com`，連線失敗時會自動改試 `www.okx.com`。兩個官方端點都無法連線時，頁面會明確標示為 OKX 行情連線問題；K 線歷史不足則會列出缺少的週期，不會再誤寫成幣種或訊號失效。
 
-V3.4 的核心原則是：**正式價格 Trigger 成立就保留卡片，風險檢查只提醒、不刪訊號**。價格／結構與 MA／MACD 仍負責建立 Trigger；Trigger 成立後，系統另外用「同向延續確認」軟分級描述資金與量能是否支持行情繼續往同一方向走。這個分級不建立或取消 Trigger、不改變方向、不刪卡，也不新增或改動既有 Hard Gate。現價相對 Entry／SL／TP 的位置仍獨立決定目前可進、等回踩、已錯過或失效。
+V3.4 的核心原則是：**正式價格 Trigger 成立就保留卡片，風險檢查只提醒、不刪訊號**。價格／結構與 MA／MACD 仍負責建立 Trigger；掃描產生卡片時，系統另外用「同向延續確認」軟分級描述最近完整收線的資金與量能是否支持行情繼續往同一方向走。這個分級不建立或取消 Trigger、不改變方向、不刪卡，也不新增或改動既有 Hard Gate。現價相對 Entry／SL／TP 的位置仍獨立決定目前可進、等回踩、已錯過或失效。
 
 ## 目前判定順序
 
 | 順序 | 回答的問題 | 規則 |
 | --- | --- | --- |
 | 1. Price Trigger（價格觸發） | 已收盤核心週期是否已形成正式方向與交易計畫 | 不用分數或參考資料憑空製造 Trigger |
-| 2. Continuation Confirmation（同向延續確認） | Trigger 後的 OI、Taker／CVD 與核心 K 線量比是否支持同向延續 | 軟分級為 `CONFIRMED`／`FORMING`／`CONFLICT`／`UNKNOWN`，不改寫 Trigger、方向或進場權限 |
+| 2. Continuation Confirmation（同向延續確認） | 掃描時最新完整 5m 收線的 OI 相較前段端點均值，配合同窗價格／量能是否支持同向延續 | 軟分級為 `CONFIRMED`／`FORMING`／`CONFLICT`／`UNKNOWN`，不改寫 Trigger、方向或進場權限 |
 | 3. Entry Eligibility（進場資格） | 現價是否仍在合理 Entry，或應等回踩／禁止追價 | 走遠不等於訊號死亡 |
 | 4. Risk Review（風險提醒） | 流動性、Spread、Slippage、成本、SL 距離、R:R、深度與異常行情是否需要注意 | 只顯示提醒，不改寫 Price Trigger 或 Entry Eligibility |
 
@@ -29,7 +29,7 @@ Market Context、OI、Taker、CVD、Funding 與 Order Book 仍會保存並放在
 2. 依掃描範圍載入資料：15m 掃描使用 4H／1H／15m，4H 掃描使用 1D／4H／1H，全市場掃描同時執行兩套雷達。
 3. 短線與長線雷達各自建立 Market Story，不共用 Trigger。
 4. 15m 核心判定完成後可先發布只讀 `CORE_PREVIEW`；它不建立／推進持久 Signal Episode，也一律不可進場。
-5. 依新鮮度、生命週期與故事成熟度，對最高順位最多 100 個標的補 5m、Funding、Taker、CVD、OI、Order Book 與執行資料。
+5. 依新鮮度、生命週期與故事成熟度，對最高順位最多 100 個標的補 5m、單合約歷史 OI、Funding、Taker、CVD、Order Book 與執行資料。
 6. 整理 Market Context、變化趨勢與異常資料供詳細頁參考；資料不足就顯示不知道，不填假值，也不作反向判定。
 7. 最後依現價相對 Entry／SL／TP 的位置輸出本輪判定，並附上執行品質與市場風險提醒；提醒不會封鎖或隱藏正式 Trigger。
 8. SQLite 保存 Signal Episode、事件、MFE／MAE、TP／SL 先後與結果，再從真實完成樣本計算績效。
@@ -52,7 +52,7 @@ Market Context、OI、Taker、CVD、Funding 與 Order Book 仍會保存並放在
 ## 三種掃描與週期隔離
 
 - `15m 短線掃描`：只執行短線策略所需的 4H／1H／15m 核心資料與後續 5m／市場 Context。
-- `4H 波段掃描`：只執行長線策略所需的 1D／4H／1H 資料。
+- `4H 波段掃描`：核心策略使用 1D／4H／1H，另取已收線 5m 與歷史 OI 建立 30／60 分鐘續走力道。
 - `全市場掃描（15m＋4H）`：同一輪完成兩套雷達；名稱明確包含兩個週期，避免與部分掃描混淆。
 
 部分掃描只更新被選取的週期；另一週期已完成的快照、Signal Episode 與完成時間都會保留。從 15m 卡片按「幣種掃描」只顯示 15m 交易計畫，從 4H 卡片按下則只顯示 4H 交易計畫；這是 UI 與交易計畫隔離，底層仍可把高／低週期 Bias 當成 Context 證據。單獨更新 15m 不會刪除既有 4H，反之亦然。
@@ -99,11 +99,13 @@ Market Context、OI、Taker、CVD、Funding 與 Order Book 仍會保存並放在
 | `CONFLICT` | 出現嚴重吸收／反向新增部位，或至少兩類判定領域形成反證 |
 | `UNKNOWN` | 尚無明確方向或資金參與資料不足，不能把缺資料當成中性或支持 |
 
-正式掃描仍是使用者手動啟動的市場快照；掃描完成後，服務只針對有效 Signal Episode 啟動輕量連續觀察。15m 短線在每個 UTC 整分收線後取一個 1 分鐘區間，先建立 5 分鐘快速窗，再完成 10 分鐘基準窗；4H 波段在每個 UTC 5 分鐘收線後取樣，建立 30／60 分鐘窗。所有 worker 共用同一個交易所收線邊界，網路完成時間不會改變區間；5m／30m 快速窗只能顯示形成中或提早反證，10m／60m 基準窗完成後才可能升為 `CONFIRMED`。
+正式掃描仍是使用者手動啟動的市場快照。掃描當下會直接取得單一合約的歷史 OI，並把 OKX 的資料生成時間歸到其前一個已完成 5m K 收線點：15m 短線以 2／3 個端點建立 5／10 分鐘窗，4H 波段以 7／13 個端點建立 30／60 分鐘窗。因此卡片不必先等待訊號後累積 10 或 60 分鐘，便能顯示掃描當下的平均續走力道。5m／30m 快速窗用來提早辨識近期轉弱，10m／60m 基準窗決定主要分級；快速窗不能單獨把力道升到最高級。
 
-平均走向不是把幾張任意時間快照相加。OI 使用同一單位的 raw `oi` 合約數（欄位完整時才以 `oiCcy` 整窗替代），同時看回歸斜率、總變化與各區間持續度；OI 來源時間還必須落在收線邊界 15 秒內並整窗嚴格遞增，重複、倒序或過期一律視為未知。Taker／CVD 嚴格加總每個 `(bucket_start, bucket_end]` 不重疊完整區間，並要求多數區間同向；成交量使用完全相同 `bucket_end` 的已收盤 1m／5m K 整窗平均與放量持續度。三者都對照同一批已收盤小 K 的平均價格走向；主動成交很強但價格推不動會列為吸收反證。OI 以兩倍權重進入內部淨力道，且是最高續走等級的必要支持，再搭配 Taker／CVD 或成交量至少一項支持；5m 與 10m（或 30m 與 60m）仍不是額外票，總共永遠只有 OI、Taker／CVD、成交量三類。
+續走力道只採用當輪掃描取得的歷史完整收線 lookback。舊版訊號後 observer 已停用，也不能在資料較新時接手或在歷史 OI 失敗時補位，避免把「訊號後才開始存的快照」混進使用者指定的前棒比較。
 
-收線 bucket 重複、缺格、間隔中斷、K 線邊界不符、Taker 最新 500 筆無法覆蓋整段或任一來源缺失時，該領域維持 `UNKNOWN`，並從新的完整區間重新累積；不補 0，也不拿零散快照冒充平均。Funding、深度與 Order Book 的變化仍只作 Context／風險提醒。Market Context 另外整理 Regime（行情型態）、Phase（階段）、Volatility（波動）、BTC／市場帶動與三大交易時段。所有同向延續結果都只提供資訊，不會取消價格 Trigger、否決已通過的進場資格、刪除卡片、改變方向、生成反向正式訊號或改動既有 Hard Gate、Entry、SL、TP 或生命週期。
+平均走向不是拿最新 OI 跟一張任意快照相比。每個視窗都用「最新完整 OI 端點」對比前面 1／2／6／12 個完整端點的均值，再用整段回歸斜率與各 5m 區間持續度過濾單點尖峰。OI 使用同一單位的 raw `oi` 合約數；只有整個視窗都無法使用合約數時，才整窗改用 `oiCcy`，絕不使用會被價格變動影響的 `oiUsd` 判斷 OI 趨勢。OKX 歷史 OI 的 `ts` 是資料生成時間而非 K 線 `confirm`，所以保留原始時間，再歸到緊鄰的上一個已完成 5m 收線；只排除掃描時間之後或尚無已收線價格可配對的端點。重複且數值衝突、倒序、缺棒或過期資料一律不補值。掃描時的歷史 Taker／CVD 若未取得就維持未知，不拿即時成交快照冒充整段流量。OI 以兩倍權重進入內部淨力道，且是最高續走等級的必要支持，再搭配 Taker／CVD 或成交量至少一項支持；5m 與 10m（或 30m 與 60m）仍不是額外票，總共永遠只有 OI、Taker／CVD、成交量三類。
+
+收線 bucket 重複衝突、缺格、間隔中斷、K 線邊界不符或任一來源缺失時，該領域維持 `UNKNOWN`，卡片顯示「資料不足」；不補 0，也不拿零散快照冒充平均。Funding、深度與 Order Book 的變化仍只作 Context／風險提醒。Market Context 另外整理 Regime（行情型態）、Phase（階段）、Volatility（波動）、BTC／市場帶動與三大交易時段。所有同向延續結果都只提供資訊，不會取消價格 Trigger、否決已通過的進場資格、刪除卡片、改變方向、生成反向正式訊號或改動既有 Hard Gate、Entry、SL、TP 或生命週期。
 
 `continuation_confirmation.score` 只表示三類延續證據的一致程度，不是勝率，也不是價格同向移動的機率。真正的 Win Rate 仍只由已完成 Signal Episode 的 TP／SL 與 Final R 樣本計算。
 
@@ -178,7 +180,7 @@ Trigger 是否存在與「現在是否適合進場」分開顯示：
 
 - 公開 REST 請求有 process-wide rate limit、有限重試、退避、短 TTL cache 與 endpoint metrics。
 - 單一幣種短線核心資料失敗只排除該幣種，報告為 `PARTIAL_DATA`；所有短線核心標的失敗才是 `DATA_INCOMPLETE`。長線 1D 歷史不足獨立計數，不冒充短線核心失敗。
-- OI 或任一 Deep Data endpoint 失敗會明確列為資料缺失，不會偽造數值或讓整輪掃描崩潰；既有價格 Trigger 仍保留，同向延續確認顯示 `UNKNOWN` 或 `FORMING`，不會僅因輔助資料缺失而刪卡或翻向。
+- 歷史 OI 或任一 Deep Data endpoint 失敗會明確列為資料缺失，不會偽造數值或讓整輪掃描崩潰；既有價格 Trigger、Entry、SL、TP 與生命週期仍保留，同向延續確認維持資料不足，不會僅因輔助資料缺失而刪卡或翻向。
 - 每輪記錄 core coverage、Deep Data completeness、來源成功／缺失、cache hit、retry、timeout 與 duration。
 - 1D／4H／1H K 線會在同一輪短長雷達間重用，報告發布後立即釋放；全市場 Map 只保留首頁、熱度、OI、收藏與搜尋需要的摘要欄位，完整 Market Story 仍保留在 Signal／Watchlist，避免小型 Web instance 因重複資料耗盡記憶體。
 - 沒有 fallback 數值、placeholder Signal 或用上一輪資料冒充最新 Trigger。
@@ -296,9 +298,9 @@ docker run --name okx-radar-v34 -p 8000:8000 okx-radar-v34
 
 GitHub Actions 只執行離線 compile／tests，不再排程市場掃描。正式站只有使用者按下頁面的掃描按鈕才會呼叫 `/api/scan`；若掃描途中重新開啟網頁，Runtime Scan Lock 只會讓頁面接回既有進度，不會平行重掃。
 
-目前 `render.yaml` 使用 Docker、Singapore、`main` 分支、單一 instance 與 `/health` 健康檢查。手動部署前先在本機完成下方三項驗證，再把已驗證版本推到 `main`，於 Render 選擇 **Manual Deploy → Deploy latest commit**；若保留既有 commit 自動部署設定，推送後也會自動建立部署。部署完成後至少核對 `/health`、首頁版本、三個掃描按鈕、15m／4H 隔離、單幣掃描，以及訊號卡的「強／中等／偏弱／資料累積中」續走力道。
+目前 `render.yaml` 使用 Docker、Singapore、`main` 分支、單一 instance 與 `/health` 健康檢查。手動部署前先在本機完成下方三項驗證，再把已驗證版本推到 `main`，於 Render 選擇 **Manual Deploy → Deploy latest commit**；若保留既有 commit 自動部署設定，推送後也會自動建立部署。部署完成後至少核對 `/health`、首頁版本、三個掃描按鈕、15m／4H 隔離、單幣掃描，以及訊號卡的「強／中等／偏弱／資料不足」續走力道。
 
-免費 Web instance 休眠、重新部署或程序重啟都可能中斷背景取樣，尤其 60 分鐘窗需要服務持續存活。中斷後系統只會重新累積並顯示資料不足，不會補造缺失區間；瀏覽器保持開啟時，每 15 秒的狀態更新也會同步最新觀察結果。若必須保證 60 分鐘窗不中斷，部署環境需使用持續運行的 instance 與持久磁碟。
+免費 Web instance 休眠、重新部署或程序重啟不會讓 10／60 分鐘 OI 視窗從零開始，因為每次掃描都會重新向 OKX 取得歷史端點。若當輪 API 失敗、端點不足或無法對齊，就顯示資料不足；不沿用上一輪 lookback，也不補造缺失區間。
 
 若部署多個 Web instance，SQLite 與 process-wide Scan Lock 必須改成共享儲存與分散式鎖；目前設定應維持一個 instance，否則 Signal Episode 唯一性與掃描鎖無法跨程序保證。
 
@@ -310,7 +312,7 @@ python -m unittest discover -s tests -v
 git diff --check
 ```
 
-測試涵蓋 Price Trigger 與進場資格分離、OI 兩倍權重與 Taker-CVD／核心量比各一倍的同向延續軟分級、SHORT 5／10m 與 LONG 30／60m 真實時間覆蓋、raw OI 單位隔離、Taker／成交量單一尖峰不翻轉平均、缺價格不冒充吸收、取樣中斷重建、新核心 generation 重啟、延續分級不刪卡不翻向、早期訊號在同一 Episode 升級且 Entry／SL／TP 不漂移、可進會員資格固定、TP／SL 結果卡的 5／24 小時期限與獨立已結束板塊、股票型／非加密合約在全市場及單一合約入口被排除、單幣來源並行與短等待上限、結構＋波動分布止損、強弱 OI／Taker／CVD 自動目標、過近障礙不直接完成交易、流動性／Spread／Slippage／成交成本／R:R／異常行情只提醒不刪卡、資料不知道不冒充最新、Market Context／DST 時段、價格接受、控制權轉移、Signal Episode 去重與永久失效、舊資料／亂序資料不回寫、15m／4H 隔離、三種掃描、部分掃描與獨立新鮮度、`CORE_PREVIEW` 唯讀、可進排序、Scan Lock、舊請求不可覆蓋新結果、STALE 快照保留、API 失敗降級、Web Push、PWA 與 API contract。
+測試涵蓋 Price Trigger 與進場資格分離、OI 兩倍權重與 Taker-CVD／核心量比各一倍的同向延續軟分級、OKX 歷史 OI 生成時間映射至已收線 5m K、最新端點對前段均值、SHORT 2／3 點的 5／10m 視窗、LONG 7／13 點的 30／60m 視窗、未來端點排除、衝突重複點拒收、缺棒不內插、SHORT／LONG 共用一次 OI 請求、raw OI 單位隔離、Taker／成交量單一尖峰不翻轉平均、缺價格不冒充吸收、舊 observer 不接手、新核心 generation 重啟、延續分級不刪卡不翻向、早期訊號在同一 Episode 升級且 Entry／SL／TP 不漂移、可進會員資格固定、TP／SL 結果卡的 5／24 小時期限與獨立已結束板塊、股票型／非加密合約在全市場及單一合約入口被排除、單幣來源並行與短等待上限、結構＋波動分布止損、強弱 OI／Taker／CVD 自動目標、過近障礙不直接完成交易、流動性／Spread／Slippage／成交成本／R:R／異常行情只提醒不刪卡、資料不知道不冒充最新、Market Context／DST 時段、價格接受、控制權轉移、Signal Episode 去重與永久失效、舊資料／亂序資料不回寫、15m／4H 隔離、三種掃描、部分掃描與獨立新鮮度、`CORE_PREVIEW` 唯讀、可進排序、Scan Lock、舊請求不可覆蓋新結果、STALE 快照保留、API 失敗降級、Web Push、PWA 與 API contract。
 
 ## 安全邊界與限制
 

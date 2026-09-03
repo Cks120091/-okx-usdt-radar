@@ -3084,6 +3084,79 @@ class RuntimeSafetyTests(unittest.TestCase):
             self.assertEqual(updated, 1)
             self.assertEqual(client.calls, 1)
 
+    def test_primary_ready_partial_observer_keeps_sampling_until_ready(self):
+        boundary_ms = 1_800_000_000_000
+
+        class ObserverClient:
+            def __init__(self):
+                self.calls = 0
+
+            def get_continuation_snapshot(
+                self,
+                inst_id,
+                horizon,
+                since_ms=None,
+                bucket_end_ms=None,
+            ):
+                self.calls += 1
+                return {
+                    "observed_at_ms": bucket_end_ms + 3_000,
+                    "bucket_start_ms": bucket_end_ms - 60_000,
+                    "bucket_end_ms": bucket_end_ms,
+                }
+
+        with tempfile.TemporaryDirectory() as directory:
+            item = signal()
+            item.trigger_id = "partial-observer-episode"
+            item.lifecycle = {
+                "terminal": False,
+                "last_evaluated_core_ts": item.closed_candle_ts,
+            }
+
+            class ObserverRepository:
+                def load_continuation_observer(self, signal_id):
+                    return {
+                        "algorithm_version": "CONTINUATION_AVG_V2",
+                        "signal_id": signal_id,
+                        "inst_id": item.inst_id,
+                        "horizon": item.radar_horizon,
+                        "direction": item.direction,
+                        "core_ts": item.closed_candle_ts,
+                        "samples": [
+                            {
+                                "observed_at_ms": boundary_ms + 3_000,
+                                "bucket_end_ms": boundary_ms,
+                            }
+                        ],
+                        "summary": {
+                            "algorithm_version": "CONTINUATION_AVG_V2",
+                            "status": "PARTIAL",
+                            "primary_window": "10m",
+                            "windows": {"10m": {"ready": True}},
+                        },
+                    }
+
+                def record_continuation_snapshot(self, *args, **kwargs):
+                    return item
+
+            client = ObserverClient()
+            runtime = RadarRuntime(
+                SimpleNamespace(client=client, repository=ObserverRepository()),
+                AppConfig(data_dir=directory),
+            )
+            current = report()
+            current.signals = [item]
+            runtime._latest = current
+
+            with patch(
+                "radar.service.time.time",
+                return_value=(boundary_ms + 63_000) / 1000,
+            ):
+                updated = runtime._run_observer_cycle()
+
+            self.assertEqual(updated, 1)
+            self.assertEqual(client.calls, 1)
+
     def test_ready_observer_rehydrates_report_after_file_publication_gap(self):
         class ObserverClient:
             def __init__(self):

@@ -546,6 +546,33 @@ class SignalRepositoryTests(unittest.TestCase):
                     "funding": 199,
                     "order_book": 200,
                 },
+                "continuation_lookback": {
+                    "algorithm_version": "CONTINUATION_LOOKBACK_V1",
+                    "source_mode": "HISTORICAL_CLOSED_BARS",
+                    "status": "PARTIAL",
+                    "early_window": "5m",
+                    "primary_window": "10m",
+                    "selected_window": "10m",
+                    "selected": {
+                        "ready": True,
+                        "domains": {
+                            "OI": {"state": "SUPPORT", "reason": "OI 同向"},
+                            "TAKER_CVD": {
+                                "state": "UNKNOWN",
+                                "reason": "未取得歷史主動成交",
+                            },
+                            "VOLUME": {
+                                "state": "SUPPORT",
+                                "reason": "成交量同向",
+                            },
+                        },
+                    },
+                    "windows": {
+                        "5m": {"ready": True, "state": "ALIGNED"},
+                        "10m": {"ready": True, "state": "ALIGNED"},
+                    },
+                    "as_of_close_ms": 1_700_000_200_000,
+                },
                 "bid_depth_usd": 500_000,
                 "ask_depth_usd": 400_000,
                 "buy_slippage_pct": 0.04,
@@ -616,6 +643,10 @@ class SignalRepositoryTests(unittest.TestCase):
             self.assertEqual(signal.market_metrics["volume_ratio_core"], 0.8)
             self.assertEqual(signal.market_metrics["last_price"], 100.5)
             self.assertEqual(signal.market_metrics["context_sampled_at"], 200)
+            self.assertEqual(
+                signal.market_metrics["continuation_lookback"]["as_of_close_ms"],
+                1_700_000_200_000,
+            )
             self.assertEqual(
                 signal.market_metrics["source_timestamps"]["open_interest"],
                 198,
@@ -2744,7 +2775,7 @@ class SignalRepositoryTests(unittest.TestCase):
         self.assertTrue(observer["windows"]["10m"]["ready"])
         self.assertEqual(
             updated.decision_context["continuation_confirmation"]["key"],
-            "CONFIRMED",
+            "UNKNOWN",
         )
         for key, value in protected.items():
             self.assertEqual(getattr(updated, key), value, key)
@@ -2823,8 +2854,66 @@ class SignalRepositoryTests(unittest.TestCase):
         self.assertIn("continuation_observer", observed.market_metrics)
         self.assertEqual(
             observed.decision_context["continuation_confirmation"]["key"],
-            "CONFIRMED",
+            "UNKNOWN",
         )
+
+        next_core_ts = raw.closed_candle_ts + 900_000
+        next_state = state_fixture(raw, next_core_ts)
+        next_state = replace(
+            next_state,
+            market_metrics={
+                **next_state.market_metrics,
+                "continuation_lookback": {
+                    "algorithm_version": "CONTINUATION_LOOKBACK_V1",
+                    "source_mode": "HISTORICAL_CLOSED_BARS",
+                    "as_of_close_ms": base_ms + 15 * 60_000,
+                },
+            },
+        )
+        advanced = self.repository.reconcile(
+            [],
+            [next_state],
+            "2026-09-03T00:15:00+00:00",
+            "SHORT",
+        )[0]
+        persisted = self.repository.load_active_signal(raw.inst_id, "SHORT")
+
+        for item in (advanced, persisted):
+            self.assertNotIn("continuation_observer", item.market_metrics)
+            self.assertEqual(
+                item.market_metrics["continuation_lookback"]["as_of_close_ms"],
+                base_ms + 15 * 60_000,
+            )
+            self.assertNotIn(
+                "continuation_confirmation",
+                item.decision_context,
+            )
+            public = public_candidate_payload(item, signal=True)
+            self.assertEqual(
+                public["decision_context"]["continuation_confirmation"]["key"],
+                "UNKNOWN",
+            )
+
+    def test_new_core_without_history_drops_previous_closed_oi_lookback(self):
+        raw = signal_fixture("LOOKBACK-OUTAGE-USDT-SWAP")
+        raw = replace(
+            raw,
+            market_metrics={
+                **raw.market_metrics,
+                "continuation_lookback": {
+                    "algorithm_version": "CONTINUATION_LOOKBACK_V1",
+                    "source_mode": "HISTORICAL_CLOSED_BARS",
+                    "as_of_close_ms": 1_800_000_000_000,
+                },
+            },
+        )
+        committed = self.repository.reconcile(
+            [raw],
+            [state_fixture(raw, raw.closed_candle_ts)],
+            "2026-09-03T00:00:00+00:00",
+            "SHORT",
+        )[0]
+        self.assertIn("continuation_lookback", committed.market_metrics)
 
         next_core_ts = raw.closed_candle_ts + 900_000
         advanced = self.repository.reconcile(
@@ -2836,16 +2925,123 @@ class SignalRepositoryTests(unittest.TestCase):
         persisted = self.repository.load_active_signal(raw.inst_id, "SHORT")
 
         for item in (advanced, persisted):
-            self.assertNotIn("continuation_observer", item.market_metrics)
-            self.assertNotIn(
-                "continuation_confirmation",
-                item.decision_context,
-            )
-            public = public_candidate_payload(item, signal=True)
+            self.assertNotIn("continuation_lookback", item.market_metrics)
             self.assertEqual(
-                public["decision_context"]["continuation_confirmation"]["key"],
+                public_candidate_payload(item, signal=True)["decision_context"]
+                ["continuation_confirmation"]["key"],
                 "UNKNOWN",
             )
+
+    def test_newer_failed_attempt_replaces_same_core_lookback_with_insufficient(self):
+        raw = signal_fixture("LOOKBACK-SAME-CORE-OUTAGE-USDT-SWAP")
+        raw = replace(
+            raw,
+            market_metrics={
+                **raw.market_metrics,
+                "continuation_lookback": {
+                    "algorithm_version": "CONTINUATION_LOOKBACK_V1",
+                    "source_mode": "HISTORICAL_CLOSED_BARS",
+                    "status": "READY",
+                    "attempted_at_ms": 200,
+                    "as_of_close_ms": 1_800_000_000_000,
+                },
+            },
+        )
+        self.repository.reconcile(
+            [raw],
+            [state_fixture(raw, raw.closed_candle_ts)],
+            "2026-09-03T00:00:00+00:00",
+            "SHORT",
+        )
+        failed_state = replace(
+            state_fixture(raw, raw.closed_candle_ts),
+            market_metrics={
+                **raw.market_metrics,
+                "continuation_lookback": {
+                    "algorithm_version": "CONTINUATION_LOOKBACK_V1",
+                    "source_mode": "HISTORICAL_CLOSED_BARS",
+                    "status": "INSUFFICIENT",
+                    "attempted_at_ms": 300,
+                    "as_of_close_ms": None,
+                },
+            },
+        )
+
+        refreshed = self.repository.reconcile(
+            [],
+            [failed_state],
+            "2026-09-03T00:00:05+00:00",
+            "SHORT",
+        )[0]
+
+        self.assertEqual(
+            refreshed.market_metrics["continuation_lookback"]["status"],
+            "INSUFFICIENT",
+        )
+        self.assertIsNone(
+            refreshed.market_metrics["continuation_lookback"]["as_of_close_ms"]
+        )
+
+    def test_opposite_direction_lookback_never_attaches_to_active_episode(self):
+        base_ts = 1_700_000_000_000
+        raw = signal_fixture("LOOKBACK-DIRECTION-USDT-SWAP", event_ts=base_ts)
+        raw = replace(
+            raw,
+            market_metrics={
+                **raw.market_metrics,
+                "continuation_lookback": {
+                    "algorithm_version": "CONTINUATION_LOOKBACK_V1",
+                    "direction": "LONG",
+                    "as_of_close_ms": 1_800_000_000_000,
+                },
+            },
+        )
+        committed = self.repository.reconcile(
+            [raw],
+            [state_fixture(raw, base_ts)],
+            "2026-09-03T00:00:00+00:00",
+            "SHORT",
+        )[0]
+        self.assertEqual(committed.direction, "LONG")
+
+        next_ts = base_ts + 900_000
+        opposite = replace(
+            raw,
+            direction="SHORT",
+            closed_candle_ts=next_ts,
+            data_timestamp=next_ts,
+            market_metrics={
+                **raw.market_metrics,
+                "core_timestamp": next_ts,
+                "continuation_lookback": {
+                    "algorithm_version": "CONTINUATION_LOOKBACK_V1",
+                    "direction": "SHORT",
+                    "as_of_close_ms": 1_800_000_900_000,
+                },
+            },
+            market_story={
+                "trigger": {
+                    "event_ts": next_ts,
+                    "trigger_event_key": (
+                        f"SHORT:SHORT:BREAKOUT:{next_ts}:ZONE-B"
+                    ),
+                }
+            },
+        )
+        advanced = self.repository.reconcile(
+            [opposite],
+            [],
+            "2026-09-03T00:15:00+00:00",
+            "SHORT",
+        )[0]
+
+        self.assertEqual(advanced.direction, "LONG")
+        self.assertNotIn("continuation_lookback", advanced.market_metrics)
+        self.assertEqual(
+            public_candidate_payload(advanced, signal=True)["decision_context"]
+            ["continuation_confirmation"]["key"],
+            "UNKNOWN",
+        )
 
 
 if __name__ == "__main__":

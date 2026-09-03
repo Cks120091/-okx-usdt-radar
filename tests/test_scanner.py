@@ -25,6 +25,22 @@ def candles(count=100, micro_anomaly=False):
     ]
 
 
+def aligned_five_minute_candles(count=120, base_ms=1_700_000_100_000):
+    return [
+        Candle(
+            base_ms + index * 300_000,
+            100.0 + index * 0.1,
+            100.2 + index * 0.1,
+            99.8 + index * 0.1,
+            100.1 + index * 0.1,
+            10.0,
+            1_000_000.0 * (1.4 if index >= count - 12 else 1.0),
+            True,
+        )
+        for index in range(count)
+    ]
+
+
 class FakeClient:
     def __init__(self, fail_id=None):
         self.fail_id = fail_id
@@ -1805,6 +1821,257 @@ class ScannerTests(unittest.TestCase):
                 "open_interest" in item.data_quality["missing_sources"]
                 for item in report.market_map
             )
+        )
+
+    def test_single_scan_reuses_one_closed_oi_history_for_both_horizons(self):
+        class HistoricalOIClient(ContextFakeClient):
+            def __init__(self):
+                super().__init__()
+                self.instruments = [self.instruments[0]]
+                self.history_calls = []
+
+            def get_usdt_swap_instrument(self, inst_id):
+                return self.instruments[0] if inst_id == self.instruments[0].inst_id else None
+
+            def get_ticker(self, inst_id):
+                return Ticker(inst_id, 100.0, 99.99, 100.01, 1_700_036_100_000)
+
+            def get_open_interest_for(self, inst_id):
+                return 5_000_000.0
+
+            def get_candles(self, inst_id, bar, limit=100):
+                self.candle_requests.append((inst_id, bar, limit))
+                if bar == "5m":
+                    return aligned_five_minute_candles(limit)
+                return candles(limit)
+
+            def get_open_interest_history(self, inst_id, period="5m", limit=20):
+                self.history_calls.append((inst_id, period, limit))
+                series = aligned_five_minute_candles(120)[-limit:]
+                return [
+                    {
+                        "ts": candle.ts + 300_000,
+                        "oi": 10_000.0 + index * 25.0,
+                        "oiCcy": 100.0 + index * 0.25,
+                    }
+                    for index, candle in enumerate(series)
+                ]
+
+        class BothHorizonEngine:
+            @staticmethod
+            def _result(horizon):
+                signal = replace(
+                    qualified_signal(),
+                    radar_horizon=horizon,
+                    trigger_id=f"fixture-{horizon.lower()}",
+                )
+                return AnalysisResult(signal, "qualified", qualified_state(signal))
+
+            def analyze(self, *args, **kwargs):
+                return self._result("SHORT")
+
+            def analyze_long(self, *args, **kwargs):
+                return self._result("LONG")
+
+            def apply_market_context(self, result, *args, **kwargs):
+                return result
+
+        client = HistoricalOIClient()
+        scanner = MarketScanner(
+            client,
+            ScannerConfig(min_quote_volume_24h=0, universe_max_spread_pct=1.0),
+        )
+        scanner.engine = BothHorizonEngine()
+
+        analysis = scanner.scan_instrument(
+            "AAA-USDT-SWAP",
+            requested_horizon="BOTH",
+        )
+
+        self.assertEqual(
+            client.history_calls,
+            [("AAA-USDT-SWAP", "5m", 20)],
+        )
+        short = analysis.short_result.market_state.market_metrics[
+            "continuation_lookback"
+        ]
+        long = analysis.long_result.market_state.market_metrics[
+            "continuation_lookback"
+        ]
+        self.assertTrue(short["windows"]["10m"]["ready"])
+        self.assertTrue(long["windows"]["60m"]["ready"])
+        self.assertEqual(short["as_of_close_ms"], long["as_of_close_ms"])
+        self.assertEqual(short["source_mode"], "HISTORICAL_CLOSED_BARS")
+        self.assertNotIn("samples", short)
+        continuation = analysis.short_result.market_state.decision_context[
+            "continuation_confirmation"
+        ]
+        self.assertEqual(
+            continuation["observer"]["algorithm_version"],
+            "CONTINUATION_LOOKBACK_V1",
+        )
+        self.assertEqual(continuation["core_votes"]["OI"]["state"], "SUPPORT")
+        self.assertEqual(analysis.short_result.signal.entry_low, "99")
+        self.assertEqual(analysis.short_result.signal.stop_loss, "97")
+
+        client.history_calls.clear()
+        report = scanner.scan_once(scan_mode="FULL")
+        self.assertEqual(
+            client.history_calls,
+            [("AAA-USDT-SWAP", "5m", 20)],
+        )
+        self.assertEqual(
+            report.signals[0].decision_context["continuation_confirmation"][
+                "observer"
+            ]["source_mode"],
+            "HISTORICAL_CLOSED_BARS",
+        )
+
+        context_failure_client = HistoricalOIClient()
+
+        def failed_context(*args, **kwargs):
+            raise RuntimeError("fixture market context outage")
+
+        context_failure_client.get_market_context = failed_context
+        context_failure_scanner = MarketScanner(
+            context_failure_client,
+            ScannerConfig(min_quote_volume_24h=0, universe_max_spread_pct=1.0),
+        )
+        context_failure_scanner.engine = BothHorizonEngine()
+        context_degraded = context_failure_scanner.scan_once(scan_mode="FULL")
+        self.assertEqual(len(context_degraded.signals), 1)
+        self.assertEqual(
+            context_degraded.signals[0]
+            .market_metrics["continuation_lookback"]["source_mode"],
+            "HISTORICAL_CLOSED_BARS",
+        )
+        self.assertIn("AAA-USDT-SWAP", context_degraded.context_failures)
+
+        def failed_history(*args, **kwargs):
+            raise RuntimeError("fixture historical OI outage")
+
+        client.get_open_interest_history = failed_history
+        degraded = scanner.scan_instrument(
+            "AAA-USDT-SWAP",
+            requested_horizon="SHORT",
+        )
+        self.assertEqual(degraded.short_result.signal.entry_low, "99")
+        self.assertEqual(degraded.short_result.signal.stop_loss, "97")
+        self.assertTrue(
+            any("歷史 OI" in message for message in degraded.errors)
+        )
+        degraded_continuation = degraded.short_result.signal.decision_context[
+            "continuation_confirmation"
+        ]
+        self.assertEqual(degraded_continuation["key"], "UNKNOWN")
+        self.assertEqual(
+            degraded_continuation["observer"]["status"],
+            "INSUFFICIENT",
+        )
+
+    def test_closed_oi_alignment_includes_latest_close_and_excludes_future_point(self):
+        five_minute = aligned_five_minute_candles(35)
+        latest_close = five_minute[-1].ts + 300_000
+        history = [
+            {
+                "ts": candle.ts + 300_000,
+                "oi": 1_000.0 + index,
+                "oiCcy": 10.0 + index,
+            }
+            for index, candle in enumerate(five_minute[-13:])
+        ]
+        history.append(
+            {
+                "ts": latest_close + 300_000,
+                "oi": 9_999.0,
+                "oiCcy": 99.0,
+            }
+        )
+
+        samples = MarketScanner._build_closed_oi_lookback_samples(
+            five_minute,
+            history,
+            observed_at_ms=latest_close + 60_000,
+        )
+
+        self.assertEqual(len(samples), 13)
+        self.assertEqual(samples[-1]["bucket_end_ms"], latest_close)
+        self.assertEqual(samples[-1]["open_interest_contracts"], 1_012.0)
+        self.assertIsNotNone(samples[-1]["volume_baseline"])
+
+    def test_closed_oi_generation_timestamp_maps_to_preceding_completed_close(self):
+        five_minute = aligned_five_minute_candles(35)
+        selected = five_minute[-3:]
+        latest_close = selected[-1].ts + 300_000
+        history = [
+            {
+                # OKX documents ts as data-generation time; it need not be an
+                # exact 5m boundary.
+                "ts": candle.ts + 300_000 + 83_085,
+                "oi": 1_000.0 + index * 2.0,
+                "oiCcy": 10.0 + index,
+            }
+            for index, candle in enumerate(selected)
+        ]
+
+        samples = MarketScanner._build_closed_oi_lookback_samples(
+            five_minute,
+            history,
+            observed_at_ms=latest_close + 100_000,
+        )
+
+        self.assertEqual(len(samples), 3)
+        self.assertEqual(samples[-1]["bucket_end_ms"], latest_close)
+        self.assertEqual(
+            samples[-1]["source_timestamps"]["open_interest"],
+            latest_close + 83_085,
+        )
+
+    def test_closed_oi_older_tail_cannot_masquerade_as_latest_close(self):
+        five_minute = aligned_five_minute_candles(35)
+        latest_close = five_minute[-1].ts + 300_000
+        history = [
+            {
+                "ts": candle.ts + 300_000,
+                "oi": 1_000.0 + index,
+                "oiCcy": 10.0 + index,
+            }
+            for index, candle in enumerate(five_minute[-4:-1])
+        ]
+
+        samples = MarketScanner._build_closed_oi_lookback_samples(
+            five_minute,
+            history,
+            observed_at_ms=latest_close + 60_000,
+        )
+
+        self.assertEqual(samples, [])
+
+    def test_closed_oi_alignment_rejects_conflicting_duplicate_endpoint(self):
+        five_minute = aligned_five_minute_candles(35)
+        latest_close = five_minute[-1].ts + 300_000
+        history = [
+            {
+                "ts": candle.ts + 300_000,
+                "oi": 1_000.0 + index,
+                "oiCcy": 10.0 + index,
+            }
+            for index, candle in enumerate(five_minute[-4:])
+        ]
+        conflict = dict(history[-2])
+        conflict["oi"] = 8_888.0
+        history.append(conflict)
+
+        samples = MarketScanner._build_closed_oi_lookback_samples(
+            five_minute,
+            history,
+            observed_at_ms=latest_close + 300_000,
+        )
+
+        rejected_close = conflict["ts"]
+        self.assertNotIn(
+            rejected_close,
+            [sample["bucket_end_ms"] for sample in samples],
         )
 
     def test_market_bias_turns_bullish_when_breadth_and_anchors_align(self):

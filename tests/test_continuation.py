@@ -1,6 +1,10 @@
 import unittest
 
-from radar.continuation import summarize_continuation_samples
+from radar.continuation import (
+    LOOKBACK_ALGORITHM_VERSION,
+    summarize_closed_lookback_samples,
+    summarize_continuation_samples,
+)
 
 
 def observer_samples(
@@ -44,6 +48,16 @@ def observer_samples(
             }
         )
     return output
+
+
+def closed_lookback_samples(count, **kwargs):
+    samples = observer_samples(count, step_ms=300_000, **kwargs)
+    for sample in samples:
+        sample["trades_coverage"] = "UNKNOWN"
+        sample.pop("taker_buy_volume", None)
+        sample.pop("taker_sell_volume", None)
+        sample.pop("cvd", None)
+    return samples
 
 
 class ContinuationAverageTests(unittest.TestCase):
@@ -321,6 +335,144 @@ class ContinuationAverageTests(unittest.TestCase):
                 for domain in wrong_result["windows"]["10m"]["domains"].values()
             )
         )
+
+
+class ClosedLookbackTests(unittest.TestCase):
+    def test_short_uses_two_points_for_fast_and_three_for_primary(self):
+        fast = summarize_closed_lookback_samples(
+            closed_lookback_samples(2),
+            "SHORT",
+            "LONG",
+        )
+        primary = summarize_closed_lookback_samples(
+            closed_lookback_samples(3),
+            "SHORT",
+            "LONG",
+        )
+
+        self.assertTrue(fast["windows"]["5m"]["ready"])
+        self.assertFalse(fast["windows"]["10m"]["ready"])
+        self.assertEqual(fast["status"], "EARLY_READY")
+        self.assertTrue(primary["windows"]["10m"]["ready"])
+        self.assertEqual(primary["selected_window"], "10m")
+        self.assertEqual(primary["sample_count"], 3)
+
+    def test_rows_are_sorted_and_identical_duplicate_close_times_are_deduplicated(self):
+        samples = closed_lookback_samples(3)
+        duplicate = dict(samples[1])
+        duplicate["observed_at_ms"] += 10_000
+        result = summarize_closed_lookback_samples(
+            [samples[2], samples[0], samples[1], duplicate],
+            "SHORT",
+            "LONG",
+        )
+
+        self.assertEqual(result["sample_count"], 3)
+        self.assertTrue(result["windows"]["10m"]["ready"])
+        self.assertEqual(result["updated_at_ms"], samples[2]["observed_at_ms"])
+
+    def test_conflicting_duplicate_oi_endpoint_invalidates_that_close(self):
+        samples = closed_lookback_samples(3)
+        duplicate = dict(samples[1])
+        duplicate["open_interest_contracts"] = 9_999.0
+
+        result = summarize_closed_lookback_samples(
+            [*samples, duplicate],
+            "SHORT",
+            "LONG",
+        )
+
+        self.assertEqual(result["sample_count"], 1)
+        self.assertTrue(result["continuity_reset"])
+        self.assertFalse(result["windows"]["5m"]["ready"])
+        self.assertEqual(result["status"], "INSUFFICIENT")
+
+    def test_latest_closed_oi_is_compared_with_prior_endpoint_average(self):
+        result = summarize_closed_lookback_samples(
+            closed_lookback_samples(3),
+            "SHORT",
+            "LONG",
+        )
+        oi = result["windows"]["10m"]["domains"]["OI"]
+
+        expected = (1_004.0 - 1_001.0) / 1_001.0 * 100.0
+        self.assertAlmostEqual(oi["latest_vs_prior_average_pct"], expected, 6)
+        self.assertAlmostEqual(oi["change_pct"], expected, 6)
+        self.assertAlmostEqual(oi["prior_average"], 1_001.0)
+        self.assertAlmostEqual(oi["latest_value"], 1_004.0)
+        self.assertIn("最新相較前 2 點均值", oi["detail"])
+
+    def test_gap_only_allows_windows_covered_by_continuous_tail(self):
+        samples = closed_lookback_samples(4)
+        for key in (
+            "observed_at_ms",
+            "bucket_start_ms",
+            "bucket_end_ms",
+            "candle_ts",
+            "candle_close_ts",
+        ):
+            samples[2][key] += 300_000
+            samples[3][key] += 300_000
+        samples[2]["source_timestamps"]["open_interest"] += 300_000
+        samples[3]["source_timestamps"]["open_interest"] += 300_000
+
+        result = summarize_closed_lookback_samples(samples, "SHORT", "LONG")
+
+        self.assertTrue(result["continuity_reset"])
+        self.assertEqual(result["sample_count"], 2)
+        self.assertTrue(result["windows"]["5m"]["ready"])
+        self.assertFalse(result["windows"]["10m"]["ready"])
+
+    def test_unfinished_point_does_not_count_toward_a_window(self):
+        samples = closed_lookback_samples(3)
+        samples[-1]["observed_at_ms"] = samples[-1]["bucket_end_ms"] - 1
+
+        result = summarize_closed_lookback_samples(samples, "SHORT", "LONG")
+
+        self.assertEqual(result["sample_count"], 2)
+        self.assertTrue(result["windows"]["5m"]["ready"])
+        self.assertFalse(result["windows"]["10m"]["ready"])
+
+    def test_long_uses_seven_and_thirteen_completed_five_minute_points(self):
+        fast = summarize_closed_lookback_samples(
+            closed_lookback_samples(7),
+            "LONG",
+            "LONG",
+        )
+        primary = summarize_closed_lookback_samples(
+            closed_lookback_samples(13),
+            "LONG",
+            "LONG",
+        )
+
+        self.assertTrue(fast["windows"]["30m"]["ready"])
+        self.assertFalse(fast["windows"]["60m"]["ready"])
+        self.assertTrue(primary["windows"]["60m"]["ready"])
+        self.assertEqual(primary["windows"]["60m"]["sample_count"], 13)
+        self.assertEqual(primary["windows"]["60m"]["elapsed_minutes"], 60.0)
+
+    def test_source_mode_and_as_of_use_latest_completed_close(self):
+        samples = closed_lookback_samples(3)
+        result = summarize_closed_lookback_samples(samples, "SHORT", "SHORT")
+
+        self.assertEqual(result["algorithm_version"], LOOKBACK_ALGORITHM_VERSION)
+        self.assertEqual(result["source_mode"], "HISTORICAL_CLOSED_BARS")
+        self.assertEqual(result["interval_seconds"], 300)
+        self.assertEqual(result["as_of_close_ms"], samples[-1]["bucket_end_ms"])
+        self.assertTrue(result["selected"]["ready"])
+
+    def test_oi_unit_fallback_is_consistent_for_the_whole_window(self):
+        samples = closed_lookback_samples(3)
+        for sample in samples:
+            sample["open_interest_ccy"] = 10.0
+        samples[1]["open_interest_contracts"] = None
+
+        result = summarize_closed_lookback_samples(samples, "SHORT", "LONG")
+        oi = result["windows"]["10m"]["domains"]["OI"]
+
+        self.assertEqual(oi["state"], "NEUTRAL")
+        self.assertAlmostEqual(oi["change_pct"], 0.0)
+        self.assertIn("標的幣數量", oi["detail"])
 
 
 if __name__ == "__main__":

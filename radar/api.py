@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import math
 import random
 import threading
 import time
@@ -101,6 +102,14 @@ class OKXPublicClient:
             rate_limit_requests,
             2.0,
         )
+        # OKX publishes a separate 10 requests / 2 seconds quota for the
+        # contract open-interest history endpoint.  Keeping its budget
+        # separate prevents a historical lookback from consuming the quota
+        # used by current market-data requests (and vice versa).
+        self.open_interest_history_rate_limiter = SlidingWindowRateLimiter(
+            10,
+            2.0,
+        )
         self.execution_notional_usdt = max(0.0, execution_notional_usdt)
         self._instrument_meta: dict[str, Instrument] = {}
         self._instrument_meta_expires_at: dict[str, float] = {}
@@ -190,11 +199,12 @@ class OKXPublicClient:
         for attempt in range(retry_limit + 1):
             request_base_url = self.base_urls[attempt % len(self.base_urls)]
             url = f"{request_base_url}{path}?{query}"
-            limiter = (
-                self.candle_rate_limiter
-                if path == "/api/v5/market/candles"
-                else self.rate_limiter
-            )
+            if path == "/api/v5/market/candles":
+                limiter = self.candle_rate_limiter
+            elif path == "/api/v5/rubik/stat/contracts/open-interest-history":
+                limiter = self.open_interest_history_rate_limiter
+            else:
+                limiter = self.rate_limiter
             limiter.acquire()
             request_started = time.monotonic()
             self._metric("requests", endpoint=path)
@@ -581,6 +591,128 @@ class OKXPublicClient:
             timestamps[inst_id] = timestamp
             self._open_interest_timestamps = timestamps
         return _float_or_none(row.get("oiUsd"))
+
+    def get_open_interest_history(
+        self,
+        inst_id: str,
+        period: str = "5m",
+        limit: int = 20,
+        end_ms: int | None = None,
+        *,
+        request_retries: int | None = None,
+        request_timeout_seconds: float | None = None,
+    ) -> list[dict[str, int | float]]:
+        """Return validated raw OI levels for one linear USDT contract.
+
+        ``oi`` (contracts) and ``oiCcy`` are retained as the stable levels for
+        later trend calculations.  ``oiUsd`` is optional display/liquidity
+        context only: its price component means callers must not use it as the
+        OI trend input.  Candle-close filtering deliberately belongs to the
+        scanner, which owns the confirmed 5-minute close watermark.
+        """
+
+        normalized_inst_id = _usdt_contract_inst_id(inst_id)
+        normalized_period = str(period or "").strip()
+        if not normalized_period:
+            raise ValueError("open-interest history period must not be empty")
+        if (
+            isinstance(limit, bool)
+            or not isinstance(limit, int)
+            or not 1 <= limit <= 100
+        ):
+            raise ValueError("open-interest history limit must be between 1 and 100")
+
+        params: dict[str, Any] = {
+            "instId": normalized_inst_id,
+            "period": normalized_period,
+            "limit": limit,
+        }
+        if end_ms is not None:
+            if isinstance(end_ms, bool):
+                raise ValueError(
+                    "open-interest history end must be a positive timestamp"
+                )
+            try:
+                normalized_end_ms = int(end_ms)
+            except (TypeError, ValueError, OverflowError) as exc:
+                raise ValueError(
+                    "open-interest history end must be a positive timestamp"
+                ) from exc
+            if normalized_end_ms <= 0:
+                raise ValueError(
+                    "open-interest history end must be a positive timestamp"
+                )
+            params["end"] = normalized_end_ms
+
+        data = self._get(
+            "/api/v5/rubik/stat/contracts/open-interest-history",
+            params,
+            **_request_overrides(
+                request_retries,
+                request_timeout_seconds,
+            ),
+        )
+        by_timestamp: dict[int, dict[str, int | float]] = {}
+        conflicted_timestamps: set[int] = set()
+        for row in data:
+            # The documented Rubik response is positional
+            # [ts, oi, oiCcy, oiUsd].  Accept named rows too because some OKX
+            # SDK adapters normalize the same response into mappings.
+            if isinstance(row, (list, tuple)):
+                timestamp_raw = row[0] if len(row) > 0 else None
+                open_interest_raw = row[1] if len(row) > 1 else None
+                open_interest_ccy_raw = row[2] if len(row) > 2 else None
+                open_interest_usd_raw = row[3] if len(row) > 3 else None
+            elif isinstance(row, dict):
+                timestamp_raw = row.get("ts")
+                open_interest_raw = row.get("oi")
+                open_interest_ccy_raw = row.get("oiCcy")
+                open_interest_usd_raw = row.get("oiUsd")
+            else:
+                continue
+            timestamp = _positive_int_or_none(timestamp_raw)
+            open_interest = _positive_finite_float_or_none(open_interest_raw)
+            open_interest_ccy = _positive_finite_float_or_none(
+                open_interest_ccy_raw
+            )
+            if timestamp is None or (
+                open_interest is None and open_interest_ccy is None
+            ):
+                continue
+            parsed: dict[str, int | float] = {"ts": timestamp}
+            if open_interest is not None:
+                parsed["oi"] = open_interest
+            if open_interest_ccy is not None:
+                parsed["oiCcy"] = open_interest_ccy
+            open_interest_usd = _positive_finite_float_or_none(
+                open_interest_usd_raw
+            )
+            if open_interest_usd is not None:
+                parsed["oiUsd"] = open_interest_usd
+            if timestamp in conflicted_timestamps:
+                continue
+            existing = by_timestamp.get(timestamp)
+            if existing is not None:
+                # Duplicate rows are harmless only when every overlapping
+                # raw OI field agrees.  A conflicting endpoint must be
+                # discarded completely; choosing whichever row happened to
+                # arrive last would manufacture a trend.
+                conflicts = any(
+                    key in existing
+                    and key in parsed
+                    and existing[key] != parsed[key]
+                    for key in ("oi", "oiCcy")
+                )
+                if conflicts:
+                    by_timestamp.pop(timestamp, None)
+                    conflicted_timestamps.add(timestamp)
+                    continue
+                merged = dict(existing)
+                merged.update(parsed)
+                by_timestamp[timestamp] = merged
+                continue
+            by_timestamp[timestamp] = parsed
+        return [by_timestamp[timestamp] for timestamp in sorted(by_timestamp)]
 
     def get_continuation_snapshot(
         self,
@@ -979,6 +1111,42 @@ def _float(value: Any, default: float = 0.0) -> float:
         return float(value)
     except (TypeError, ValueError):
         return default
+
+
+def _usdt_contract_inst_id(value: Any) -> str:
+    """Validate one OKX linear USDT perpetual or dated futures identifier."""
+
+    inst_id = str(value or "").strip()
+    parts = inst_id.split("-")
+    is_perpetual = len(parts) == 3 and parts[2] == "SWAP"
+    is_dated_future = len(parts) == 3 and len(parts[2]) == 6 and parts[2].isdigit()
+    if not (
+        len(parts) == 3
+        and bool(parts[0])
+        and parts[0].isalnum()
+        and parts[1] == "USDT"
+        and (is_perpetual or is_dated_future)
+    ):
+        raise ValueError(
+            "open-interest history requires one USDT SWAP or FUTURES instId"
+        )
+    return inst_id
+
+
+def _positive_int_or_none(value: Any) -> int | None:
+    try:
+        parsed = int(value)
+    except (TypeError, ValueError, OverflowError):
+        return None
+    return parsed if parsed > 0 else None
+
+
+def _positive_finite_float_or_none(value: Any) -> float | None:
+    try:
+        parsed = float(value)
+    except (TypeError, ValueError, OverflowError):
+        return None
+    return parsed if parsed > 0 and math.isfinite(parsed) else None
 
 
 def _instrument_from_row(row: dict[str, Any]) -> Instrument | None:

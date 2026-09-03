@@ -4,6 +4,8 @@ import math
 from collections.abc import Mapping, Sequence
 from typing import Any
 
+from .continuation import LOOKBACK_ALGORITHM_VERSION
+
 
 DEFAULT_THRESHOLDS: dict[str, float] = {
     "min_quote_volume_24h": 5_000_000.0,
@@ -805,10 +807,6 @@ def _continuation_confirmation_layer(
             *_strings(trigger.get("conflicts", [])),
         ]
     )
-    short_horizon = str(
-        _read(item, "radar_horizon", "SHORT") or "SHORT"
-    ).upper() == "SHORT"
-
     supporting: list[str] = []
     conflicts: list[str] = []
     missing: list[str] = []
@@ -869,31 +867,56 @@ def _continuation_confirmation_layer(
         missing.append("MA／MACD 動能資料")
 
     directional_return = _directional_core_return(direction, story)
-    observer = _mapping(metrics.get("continuation_observer"))
-    observer_selected = _mapping(observer.get("selected"))
-    observer_present = bool(observer.get("algorithm_version"))
-    observer_ready = observer_selected.get("ready") is True
-    if observer_present:
-        observer_domains = _mapping(observer_selected.get("domains"))
+    # A completed, scan-time lookback establishes the fixed-window view as
+    # soon as the card is created.  Only historical fully closed 5m endpoints
+    # are eligible; legacy post-trigger snapshots are intentionally ignored.
+    fixed_summary = _select_continuation_fixed_summary(metrics)
+    fixed_selected = _continuation_selected_window(fixed_summary)
+    fixed_present = bool(fixed_summary)
+    fixed_ready = fixed_selected.get("ready") is True
+    if fixed_present:
+        fixed_domains = _mapping(fixed_selected.get("domains"))
         oi_vote = _continuation_observer_vote(
-            _mapping(observer_domains.get("OI")),
+            _mapping(fixed_domains.get("OI")),
             "OI 固定平均窗",
-            ready=observer_ready,
+            ready=fixed_ready,
         )
         taker_vote = _continuation_observer_vote(
-            _mapping(observer_domains.get("TAKER_CVD")),
+            _mapping(fixed_domains.get("TAKER_CVD")),
             "Taker／CVD 固定平均窗",
-            ready=observer_ready,
+            ready=fixed_ready,
         )
         volume_vote = _continuation_observer_vote(
-            _mapping(observer_domains.get("VOLUME")),
+            _mapping(fixed_domains.get("VOLUME")),
             "成交量固定平均窗",
-            ready=observer_ready,
+            ready=fixed_ready,
+        )
+    elif isinstance(metrics.get("continuation_observer"), Mapping):
+        # Old one-shot context fields and post-signal snapshots are not a
+        # substitute for the requested historical completed-bar comparison.
+        oi_vote = _continuation_observer_vote(
+            {},
+            "OI 歷史完整收線窗",
+            ready=False,
+        )
+        taker_vote = _continuation_observer_vote(
+            {},
+            "Taker／CVD 歷史完整收線窗",
+            ready=False,
+        )
+        volume_vote = _continuation_observer_vote(
+            {},
+            "成交量歷史完整收線窗",
+            ready=False,
         )
     else:
+        # Backward compatibility for records created before the historical
+        # endpoint existed.  New scans always attach a lookback object—even
+        # an INSUFFICIENT one—so this branch cannot masquerade as the new OI
+        # contract after an API failure.
         oi_vote = _continuation_oi_vote(
             metrics,
-            directional_return,
+            directional_return=directional_return,
         )
         taker_vote = _continuation_taker_cvd_vote(
             direction,
@@ -903,7 +926,10 @@ def _continuation_confirmation_layer(
         volume_vote = _continuation_volume_vote(
             metrics,
             directional_return,
-            allow_15m_fallback=short_horizon,
+            allow_15m_fallback=(
+                str(_read(item, "radar_horizon", "SHORT") or "SHORT").upper()
+                == "SHORT"
+            ),
         )
     votes = {
         "OI": oi_vote,
@@ -933,16 +959,16 @@ def _continuation_confirmation_layer(
         for key in ("flow_oi_alignment", "flow_taker_state")
     )
     valid_history_samples = _number(metrics.get("flow_valid_sample_count"))
-    observer_primary_ready = bool(
-        observer_present
-        and observer_ready
-        and str(observer.get("selected_window") or "")
-        == str(observer.get("primary_window") or "")
+    fixed_primary_ready = bool(
+        fixed_present
+        and fixed_ready
+        and str(fixed_summary.get("selected_window") or "")
+        == str(fixed_summary.get("primary_window") or "")
     )
-    if observer_primary_ready:
-        observer_windows = _mapping(observer.get("windows"))
+    if fixed_primary_ready:
+        fixed_windows = _mapping(fixed_summary.get("windows"))
         early_window = _mapping(
-            observer_windows.get(str(observer.get("early_window") or ""))
+            fixed_windows.get(str(fixed_summary.get("early_window") or ""))
         )
         if str(early_window.get("state") or "").upper() in {"CONFLICT", "MIXED"}:
             # The full window still describes the original post-trigger move,
@@ -951,8 +977,8 @@ def _continuation_confirmation_layer(
             story_counterevidence = True
             warnings.append("快速平均窗已轉弱；基準窗仍在，但近期接力不一致")
     history_insufficient = (
-        not observer_primary_ready
-        if observer_present
+        not fixed_primary_ready
+        if fixed_present
         else (
             not structured_history_complete
             or valid_history_samples is None
@@ -963,10 +989,12 @@ def _continuation_confirmation_layer(
         )
     )
     if history_insufficient:
-        if observer_present:
-            primary_window = str(observer.get("primary_window") or "完整")
-            bucket_count = int(_number(observer.get("bucket_count")) or 0)
-            target_buckets = int(_number(observer.get("target_buckets")) or 0)
+        if fixed_present:
+            primary_window = str(fixed_summary.get("primary_window") or "完整")
+            bucket_count = int(_number(fixed_summary.get("bucket_count")) or 0)
+            target_buckets = int(
+                _number(fixed_summary.get("target_buckets")) or 0
+            )
             missing.append(
                 f"{primary_window} 固定平均窗（{bucket_count}/{target_buckets} 區間）"
             )
@@ -1052,7 +1080,7 @@ def _continuation_confirmation_layer(
         "CONFIRMED": "續走力道強",
         "FORMING": "續走力道中等",
         "CONFLICT": "續走力道偏弱",
-        "UNKNOWN": "續走力道資料累積中",
+        "UNKNOWN": "續走力道資料不足",
     }
     return {
         "key": key,
@@ -1070,8 +1098,34 @@ def _continuation_confirmation_layer(
             "score 代表同向延續證據的一致度，不是勝率或價格上漲／下跌概率；"
             "本層只提供資訊，不會取消 Trigger、改變方向或改寫進場權限。"
         ),
-        "observer": dict(observer) if observer_present else {},
+        # Keep the established public field name for frontend compatibility.
+        # Its value is now exclusively the closed-bar historical lookback.
+        "observer": dict(fixed_summary) if fixed_present else {},
     }
+
+
+def _select_continuation_fixed_summary(
+    metrics: Mapping[str, Any],
+) -> dict[str, Any]:
+    """Use only scan-time historical, fully closed 5m OI endpoints.
+
+    Legacy post-signal observer rows can still exist in persisted deployments,
+    but they describe a different experiment and must never replace or fill
+    this closed-bar comparison.
+    """
+
+    lookback = _mapping(metrics.get("continuation_lookback"))
+    if lookback.get("algorithm_version") != LOOKBACK_ALGORITHM_VERSION:
+        return {}
+    return lookback
+
+
+def _continuation_selected_window(summary: Mapping[str, Any]) -> dict[str, Any]:
+    selected = _mapping(summary.get("selected"))
+    if selected:
+        return selected
+    windows = _mapping(summary.get("windows"))
+    return _mapping(windows.get(str(summary.get("selected_window") or "")))
 
 
 def _continuation_observer_vote(

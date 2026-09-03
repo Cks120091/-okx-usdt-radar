@@ -5,6 +5,7 @@ from typing import Any, Iterable, Mapping
 
 
 ALGORITHM_VERSION = "CONTINUATION_AVG_V2"
+LOOKBACK_ALGORITHM_VERSION = "CONTINUATION_LOOKBACK_V1"
 
 _WINDOW_SPECS = {
     "SHORT": (
@@ -18,6 +19,20 @@ _WINDOW_SPECS = {
 }
 
 _INTERVAL_SECONDS = {"SHORT": 60, "LONG": 300}
+_LOOKBACK_INTERVAL_SECONDS = 300
+_LOOKBACK_WINDOW_SPECS = {
+    # Historical lookback always uses completed 5m bars.  The number in the
+    # third position is the number of intervals, so each window needs one
+    # additional endpoint (2/3 points for SHORT and 7/13 for LONG).
+    "SHORT": (
+        ("5m", 5, 1),
+        ("10m", 10, 2),
+    ),
+    "LONG": (
+        ("30m", 30, 6),
+        ("60m", 60, 12),
+    ),
+}
 _OI_BUCKET_GRACE_MS = 15_000
 _SOURCE_FUTURE_SKEW_MS = 5_000
 
@@ -119,6 +134,7 @@ def summarize_continuation_samples(
     selected = windows[selected_window]
     return {
         "algorithm_version": ALGORITHM_VERSION,
+        "source_mode": "POST_SIGNAL_OBSERVER",
         "status": status,
         "label": label,
         "horizon": normalized_horizon,
@@ -141,6 +157,9 @@ def summarize_continuation_samples(
         "updated_at_ms": (
             _integer(prepared[-1].get("observed_at_ms")) if prepared else None
         ),
+        "as_of_close_ms": (
+            _integer(prepared[-1].get("bucket_end_ms")) if prepared else None
+        ),
         "windows": windows,
         "selected": selected,
         "meaning": (
@@ -149,6 +168,177 @@ def summarize_continuation_samples(
         ),
         "permission": "ADVISORY_ONLY_NEVER_CHANGES_TRIGGER_OR_PLAN",
     }
+
+
+def summarize_closed_lookback_samples(
+    samples: Iterable[Mapping[str, Any]],
+    horizon: str,
+    direction: str,
+) -> dict[str, Any]:
+    """Summarize completed historical 5m bars available at scan time.
+
+    This deliberately uses exact exchange candle boundaries.  Rows are sorted
+    and de-duplicated, but missing intervals are never filled or interpolated:
+    only the newest continuous 5m tail can satisfy a fixed window.
+    """
+
+    normalized_horizon = _horizon(horizon)
+    normalized_direction = str(direction or "").strip().upper()
+    specs = _LOOKBACK_WINDOW_SPECS[normalized_horizon]
+    target_samples = specs[-1][2] + 1
+    all_samples = _bounded_closed_lookback_samples(samples, target_samples)
+    prepared = _continuous_tail_ms(
+        all_samples,
+        _LOOKBACK_INTERVAL_SECONDS * 1000,
+    )
+    continuity_reset = len(prepared) < len(all_samples)
+    early_window = specs[0][0]
+    primary_window = specs[-1][0]
+    windows: dict[str, dict[str, Any]] = {}
+    for key, minutes, required_buckets in specs:
+        windows[key] = _summarize_window(
+            prepared,
+            normalized_direction,
+            key,
+            minutes,
+            required_buckets,
+        )
+
+    completed = windows[primary_window]["ready"]
+    early_ready = windows[early_window]["ready"]
+    bucket_count = max(0, len(prepared) - 1)
+    target_buckets = specs[-1][2]
+    if completed:
+        primary = windows[primary_window]
+        if primary["known_count"] == 0:
+            status = "INSUFFICIENT"
+            label = f"{primary_window} 已收線時窗完成・有效資料不足"
+        elif primary["unknown_count"]:
+            status = "PARTIAL"
+            label = f"{primary_window} 已收線平均部分完成"
+        else:
+            status = "READY"
+            label = f"{primary_window} 已收線平均走向已建立"
+        selected_window = primary_window
+    elif early_ready:
+        status = "EARLY_READY"
+        label = f"{early_window} 已收線平均已形成・長窗資料不足"
+        selected_window = early_window
+    else:
+        status = "INSUFFICIENT"
+        prefix = "已收線資料有缺口" if continuity_reset else "已收線平均資料不足"
+        label = f"{prefix} {min(bucket_count, target_buckets)}/{target_buckets}"
+        selected_window = early_window
+
+    selected = windows[selected_window]
+    return {
+        "algorithm_version": LOOKBACK_ALGORITHM_VERSION,
+        "source_mode": "HISTORICAL_CLOSED_BARS",
+        "status": status,
+        "label": label,
+        "horizon": normalized_horizon,
+        "direction": normalized_direction,
+        "interval_seconds": _LOOKBACK_INTERVAL_SECONDS,
+        "cadence_label": "每 5 分鐘完整收線",
+        "sample_count": len(prepared),
+        "bucket_count": bucket_count,
+        "target_samples": target_samples,
+        "target_buckets": target_buckets,
+        "continuity_reset": continuity_reset,
+        "early_window": early_window,
+        "primary_window": primary_window,
+        "selected_window": selected_window,
+        "averaging_ready": bool(selected.get("ready")),
+        "as_of_close_ms": (
+            _integer(prepared[-1].get("bucket_end_ms")) if prepared else None
+        ),
+        "updated_at_ms": (
+            _integer(prepared[-1].get("observed_at_ms")) if prepared else None
+        ),
+        "windows": windows,
+        "selected": selected,
+        "meaning": (
+            "以掃描當下最新完整收線與前幾根 5 分鐘棒判斷平均走向；"
+            "這是同向延續證據，不是勝率，也不會建立、取消或翻轉正式 Trigger。"
+        ),
+        "permission": "ADVISORY_ONLY_NEVER_CHANGES_TRIGGER_OR_PLAN",
+    }
+
+
+def _bounded_closed_lookback_samples(
+    samples: Iterable[Mapping[str, Any]],
+    target_samples: int,
+) -> list[dict[str, Any]]:
+    """Return a small, ordered set of exact completed 5m samples."""
+
+    by_timestamp: dict[int, dict[str, Any]] = {}
+    conflicted_timestamps: set[int] = set()
+    for source in samples:
+        if not isinstance(source, Mapping):
+            continue
+        timestamp = _canonical_closed_lookback_end(source)
+        if timestamp is None:
+            continue
+        if timestamp in conflicted_timestamps:
+            continue
+        normalized = dict(source)
+        existing = by_timestamp.get(timestamp)
+        if existing is not None:
+            conflicts = any(
+                left is not None
+                and right is not None
+                and left != right
+                for left, right in (
+                    (
+                        _number(existing.get("open_interest_contracts")),
+                        _number(normalized.get("open_interest_contracts")),
+                    ),
+                    (
+                        _number(existing.get("open_interest_ccy")),
+                        _number(normalized.get("open_interest_ccy")),
+                    ),
+                )
+            )
+            if conflicts:
+                by_timestamp.pop(timestamp, None)
+                conflicted_timestamps.add(timestamp)
+                continue
+        by_timestamp[timestamp] = normalized
+    ordered = [by_timestamp[key] for key in sorted(by_timestamp)]
+    return ordered[-max(target_samples + 4, 17) :]
+
+
+def _canonical_closed_lookback_end(sample: Mapping[str, Any]) -> int | None:
+    interval_ms = _LOOKBACK_INTERVAL_SECONDS * 1000
+    bucket_end = _integer(sample.get("bucket_end_ms"))
+    bucket_start = _integer(sample.get("bucket_start_ms"))
+    observed_at = _integer(sample.get("observed_at_ms"))
+    if (
+        bucket_end is None
+        or bucket_end <= 0
+        or bucket_end % interval_ms != 0
+        or bucket_start != bucket_end - interval_ms
+        or observed_at is None
+        or observed_at < bucket_end
+    ):
+        return None
+    return bucket_end
+
+
+def _continuous_tail_ms(
+    samples: list[dict[str, Any]],
+    interval_ms: int,
+) -> list[dict[str, Any]]:
+    if len(samples) < 2:
+        return samples
+    start = len(samples) - 1
+    while start > 0:
+        newer = _integer(samples[start].get("bucket_end_ms"))
+        older = _integer(samples[start - 1].get("bucket_end_ms"))
+        if newer is None or older is None or newer - older != interval_ms:
+            break
+        start -= 1
+    return samples[start:]
 
 
 def _summarize_window(
@@ -331,7 +521,10 @@ def _oi_domain(
         )
 
     first = points[0][1]
-    change_pct = (points[-1][1] - first) / first * 100.0
+    latest = points[-1][1]
+    prior_average = sum(value for _, value in points[:-1]) / (len(points) - 1)
+    latest_vs_prior_average_pct = (latest - prior_average) / prior_average * 100.0
+    window_change_pct = (latest - first) / first * 100.0
     normalized = [(x, (value - first) / first * 100.0) for x, value in points]
     slope = _linear_slope(normalized)
     deltas = [right[1] - left[1] for left, right in zip(points, points[1:])]
@@ -342,53 +535,61 @@ def _oi_domain(
     )
     threshold = max(0.10, 0.50 * minutes / 60.0)
     detail = (
-        f"{minutes}m {unit_label} {change_pct:+.2f}%・"
+        f"{unit_label}・最新相較前 {len(points) - 1} 點均值 "
+        f"{latest_vs_prior_average_pct:+.2f}%・"
         f"上升持續度 {persistence:.0f}%"
     )
-    if change_pct >= threshold and (persistence or 0.0) >= 60.0:
+    domain_metrics = {
+        # Keep change_pct as the primary public number for compatibility, but
+        # it now means exactly what the radar promises: newest completed OI
+        # versus the mean of the preceding completed endpoints.
+        "change_pct": latest_vs_prior_average_pct,
+        "latest_vs_prior_average_pct": latest_vs_prior_average_pct,
+        "window_change_pct": window_change_pct,
+        "prior_average": prior_average,
+        "latest_value": latest,
+        "slope_pct_per_min": slope,
+        "persistence_pct": persistence,
+    }
+    if (
+        latest_vs_prior_average_pct >= threshold
+        and window_change_pct > 0.0
+        and (slope or 0.0) > 0.0
+        and (persistence or 0.0) >= 60.0
+    ):
         if directional_return > 0.02 and directional_consistency >= 55.0:
             return _domain(
                 "SUPPORT",
-                f"OI 多筆平均新增且價格同向（{detail}）",
+                f"最新完整 OI 高於前段均值且價格同向（{detail}）",
                 detail=detail,
-                change_pct=change_pct,
-                slope_pct_per_min=slope,
-                persistence_pct=persistence,
+                **domain_metrics,
             )
         if directional_return < -0.02 and directional_consistency <= 45.0:
             return _domain(
                 "CONFLICT",
-                f"OI 多筆平均增加但價格反向（{detail}）",
+                f"最新完整 OI 高於前段均值但價格反向（{detail}）",
                 detail=detail,
                 severe=True,
-                change_pct=change_pct,
-                slope_pct_per_min=slope,
-                persistence_pct=persistence,
+                **domain_metrics,
             )
         return _domain(
             "NEUTRAL",
-            f"OI 多筆平均增加，但價格尚未同向回應（{detail}）",
+            f"最新完整 OI 高於前段均值，但價格尚未同向回應（{detail}）",
             detail=detail,
-            change_pct=change_pct,
-            slope_pct_per_min=slope,
-            persistence_pct=persistence,
+            **domain_metrics,
         )
-    if change_pct <= -threshold:
+    if latest_vs_prior_average_pct <= -threshold:
         return _domain(
             "NEUTRAL",
-            f"OI 多筆平均下降，較像平倉／回補（{detail}）",
+            f"最新完整 OI 低於前段均值，較像平倉／回補（{detail}）",
             detail=detail,
-            change_pct=change_pct,
-            slope_pct_per_min=slope,
-            persistence_pct=persistence,
+            **domain_metrics,
         )
     return _domain(
         "NEUTRAL",
-        f"OI 多筆平均變化不明顯（{detail}）",
+        f"最新完整 OI 相較前段均值變化不明顯（{detail}）",
         detail=detail,
-        change_pct=change_pct,
-        slope_pct_per_min=slope,
-        persistence_pct=persistence,
+        **domain_metrics,
     )
 
 
@@ -742,12 +943,38 @@ def _oi_source_matches_bucket(
     source_timestamp: int | None,
 ) -> bool:
     bucket_end = _integer(sample.get("bucket_end_ms"))
+    bucket_start = _integer(sample.get("bucket_start_ms"))
     observed_at = _integer(sample.get("observed_at_ms"))
+    interval_ms = (
+        bucket_end - bucket_start
+        if bucket_end is not None
+        and bucket_start is not None
+        and bucket_end > bucket_start
+        else None
+    )
+    historical_generation_time = (
+        str(sample.get("open_interest_alignment") or "").upper()
+        == "PRECEDING_COMPLETED_5M_CLOSE"
+    )
     return bool(
         source_timestamp is not None
         and bucket_end is not None
+        and interval_ms is not None
         and observed_at is not None
-        and abs(source_timestamp - bucket_end) <= _OI_BUCKET_GRACE_MS
+        and (
+            (
+                # Rubik history exposes a data-generation timestamp, not a
+                # candle confirm bit.  The scanner maps it to the immediately
+                # preceding completed boundary, so it can occur anywhere in
+                # that next interval.
+                historical_generation_time
+                and bucket_end <= source_timestamp < bucket_end + interval_ms
+            )
+            or (
+                not historical_generation_time
+                and abs(source_timestamp - bucket_end) <= _OI_BUCKET_GRACE_MS
+            )
+        )
         and source_timestamp <= observed_at + _SOURCE_FUTURE_SKEW_MS
     )
 

@@ -96,6 +96,51 @@ def complete_signal():
     }
 
 
+def fixed_continuation_summary(
+    *,
+    algorithm_version="CONTINUATION_LOOKBACK_V1",
+    status="READY",
+    as_of_close_ms=1_000,
+    updated_at_ms=1_000,
+    domains=None,
+):
+    if domains is None:
+        domains = {
+            key: {"state": "SUPPORT", "reason": f"{key} 多筆平均同向"}
+            for key in ("OI", "TAKER_CVD", "VOLUME")
+        }
+    source_mode = (
+        "HISTORICAL_CLOSED_BARS"
+        if algorithm_version == "CONTINUATION_LOOKBACK_V1"
+        else "POST_SIGNAL_OBSERVER"
+    )
+    primary = {
+        "key": "10m",
+        "ready": True,
+        "state": "ALIGNED",
+        "bucket_count": 2,
+        "required_buckets": 2,
+        "domains": domains,
+    }
+    return {
+        "algorithm_version": algorithm_version,
+        "source_mode": source_mode,
+        "status": status,
+        "bucket_count": 2,
+        "target_buckets": 2,
+        "early_window": "5m",
+        "primary_window": "10m",
+        "selected_window": "10m",
+        "selected": primary,
+        "windows": {
+            "5m": {"key": "5m", "ready": True, "state": "ALIGNED"},
+            "10m": primary,
+        },
+        "as_of_close_ms": as_of_close_ms,
+        "updated_at_ms": updated_at_ms,
+    }
+
+
 class DecisionContextTests(unittest.TestCase):
     def test_complete_signal_produces_one_enter_decision(self):
         result = build_decision_context(complete_signal())
@@ -1490,6 +1535,95 @@ class DecisionContextTests(unittest.TestCase):
         self.assertEqual(result["final"]["status"], "ENTER")
         self.assertTrue(result["final"]["new_entry_allowed"])
 
+    def test_ready_closed_bar_lookback_beats_collecting_observer(self):
+        item = complete_signal()
+        item["market_metrics"]["continuation_lookback"] = (
+            fixed_continuation_summary(as_of_close_ms=1_000)
+        )
+        item["market_metrics"]["continuation_observer"] = {
+            "algorithm_version": "CONTINUATION_AVG_V2",
+            "status": "COLLECTING",
+            "bucket_count": 1,
+            "target_buckets": 10,
+            "early_window": "5m",
+            "primary_window": "10m",
+            "selected_window": "5m",
+            "selected": {"ready": False, "domains": {}},
+            "windows": {"5m": {"ready": False}, "10m": {"ready": False}},
+            "updated_at_ms": 2_000,
+        }
+
+        result = build_decision_context(item)
+        continuation = result["continuation_confirmation"]
+
+        self.assertEqual(continuation["key"], "CONFIRMED")
+        self.assertEqual(
+            continuation["observer"]["algorithm_version"],
+            "CONTINUATION_LOOKBACK_V1",
+        )
+        self.assertEqual(
+            continuation["observer"]["source_mode"],
+            "HISTORICAL_CLOSED_BARS",
+        )
+        self.assertEqual(result["final"]["status"], "ENTER")
+        self.assertTrue(result["final"]["new_entry_allowed"])
+
+    def test_ready_legacy_observer_cannot_fill_missing_historical_lookback(self):
+        item = complete_signal()
+        item["market_metrics"]["continuation_observer"] = (
+            fixed_continuation_summary(
+                algorithm_version="CONTINUATION_AVG_V2",
+                as_of_close_ms=2_000,
+                updated_at_ms=2_000,
+            )
+        )
+
+        continuation = build_decision_context(item)["continuation_confirmation"]
+
+        self.assertEqual(continuation["key"], "UNKNOWN")
+        self.assertEqual(continuation["label"], "續走力道資料不足")
+        self.assertEqual(continuation["observer"], {})
+
+    def test_post_signal_observer_never_replaces_closed_bar_lookback(self):
+        conflict_domains = {
+            "OI": {
+                "state": "CONFLICT",
+                "reason": "OI 平均與原方向相反",
+                "severe": True,
+            },
+            "TAKER_CVD": {"state": "CONFLICT", "reason": "主動成交轉向"},
+            "VOLUME": {"state": "NEUTRAL", "reason": "量能中性"},
+        }
+        item = complete_signal()
+        item["market_metrics"]["continuation_lookback"] = (
+            fixed_continuation_summary(as_of_close_ms=1_000)
+        )
+        item["market_metrics"]["continuation_observer"] = (
+            fixed_continuation_summary(
+                algorithm_version="CONTINUATION_AVG_V2",
+                as_of_close_ms=2_000,
+                updated_at_ms=2_000,
+                domains=conflict_domains,
+            )
+        )
+
+        newer = build_decision_context(item)["continuation_confirmation"]
+
+        self.assertEqual(newer["key"], "CONFIRMED")
+        self.assertEqual(
+            newer["observer"]["algorithm_version"],
+            "CONTINUATION_LOOKBACK_V1",
+        )
+
+        item["market_metrics"]["continuation_observer"]["updated_at_ms"] = 900
+        older = build_decision_context(item)["continuation_confirmation"]
+
+        self.assertEqual(older["key"], "CONFIRMED")
+        self.assertEqual(
+            older["observer"]["algorithm_version"],
+            "CONTINUATION_LOOKBACK_V1",
+        )
+
     def test_fast_average_can_only_form_until_base_window_is_ready(self):
         item = complete_signal()
         support_domains = {
@@ -1501,7 +1635,8 @@ class DecisionContextTests(unittest.TestCase):
             for key in ("OI", "TAKER_CVD", "VOLUME")
         }
         observer = {
-            "algorithm_version": "CONTINUATION_AVG_V2",
+            "algorithm_version": "CONTINUATION_LOOKBACK_V1",
+            "source_mode": "HISTORICAL_CLOSED_BARS",
             "status": "EARLY_READY",
             "bucket_count": 5,
             "target_buckets": 10,
@@ -1514,7 +1649,7 @@ class DecisionContextTests(unittest.TestCase):
                 "10m": {"ready": False},
             },
         }
-        item["market_metrics"]["continuation_observer"] = observer
+        item["market_metrics"]["continuation_lookback"] = observer
 
         early = build_decision_context(item)
         self.assertEqual(early["continuation_confirmation"]["key"], "FORMING")
@@ -1546,8 +1681,9 @@ class DecisionContextTests(unittest.TestCase):
             "TAKER_CVD": {"state": "SUPPORT", "reason": "主動成交平均同向"},
             "VOLUME": {"state": "SUPPORT", "reason": "平均量價同向"},
         }
-        item["market_metrics"]["continuation_observer"] = {
-            "algorithm_version": "CONTINUATION_AVG_V2",
+        item["market_metrics"]["continuation_lookback"] = {
+            "algorithm_version": "CONTINUATION_LOOKBACK_V1",
+            "source_mode": "HISTORICAL_CLOSED_BARS",
             "status": "PARTIAL",
             "bucket_count": 10,
             "target_buckets": 10,
@@ -1569,8 +1705,9 @@ class DecisionContextTests(unittest.TestCase):
             key: {"state": "SUPPORT", "reason": f"{key} 基準窗同向"}
             for key in ("OI", "TAKER_CVD", "VOLUME")
         }
-        item["market_metrics"]["continuation_observer"] = {
-            "algorithm_version": "CONTINUATION_AVG_V2",
+        item["market_metrics"]["continuation_lookback"] = {
+            "algorithm_version": "CONTINUATION_LOOKBACK_V1",
+            "source_mode": "HISTORICAL_CLOSED_BARS",
             "status": "READY",
             "bucket_count": 10,
             "target_buckets": 10,
@@ -1591,7 +1728,7 @@ class DecisionContextTests(unittest.TestCase):
         self.assertTrue(any("快速平均窗" in item for item in continuation["warnings"]))
         self.assertEqual(result["final"]["status"], "ENTER")
 
-    def test_public_observer_projection_never_exposes_raw_samples(self):
+    def test_public_projection_rejects_legacy_observer_and_raw_samples(self):
         item = complete_signal()
         item["market_metrics"]["continuation_observer"] = {
             "algorithm_version": "CONTINUATION_AVG_V2",
@@ -1619,10 +1756,34 @@ class DecisionContextTests(unittest.TestCase):
         public = public_candidate_payload(item, signal=True)
         observer = public["decision_context"]["continuation_confirmation"]["observer"]
 
-        self.assertEqual(observer["bucket_count"], 3)
+        self.assertEqual(observer, {})
         self.assertNotIn("samples", observer)
         self.assertNotIn("selected", observer)
         self.assertNotIn("continuation_observer", public["market_metrics"])
+
+    def test_public_projection_accepts_closed_bar_lookback_without_raw_rows(self):
+        item = complete_signal()
+        lookback = fixed_continuation_summary(as_of_close_ms=1_234_000)
+        lookback["samples"] = [{"open_interest_contracts": 99_999}]
+        lookback["windows"]["10m"]["raw_points"] = [{"oi": "secret"}]
+        item["market_metrics"]["continuation_lookback"] = lookback
+        item["decision_context"] = build_decision_context(item)
+
+        public = public_candidate_payload(item, signal=True)
+        continuation = public["decision_context"]["continuation_confirmation"]
+        projected = continuation["observer"]
+
+        self.assertEqual(continuation["key"], "CONFIRMED")
+        self.assertEqual(
+            projected["algorithm_version"],
+            "CONTINUATION_LOOKBACK_V1",
+        )
+        self.assertEqual(projected["source_mode"], "HISTORICAL_CLOSED_BARS")
+        self.assertEqual(projected["as_of_close_ms"], 1_234_000)
+        self.assertNotIn("samples", projected)
+        self.assertNotIn("selected", projected)
+        self.assertNotIn("raw_points", projected["windows"]["10m"])
+        self.assertNotIn("continuation_lookback", public["market_metrics"])
 
     def test_public_projection_hides_stale_observer_algorithm(self):
         item = complete_signal()

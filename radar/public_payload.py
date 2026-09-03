@@ -3,7 +3,7 @@ from __future__ import annotations
 from collections.abc import Mapping
 from typing import Any
 
-from .continuation import ALGORITHM_VERSION
+from .continuation import LOOKBACK_ALGORITHM_VERSION
 from .price_display import signal_plan_display_fields
 
 
@@ -437,24 +437,24 @@ def _public_decision_context(decision: Any) -> dict[str, Any]:
     if not observer_payload:
         # The previous scanner-only continuation fields remain available
         # internally for backward compatibility, but the public radar must not
-        # present one snapshot as the new fixed-window average.
+        # present one snapshot as the new historical closed-bar comparison.
         payload["continuation_confirmation"].update(
             {
                 "key": "UNKNOWN",
-                "label": "未知｜等待固定平均採樣",
+                "label": "續走力道資料不足",
                 "score": None,
                 "supporting": [],
                 "conflicts": [],
                 "warnings": [],
-                "missing": ["固定平均觀察尚未建立"],
+                "missing": ["歷史完整收線比較資料不足"],
                 "meaning": (
-                    "完成多筆固定節奏樣本前，不使用單一快照宣稱同向續走。"
+                    "歷史完整收線資料不足時，不使用單一快照宣稱同向續走。"
                 ),
                 "core_votes": {
                     key: {
                         "state": "UNKNOWN",
-                        "label": "等待平均採樣",
-                        "detail": "固定平均觀察尚未建立",
+                        "label": "歷史資料不足",
+                        "detail": "完整收線比較尚未建立",
                     }
                     for key in ("OI", "TAKER_CVD", "VOLUME")
                 },
@@ -482,13 +482,14 @@ def _public_decision_context(decision: Any) -> dict[str, Any]:
 def _public_continuation_observer(observer: Any) -> dict[str, Any]:
     if (
         not isinstance(observer, Mapping)
-        or observer.get("algorithm_version") != ALGORITHM_VERSION
+        or observer.get("algorithm_version") != LOOKBACK_ALGORITHM_VERSION
     ):
         return {}
     payload = _select(
         observer,
         (
             "algorithm_version",
+            "source_mode",
             "status",
             "label",
             "horizon",
@@ -504,6 +505,7 @@ def _public_continuation_observer(observer: Any) -> dict[str, Any]:
             "primary_window",
             "selected_window",
             "averaging_ready",
+            "as_of_close_ms",
             "updated_at_ms",
             "meaning",
             "permission",

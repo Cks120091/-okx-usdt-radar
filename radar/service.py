@@ -995,25 +995,14 @@ class RadarRuntime:
             LOGGER.exception("Failed to persist restored terminal-card cleanup")
 
     def start(self) -> bool:
-        """Start the lightweight post-signal observer for web-service mode."""
+        """Keep legacy post-signal polling disabled in web-service mode.
 
-        client = getattr(self.scanner, "client", None)
-        repository = getattr(self.scanner, "repository", None)
-        if not callable(getattr(client, "get_continuation_snapshot", None)):
-            return False
-        if not callable(getattr(repository, "record_continuation_snapshot", None)):
-            return False
-        with self._state_lock:
-            if self._observer_thread is not None and self._observer_thread.is_alive():
-                return False
-            self._observer_stop.clear()
-            self._observer_thread = threading.Thread(
-                target=self._observer_worker,
-                name="radar-continuation-observer",
-                daemon=True,
-            )
-            self._observer_thread.start()
-        return True
+        Continuation strength is rebuilt from exchange historical OI on each
+        scan.  Starting the older per-Episode observer here would mix a
+        different time origin into that closed-bar result.
+        """
+
+        return False
 
     def stop(self) -> None:
         self._observer_stop.set()
@@ -1072,7 +1061,11 @@ class RadarRuntime:
                 and isinstance(summary.get("windows"), dict)
                 else {}
             )
-            if isinstance(primary, dict) and primary.get("ready") is True:
+            if (
+                isinstance(primary, dict)
+                and primary.get("ready") is True
+                and str(summary.get("status") or "").upper() == "READY"
+            ):
                 reported_observer = signal.market_metrics.get(
                     "continuation_observer",
                     {},
