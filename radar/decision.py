@@ -1037,7 +1037,11 @@ def _continuation_confirmation_layer(
         not trigger_active
         or direction == "NEUTRAL"
         or not capital_observed
-        or (support_count == 0 and capital_conflict_count == 0)
+        or (
+            support_count == 0
+            and capital_conflict_count == 0
+            and not fixed_primary_ready
+        )
     ):
         key = "UNKNOWN"
         score = None
@@ -1063,10 +1067,20 @@ def _continuation_confirmation_layer(
             75.0,
             _continuation_score(votes),
         )
-    else:
+    elif support_count > 0:
         key = "FORMING"
         score = min(
             70.0,
+            _continuation_score(votes),
+        )
+    else:
+        # OI/volume can be fully available without supporting the Trigger.
+        # That is weak follow-through, not missing data.  Keeping those two
+        # meanings separate prevents a complete historical comparison from
+        # being rendered as "資料不足" merely because no vote is positive.
+        key = "WEAK"
+        score = min(
+            45.0,
             _continuation_score(votes),
         )
 
@@ -1075,10 +1089,14 @@ def _continuation_confirmation_layer(
     if not trigger_active:
         missing.append("有效中的正式價格 Trigger")
     if support_count == 0 and capital_conflict_count == 0:
-        missing.append("至少一項同向資金證據")
+        if capital_observed and fixed_primary_ready:
+            warnings.append("資金資料已取得，但尚未形成同向支持")
+        else:
+            missing.append("至少一項同向資金證據")
     labels = {
         "CONFIRMED": "續走力道強",
         "FORMING": "續走力道中等",
+        "WEAK": "續走力道偏弱",
         "CONFLICT": "續走力道偏弱",
         "UNKNOWN": "續走力道資料不足",
     }

@@ -781,16 +781,17 @@
       $('#favoritesBox').innerHTML=items.length?items.map(item=>`<div class="rank-row"><div><div class="rank-symbol">${esc(displaySymbol(item.inst_id))}</div><div class="rank-meta">${esc(directionName[item.direction]||'中性')} · ${esc(stageName[item.status]||'觀望')} · ${price(item.market_metrics?.last_price,item)}</div><div class="quick-links">${preflightActions(item.inst_id,'BOTH',item)}</div></div><div class="card-actions">${favoriteButton(item.inst_id)}</div></div>`).join(''):'<div class="empty">尚未收藏幣種。點候選卡右上的 ☆ 即可收藏。</div>';
     }
 
-    function continuationConfirmation(item){const value=item?.decision_context?.continuation_confirmation||{},rawKey=String(value.key||'UNKNOWN').toUpperCase(),key=['CONFIRMED','FORMING','CONFLICT','UNKNOWN'].includes(rawKey)?rawKey:'UNKNOWN';return {...value,key}}
+    function continuationConfirmation(item){const value=item?.decision_context?.continuation_confirmation||{},rawKey=String(value.key||'UNKNOWN').toUpperCase(),key=['CONFIRMED','FORMING','WEAK','CONFLICT','UNKNOWN'].includes(rawKey)?rawKey:'UNKNOWN';return {...value,key}}
     function continuationObserver(item){const value=continuationConfirmation(item).observer;return isRecord(value)&&value.algorithm_version?value:null}
     function continuationStrip(item){
       if(terminalSignalOutcome(item)||isPreviewItem(item))return '';
-      const confirmation=continuationConfirmation(item),observer=continuationObserver(item),status=String(observer?.status||'').toUpperCase(),primary=observer?.windows?.[observer?.primary_window],primaryReady=primary?.ready===true,key=observer?confirmation.key:'UNKNOWN',readOnlyReason=itemReadOnlyReason(item),votes=confirmation.core_votes||{},voteStates=Object.values(votes).map(value=>String(value?.state||'UNKNOWN').toUpperCase()),supportCount=voteStates.filter(state=>state==='SUPPORT').length,conflictCount=voteStates.filter(state=>state==='CONFLICT').length,oiState=String(votes.OI?.state||'UNKNOWN').toUpperCase();
+      const confirmation=continuationConfirmation(item),observer=continuationObserver(item),status=String(observer?.status||'').toUpperCase(),primary=observer?.windows?.[observer?.primary_window],primaryReady=primary?.ready===true,key=observer?confirmation.key:'UNKNOWN',readOnlyReason=itemReadOnlyReason(item),votes=confirmation.core_votes||{},voteStates=Object.values(votes).map(value=>String(value?.state||'UNKNOWN').toUpperCase()),knownCount=voteStates.filter(state=>state!=='UNKNOWN').length;
       let strength='資料不足',cls='unknown';
       if(status!=='INTERRUPTED'&&primaryReady){
-        if(key==='CONFLICT'||(supportCount===0&&conflictCount>0)){strength='偏弱';cls='conflict'}
+        if(key==='WEAK'||key==='CONFLICT'){strength='偏弱';cls='conflict'}
         else if(key==='CONFIRMED'){strength='強';cls='confirmed'}
-        else if(key==='FORMING'&&oiState==='SUPPORT'){strength='中等';cls='forming'}
+        else if(key==='FORMING'){strength='中等';cls='forming'}
+        else if(key==='UNKNOWN'&&knownCount>0){strength='偏弱';cls='conflict'}
       }
       if(readOnlyReason){cls='reference';strength=`上輪${strength}`}
       const direction=item.direction==='SHORT'?'空頭':item.direction==='LONG'?'多頭':'同向';

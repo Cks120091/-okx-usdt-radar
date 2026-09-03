@@ -1699,6 +1699,45 @@ class DecisionContextTests(unittest.TestCase):
         self.assertEqual(result["continuation_confirmation"]["key"], "FORMING")
         self.assertEqual(result["final"]["status"], "ENTER")
 
+    def test_ready_neutral_history_is_weak_not_data_insufficient(self):
+        item = complete_signal()
+        domains = {
+            "OI": {
+                "state": "NEUTRAL",
+                "reason": "最新完整 OI 相較前段均值變化不明顯",
+            },
+            "TAKER_CVD": {
+                "state": "UNKNOWN",
+                "missing": "Taker／CVD 完整區間樣本",
+            },
+            "VOLUME": {
+                "state": "NEUTRAL",
+                "reason": "平均成交量尚未形成持續同向放量",
+            },
+        }
+        item["market_metrics"]["continuation_lookback"] = (
+            fixed_continuation_summary(status="PARTIAL", domains=domains)
+        )
+
+        result = build_decision_context(item)
+        continuation = result["continuation_confirmation"]
+
+        self.assertEqual(continuation["key"], "WEAK")
+        self.assertEqual(continuation["label"], "續走力道偏弱")
+        self.assertLessEqual(continuation["score"], 45.0)
+        self.assertNotIn("至少一項同向資金證據", continuation["missing"])
+        self.assertTrue(
+            any("尚未形成同向支持" in value for value in continuation["warnings"])
+        )
+        self.assertEqual(result["final"]["status"], "ENTER")
+
+        item["decision_context"] = result
+        public = public_candidate_payload(item, signal=True)
+        self.assertEqual(
+            public["decision_context"]["continuation_confirmation"]["key"],
+            "WEAK",
+        )
+
     def test_recent_fast_window_conflict_downgrades_aligned_base_window(self):
         item = complete_signal()
         support_domains = {
