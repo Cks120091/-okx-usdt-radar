@@ -1013,11 +1013,15 @@ def _continuation_confirmation_layer(
     ):
         key = "UNKNOWN"
         score = None
-    elif severe_counterevidence or len(counter_domains) >= 2:
+    elif (
+        severe_counterevidence
+        or len(counter_domains) >= 2
+        or oi_vote["state"] == "CONFLICT"
+    ):
         key = "CONFLICT"
         score = min(
             35.0,
-            _continuation_score(support_count, capital_conflict_count),
+            _continuation_score(votes),
         )
     elif (
         support_count >= 2
@@ -1029,13 +1033,13 @@ def _continuation_confirmation_layer(
         key = "CONFIRMED"
         score = max(
             75.0,
-            _continuation_score(support_count, capital_conflict_count),
+            _continuation_score(votes),
         )
     else:
         key = "FORMING"
         score = min(
             70.0,
-            _continuation_score(support_count, capital_conflict_count),
+            _continuation_score(votes),
         )
 
     if direction == "NEUTRAL":
@@ -1045,10 +1049,10 @@ def _continuation_confirmation_layer(
     if support_count == 0 and capital_conflict_count == 0:
         missing.append("至少一項同向資金證據")
     labels = {
-        "CONFIRMED": "高｜同向續走證據一致",
-        "FORMING": "中｜同向續走形成中",
-        "CONFLICT": "低｜續走證據衝突",
-        "UNKNOWN": "未知｜續走資料不足",
+        "CONFIRMED": "續走力道強",
+        "FORMING": "續走力道中等",
+        "CONFLICT": "續走力道偏弱",
+        "UNKNOWN": "續走力道資料累積中",
     }
     return {
         "key": key,
@@ -1307,11 +1311,24 @@ def _continuation_vote_summary(
     }
 
 
-def _continuation_score(support_count: int, conflict_count: int) -> float:
-    return round(
-        max(0.0, min(100.0, 50.0 + (support_count - conflict_count) * (50.0 / 3.0))),
-        1,
-    )
+def _continuation_score(votes: Mapping[str, Mapping[str, Any]]) -> float:
+    """Return internal continuation strength with OI carrying the core weight.
+
+    OI measures whether fresh leveraged participation is joining the move, so
+    its directional average carries two internal units.  Taker/CVD and volume
+    each carry one.  The public UI translates the result into plain-language
+    strength and never presents these units as win probability.
+    """
+
+    weights = {"OI": 2.0, "TAKER_CVD": 1.0, "VOLUME": 1.0}
+    net_weight = 0.0
+    for domain, weight in weights.items():
+        state = str(_mapping(votes.get(domain)).get("state") or "UNKNOWN").upper()
+        if state == "SUPPORT":
+            net_weight += weight
+        elif state == "CONFLICT":
+            net_weight -= weight
+    return round(max(0.0, min(100.0, 50.0 + net_weight * 12.5)), 1)
 
 
 def _directional_core_return(

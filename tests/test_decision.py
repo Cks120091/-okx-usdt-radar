@@ -839,7 +839,8 @@ class DecisionContextTests(unittest.TestCase):
         continuation = result["continuation_confirmation"]
 
         self.assertEqual(continuation["key"], "CONFIRMED")
-        self.assertEqual(continuation["score"], 83.3)
+        self.assertEqual(continuation["label"], "續走力道強")
+        self.assertEqual(continuation["score"], 87.5)
         self.assertTrue(any("OI" in text for text in continuation["supporting"]))
         self.assertTrue(any("Taker" in text for text in continuation["supporting"]))
         self.assertEqual(continuation["conflicts"], [])
@@ -873,7 +874,8 @@ class DecisionContextTests(unittest.TestCase):
         continuation = result["continuation_confirmation"]
 
         self.assertEqual(continuation["key"], "FORMING")
-        self.assertEqual(continuation["score"], 66.7)
+        self.assertEqual(continuation["label"], "續走力道中等")
+        self.assertEqual(continuation["score"], 62.5)
         self.assertEqual(result["final"]["status"], "ENTER")
 
     def test_insufficient_flow_history_is_forming_not_fake_confirmation(self):
@@ -948,6 +950,7 @@ class DecisionContextTests(unittest.TestCase):
         continuation = result["continuation_confirmation"]
 
         self.assertEqual(continuation["key"], "CONFLICT")
+        self.assertEqual(continuation["label"], "續走力道偏弱")
         self.assertLessEqual(continuation["score"], 35.0)
         self.assertTrue(any("opposite build" in text for text in continuation["conflicts"]))
         self.assertEqual(result["final"]["status"], "ENTER")

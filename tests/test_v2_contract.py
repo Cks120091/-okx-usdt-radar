@@ -113,7 +113,7 @@ class V33ContractTests(unittest.TestCase):
         self.assertIn('<body data-active-group="home">', html)
         self.assertIn('body:not([data-active-group="home"]) .command-deck', html)
         self.assertIn("document.body.dataset.activeGroup=group", html)
-        self.assertIn("okx-radar-shell-v4.0-radar-compact-1", service_worker)
+        self.assertIn("okx-radar-shell-v4.1-strength-simple-1", service_worker)
         self.assertIn("市場自動計畫", html)
         self.assertIn("plan.adaptive_market_plan", html)
         self.assertIn("plan.market_plan_sources", html)
@@ -180,19 +180,24 @@ class V33ContractTests(unittest.TestCase):
             "async function pollUntilComplete", 1
         )[0]
         self.assertNotIn("state.report=null", start_scan)
-        self.assertIn("多空候選排行", html)
-        self.assertIn("交易品質不會代替 Trigger（價格觸發）", html)
+        self.assertIn("目前最值得看", html)
+        self.assertIn("依可進狀態與交易品質排列", html)
         self.assertIn("訊號準備度", html)
         self.assertIn("尚未觸發", html)
         self.assertIn("可進 · ${watchCount} 觀察", html)
         self.assertIn("itemEntryStatus(x)==='ENTRY_READY'", html)
         self.assertIn("function itemWasEntryReady(item)", html)
         self.assertIn("OI（未平倉量）異動雷達", html)
-        self.assertIn("市場平均 RSI", html)
+        self.assertIn("市場方向分布", html)
+        self.assertNotIn("市場平均 RSI", html)
         self.assertIn("localStorage", html)
         self.assertIn("TradingView（技術圖表）", html)
         self.assertIn("輸入正式訊號幣種，例如 BTC", html)
         self.assertIn("renderOverviewUnavailable", html)
+        overview_unavailable = html.split(
+            "function renderOverviewUnavailable(message)", 1
+        )[1].split("function isRecord", 1)[0]
+        self.assertIn("$('#marketHeat').innerHTML", overview_unavailable)
         self.assertNotIn("開發者資料（Raw Data）", html)
         self.assertNotIn("分組績效 JSON", html)
         self.assertNotIn("raw_indicators", html)
@@ -224,7 +229,7 @@ class V33ContractTests(unittest.TestCase):
         self.assertIn("function signalTriggerTime(item)", html)
         self.assertIn("訊號觸發時間（台灣）", html)
         self.assertNotIn("status!=='ENTRY_READY'&&status!=='MISSED_ENTRY'", html)
-        self.assertIn("okx-radar-shell-v4.0-radar-compact-1", service_worker)
+        self.assertIn("okx-radar-shell-v4.1-strength-simple-1", service_worker)
         self.assertIn("$('#preflightRefresh').addEventListener('click',loadPreflight)", html)
         self.assertIn("${decisionPanel(item)}", html)
         self.assertNotIn("showPreflight", html)
@@ -565,29 +570,27 @@ class V33ContractTests(unittest.TestCase):
         self.assertIn("item?.decision_context?.continuation_confirmation", continuation)
         self.assertNotIn("function continuationBadge", continuation)
         self.assertNotIn("function continuationRank", continuation)
-        self.assertIn("function continuationCoreVote(item,key)", html)
-        self.assertIn("confirmation.core_votes?.[key]", continuation)
+        self.assertNotIn("function continuationCoreVote(item,key)", html)
         self.assertIn("function continuationStrip(item)", html)
-        self.assertIn("hasCoreVotes=Boolean(observer)&&domains.every", continuation)
-        self.assertIn("完成前不使用單一快照判斷續走", continuation)
-        self.assertIn("等待平均採樣", continuation)
         self.assertIn("readOnlyReason=itemReadOnlyReason(item)", continuation)
-        self.assertIn("confirmation.conflicts", continuation)
-        self.assertIn("confirmation.warnings", continuation)
-        self.assertIn("confirmation.missing", continuation)
-        self.assertIn("observer.meaning", continuation)
         self.assertIn("terminalSignalOutcome(item)", continuation)
-        self.assertIn("OI 使用合約數量的多筆斜率與持續度", continuation)
-        self.assertIn("Taker／CVD 使用各完整區間成交量加權", continuation)
-        self.assertIn("成交量使用已收盤小 K 平均", continuation)
-        self.assertIn("不是勝率", continuation)
         self.assertIn("function continuationObserver(item)", continuation)
-        self.assertIn("function continuationObserverPanel(observer,item)", continuation)
-        self.assertIn("15m 短線會每 1 分鐘採樣，建立 5／10 分鐘平均", continuation)
-        self.assertIn("4H 波段會每 5 分鐘採樣，建立 30／60 分鐘平均", continuation)
-        self.assertIn("continuationObserverPanel(observer,item)", continuation)
-        self.assertIn("!observer&&key==='OI'", continuation)
-        self.assertIn("observer.continuity_reset", continuation)
+        self.assertIn("strength='強'", continuation)
+        self.assertIn("strength='中等'", continuation)
+        self.assertIn("strength='偏弱'", continuation)
+        self.assertIn("strength='資料累積中'", continuation)
+        self.assertIn("status!=='INTERRUPTED'&&primaryReady", continuation)
+        self.assertIn("oiState==='SUPPORT'", continuation)
+        self.assertIn("${direction}續走力道", continuation)
+        self.assertNotIn("continuation-window-note", continuation)
+        self.assertNotIn("5／10m", continuation)
+        self.assertNotIn("30／60m", continuation)
+        self.assertNotIn("confirmation.score", continuation)
+        continuation_markup = continuation.split("return `<section", 1)[1]
+        self.assertNotIn("OI", continuation_markup)
+        self.assertNotIn("Taker", continuation_markup)
+        self.assertNotIn("成交量", continuation_markup)
+        self.assertNotIn("加成", continuation_markup)
         self.assertIn("observer_updated_at", fingerprint)
         self.assertIn("windows['5m']?.bucket_count", fingerprint)
         self.assertIn("windows['60m']?.bucket_count", fingerprint)
@@ -605,13 +608,10 @@ class V33ContractTests(unittest.TestCase):
         )
         self.assertIn("signal-status-line", render_signals)
         self.assertIn("現在能否進場", decision_panel)
-        self.assertIn("訊號後平均走向", continuation)
-        self.assertIn("最高等級門檻：OI 支持＋至少 1 項加成", continuation)
-        self.assertIn("目前：OI", continuation)
-        self.assertIn("採樣與 OI／Taker／量能依據", continuation)
-        self.assertIn('role="progressbar"', continuation)
-        self.assertIn('aria-valuenow="${num(progress,0)}"', continuation)
-        self.assertIn('aria-valuetext="已完成 ${count}/${target} 個完整區間"', continuation)
+        self.assertIn("續走力道", continuation)
+        self.assertNotIn("最高等級門檻", continuation)
+        self.assertNotIn("加成", continuation)
+        self.assertNotIn('role="progressbar"', continuation)
         self.assertIn("完整判定資料", render_signals)
         self.assertIn("details(item,true)", render_signals)
         self.assertIn("function signalTradeGrid(item,options={})", html)
@@ -731,20 +731,15 @@ class V33ContractTests(unittest.TestCase):
         self.assertNotIn("至少需要連續兩輪", anomaly)
         self.assertNotIn("需要至少兩輪掃描才能比較 OI", html)
 
-        continuation = html.split("function continuationCoreVote(item,key)", 1)[
-            1
-        ].split("function directionBadge", 1)[0]
-        self.assertIn("key==='OI'&&safeState==='NEUTRAL'", continuation)
-        self.assertIn("已取得・未達同向新增門檻", continuation)
-        self.assertIn("key==='OI'&&safeState==='UNKNOWN'", continuation)
-        self.assertIn("availability.key==='MISSING'", continuation)
-        self.assertIn("availability.key==='NO_BASELINE'", continuation)
-        self.assertIn("完成前不使用單一快照判斷續走", continuation)
-        self.assertIn("最高等級門檻：OI 支持＋至少 1 項加成", continuation)
-        self.assertNotIn(
-            "continuationItems(confirmation.missing,'核心資料已取得')",
-            continuation,
-        )
+        continuation = html.split("function continuationStrip(item)", 1)[1].split(
+            "function directionBadge", 1
+        )[0]
+        self.assertIn("續走力道", continuation)
+        continuation_markup = continuation.split("return `<section", 1)[1]
+        self.assertNotIn("OI", continuation_markup)
+        self.assertNotIn("Taker", continuation_markup)
+        self.assertNotIn("成交量", continuation_markup)
+        self.assertNotIn("加成", continuation_markup)
 
     def test_pwa_never_caches_live_market_api(self):
         root = Path(__file__).parents[1] / "radar" / "static"
@@ -794,7 +789,7 @@ class V33ContractTests(unittest.TestCase):
         self.assertIn("舊 Entry／SL／TP 不會復活", html)
         self.assertIn("舊交易計畫已結束", html)
         self.assertIn("signalTradeGrid(item,{prefix:'原始 ',original:true})", html)
-        self.assertIn("okx-radar-shell-v4.0-radar-compact-1", worker)
+        self.assertIn("okx-radar-shell-v4.1-strength-simple-1", worker)
 
     def test_market_scan_has_no_github_schedule(self):
         root = Path(__file__).parents[1]
