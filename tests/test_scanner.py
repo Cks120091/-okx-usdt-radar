@@ -2077,7 +2077,7 @@ class ScannerTests(unittest.TestCase):
     def test_market_bias_turns_bullish_when_breadth_and_anchors_align(self):
         scanner = MarketScanner(FakeClient())
 
-        def bullish(inst_id):
+        def bullish(inst_id, rsi):
             return AnalysisResult(
                 None,
                 "fixture",
@@ -2092,21 +2092,23 @@ class ScannerTests(unittest.TestCase):
                     spread_pct=0.01,
                     quote_volume_24h=20_000_000,
                     closed_candle_ts=1,
-                    market_metrics={"rsi_core": 61.2},
+                    market_metrics={"rsi_core": rsi},
                 ),
             )
 
         bias = scanner._calculate_market_bias(
             {
-                "BTC-USDT-SWAP": bullish("BTC-USDT-SWAP"),
-                "ETH-USDT-SWAP": bullish("ETH-USDT-SWAP"),
-                "AAA-USDT-SWAP": bullish("AAA-USDT-SWAP"),
+                "BTC-USDT-SWAP": bullish("BTC-USDT-SWAP", 40.0),
+                "ETH-USDT-SWAP": bullish("ETH-USDT-SWAP", 60.0),
+                "AAA-USDT-SWAP": bullish("AAA-USDT-SWAP", 80.0),
             }
         )
         self.assertEqual(bias["label"], "偏多")
         self.assertGreaterEqual(bias["score"], 65.0)
         self.assertEqual(bias["market_breadth_long_pct"], 100.0)
-        self.assertEqual(bias["btc"]["core_rsi"], 61.2)
+        self.assertEqual(bias["market_average_rsi"], 60.0)
+        self.assertEqual(bias["market_average_rsi_sample_count"], 3)
+        self.assertEqual(bias["btc"]["core_rsi"], 40.0)
 
 
 if __name__ == "__main__":

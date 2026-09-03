@@ -10,4 +10,4 @@ services:
     autoDeployTrigger: commit
     envVars:
       - key: RADAR_RELEASE
-        value: radar-continuation-advisory-only-20260903
+        value: radar-market-average-rsi-20260903

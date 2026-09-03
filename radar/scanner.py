@@ -3559,6 +3559,19 @@ class MarketScanner:
             and state.regime in ("TREND", "BREAKOUT_READY", "BREAKOUT")
             and state.direction in ("LONG", "SHORT")
         ]
+        market_rsi_values = [
+            value
+            for state in states
+            if state.status != "FILTERED"
+            and (value := _finite_number(state.market_metrics.get("rsi_core")))
+            is not None
+            and 0.0 <= value <= 100.0
+        ]
+        market_average_rsi = (
+            round(sum(market_rsi_values) / len(market_rsi_values), 1)
+            if market_rsi_values
+            else None
+        )
 
         def breadth(items: list[MarketState]) -> tuple[float, int, int]:
             long_count = sum(item.direction == "LONG" for item in items)
@@ -3655,6 +3668,8 @@ class MarketScanner:
             "long_count": long_count,
             "short_count": short_count,
             "sample_count": len(directional),
+            "market_average_rsi": market_average_rsi,
+            "market_average_rsi_sample_count": len(market_rsi_values),
             "btc": {
                 "direction": btc_direction,
                 "core_change_pct": btc_core_change,

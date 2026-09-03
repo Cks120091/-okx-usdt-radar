@@ -147,7 +147,14 @@ def public_report_payload(report: Any) -> dict[str, Any]:
         market_bias = _read(report, report_key, {})
         payload[report_key] = _select(
             market_bias,
-            ("label", "score", "market_breadth_long_pct", "liquid_breadth_long_pct"),
+            (
+                "label",
+                "score",
+                "market_breadth_long_pct",
+                "liquid_breadth_long_pct",
+                "market_average_rsi",
+                "market_average_rsi_sample_count",
+            ),
         )
         for key in ("btc", "resonance", "exposure_warning"):
             value = _read(market_bias, key, None)

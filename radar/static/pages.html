@@ -293,7 +293,7 @@
         <div class="metric wide"><div class="k">最後更新（台灣時間）</div><div class="v" id="updatedAt">正在喚醒服務…</div></div>
         <div class="metric"><div class="k" id="signalCountLabel">15m 訊號</div><div class="v" id="signalCount">—</div></div>
         <div class="metric"><div class="k" id="longSignalCountLabel">4H 訊號</div><div class="v" id="longSignalCount">—</div></div>
-        <div class="metric market-bias-card"><div class="k">市場方向 · BTC RSI(14)</div><div class="v bias-lines" id="marketBias">—</div></div>
+        <div class="metric market-bias-card"><div class="k">市場方向 · 市場平均 RSI(14)</div><div class="v bias-lines" id="marketBias">—</div></div>
         <div class="metric" hidden><div class="k">接近觸發</div><div class="v" id="nearCount">—</div></div>
         <div class="metric" hidden><div class="k" id="contextCountLabel">深度資料完整</div><div class="v" id="contextCount">—</div><small class="metric-note" id="contextSourceCoverage">來源完整率 —</small></div>
       </section>
@@ -719,8 +719,8 @@
       $('#longSignalCount').textContent=longTransient?(longTransient==='ERROR'?'更新失敗':'掃描中'):!longAvailable?(preview&&activeScanMode==='FULL'?'補充中':'尚未掃描'):longPreview?`${allLong.length} 初步候選`:longReference?`${longReady.length} 只供參考`:longExpired?`${longReady.length}（過期）`:`${stickyLong.length} 有效 · ${longClosed.length} 已結束`;
       $('#nearCount').textContent=shortAvailable?num((report.watchlist||[]).filter(x=>x.status==='NEAR_TRIGGER').length,0):'—';
       const bias=report.market_bias||{},longBias=report.long_market_bias||{},biasRows=[];
-      if(shortAvailable)biasRows.push(`<span><b>15m</b><strong>${esc(String(bias.label||'中性'))}</strong><small>RSI ${metricNumber(bias.btc?.core_rsi)===null?'—':num(bias.btc.core_rsi,1)}</small></span>`);
-      if(longAvailable)biasRows.push(`<span><b>4H</b><strong>${esc(String(longBias.label||'中性'))}</strong><small>RSI ${metricNumber(longBias.btc?.core_rsi)===null?'—':num(longBias.btc.core_rsi,1)}</small></span>`);
+      if(shortAvailable)biasRows.push(`<span><b>15m</b><strong>${esc(String(bias.label||'中性'))}</strong><small>平均 RSI ${metricNumber(bias.market_average_rsi)===null?'—':num(bias.market_average_rsi,1)} · ${num(bias.market_average_rsi_sample_count,0)} 幣</small></span>`);
+      if(longAvailable)biasRows.push(`<span><b>4H</b><strong>${esc(String(longBias.label||'中性'))}</strong><small>平均 RSI ${metricNumber(longBias.market_average_rsi)===null?'—':num(longBias.market_average_rsi,1)} · ${num(longBias.market_average_rsi_sample_count,0)} 幣</small></span>`);
       $('#marketBias').innerHTML=biasRows.join('')||'—';
       renderContextCoverage(report,shortTransient||longTransient,preview);
       if(shortTransient){const message=horizonTransientMessage(shortTransient,'SHORT');renderHorizonUnavailable('SHORT',message);renderOverviewUnavailable(message)}else if(!shortAvailable){const message='尚未執行 15m 掃描；完成 15m 或全市場掃描後才會顯示短線資料。';renderHorizonUnavailable('SHORT',message);renderOverviewUnavailable(message)}else{renderSignals(allShort,'#fifteenAllBox','本輪沒有 15m 正式訊號。',shortReadOnlyReason);renderSignals(early,'#earlySignalsBox','本輪沒有剛觸發的早期訊號。',shortReadOnlyReason);renderSignals(ready,'#signalsBox','目前沒有已觸發並持續保留的訊號。',shortReadOnlyReason);renderSignals(waiting,'#waitRetestBox','目前沒有尚未曾可進、正在等待回踩的訊號。',shortReadOnlyReason);renderSignals(missed,'#missedSignalsBox','目前沒有尚未曾可進、已錯過的訊號。',shortReadOnlyReason);renderWatchlist(report.watchlist||[],'#watchBox',shortReadOnlyReason);renderMap(report.market_map||[],$('#mapSearch').value);renderFavorites();renderOverview({...report,signals:liveReady});if(shortReadOnlyReason)$('#rankingBox').insertAdjacentHTML('afterbegin',readOnlyReferenceBanner(shortReadOnlyReason,'SHORT'))}

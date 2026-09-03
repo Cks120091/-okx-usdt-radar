@@ -113,8 +113,9 @@ class V33ContractTests(unittest.TestCase):
         self.assertIn('<body data-active-group="home">', html)
         self.assertIn('body:not([data-active-group="home"]) .command-deck', html)
         self.assertIn("document.body.dataset.activeGroup=group", html)
-        self.assertIn("okx-radar-shell-v4.1-advisory-1", service_worker)
-        self.assertIn("市場方向 · BTC RSI(14)", html)
+        self.assertIn("okx-radar-shell-v4.1-market-rsi-1", service_worker)
+        self.assertIn("市場方向 · 市場平均 RSI(14)", html)
+        self.assertIn("bias.market_average_rsi", html)
         self.assertIn("function preflightContinuation(data)", html)
         self.assertIn("原方向續走力道", html)
         self.assertIn("純輔助觀察", html)
@@ -194,7 +195,7 @@ class V33ContractTests(unittest.TestCase):
         self.assertIn("function itemWasEntryReady(item)", html)
         self.assertIn("OI（未平倉量）異動雷達", html)
         self.assertIn("市場方向分布", html)
-        self.assertNotIn("市場平均 RSI", html)
+        self.assertIn("市場平均 RSI", html)
         self.assertIn("localStorage", html)
         self.assertIn("TradingView（技術圖表）", html)
         self.assertIn("輸入正式訊號幣種，例如 BTC", html)
@@ -234,7 +235,7 @@ class V33ContractTests(unittest.TestCase):
         self.assertIn("function signalTriggerTime(item)", html)
         self.assertIn("訊號觸發時間（台灣）", html)
         self.assertNotIn("status!=='ENTRY_READY'&&status!=='MISSED_ENTRY'", html)
-        self.assertIn("okx-radar-shell-v4.1-advisory-1", service_worker)
+        self.assertIn("okx-radar-shell-v4.1-market-rsi-1", service_worker)
         self.assertIn("$('#preflightRefresh').addEventListener('click',loadPreflight)", html)
         self.assertIn("${decisionPanel(item)}", html)
         self.assertNotIn("showPreflight", html)
@@ -800,7 +801,7 @@ class V33ContractTests(unittest.TestCase):
         self.assertIn("舊 Entry／SL／TP 不會復活", html)
         self.assertIn("舊交易計畫已結束", html)
         self.assertIn("signalTradeGrid(item,{prefix:'原始 ',original:true})", html)
-        self.assertIn("okx-radar-shell-v4.1-advisory-1", worker)
+        self.assertIn("okx-radar-shell-v4.1-market-rsi-1", worker)
 
     def test_market_scan_has_no_github_schedule(self):
         root = Path(__file__).parents[1]
