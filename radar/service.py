@@ -43,6 +43,69 @@ _OBSERVER_SETTLE_DELAY_MS = 2_000
 _OBSERVER_START_WINDOW_MS = 8_000
 
 
+def _preflight_continuation_state(value: dict[str, Any]) -> dict[str, Any]:
+    key = str(value.get("key") or "UNKNOWN").upper()
+    if key not in {"CONFIRMED", "FORMING", "WEAK", "CONFLICT", "UNKNOWN"}:
+        key = "UNKNOWN"
+    observer = value.get("observer") if isinstance(value.get("observer"), dict) else {}
+    primary = str(observer.get("primary_window") or "")
+    windows = observer.get("windows") if isinstance(observer.get("windows"), dict) else {}
+    primary_state = windows.get(primary) if isinstance(windows.get(primary), dict) else {}
+    ready = primary_state.get("ready") is True and str(observer.get("status") or "").upper() != "INTERRUPTED"
+    votes = value.get("core_votes") if isinstance(value.get("core_votes"), dict) else {}
+    known_votes = sum(
+        str(vote.get("state") or "UNKNOWN").upper() != "UNKNOWN"
+        for vote in votes.values()
+        if isinstance(vote, dict)
+    )
+    if not ready:
+        strength, label = "UNKNOWN", "資料不足"
+    elif key == "CONFIRMED":
+        strength, label = "STRONG", "強"
+    elif key == "FORMING":
+        strength, label = "MEDIUM", "中等"
+    elif key in {"WEAK", "CONFLICT"} or (key == "UNKNOWN" and known_votes):
+        strength, label = "WEAK", "偏弱"
+    else:
+        strength, label = "UNKNOWN", "資料不足"
+    return {
+        "key": key,
+        "strength": strength,
+        "label": label,
+        "score": value.get("score"),
+        "primary_window": primary or None,
+        "as_of_close_ms": observer.get("as_of_close_ms"),
+    }
+
+
+def _preflight_continuation_payload(
+    signal: Any,
+    original: dict[str, Any],
+    current: dict[str, Any],
+    *,
+    refresh_failed: bool,
+) -> dict[str, Any]:
+    original_state = _preflight_continuation_state(original)
+    current_state = _preflight_continuation_state(current)
+    if refresh_failed:
+        current_state = {
+            **current_state,
+            "key": "UNKNOWN",
+            "strength": "UNKNOWN",
+            "label": "資料不足",
+        }
+    direction = str(getattr(signal, "direction", "") or "").upper()
+    return {
+        "direction": direction,
+        "direction_label": "多頭" if direction == "LONG" else "空頭" if direction == "SHORT" else "同向",
+        "original": original_state,
+        "current": current_state,
+        "changed": original_state["strength"] != current_state["strength"],
+        "refresh_failed": refresh_failed,
+        "note": "以最新完整 5m 資料重算原方向續走力道；只作加強／轉弱提示，不改方向、Entry、SL 或 TP。",
+    }
+
+
 def _normalize_scan_mode(value: Any) -> str:
     mode = str(value or "FULL").strip().upper()
     aliases = {
@@ -2760,6 +2823,31 @@ class RadarRuntime:
                 context,
                 self.config,
                 report_generated_at=report_generated_at,
+            )
+            original_continuation = dict(
+                (getattr(signal, "decision_context", {}) or {}).get(
+                    "continuation_confirmation"
+                )
+                or {}
+            )
+            refreshed_continuation: dict[str, Any] = {}
+            continuation_error = False
+            refresher = getattr(self.scanner, "refresh_continuation_for_signal", None)
+            if callable(refresher):
+                try:
+                    refreshed_continuation = dict(refresher(signal) or {})
+                except Exception:
+                    continuation_error = True
+                    LOGGER.warning(
+                        "Preflight continuation refresh failed for %s",
+                        normalized_id,
+                        exc_info=True,
+                    )
+            payload["continuation"] = _preflight_continuation_payload(
+                signal,
+                original_continuation,
+                refreshed_continuation,
+                refresh_failed=continuation_error,
             )
         except PreflightError:
             raise

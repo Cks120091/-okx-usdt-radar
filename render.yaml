@@ -10,4 +10,4 @@ services:
     autoDeployTrigger: commit
     envVars:
       - key: RADAR_RELEASE
-        value: radar-continuation-strength-state-20260903
+        value: radar-rsi-preflight-clarity-20260903

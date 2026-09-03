@@ -2092,6 +2092,7 @@ class ScannerTests(unittest.TestCase):
                     spread_pct=0.01,
                     quote_volume_24h=20_000_000,
                     closed_candle_ts=1,
+                    market_metrics={"rsi_core": 61.2},
                 ),
             )
 
@@ -2105,6 +2106,7 @@ class ScannerTests(unittest.TestCase):
         self.assertEqual(bias["label"], "偏多")
         self.assertGreaterEqual(bias["score"], 65.0)
         self.assertEqual(bias["market_breadth_long_pct"], 100.0)
+        self.assertEqual(bias["btc"]["core_rsi"], 61.2)
 
 
 if __name__ == "__main__":

@@ -2270,6 +2270,37 @@ class MarketScanner:
             candidate_signal=updated_candidate,
         )
 
+    def refresh_continuation_for_signal(self, signal: Signal) -> dict[str, Any]:
+        """Refresh only the original Trigger's directional follow-through.
+
+        This does not run the strategy engine or mutate the stored Signal. The
+        latest completed 5m candle/OI endpoints feed the same horizon-aware
+        continuation model used by a full scan.
+        """
+
+        candles = self.client.get_candles(
+            signal.inst_id,
+            "5m",
+            self.config.candle_limit_5m,
+        )
+        history = self.client.get_open_interest_history(
+            signal.inst_id,
+            "5m",
+            20,
+        )
+        samples = self._build_closed_oi_lookback_samples(candles, history)
+        summary = summarize_closed_lookback_samples(
+            samples,
+            signal.radar_horizon,
+            signal.direction,
+        )
+        summary["attempted_at_ms"] = int(time.time() * 1000)
+        metrics = dict(signal.market_metrics)
+        metrics["continuation_lookback"] = summary
+        refreshed = replace(signal, market_metrics=metrics)
+        decision = build_decision_context(refreshed, self.config)
+        return dict(decision.get("continuation_confirmation") or {})
+
     @staticmethod
     def _rank_context_candidates(
         short_results: dict[str, AnalysisResult],
@@ -3575,6 +3606,11 @@ class MarketScanner:
             if btc_state is not None
             else None
         )
+        btc_core_rsi = (
+            _finite_number(btc_state.market_metrics.get("rsi_core"))
+            if btc_state is not None
+            else None
+        )
         btc_direction = (
             btc_state.direction
             if btc_state is not None and btc_state.direction in {"LONG", "SHORT"}
@@ -3622,6 +3658,7 @@ class MarketScanner:
             "btc": {
                 "direction": btc_direction,
                 "core_change_pct": btc_core_change,
+                "core_rsi": btc_core_rsi,
             },
             "resonance": {
                 "active": resonance_active,

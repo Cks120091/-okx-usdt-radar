@@ -79,6 +79,8 @@ _CANDIDATE_METRIC_FIELDS = frozenset(
         "price_change_15m_pct",
         "price_change_1h_pct",
         "price_change_24h_pct",
+        "rsi_core",
+        "rsi_15m",
         "volume_ratio_15m",
         "volume_ratio_5m",
         "taker_buy_pct",
@@ -101,6 +103,7 @@ _MAP_METRIC_FIELDS = frozenset(
         "price_change_1h_pct",
         "price_change_24h_pct",
         "rsi_15m",
+        "rsi_core",
         "open_interest_usd",
         "open_interest_change_pct",
         "oi_flow_state",
@@ -140,15 +143,16 @@ def public_report_payload(report: Any) -> dict[str, Any]:
     """
 
     payload = _select(report, _REPORT_FIELDS)
-    market_bias = _read(report, "market_bias", {})
-    payload["market_bias"] = _select(
-        market_bias,
-        ("label", "score", "market_breadth_long_pct", "liquid_breadth_long_pct"),
-    )
-    for key in ("btc", "resonance", "exposure_warning"):
-        value = _read(market_bias, key, None)
-        if isinstance(value, Mapping):
-            payload["market_bias"][key] = dict(value)
+    for report_key in ("market_bias", "long_market_bias"):
+        market_bias = _read(report, report_key, {})
+        payload[report_key] = _select(
+            market_bias,
+            ("label", "score", "market_breadth_long_pct", "liquid_breadth_long_pct"),
+        )
+        for key in ("btc", "resonance", "exposure_warning"):
+            value = _read(market_bias, key, None)
+            if isinstance(value, Mapping):
+                payload[report_key][key] = dict(value)
     payload["data_quality"] = _select(
         _read(report, "data_quality", {}),
         _PUBLIC_REPORT_DATA_QUALITY_FIELDS,

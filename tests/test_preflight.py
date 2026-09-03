@@ -149,6 +149,25 @@ class PreflightScanner:
         self.client = client
 
 
+class ContinuationPreflightScanner(PreflightScanner):
+    def refresh_continuation_for_signal(self, signal):
+        return {
+            "key": "CONFIRMED",
+            "score": 88.0,
+            "core_votes": {
+                "OI": {"state": "SUPPORT"},
+                "TAKER_CVD": {"state": "SUPPORT"},
+                "VOLUME": {"state": "SUPPORT"},
+            },
+            "observer": {
+                "status": "READY",
+                "primary_window": "10m",
+                "as_of_close_ms": 1_700_000_000_000,
+                "windows": {"10m": {"ready": True}},
+            },
+        }
+
+
 class FullCapablePreflightScanner(PreflightScanner):
     def __init__(self, client: PreflightClient):
         super().__init__(client)
@@ -461,6 +480,41 @@ class PreflightTests(unittest.TestCase):
             self.assertEqual(payload["plan_state"]["new_entry_status"], "READY")
             self.assertEqual(item.market_metrics, original_metrics)
             self.assertEqual(item.execution_quality, original_quality)
+
+    def test_preflight_refresh_adds_directional_continuation_without_mutating_plan(self):
+        with tempfile.TemporaryDirectory() as directory:
+            item = make_signal()
+            original_plan = (
+                item.direction,
+                item.entry_low,
+                item.entry_high,
+                item.stop_loss,
+                item.take_profit_1,
+                item.take_profit_2,
+            )
+            runtime = RadarRuntime(
+                ContinuationPreflightScanner(PreflightClient()),
+                AppConfig(data_dir=directory),
+            )
+            runtime._latest = make_report(item)
+
+            payload = runtime.preflight_dict(item.inst_id, "SHORT")
+
+            self.assertEqual(payload["continuation"]["direction_label"], "多頭")
+            self.assertEqual(payload["continuation"]["current"]["label"], "強")
+            self.assertEqual(payload["continuation"]["current"]["primary_window"], "10m")
+            self.assertTrue(payload["safety"]["stored_trigger_unchanged"])
+            self.assertEqual(
+                (
+                    item.direction,
+                    item.entry_low,
+                    item.entry_high,
+                    item.stop_loss,
+                    item.take_profit_1,
+                    item.take_profit_2,
+                ),
+                original_plan,
+            )
 
     def test_wrong_expected_trigger_is_structured_conflict_before_live_fetch(self):
         with tempfile.TemporaryDirectory() as directory:
