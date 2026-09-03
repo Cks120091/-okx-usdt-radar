@@ -420,7 +420,6 @@ def _public_decision_context(decision: Any) -> dict[str, Any]:
         (
             "key",
             "label",
-            "score",
             "supporting",
             "conflicts",
             "missing",
@@ -446,7 +445,6 @@ def _public_decision_context(decision: Any) -> dict[str, Any]:
             {
                 "key": "UNKNOWN",
                 "label": "續走力道資料不足",
-                "score": None,
                 "supporting": [],
                 "conflicts": [],
                 "warnings": [],

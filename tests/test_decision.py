@@ -885,7 +885,7 @@ class DecisionContextTests(unittest.TestCase):
 
         self.assertEqual(continuation["key"], "CONFIRMED")
         self.assertEqual(continuation["label"], "續走力道強")
-        self.assertEqual(continuation["score"], 87.5)
+        self.assertNotIn("score", continuation)
         self.assertTrue(any("OI" in text for text in continuation["supporting"]))
         self.assertTrue(any("Taker" in text for text in continuation["supporting"]))
         self.assertEqual(continuation["conflicts"], [])
@@ -920,7 +920,7 @@ class DecisionContextTests(unittest.TestCase):
 
         self.assertEqual(continuation["key"], "FORMING")
         self.assertEqual(continuation["label"], "續走力道中等")
-        self.assertEqual(continuation["score"], 62.5)
+        self.assertNotIn("score", continuation)
         self.assertEqual(result["final"]["status"], "ENTER")
 
     def test_insufficient_flow_history_is_forming_not_fake_confirmation(self):
@@ -996,7 +996,7 @@ class DecisionContextTests(unittest.TestCase):
 
         self.assertEqual(continuation["key"], "CONFLICT")
         self.assertEqual(continuation["label"], "續走力道偏弱")
-        self.assertLessEqual(continuation["score"], 35.0)
+        self.assertNotIn("score", continuation)
         self.assertTrue(any("opposite build" in text for text in continuation["conflicts"]))
         self.assertEqual(result["final"]["status"], "ENTER")
         self.assertTrue(result["final"]["trigger_preserved"])
@@ -1083,7 +1083,7 @@ class DecisionContextTests(unittest.TestCase):
         continuation = result["continuation_confirmation"]
 
         self.assertEqual(continuation["key"], "UNKNOWN")
-        self.assertIsNone(continuation["score"])
+        self.assertNotIn("score", continuation)
         self.assertIn("OI 方向資料", continuation["missing"])
         self.assertIn("Taker／CVD 方向資料", continuation["missing"])
         self.assertIn("K 線量能資料", continuation["missing"])
@@ -1470,7 +1470,7 @@ class DecisionContextTests(unittest.TestCase):
         continuation = public["decision_context"]["continuation_confirmation"]
 
         self.assertEqual(continuation["key"], "UNKNOWN")
-        self.assertIn("score", continuation)
+        self.assertNotIn("score", continuation)
         self.assertIn("supporting", continuation)
         self.assertIn("conflicts", continuation)
         self.assertIn("missing", continuation)
@@ -1724,7 +1724,7 @@ class DecisionContextTests(unittest.TestCase):
 
         self.assertEqual(continuation["key"], "WEAK")
         self.assertEqual(continuation["label"], "續走力道偏弱")
-        self.assertLessEqual(continuation["score"], 45.0)
+        self.assertNotIn("score", continuation)
         self.assertNotIn("至少一項同向資金證據", continuation["missing"])
         self.assertTrue(
             any("尚未形成同向支持" in value for value in continuation["warnings"])

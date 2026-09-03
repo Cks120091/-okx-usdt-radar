@@ -153,7 +153,6 @@ class ContinuationPreflightScanner(PreflightScanner):
     def refresh_continuation_for_signal(self, signal):
         return {
             "key": "CONFIRMED",
-            "score": 88.0,
             "core_votes": {
                 "OI": {"state": "SUPPORT"},
                 "TAKER_CVD": {"state": "SUPPORT"},
@@ -503,6 +502,7 @@ class PreflightTests(unittest.TestCase):
             self.assertEqual(payload["continuation"]["direction_label"], "多頭")
             self.assertEqual(payload["continuation"]["current"]["label"], "強")
             self.assertEqual(payload["continuation"]["current"]["primary_window"], "10m")
+            self.assertNotIn("score", payload["continuation"]["current"])
             self.assertTrue(payload["safety"]["stored_trigger_unchanged"])
             self.assertEqual(
                 (

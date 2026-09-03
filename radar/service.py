@@ -72,7 +72,6 @@ def _preflight_continuation_state(value: dict[str, Any]) -> dict[str, Any]:
         "key": key,
         "strength": strength,
         "label": label,
-        "score": value.get("score"),
         "primary_window": primary or None,
         "as_of_close_ms": observer.get("as_of_close_ms"),
     }
@@ -102,7 +101,7 @@ def _preflight_continuation_payload(
         "current": current_state,
         "changed": original_state["strength"] != current_state["strength"],
         "refresh_failed": refresh_failed,
-        "note": "以最新完整 5m 資料重算原方向續走力道；只作加強／轉弱提示，不改方向、Entry、SL 或 TP。",
+        "note": "以最新完整 5m 資料判讀原方向續走力道；只作多空輔助觀察，不加入評分、排序或進場判定，也不改方向、Entry、SL 或 TP。",
     }
 
 

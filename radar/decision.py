@@ -1044,17 +1044,12 @@ def _continuation_confirmation_layer(
         )
     ):
         key = "UNKNOWN"
-        score = None
     elif (
         severe_counterevidence
         or len(counter_domains) >= 2
         or oi_vote["state"] == "CONFLICT"
     ):
         key = "CONFLICT"
-        score = min(
-            35.0,
-            _continuation_score(votes),
-        )
     elif (
         support_count >= 2
         and oi_vote["state"] == "SUPPORT"
@@ -1063,26 +1058,14 @@ def _continuation_confirmation_layer(
         and not history_insufficient
     ):
         key = "CONFIRMED"
-        score = max(
-            75.0,
-            _continuation_score(votes),
-        )
     elif support_count > 0:
         key = "FORMING"
-        score = min(
-            70.0,
-            _continuation_score(votes),
-        )
     else:
         # OI/volume can be fully available without supporting the Trigger.
         # That is weak follow-through, not missing data.  Keeping those two
         # meanings separate prevents a complete historical comparison from
         # being rendered as "資料不足" merely because no vote is positive.
         key = "WEAK"
-        score = min(
-            45.0,
-            _continuation_score(votes),
-        )
 
     if direction == "NEUTRAL":
         missing.append("明確 Trigger 方向")
@@ -1103,7 +1086,6 @@ def _continuation_confirmation_layer(
     return {
         "key": key,
         "label": labels[key],
-        "score": round(score, 1) if score is not None else None,
         "core_votes": {
             domain: _continuation_vote_summary(domain, vote)
             for domain, vote in votes.items()
@@ -1113,8 +1095,8 @@ def _continuation_confirmation_layer(
         "missing": _unique(missing)[:8],
         "warnings": _unique(warnings)[:6],
         "meaning": (
-            "score 代表同向延續證據的一致度，不是勝率或價格上漲／下跌概率；"
-            "本層只提供資訊，不會取消 Trigger、改變方向或改寫進場權限。"
+            "本層只作原方向的多空輔助觀察，不加入任何評分、排序或進場判定；"
+            "也不會取消 Trigger、改變方向或改寫交易計畫。"
         ),
         # Keep the established public field name for frontend compatibility.
         # Its value is now exclusively the closed-bar historical lookback.
@@ -1381,26 +1363,6 @@ def _continuation_vote_summary(
         "label": labels.get(state, labels["UNKNOWN"]),
         "detail": details[0] if details else fallbacks.get(domain, "方向資料不足"),
     }
-
-
-def _continuation_score(votes: Mapping[str, Mapping[str, Any]]) -> float:
-    """Return internal continuation strength with OI carrying the core weight.
-
-    OI measures whether fresh leveraged participation is joining the move, so
-    its directional average carries two internal units.  Taker/CVD and volume
-    each carry one.  The public UI translates the result into plain-language
-    strength and never presents these units as win probability.
-    """
-
-    weights = {"OI": 2.0, "TAKER_CVD": 1.0, "VOLUME": 1.0}
-    net_weight = 0.0
-    for domain, weight in weights.items():
-        state = str(_mapping(votes.get(domain)).get("state") or "UNKNOWN").upper()
-        if state == "SUPPORT":
-            net_weight += weight
-        elif state == "CONFLICT":
-            net_weight -= weight
-    return round(max(0.0, min(100.0, 50.0 + net_weight * 12.5)), 1)
 
 
 def _directional_core_return(
