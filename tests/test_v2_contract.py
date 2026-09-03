@@ -113,7 +113,7 @@ class V33ContractTests(unittest.TestCase):
         self.assertIn('<body data-active-group="home">', html)
         self.assertIn('body:not([data-active-group="home"]) .command-deck', html)
         self.assertIn("document.body.dataset.activeGroup=group", html)
-        self.assertIn("okx-radar-shell-v3.8-continuation-average-1", service_worker)
+        self.assertIn("okx-radar-shell-v3.9-radar-clarity-1", service_worker)
         self.assertIn("市場自動計畫", html)
         self.assertIn("plan.adaptive_market_plan", html)
         self.assertIn("plan.market_plan_sources", html)
@@ -224,7 +224,7 @@ class V33ContractTests(unittest.TestCase):
         self.assertIn("function signalTriggerTime(item)", html)
         self.assertIn("訊號觸發時間（台灣）", html)
         self.assertNotIn("status!=='ENTRY_READY'&&status!=='MISSED_ENTRY'", html)
-        self.assertIn("okx-radar-shell-v3.8-continuation-average-1", service_worker)
+        self.assertIn("okx-radar-shell-v3.9-radar-clarity-1", service_worker)
         self.assertIn("$('#preflightRefresh').addEventListener('click',loadPreflight)", html)
         self.assertIn("${decisionPanel(item)}", html)
         self.assertNotIn("showPreflight", html)
@@ -314,13 +314,17 @@ class V33ContractTests(unittest.TestCase):
         self.assertIn('data-scan-mode="LONG"', html)
         self.assertIn('data-scan-mode="FULL"', html)
         self.assertIn("function signalSortComparator(a,b)", html)
+        comparator_start = html.index("function signalSortComparator")
+        comparator_end = html.index("function terminalSortComparator", comparator_start)
+        comparator = html[comparator_start:comparator_end]
+        self.assertNotIn("continuationDiff", comparator)
         self.assertLess(
-            html.index("const continuationDiff=", html.index("function signalSortComparator")),
-            html.index("const qualityDiff=", html.index("function signalSortComparator")),
+            comparator.index("const qualityDiff="),
+            comparator.index("const statusDiff="),
         )
         self.assertLess(
-            html.index("const qualityDiff=", html.index("function signalSortComparator")),
-            html.index("const freshDiff=", html.index("function signalSortComparator")),
+            comparator.index("const statusDiff="),
+            comparator.index("const freshDiff="),
         )
         self.assertIn("Europe/London", html)
         self.assertIn("America/New_York", html)
@@ -469,16 +473,48 @@ class V33ContractTests(unittest.TestCase):
         self.assertIn(
             "renderContextCoverage(report,shortTransient||longTransient,preview)", report
         )
+        self.assertIn(
+            "early=stickyShort.filter(x=>x.signal_stage==='EARLY_SIGNAL').sort(signalSortComparator)",
+            report,
+        )
+        self.assertIn("allShort=[...activeShort].sort(signalSortComparator)", report)
+        self.assertIn("ready=[...stickyShort].sort(signalSortComparator)", report)
+        self.assertIn(
+            "waiting=activeShort.filter(x=>!isPreviewItem(x)&&!itemWasEntryReady(x)&&itemEntryStatus(x)==='WAIT_RETEST').sort(signalSortComparator)",
+            report,
+        )
+        self.assertIn(
+            "missed=activeShort.filter(x=>!isPreviewItem(x)&&!itemWasEntryReady(x)&&itemEntryStatus(x)==='MISSED_ENTRY').sort(signalSortComparator)",
+            report,
+        )
+        self.assertIn("allLong=[...activeLong].sort(signalSortComparator)", report)
+        self.assertIn("longReady=[...stickyLong].sort(signalSortComparator)", report)
+        self.assertIn(
+            "longEarly=stickyLong.filter(x=>x.signal_stage==='EARLY_SIGNAL').sort(signalSortComparator)",
+            report,
+        )
+        self.assertIn(
+            "longWaiting=activeLong.filter(x=>!isPreviewItem(x)&&!itemWasEntryReady(x)&&itemEntryStatus(x)==='WAIT_RETEST').sort(signalSortComparator)",
+            report,
+        )
+        self.assertIn(
+            "longMissed=activeLong.filter(x=>!isPreviewItem(x)&&!itemWasEntryReady(x)&&itemEntryStatus(x)==='MISSED_ENTRY').sort(signalSortComparator)",
+            report,
+        )
+        self.assertGreaterEqual(html.count("交易品質由高至低"), 10)
 
         comparator = html.split("function signalSortComparator(a,b){", 1)[1].split(
             "function renderContextCoverage", 1
         )[0]
         self.assertIn("item.data_timestamp", comparator)
         self.assertIn("item.closed_candle_ts", comparator)
-        self.assertIn("const continuationDiff=continuationRank(b)-continuationRank(a)", comparator)
-        self.assertLess(comparator.index("statusDiff"), comparator.index("continuationDiff"))
-        self.assertLess(comparator.index("continuationDiff"), comparator.index("qualityDiff"))
-        self.assertLess(comparator.index("qualityDiff"), comparator.index("dataTimeDiff"))
+        self.assertIn(
+            "quality=item=>metricNumber(item.execution_quality?.score)??Number.NEGATIVE_INFINITY",
+            comparator,
+        )
+        self.assertNotIn("continuationRank", comparator)
+        self.assertLess(comparator.index("qualityDiff"), comparator.index("statusDiff"))
+        self.assertLess(comparator.index("statusDiff"), comparator.index("dataTimeDiff"))
         self.assertLess(comparator.index("dataTimeDiff"), comparator.index("freshDiff"))
         self.assertLess(comparator.index("freshDiff"), comparator.index("rrDiff"))
 
@@ -509,11 +545,7 @@ class V33ContractTests(unittest.TestCase):
         )
         self.assertNotIn("instrumentButton", decision_panel)
         self.assertNotIn("status==='HARD_GATE_BLOCKED'", decision_panel)
-        entry_badge = html.split("function entryBadge(item)", 1)[1].split(
-            "function entryCallout", 1
-        )[0]
-        self.assertNotIn("status==='HARD_GATE_BLOCKED'", entry_badge)
-        self.assertNotIn("風控未通過｜暫停進場", entry_badge)
+        self.assertNotIn("function entryBadge(item)", html)
         self.assertIn("function reportRenderFingerprint(report)", html)
         fingerprint = html.split("function reportRenderFingerprint(report)", 1)[1].split(
             "function reportCardEntries", 1
@@ -531,23 +563,19 @@ class V33ContractTests(unittest.TestCase):
             "function directionBadge", 1
         )[0]
         self.assertIn("item?.decision_context?.continuation_confirmation", continuation)
-        self.assertIn("CONFIRMED:['continuation-confirmed-b','續走｜證據一致']", continuation)
-        self.assertIn("FORMING:['continuation-forming-b','續走｜形成中']", continuation)
-        self.assertIn("CONFLICT:['continuation-conflict-b','續走｜有反證']", continuation)
-        self.assertIn("UNKNOWN:['continuation-unknown-b','續走｜資料不足']", continuation)
+        self.assertNotIn("function continuationBadge", continuation)
+        self.assertNotIn("function continuationRank", continuation)
         self.assertIn("function continuationCoreVote(item,key)", html)
         self.assertIn("confirmation.core_votes?.[key]", continuation)
         self.assertIn("function continuationStrip(item)", html)
         self.assertIn("hasCoreVotes=Boolean(observer)&&domains.every", continuation)
-        self.assertIn("固定平均觀察尚未建立", continuation)
-        self.assertIn("續走｜待平均採樣", continuation)
-        self.assertIn("if(!continuationObserver(item))return 1", continuation)
+        self.assertIn("完成前不使用單一快照判斷續走", continuation)
+        self.assertIn("等待平均採樣", continuation)
         self.assertIn("readOnlyReason=itemReadOnlyReason(item)", continuation)
-        self.assertIn("confirmation.supporting", continuation)
         self.assertIn("confirmation.conflicts", continuation)
         self.assertIn("confirmation.warnings", continuation)
         self.assertIn("confirmation.missing", continuation)
-        self.assertIn("observer?.meaning", continuation)
+        self.assertIn("observer.meaning", continuation)
         self.assertIn("terminalSignalOutcome(item)", continuation)
         self.assertIn("OI 使用合約數量的多筆斜率與持續度", continuation)
         self.assertIn("Taker／CVD 使用各完整區間成交量加權", continuation)
@@ -566,19 +594,33 @@ class V33ContractTests(unittest.TestCase):
         render_signals = html.split("function renderSignals(items", 1)[1].split(
             "function renderWatchlist", 1
         )[0]
-        self.assertIn("${continuationBadge(item)}", render_signals)
-        self.assertIn("${continuationStrip(item)}", render_signals)
+        self.assertNotIn("${continuationBadge(item)}", render_signals)
+        self.assertNotIn("${entryBadge(item)}", render_signals)
+        self.assertNotIn("${continuationStrip(item)}", render_signals)
+        self.assertIn("${continuationStrip(item)}", decision_panel)
+        active_decision = decision_panel.split("const entry=item.entry_eligibility||{}", 1)[1]
+        self.assertLess(
+            active_decision.index("${continuationStrip(item)}"),
+            active_decision.index("${signalTradeGrid(item)}"),
+        )
         self.assertIn("signal-status-line", render_signals)
+        self.assertIn("現在能否進場", decision_panel)
+        self.assertIn("訊號後平均走向", continuation)
+        self.assertIn("最高等級門檻：OI 支持＋至少 1 項加成", continuation)
+        self.assertIn("目前：OI", continuation)
+        self.assertIn("查看採樣與三項平均依據", continuation)
+        self.assertIn('role="progressbar"', continuation)
+        self.assertIn('aria-valuenow="${num(progress,0)}"', continuation)
+        self.assertIn('aria-valuetext="已完成 ${count}/${target} 個完整區間"', continuation)
         self.assertIn("完整判定資料", render_signals)
         self.assertIn("details(item,true)", render_signals)
         self.assertIn("function signalTradeGrid(item,options={})", html)
         self.assertIn("signal-plan-grid", html)
         self.assertIn("R:R｜${esc(rrLabel)}", html)
 
-        # 延續確認只能負責說明、重繪與同進場狀態內排序，不得變成進場硬門檻。
+        # 延續確認只負責說明與重繪，不參與排序，也不得變成進場硬門檻。
         self.assertNotIn("continuationConfirmation", entry_status)
         self.assertNotIn("continuationConfirmation", decision_panel)
-        self.assertNotIn("continuationConfirmation", entry_badge)
 
         preflight_button = html.split("function preflightButton(instId,horizon", 1)[
             1
@@ -694,8 +736,8 @@ class V33ContractTests(unittest.TestCase):
         self.assertIn("key==='OI'&&safeState==='UNKNOWN'", continuation)
         self.assertIn("availability.key==='MISSING'", continuation)
         self.assertIn("availability.key==='NO_BASELINE'", continuation)
-        self.assertIn("固定平均觀察尚未建立；取得樣本後補齊", continuation)
-        self.assertIn("仍沒有足夠證據確認續走", continuation)
+        self.assertIn("完成前不使用單一快照判斷續走", continuation)
+        self.assertIn("最高等級門檻：OI 支持＋至少 1 項加成", continuation)
         self.assertNotIn(
             "continuationItems(confirmation.missing,'核心資料已取得')",
             continuation,
@@ -749,7 +791,7 @@ class V33ContractTests(unittest.TestCase):
         self.assertIn("舊 Entry／SL／TP 不會復活", html)
         self.assertIn("舊交易計畫已結束", html)
         self.assertIn("signalTradeGrid(item,{prefix:'原始 ',original:true})", html)
-        self.assertIn("okx-radar-shell-v3.8-continuation-average-1", worker)
+        self.assertIn("okx-radar-shell-v3.9-radar-clarity-1", worker)
 
     def test_market_scan_has_no_github_schedule(self):
         root = Path(__file__).parents[1]
