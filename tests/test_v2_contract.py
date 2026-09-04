@@ -113,7 +113,7 @@ class V33ContractTests(unittest.TestCase):
         self.assertIn('<body data-active-group="home">', html)
         self.assertIn('body:not([data-active-group="home"]) .command-deck', html)
         self.assertIn("document.body.dataset.activeGroup=group", html)
-        self.assertIn("okx-radar-shell-v4.1-oi-rsi24-1", service_worker)
+        self.assertIn("okx-radar-shell-v4.2-interface-1", service_worker)
         self.assertIn("市場方向 · 24H 全市場平均 RSI", html)
         self.assertIn("bias.market_average_rsi", html)
         self.assertIn("rsi24.market_rsi_24h_label", html)
@@ -124,7 +124,7 @@ class V33ContractTests(unittest.TestCase):
         self.assertIn("完整收線數量方向輔助（不計分）", html)
         self.assertIn("function preflightContinuation(data)", html)
         self.assertIn("原方向續走力道", html)
-        self.assertIn("純輔助觀察", html)
+        self.assertIn("純輔助 · 不影響進場資格", html)
         self.assertNotIn("continuation.score", html)
         self.assertIn("市場自動計畫", html)
         self.assertIn("plan.adaptive_market_plan", html)
@@ -154,8 +154,8 @@ class V33ContractTests(unittest.TestCase):
         self.assertNotIn('id="instrumentContent"', html)
         self.assertNotIn('id="instrumentScan"', html)
         self.assertIn("$('.shell').scrollTo({top:0", html)
-        self.assertLess(html.index('<header class="top">'), html.index('<main class="shell">'))
-        self.assertLess(html.index('id="filterShell"'), html.index('<main class="shell">'))
+        self.assertLess(html.index('<header class="top">'), html.index('<main id="appContent" class="shell"'))
+        self.assertLess(html.index('id="filterShell"'), html.index('<main id="appContent" class="shell"'))
         self.assertNotIn(".top{position:sticky", html)
         self.assertNotIn(".filter-shell{position:sticky", html)
         self.assertNotIn(".primary-nav{position:fixed", html)
@@ -214,10 +214,10 @@ class V33ContractTests(unittest.TestCase):
         self.assertNotIn("分組績效 JSON", html)
         self.assertNotIn("raw_indicators", html)
         self.assertIn("⚡ ${frame} 進場前更新", html)
-        self.assertIn("重新取得最新成交資料", html)
+        self.assertIn("更新進場判定與成交資料", html)
         self.assertIn("進場檢查", html)
         self.assertIn("/api/preflight", html)
-        self.assertIn("只更新現價、深度、滑價與成本，不重新分析多週期方向", html)
+        self.assertIn("更新現價、進場距離、成交條件與續走力道；不改寫方向或原 Entry／SL／TP", html)
         self.assertIn("原始 Trigger（價格觸發）沒有被修改", html)
         self.assertIn("data-preflight-id", html)
         self.assertIn("data-preflight-trigger-id", html)
@@ -241,7 +241,7 @@ class V33ContractTests(unittest.TestCase):
         self.assertIn("function signalTriggerTime(item)", html)
         self.assertIn("訊號觸發時間（台灣）", html)
         self.assertNotIn("status!=='ENTRY_READY'&&status!=='MISSED_ENTRY'", html)
-        self.assertIn("okx-radar-shell-v4.1-oi-rsi24-1", service_worker)
+        self.assertIn("okx-radar-shell-v4.2-interface-1", service_worker)
         self.assertIn("$('#preflightRefresh').addEventListener('click',loadPreflight)", html)
         self.assertIn("${decisionPanel(item)}", html)
         self.assertNotIn("showPreflight", html)
@@ -309,7 +309,7 @@ class V33ContractTests(unittest.TestCase):
         self.assertNotIn("<canvas", html)
         self.assertIn("最佳進場點位", html)
         self.assertIn("已觸發・有效中", html)
-        self.assertIn("目前進場資格", html)
+        self.assertIn("現在能否進場", html)
         self.assertIn("尚未進場", html)
         self.assertIn("已經進場", html)
         self.assertIn("等待回踩」不是出場指令", html)
@@ -377,6 +377,91 @@ class V33ContractTests(unittest.TestCase):
         self.assertNotIn("isolatedInstrumentSide", html)
         self.assertIn("@media(prefers-reduced-motion:reduce)", html)
         self.assertNotIn("<canvas", html)
+
+    def test_complete_interface_system_is_clear_accessible_and_data_preserving(self):
+        html = (Path(__file__).parents[1] / "radar" / "static" / "pages.html").read_text(
+            encoding="utf-8"
+        )
+
+        self.assertIn("Complete interface system", html)
+        self.assertIn('class="home-data-health"', html)
+        self.assertIn('id="nearCount"', html)
+        self.assertIn('id="contextCount"', html)
+        self.assertIn('class="manual-section"', html)
+        self.assertIn("開始使用", html)
+        self.assertIn("讀懂交易計畫", html)
+        self.assertIn("市場與紀錄", html)
+        self.assertIn("觀察中｜尚未觸發", html)
+        self.assertIn("terminal-profit", html)
+        self.assertIn("terminal-loss", html)
+        self.assertIn("terminal-unknown", html)
+        self.assertIn('role="dialog" aria-modal="true"', html)
+        self.assertIn('id="preflightAnnouncer"', html)
+        self.assertIn('aria-label="搜尋市場地圖幣種"', html)
+        self.assertIn('aria-label="15m 短線"', html)
+        self.assertIn('aria-label="4H 長線"', html)
+        self.assertIn("function setAppInert(enabled)", html)
+        self.assertIn("function setScanResultsBusy(scanning,mode='FULL')", html)
+        self.assertIn("event.key==='Escape'", html)
+        self.assertIn("aria-current", html)
+        self.assertIn("function preflightPositionMetric(data)", html)
+        self.assertIn("function preflightRiskMetric(data)", html)
+        self.assertIn("位於 Entry 不利側", html)
+        self.assertIn("已越過原始 SL", html)
+        self.assertIn("只分析、不下單", html)
+
+        terminal = html.split("function terminalSignalOutcome(item)", 1)[1].split(
+            "function isTerminalSignal", 1
+        )[0]
+        self.assertIn("terminalStates.includes('CLOSED_UNKNOWN')", terminal)
+        self.assertLess(
+            terminal.index("terminalStates.includes('CLOSED_UNKNOWN')"),
+            terminal.index("'INVALIDATED'"),
+        )
+        render_signals = html.split("function renderSignals(items", 1)[1].split(
+            "function renderWatchlist", 1
+        )[0]
+        self.assertIn("terminal?'terminal-unknown':''", render_signals)
+        self.assertIn(
+            "terminal==='CLOSED_UNKNOWN'?'結果未知':'交易結果'", render_signals
+        )
+        decision = html.split("function decisionPanel(item)", 1)[1].split(
+            "function timeframeGrid", 1
+        )[0]
+        self.assertIn("isLoss?'stopped':'closed'", decision)
+        self.assertIn("交易計畫已關閉｜結果未知", decision)
+        self.assertIn("複製原始紀錄（不可沿用）", decision)
+
+        rankings = html.split("function renderRankings(signals,watchlist)", 1)[1].split(
+            "function renderFavorites", 1
+        )[0]
+        self.assertIn("itemEntryStatus(item)==='ENTRY_READY'", rankings)
+        self.assertIn("&&!isExpiredSnapshot(item)&&!itemReadOnlyReason(item)", rankings)
+        self.assertIn("readyCount=rows.filter(isReady).length", rankings)
+
+        continuation = html.split("function preflightContinuation(data)", 1)[1].split(
+            "function preflightPositionMetric", 1
+        )[0]
+        self.assertIn("rawWindow=String(current.primary_window||'')", continuation)
+        self.assertNotIn("horizon==='LONG'?'60m':'10m'", continuation)
+        self.assertIn("本次輔助資料未取得", continuation)
+        self.assertIn("基準視窗未建立", continuation)
+        self.assertIn("function preflightTerminalKind(data)", html)
+        self.assertIn("statuses.includes('CLOSED_UNKNOWN')", html)
+        self.assertIn("return Boolean(preflightTerminalKind(data))", html)
+        self.assertIn("OI／成交流只作續走力道輔助", html)
+
+        preflight = html.split("function renderPreflight(data){", 1)[1].split(
+            "function preflightResponseTerminal", 1
+        )[0]
+        self.assertLess(
+            preflight.index("原始進出場價格（固定，不被本次更新改寫）"),
+            preflight.index("現在位置與進場資格"),
+        )
+        self.assertLess(
+            preflight.index("現在位置與進場資格"),
+            preflight.index("${preflightContinuation(data)}"),
+        )
 
     def test_scan_round_hides_requested_horizons_but_stale_cards_are_retained(self):
         html = (Path(__file__).parents[1] / "radar" / "static" / "pages.html").read_text(
@@ -807,7 +892,7 @@ class V33ContractTests(unittest.TestCase):
         self.assertIn("舊 Entry／SL／TP 不會復活", html)
         self.assertIn("舊交易計畫已結束", html)
         self.assertIn("signalTradeGrid(item,{prefix:'原始 ',original:true})", html)
-        self.assertIn("okx-radar-shell-v4.1-oi-rsi24-1", worker)
+        self.assertIn("okx-radar-shell-v4.2-interface-1", worker)
 
     def test_market_scan_has_no_github_schedule(self):
         root = Path(__file__).parents[1]
