@@ -316,7 +316,13 @@
     .home-data-health[open]>summary{border-bottom:1px solid var(--border-soft)}
     .health-grid{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:8px;padding:10px 0}
     .health-grid .metric{min-height:72px}
+    .home-empty-state{grid-area:status;display:flex;align-items:center;justify-content:space-between;gap:14px;min-height:82px;padding:16px 17px;border:1px solid #31465c;border-radius:var(--radius-control);background:linear-gradient(135deg,#0d1823,#0a1118);color:var(--text-secondary)}
+    .home-empty-state[hidden]{display:none}.home-empty-state b{display:block;margin-bottom:4px;color:#f3f7fb;font-size:16px}.home-empty-state span{font-size:12.5px;line-height:1.5}.home-empty-state small{flex:0 0 auto;color:#8ebbe8;font-size:11.5px;font-weight:720}
+    body.home-report-empty .command-deck{grid-template-columns:1fr;grid-template-areas:"status"}
+    body.home-report-empty .command-deck>:not(.home-empty-state){display:none}
+    body.home-report-empty[data-active-tab="overview"] #overview{display:none}
     .search-tools{gap:6px;margin-bottom:13px;padding:5px;border-color:var(--border);border-radius:12px;background:var(--surface-2)}
+    body[data-active-tab="history"] .search-tools,body[data-active-tab="stats"] .search-tools,body[data-active-tab="manual"] .search-tools,body[data-active-tab="history"] #searchFeedback,body[data-active-tab="stats"] #searchFeedback,body[data-active-tab="manual"] #searchFeedback{display:none}
     .global-search{min-height:44px;padding:9px 11px;font-size:15px}
     .search-button{min-width:104px;min-height:44px;padding:8px 12px;border-radius:9px;font-size:13px;font-weight:780}
     .notice{padding:13px 14px;border-radius:12px;font-size:13px;line-height:1.55}
@@ -422,7 +428,7 @@
       #mapBox>.map-card{margin:0}#mapBox>.result-note{grid-column:1/-1}
       #anomalyBox>.anomaly-list,.history-groups{grid-template-columns:repeat(2,minmax(0,1fr));align-items:start}
       .manual-grid{grid-template-columns:repeat(3,minmax(0,1fr));align-items:start}
-      .primary-nav{padding-left:max(12px,env(safe-area-inset-left),calc((100vw - var(--layout-max))/2));padding-right:max(12px,env(safe-area-inset-right),calc((100vw - var(--layout-max))/2))}
+      .primary-nav{grid-template-columns:repeat(5,minmax(0,1fr));justify-content:center;padding-left:max(12px,env(safe-area-inset-left),calc((100vw - var(--layout-max) + 28px)/2));padding-right:max(12px,env(safe-area-inset-right),calc((100vw - var(--layout-max) + 28px)/2))}
     }
     @media(max-width:719px){
       .section-title{flex-direction:column;gap:4px}.section-title span{max-width:none;text-align:left}
@@ -531,6 +537,10 @@
   <main id="appContent" class="shell" tabindex="-1">
 
     <section class="command-deck" aria-label="市場即時指揮台">
+      <div id="homeEmptyState" class="home-empty-state" role="status" aria-live="polite" hidden>
+        <div><b id="homeEmptyTitle">尚無市場報告</b><span id="homeEmptyMessage">請選擇上方掃描範圍，完成後會在這裡整理重點。</span></div>
+        <small>15m 短線 · 4H 波段 · 全市場</small>
+      </div>
       <section id="marketStrip" class="market-strip" aria-label="BTC 與 ETH 市場脈搏">
         <div class="pulse-card"><div class="pulse-head"><strong>BTC</strong><span>等待掃描</span></div><div class="pulse-price">—</div><div class="change flat">1H — · 24H —</div></div>
         <div class="pulse-card"><div class="pulse-head"><strong>ETH</strong><span>等待掃描</span></div><div class="pulse-price">—</div><div class="change flat">1H — · 24H —</div></div>
@@ -585,7 +595,7 @@
       </div>
     </section>
     <section id="fifteenAll" class="section">
-      <div class="section-title"><h2>15m 訊號總覽</h2><span>品質高 → 低 · 同幣可保留獨立 Episode</span></div>
+      <div class="section-title"><h2>15m 訊號總覽</h2><span>品質高 → 低 · 同幣不同觸發分開保留</span></div>
       <div id="fifteenAllBox"><div class="empty">等待最新掃描。</div></div>
     </section>
     <section id="earlySignals" class="section">
@@ -678,10 +688,10 @@
           <details class="manual-card"><summary>掃描中／資料期限</summary><div class="manual-body"><p>掃描哪個週期，該週期先不顯示上一輪卡片；完成後一次換成最新結果。未被掃描的另一週期若仍是 Fresh（最新）就照常有效，不會被誤標為只供參考。只有 STALE（超過 30 分鐘）、本次錯誤或初步預覽才不可直接進場。</p></div></details>
         </section>
         <section class="manual-section"><div class="manual-section-title"><span>02</span><div><h3>讀懂交易計畫</h3><p>先看狀態，再看價格與風險</p></div></div>
-          <details class="manual-card"><summary>訊號階段／Signal Episode（訊號生命週期）</summary><div class="manual-body"><p>簡化階段為早期 → 增強 → 確認 → 轉弱 → 失效／完成。重新掃描只更新同一個 Signal Episode，不會因重整頁面製造第二次 Trigger（價格觸發）。</p></div></details>
+          <details class="manual-card"><summary>訊號階段／Signal Episode（訊號生命週期）</summary><div class="manual-body"><p>簡化階段為早期 → 增強 → 確認 → 轉弱 → 失效／完成。重新掃描只更新同一個訊號生命週期（Signal Episode），不會因重整頁面製造第二次 Trigger（價格觸發）。</p></div></details>
           <details class="manual-card"><summary>交易品質／安全檢查</summary><div class="manual-body"><p>交易品質表示目前的進場與成交條件，不是勝率。資料缺失、流動性、買賣價差、滑價、SL（止損）與 R:R（風險報酬比）仍由安全檢查把關。</p></div></details>
           <details class="manual-card"><summary>Entry（最佳進場點位）／SL（止損）／TP（止盈）／R:R（風險報酬比）</summary><div class="manual-body"><p>Entry 是合理價格區，SL 是交易邏輯失效位。正式 TP1 不會因近端小阻力被硬縮到 2R 以下：一般依波動與成交力度落在 2～4R，有有效結構時可保留到 7R；TP2 是延伸目標，最高 8R。系統依價格結構、波動與足夠的歷史 MFE 產生價位；OI／成交流只作續走力道輔助，不參與交易品質、進場資格或價位計算。Trigger 建立後原始價位固定。</p></div></details>
-          <details class="manual-card"><summary>禁止追價／交易計畫失效</summary><div class="manual-body"><p><span class="manual-term">禁止追價</span>代表方向可能仍有效，但現在位置不好，可等回踩再評估。<span class="manual-term">交易計畫失效</span>代表舊 Signal Episode（訊號生命週期）已死亡，不會復活；必須等待新 Trigger（價格觸發）／REENTRY（重新進場訊號）。</p></div></details>
+          <details class="manual-card"><summary>禁止追價／交易計畫失效</summary><div class="manual-body"><p><span class="manual-term">禁止追價</span>代表方向可能仍有效，但現在位置不好，可等回踩再評估。<span class="manual-term">交易計畫失效</span>代表舊訊號生命週期（Signal Episode）已死亡，不會復活；必須等待新 Trigger（價格觸發）／REENTRY（重新進場訊號）。</p></div></details>
         </section>
         <section class="manual-section"><div class="manual-section-title"><span>03</span><div><h3>市場與紀錄</h3><p>時段、詳細資料與歷史回看</p></div></div>
           <details class="manual-card"><summary>三大交易時段</summary><div class="manual-body"><p>上方只顯示亞洲盤、倫敦盤、紐約盤，均換算為台北／香港時間。倫敦與紐約使用各自時區自動處理夏冬令；重疊時可同時亮起，盤別只作市場背景。</p></div></details>
@@ -873,6 +883,10 @@
       $('#refreshButton').classList.toggle('spinning',scanning);
     }
 
+    function setHomeReportEmpty(active,title='尚無市場報告',message='請選擇上方掃描範圍，完成後會在這裡整理重點。'){
+      const box=$('#homeEmptyState');document.body.classList.toggle('home-report-empty',Boolean(active));box.hidden=!active;if(!active)return;$('#homeEmptyTitle').textContent=title;$('#homeEmptyMessage').textContent=message
+    }
+
     function renderStatus(status){
       state.status=status;const key=status.system_status||status.runtime_status||'BOOTING';document.body.dataset.runtimeStatus=key;
       const pill=$('#statusPill');pill.textContent=statusName[key]||'尚無資料';pill.className=`status-pill ${String(key).toLowerCase()}`;
@@ -885,11 +899,11 @@
       danger.textContent=warning;danger.classList.toggle('show',Boolean(warning));
       const showingCorePreview=scanning&&state.report?.runtime_status==='CORE_PREVIEW'&&state.currentPreviewGeneratedAt===state.report?.generated_at;
       if(scanning&&!showingCorePreview){const mode=status.scan_mode||state.scanRequestedMode||'FULL',message=`${status.scan_mode_label||'市場掃描'}執行中；只暫停正在更新的週期。`;renderScanPending(mode,message)}
-      else if(key==='BOOTING'){const message='尚無市場報告，請選擇上方掃描範圍。';renderUnavailable(message);renderOverviewUnavailable(message)}
+      else if(key==='BOOTING'){const message='尚無市場報告，請選擇上方掃描範圍。';setHomeReportEmpty(true,'尚無市場報告','請選擇上方掃描範圍，完成後會整理市場方向與交易品質。');renderUnavailable(message);renderOverviewUnavailable(message)}
       else if(key==='STALE'&&state.report)renderReport(state.report)
-      else if(key==='STALE'){renderUnavailable('資料已過期，正在載入上一輪保留快照。');renderOverviewUnavailable('資料已過期，正在載入上一輪候選快照。')}
+      else if(key==='STALE'){setHomeReportEmpty(true,'市場報告已過期','請重新掃描；新資料完成前不提供進場依據。');renderUnavailable('資料已過期，正在載入上一輪保留快照。');renderOverviewUnavailable('資料已過期，正在載入上一輪候選快照。')}
       else if(key==='ERROR'&&state.report)renderReport(state.report)
-      else if(key==='ERROR'){renderUnavailable('最新掃描異常，目前沒有可使用的正式訊號。');renderOverviewUnavailable('最新掃描異常，候選排行已停用。')}
+      else if(key==='ERROR'){setHomeReportEmpty(true,'本次掃描未完成','請重新掃描；目前沒有可使用的正式市場報告。');renderUnavailable('最新掃描異常，目前沒有可使用的正式訊號。');renderOverviewUnavailable('最新掃描異常，候選排行已停用。')}
     }
 
     function horizonSnapshot(report,horizon){
@@ -928,6 +942,7 @@
       const normalized=['SHORT','LONG','FULL'].includes(String(mode).toUpperCase())?String(mode).toUpperCase():'FULL',shortAvailable=horizonSnapshot(state.report,'SHORT').available,longAvailable=horizonSnapshot(state.report,'LONG').available;
       renderContextCoverage(state.report,'SCANNING');
       if(state.report&&(shortAvailable||longAvailable)){renderReport(state.report);return}
+      setHomeReportEmpty(true,'正在建立市場報告','掃描完成後會一次整理市場方向、候選與資料狀態。');
       if(normalized==='SHORT'||normalized==='FULL'){renderHorizonUnavailable('SHORT',message);renderOverviewUnavailable(message)}else if(!shortAvailable){const unavailable='尚未執行 15m 掃描；完成 15m 或全市場掃描後才會顯示短線資料。';renderHorizonUnavailable('SHORT',unavailable);renderOverviewUnavailable(unavailable)}
       if(normalized==='LONG'||normalized==='FULL')renderHorizonUnavailable('LONG',message);else if(!longAvailable)renderHorizonUnavailable('LONG','尚未執行 4H 掃描；完成 4H 或全市場掃描後才會顯示長線資料。')
     }
@@ -972,7 +987,7 @@
     function restoreReportUiState(saved){if(!saved)return;const entries=reportCardEntries(),cardFor=key=>entries.find(entry=>entry.key===key)?.card;saved.opened.forEach(([key,index])=>{const detail=cardFor(key)?.querySelectorAll('details')?.[index];if(detail)detail.open=true});if(saved.focus){const card=cardFor(saved.focus.cardKey);let target=null;if(saved.focus.kind==='summary')target=card?.querySelectorAll('details')?.[saved.focus.index]?.querySelector('summary');else if(card)target=[...card.querySelectorAll('button,a')].find(element=>element.dataset?.[saved.focus.name]===saved.focus.value);try{target?.focus({preventScroll:true})}catch(_){target?.focus()}}const shell=$('.shell');if(shell)shell.scrollTop=saved.scrollTop}
 
     function renderReport(report){
-      pruneExpiredTerminalCards(report);const renderKey=reportRenderFingerprint(report),savedUi=state.reportRenderKey===renderKey?null:captureReportUiState();state.report=report;if(state.reportRenderKey===renderKey)return;const preview=report.runtime_status==='CORE_PREVIEW',activeScanMode=activeUiScanMode(report),shortTransient=horizonTransientState(report,'SHORT'),longTransient=horizonTransientState(report,'LONG'),shortPreview=preview&&!shortTransient&&(activeScanMode==='SHORT'||activeScanMode==='FULL'),longPreview=preview&&!longTransient&&activeScanMode==='LONG',shortState=horizonSnapshot(report,'SHORT'),longState=horizonSnapshot(report,'LONG'),shortAvailable=shortState.available,longAvailable=longState.available,shortReadOnlyReason=horizonReadOnlyReason(report,'SHORT'),longReadOnlyReason=horizonReadOnlyReason(report,'LONG');
+      setHomeReportEmpty(false);pruneExpiredTerminalCards(report);const renderKey=reportRenderFingerprint(report),savedUi=state.reportRenderKey===renderKey?null:captureReportUiState();state.report=report;if(state.reportRenderKey===renderKey)return;const preview=report.runtime_status==='CORE_PREVIEW',activeScanMode=activeUiScanMode(report),shortTransient=horizonTransientState(report,'SHORT'),longTransient=horizonTransientState(report,'LONG'),shortPreview=preview&&!shortTransient&&(activeScanMode==='SHORT'||activeScanMode==='FULL'),longPreview=preview&&!longTransient&&activeScanMode==='LONG',shortState=horizonSnapshot(report,'SHORT'),longState=horizonSnapshot(report,'LONG'),shortAvailable=shortState.available,longAvailable=longState.available,shortReadOnlyReason=horizonReadOnlyReason(report,'SHORT'),longReadOnlyReason=horizonReadOnlyReason(report,'LONG');
       const activeShort=[...(report.signals||[])].filter(item=>!isTerminalSignal(item)),shortClosed=retainedClosedSignals(report,'SHORT'),stickyShort=activeShort.filter(item=>!isPreviewItem(item)&&itemWasEntryReady(item)),allShort=[...activeShort].sort(signalSortComparator),ready=[...stickyShort].sort(signalSortComparator),early=stickyShort.filter(x=>x.signal_stage==='EARLY_SIGNAL').sort(signalSortComparator),waiting=activeShort.filter(x=>!isPreviewItem(x)&&!itemWasEntryReady(x)&&itemEntryStatus(x)==='WAIT_RETEST').sort(signalSortComparator),missed=activeShort.filter(x=>!isPreviewItem(x)&&!itemWasEntryReady(x)&&itemEntryStatus(x)==='MISSED_ENTRY').sort(signalSortComparator),liveReady=activeShort.filter(x=>!isPreviewItem(x)&&itemEntryStatus(x)==='ENTRY_READY');
       const activeLong=[...(report.long_signals||[])].filter(item=>!isTerminalSignal(item)),longClosed=retainedClosedSignals(report,'LONG'),stickyLong=activeLong.filter(item=>!isPreviewItem(item)&&itemWasEntryReady(item)),allLong=[...activeLong].sort(signalSortComparator),longReady=[...stickyLong].sort(signalSortComparator),longEarly=stickyLong.filter(x=>x.signal_stage==='EARLY_SIGNAL').sort(signalSortComparator),longWaiting=activeLong.filter(x=>!isPreviewItem(x)&&!itemWasEntryReady(x)&&itemEntryStatus(x)==='WAIT_RETEST').sort(signalSortComparator),longMissed=activeLong.filter(x=>!isPreviewItem(x)&&!itemWasEntryReady(x)&&itemEntryStatus(x)==='MISSED_ENTRY').sort(signalSortComparator),allClosed=[...shortClosed,...longClosed].sort(terminalSortComparator);
       const shortExpired=shortState.expired===true||shortReadOnlyReason==='STALE',longExpired=longState.expired===true||longReadOnlyReason==='STALE',shortReference=Boolean(shortReadOnlyReason&&!shortPreview),longReference=Boolean(longReadOnlyReason&&!longPreview);
@@ -1096,7 +1111,7 @@
     function horizonBadge(item){return `<span class="badge watch-b">${item?.radar_horizon==='LONG'?'4H 長線':'15m 短線'}</span>`}
     function stageBadge(item){const stage=item.signal_stage||item.status||'WATCH';let cls='watch-b';if(stage==='EARLY'||stage==='EARLY_SIGNAL'||stage==='REENTRY')cls='early-b';else if(stage==='CONFIRMED')cls=item.direction==='LONG'?'confirmed-long':'confirmed-short';else if(stage==='NEAR_TRIGGER')cls='near-b';else if(stage==='EXTENDED'||stage==='TRENDING'||stage==='COMPLETED')cls='extended-b';else if(stage==='INVALIDATED'||stage==='NO_FOLLOW_THROUGH')cls='invalid-b';return `<span class="badge ${cls}">${esc(stageName[stage]||'觀望')}</span>`}
     function freshnessBadge(item){const fresh=item.freshness||'NONE';const cls=fresh==='NEW'||fresh==='REACTIVATED'?'fresh-b':fresh==='INVALIDATED'||fresh==='NO_FOLLOW_THROUGH'?'invalid-b':'extended-b';return `<span class="badge ${cls}">${esc(freshnessName[fresh]||fresh)}</span>`}
-    function signalSecondaryMeta(item){const stage=item.signal_stage||item.status||'WATCH',fresh=item.freshness||'NONE',stageLabel=stageName[stage]||'觀望',freshLabel=freshnessName[fresh]||fresh,episode=item.lifecycle?.transition,episodeLabel={UPGRADED:'本輪增強',NEW:'新 Episode',DOWNGRADED:'本輪轉弱',REACTIVATED:'重新啟動'}[episode],frame=item.radar_horizon==='LONG'?'4H':'15m',rsi=metricNumber(item.market_metrics?.rsi_core),parts=[stageLabel,freshLabel];if(rsi!==null)parts.push(`${frame} RSI ${num(rsi,1)}`);if(episodeLabel)parts.push(episodeLabel);return parts.map((value,index)=>index===0?`<strong>${esc(value)}</strong>`:esc(value)).join(' · ')}
+    function signalSecondaryMeta(item){const stage=item.signal_stage||item.status||'WATCH',fresh=item.freshness||'NONE',stageLabel=stageName[stage]||'觀望',freshLabel=freshnessName[fresh]||fresh,episode=item.lifecycle?.transition,episodeLabel={UPGRADED:'本輪增強',NEW:'新訊號週期',DOWNGRADED:'本輪轉弱',REACTIVATED:'重新啟動'}[episode],frame=item.radar_horizon==='LONG'?'4H':'15m',rsi=metricNumber(item.market_metrics?.rsi_core),parts=[stageLabel,freshLabel];if(rsi!==null)parts.push(`${frame} RSI ${num(rsi,1)}`);if(episodeLabel)parts.push(episodeLabel);return parts.map((value,index)=>index===0?`<strong>${esc(value)}</strong>`:esc(value)).join(' · ')}
     function isExpiredSnapshot(item){if(isTerminalSignal(item))return false;if(itemReadOnlyReason(item)==='STALE')return true;const horizon=item?.radar_horizon==='LONG'?'LONG':'SHORT',freshness=state.report?.horizon_freshness?.[horizon];if(freshness?.available)return freshness.expired===true;return state.report?.snapshot_expired===true||state.report?.runtime_status==='STALE'||state.status?.system_status==='STALE'}
     function expiredSnapshotBadge(item){return isExpiredSnapshot(item)?'<span class="badge invalid-b">⏱ 資料已過期</span>':''}
     function readOnlyReferenceBadge(item){const reason=itemReadOnlyReason(item);if(!reason||reason==='STALE'||reason==='CORE_PREVIEW')return '';const label=reason==='SCANNING'?'本輪掃描中':reason==='ERROR'?'本輪更新失敗':'只供參考';return `<span class="badge ${reason==='ERROR'?'invalid-b':'preview-b'}">${esc(label)}</span>`}
@@ -1312,7 +1327,7 @@
     async function refreshFreshness(){try{if(!state.polling){const status=await refreshStatus();if(status.system_status==='SCANNING'){await pollUntilComplete();return}const reportChanged=status.has_report&&(!state.report||status.latest_generated_at!==state.report.generated_at),observerChanged=status.has_report&&String(status.observer_updated_at||'')!==String(state.report?.observer_updated_at||''),reportBecameStale=status.system_status==='STALE'&&state.report?.runtime_status!=='STALE',horizonFreshnessChanged=['SHORT','LONG'].some(horizon=>{const current=state.report?.horizon_freshness?.[horizon]||{},latest=status.horizon_freshness?.[horizon]||{};return Boolean(current.available)!==Boolean(latest.available)||Boolean(current.expired)!==Boolean(latest.expired)||String(current.completed_at||'')!==String(latest.completed_at||'')}),terminalExpired=['closed_signals','long_closed_signals'].some(key=>(state.report?.[key]||[]).some(item=>isTerminalSignal(item)&&!terminalRetentionActive(item)));if(reportChanged||observerChanged||reportBecameStale||horizonFreshnessChanged)await loadReport({history:reportChanged||reportBecameStale||horizonFreshnessChanged});else if(terminalExpired){state.reportRenderKey=null;renderReport(state.report)}}}catch(error){showConnectionError(error)}finally{setTimeout(refreshFreshness,15000)}}
 
     const tabGroups={overview:'home',fifteenAll:'fifteen',earlySignals:'fifteen',signals:'fifteen',waitRetest:'fifteen',missedSignals:'fifteen',watchlist:'fifteen',longSignals:'long',longEarlySignals:'long',longReadySignals:'long',longWaitRetest:'long',longMissedSignals:'long',longWatchlist:'long',closedSignals:'closed',closedShortSignals:'closed',closedLongSignals:'closed',anomalies:'more',map:'more',history:'more',stats:'more',manual:'more'};
-    function activateTab(id,scroll=true){const group=tabGroups[id]||'home';state.activeGroup=group;state.groupTabs[group]=id;document.body.dataset.activeGroup=group;$('#filterShell').hidden=group==='home';$$('.primary-tab').forEach(x=>{const active=x.dataset.group===group;x.classList.toggle('active',active);if(active){x.setAttribute('aria-current','page');x.setAttribute('aria-controls',id)}else x.removeAttribute('aria-current')});$$('[data-group-filters]').forEach(x=>{x.hidden=x.dataset.groupFilters!==group});$$('.filter-tab').forEach(x=>{const active=x.dataset.tab===id;x.classList.toggle('active',active);if(active)x.setAttribute('aria-current','page');else x.removeAttribute('aria-current')});$$('.section').forEach(x=>x.classList.toggle('active',x.id===id));const activeFilter=$(`.filter-tab[data-tab="${id}"]`);if(activeFilter)requestAnimationFrame(()=>activeFilter.scrollIntoView({behavior:scroll?'smooth':'auto',block:'nearest',inline:'center'}));if(scroll)$('.shell').scrollTo({top:0,behavior:'smooth'})}
+    function activateTab(id,scroll=true){const group=tabGroups[id]||'home';state.activeGroup=group;state.groupTabs[group]=id;document.body.dataset.activeGroup=group;document.body.dataset.activeTab=id;$('#filterShell').hidden=group==='home';$$('.primary-tab').forEach(x=>{const active=x.dataset.group===group;x.classList.toggle('active',active);if(active){x.setAttribute('aria-current','page');x.setAttribute('aria-controls',id)}else x.removeAttribute('aria-current')});$$('[data-group-filters]').forEach(x=>{x.hidden=x.dataset.groupFilters!==group});$$('.filter-tab').forEach(x=>{const active=x.dataset.tab===id;x.classList.toggle('active',active);if(active)x.setAttribute('aria-current','page');else x.removeAttribute('aria-current')});$$('.section').forEach(x=>x.classList.toggle('active',x.id===id));const activeFilter=$(`.filter-tab[data-tab="${id}"]`);if(activeFilter)requestAnimationFrame(()=>activeFilter.scrollIntoView({behavior:scroll?'smooth':'auto',block:'nearest',inline:'center'}));if(scroll)$('.shell').scrollTo({top:0,behavior:'smooth'})}
     $$('.primary-tab').forEach(button=>button.addEventListener('click',()=>activateTab(state.groupTabs[button.dataset.group]||button.dataset.defaultTab)));
     $$('.filter-tab').forEach(button=>button.addEventListener('click',()=>activateTab(button.dataset.tab)));
     $$('[data-scan-mode]').forEach(button=>button.addEventListener('click',()=>startScan(button.dataset.scanMode||'FULL')));
