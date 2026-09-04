@@ -11,7 +11,7 @@ from .evidence import (
     infer_regime_direction,
     summary_for_stage,
 )
-from .indicators import TimeframeFeatures, features
+from .indicators import TimeframeFeatures, features, rsi
 from .market_story import (
     FEATURE_SCHEMA_VERSION,
     STRATEGY_VERSION,
@@ -185,6 +185,7 @@ class AdaptiveStrategyEngine:
         volume_source = (
             candles_bias if horizon == "SHORT" else candles_timing or candles_bias
         )
+        hourly_source = candles_bias if horizon == "SHORT" else candles_timing or []
         quote_volume_24h = sum(item.quote_volume for item in volume_source[-24:])
         metrics = {
             "last_price": ticker.last,
@@ -212,6 +213,11 @@ class AdaptiveStrategyEngine:
             "adx_1h": round(tf_bias.adx14, 1),
             "rsi_core": round(tf_core.rsi14, 1),
             "rsi_15m": round(tf_core.rsi14, 1) if horizon == "SHORT" else None,
+            # Exactly 24 completed one-hour changes (25 closes).  This is kept
+            # separate from the horizon's regular RSI(14), so the homepage can
+            # describe a real full-day market oscillator without relabelling a
+            # 15m or 4H value as "24H".
+            "rsi_24h": _completed_24h_rsi(hourly_source),
             "volume_ratio_core": round(tf_core.volume_ratio, 2),
             "volume_ratio_15m": round(tf_core.volume_ratio, 2) if horizon == "SHORT" else None,
             "volume_ratio_5m": round(tf_timing.volume_ratio, 2) if horizon == "SHORT" and tf_timing else None,
@@ -3755,6 +3761,24 @@ def _price_change_pct(current: float, baseline: float) -> float | None:
     if not math.isfinite(current) or not math.isfinite(baseline) or baseline <= 0:
         return None
     return round((current - baseline) / baseline * 100.0, 3)
+
+
+def _completed_24h_rsi(candles_1h: list[Candle]) -> float | None:
+    """Return RSI(24) from exactly 24 completed, contiguous 1H changes."""
+
+    confirmed = [item for item in candles_1h if item.confirmed]
+    if len(confirmed) < 25:
+        return None
+    window = confirmed[-25:]
+    if any(
+        right.ts - left.ts != 3_600_000
+        for left, right in zip(window, window[1:])
+    ):
+        return None
+    value = rsi([item.close for item in window], period=24)
+    if not math.isfinite(value):
+        return None
+    return round(value, 1)
 
 
 def _safe_float(value: object, default: float = 0.0) -> float:

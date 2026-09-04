@@ -400,7 +400,29 @@ class ClosedLookbackTests(unittest.TestCase):
         self.assertAlmostEqual(oi["change_pct"], expected, 6)
         self.assertAlmostEqual(oi["prior_average"], 1_001.0)
         self.assertAlmostEqual(oi["latest_value"], 1_004.0)
-        self.assertIn("最新相較前 2 點均值", oi["detail"])
+        self.assertAlmostEqual(oi["change_amount"], 3.0)
+        self.assertEqual(oi["unit"], "CONTRACTS")
+        self.assertEqual(oi["capital_state"], "INCREASING")
+        self.assertIn("前 2 點均值", oi["detail"])
+        self.assertIn("增加 3", oi["detail"])
+
+    def test_oi_quantity_increase_exposes_amount_percent_and_advisory_long_bias(self):
+        result = summarize_closed_lookback_samples(
+            closed_lookback_samples(
+                3,
+                oi_values=[100_000_000.0, 100_000_000.0, 300_000_000.0],
+            ),
+            "SHORT",
+            "LONG",
+        )
+        oi = result["windows"]["10m"]["domains"]["OI"]
+
+        self.assertEqual(oi["change_amount"], 200_000_000.0)
+        self.assertEqual(oi["change_pct"], 200.0)
+        self.assertEqual(oi["directional_bias"], "LONG")
+        self.assertFalse(oi["persistent_increase"])
+        self.assertEqual(oi["state"], "NEUTRAL")
+        self.assertIn("增加 2.00 億", oi["detail"])
 
     def test_gap_only_allows_windows_covered_by_continuous_tail(self):
         samples = closed_lookback_samples(4)

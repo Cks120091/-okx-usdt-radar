@@ -3572,6 +3572,20 @@ class MarketScanner:
             if market_rsi_values
             else None
         )
+        market_rsi_24h_values = [
+            value
+            for state in states
+            if (value := _finite_number(state.market_metrics.get("rsi_24h"))) is not None
+            and 0.0 <= value <= 100.0
+        ]
+        market_rsi_24h = (
+            round(sum(market_rsi_24h_values) / len(market_rsi_24h_values), 1)
+            if market_rsi_24h_values
+            else None
+        )
+        market_rsi_24h_state, market_rsi_24h_label = _market_rsi_24h_state(
+            market_rsi_24h
+        )
 
         def breadth(items: list[MarketState]) -> tuple[float, int, int]:
             long_count = sum(item.direction == "LONG" for item in items)
@@ -3670,6 +3684,11 @@ class MarketScanner:
             "sample_count": len(directional),
             "market_average_rsi": market_average_rsi,
             "market_average_rsi_sample_count": len(market_rsi_values),
+            "market_rsi_24h": market_rsi_24h,
+            "market_rsi_24h_sample_count": len(market_rsi_24h_values),
+            "market_rsi_24h_state": market_rsi_24h_state,
+            "market_rsi_24h_label": market_rsi_24h_label,
+            "market_rsi_24h_basis": "24 個完整 1H 漲跌・全市場等權平均",
             "btc": {
                 "direction": btc_direction,
                 "core_change_pct": btc_core_change,
@@ -3936,6 +3955,7 @@ _MARKET_MAP_METRIC_KEYS = frozenset(
         "price_change_24h_pct",
         "rsi_core",
         "rsi_15m",
+        "rsi_24h",
         "open_interest_usd",
         "open_interest_change_pct",
         "oi_flow_state",
@@ -3983,6 +4003,22 @@ def _finite_number(value: object) -> float | None:
     except (TypeError, ValueError):
         return None
     return numeric if math.isfinite(numeric) else None
+
+
+def _market_rsi_24h_state(value: float | None) -> tuple[str, str]:
+    """Classify the equal-weight full-market RSI(24) without scoring trades."""
+
+    if value is None:
+        return "UNKNOWN", "資料不足"
+    if value >= 60.0:
+        return "STRONG_LONG", "強多"
+    if value >= 55.0:
+        return "LONG", "偏多"
+    if value >= 45.0:
+        return "NEUTRAL", "中性"
+    if value >= 40.0:
+        return "SHORT", "偏空"
+    return "STRONG_SHORT", "強空"
 
 
 def _unique_strings(values: list[str]) -> list[str]:

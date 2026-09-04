@@ -383,6 +383,7 @@ def _summarize_window(
     )
     oi = _oi_domain(
         selected,
+        direction,
         directional_return,
         consistency,
         minutes,
@@ -461,6 +462,7 @@ def _summarize_window(
 
 def _oi_domain(
     samples: list[dict[str, Any]],
+    direction: str,
     directional_return: float | None,
     directional_consistency: float | None,
     minutes: int,
@@ -523,6 +525,8 @@ def _oi_domain(
     first = points[0][1]
     latest = points[-1][1]
     prior_average = sum(value for _, value in points[:-1]) / (len(points) - 1)
+    change_amount = latest - prior_average
+    window_change_amount = latest - first
     latest_vs_prior_average_pct = (latest - prior_average) / prior_average * 100.0
     window_change_pct = (latest - first) / first * 100.0
     normalized = [(x, (value - first) / first * 100.0) for x, value in points]
@@ -534,10 +538,52 @@ def _oi_domain(
         else None
     )
     threshold = max(0.10, 0.50 * minutes / 60.0)
+    material_increase = latest_vs_prior_average_pct >= threshold
+    persistent_increase = bool(
+        material_increase
+        and window_change_pct > 0.0
+        and (slope or 0.0) > 0.0
+        and (persistence or 0.0) >= 60.0
+    )
+    price_bias = (
+        direction
+        if directional_return > 0.02 and directional_consistency >= 55.0
+        else _opposite_direction(direction)
+        if directional_return < -0.02 and directional_consistency <= 45.0
+        else "NEUTRAL"
+    )
+    # The inferred side is useful even before the sequence earns a persistent
+    # continuation vote.  It stays advisory: only ``persistent_increase`` can
+    # contribute SUPPORT/CONFLICT to continuation strength.
+    directional_bias = price_bias if material_increase else "NEUTRAL"
+    directional_bias_label = {
+        "LONG": (
+            "推定偏多新增參與"
+            if persistent_increase
+            else "推定偏多新增參與，持續性待確認"
+        ),
+        "SHORT": (
+            "推定偏空新增參與"
+            if persistent_increase
+            else "推定偏空新增參與，持續性待確認"
+        ),
+        "NEUTRAL": (
+            "OI 雖增加，但新增不連續／價格方向未確認"
+            if change_amount > 0
+            else "持倉減少，較像平倉／回補"
+            if change_amount < 0
+            else "新增量不明顯"
+        ),
+    }[directional_bias]
+    amount_action = (
+        "增加" if change_amount > 0 else "減少" if change_amount < 0 else "持平"
+    )
     detail = (
-        f"{unit_label}・最新相較前 {len(points) - 1} 點均值 "
-        f"{latest_vs_prior_average_pct:+.2f}%・"
-        f"上升持續度 {persistence:.0f}%"
+        f"{unit_label}・最新 {_format_oi_amount(latest)}、"
+        f"前 {len(points) - 1} 點均值 {_format_oi_amount(prior_average)}・"
+        f"{amount_action} {_format_oi_amount(abs(change_amount))} "
+        f"（{latest_vs_prior_average_pct:+.2f}%）・"
+        f"逐點增加比例 {persistence:.0f}%・{directional_bias_label}"
     )
     domain_metrics = {
         # Keep change_pct as the primary public number for compatibility, but
@@ -546,17 +592,27 @@ def _oi_domain(
         "change_pct": latest_vs_prior_average_pct,
         "latest_vs_prior_average_pct": latest_vs_prior_average_pct,
         "window_change_pct": window_change_pct,
+        "change_amount": change_amount,
+        "window_change_amount": window_change_amount,
         "prior_average": prior_average,
         "latest_value": latest,
+        "comparison_points": len(points) - 1,
+        "unit": "CONTRACTS" if unit_label == "合約數" else "BASE_CCY",
+        "capital_state": (
+            "INCREASING"
+            if change_amount > 0
+            else "DECREASING"
+            if change_amount < 0
+            else "FLAT"
+        ),
+        "persistent_increase": persistent_increase,
+        "material_increase": material_increase,
+        "directional_bias": directional_bias,
+        "directional_bias_label": directional_bias_label,
         "slope_pct_per_min": slope,
         "persistence_pct": persistence,
     }
-    if (
-        latest_vs_prior_average_pct >= threshold
-        and window_change_pct > 0.0
-        and (slope or 0.0) > 0.0
-        and (persistence or 0.0) >= 60.0
-    ):
+    if persistent_increase:
         if directional_return > 0.02 and directional_consistency >= 55.0:
             return _domain(
                 "SUPPORT",
@@ -582,6 +638,13 @@ def _oi_domain(
         return _domain(
             "NEUTRAL",
             f"最新完整 OI 低於前段均值，較像平倉／回補（{detail}）",
+            detail=detail,
+            **domain_metrics,
+        )
+    if material_increase:
+        return _domain(
+            "NEUTRAL",
+            f"最新完整 OI 已高於前段均值，但連續性尚未達門檻（{detail}）",
             detail=detail,
             **domain_metrics,
         )
@@ -1011,6 +1074,27 @@ def _horizon(value: str) -> str:
     if normalized not in _WINDOW_SPECS:
         raise ValueError("observer horizon must be SHORT or LONG")
     return normalized
+
+
+def _opposite_direction(direction: str) -> str:
+    if direction == "LONG":
+        return "SHORT"
+    if direction == "SHORT":
+        return "LONG"
+    return "NEUTRAL"
+
+
+def _format_oi_amount(value: float) -> str:
+    absolute = abs(value)
+    if absolute >= 100_000_000:
+        return f"{absolute / 100_000_000:.2f} 億"
+    if absolute >= 10_000:
+        return f"{absolute / 10_000:.2f} 萬"
+    if absolute >= 100:
+        return f"{absolute:,.0f}"
+    if absolute >= 1:
+        return f"{absolute:,.2f}".rstrip("0").rstrip(".")
+    return f"{absolute:.6f}".rstrip("0").rstrip(".") or "0"
 
 
 def _number(value: Any) -> float | None:

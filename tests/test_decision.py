@@ -1568,6 +1568,40 @@ class DecisionContextTests(unittest.TestCase):
         self.assertEqual(result["final"]["status"], "ENTER")
         self.assertTrue(result["final"]["new_entry_allowed"])
 
+    def test_public_fixed_oi_vote_exposes_delta_without_raw_samples(self):
+        item = complete_signal()
+        domains = {
+            "OI": {
+                "state": "SUPPORT",
+                "reason": "OI 數量增加並與價格同向",
+                "change_amount": 200_000_000.0,
+                "change_pct": 200.0,
+                "prior_average": 100_000_000.0,
+                "latest_value": 300_000_000.0,
+                "comparison_points": 2,
+                "unit": "CONTRACTS",
+                "capital_state": "INCREASING",
+                "material_increase": True,
+                "persistent_increase": True,
+                "directional_bias": "LONG",
+                "directional_bias_label": "推定偏多新增參與",
+            },
+            "TAKER_CVD": {"state": "NEUTRAL", "reason": "主動成交中性"},
+            "VOLUME": {"state": "NEUTRAL", "reason": "成交量中性"},
+        }
+        item["market_metrics"]["continuation_lookback"] = (
+            fixed_continuation_summary(domains=domains)
+        )
+        item["decision_context"] = build_decision_context(item)
+
+        public = public_candidate_payload(item, signal=True)
+        oi = public["decision_context"]["continuation_confirmation"]["core_votes"]["OI"]
+
+        self.assertEqual(oi["change_amount"], 200_000_000.0)
+        self.assertEqual(oi["change_pct"], 200.0)
+        self.assertEqual(oi["directional_bias"], "LONG")
+        self.assertNotIn("samples", public["decision_context"]["continuation_confirmation"])
+
     def test_ready_legacy_observer_cannot_fill_missing_historical_lookback(self):
         item = complete_signal()
         item["market_metrics"]["continuation_observer"] = (

@@ -81,6 +81,7 @@ _CANDIDATE_METRIC_FIELDS = frozenset(
         "price_change_24h_pct",
         "rsi_core",
         "rsi_15m",
+        "rsi_24h",
         "volume_ratio_15m",
         "volume_ratio_5m",
         "taker_buy_pct",
@@ -104,6 +105,7 @@ _MAP_METRIC_FIELDS = frozenset(
         "price_change_24h_pct",
         "rsi_15m",
         "rsi_core",
+        "rsi_24h",
         "open_interest_usd",
         "open_interest_change_pct",
         "oi_flow_state",
@@ -154,6 +156,11 @@ def public_report_payload(report: Any) -> dict[str, Any]:
                 "liquid_breadth_long_pct",
                 "market_average_rsi",
                 "market_average_rsi_sample_count",
+                "market_rsi_24h",
+                "market_rsi_24h_sample_count",
+                "market_rsi_24h_state",
+                "market_rsi_24h_label",
+                "market_rsi_24h_basis",
             ),
         )
         for key in ("btc", "resonance", "exposure_warning"):
@@ -436,7 +443,25 @@ def _public_decision_context(decision: Any) -> dict[str, Any]:
     )
     core_votes = _read(continuation, "core_votes", {})
     payload["continuation_confirmation"]["core_votes"] = {
-        key: _select(value, ("state", "label", "detail"))
+        key: _select(
+            value,
+            (
+                "state",
+                "label",
+                "detail",
+                "change_amount",
+                "change_pct",
+                "prior_average",
+                "latest_value",
+                "comparison_points",
+                "unit",
+                "capital_state",
+                "persistent_increase",
+                "material_increase",
+                "directional_bias",
+                "directional_bias_label",
+            ),
+        )
         for key in ("OI", "TAKER_CVD", "VOLUME")
         if isinstance((value := _read(core_votes, key, None)), Mapping)
     }

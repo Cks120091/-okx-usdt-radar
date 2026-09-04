@@ -5,7 +5,12 @@ from unittest.mock import patch
 
 from radar.context import summarize_flow_history
 from radar.models import Candle, Instrument, MarketContext, MarketState, Signal, Ticker
-from radar.scanner import MarketScanner, ScannerConfig, _compact_market_map_state
+from radar.scanner import (
+    MarketScanner,
+    ScannerConfig,
+    _compact_market_map_state,
+    _market_rsi_24h_state,
+)
 from radar.strategy import AnalysisResult
 
 
@@ -2077,7 +2082,7 @@ class ScannerTests(unittest.TestCase):
     def test_market_bias_turns_bullish_when_breadth_and_anchors_align(self):
         scanner = MarketScanner(FakeClient())
 
-        def bullish(inst_id, rsi):
+        def bullish(inst_id, rsi, rsi_24h):
             return AnalysisResult(
                 None,
                 "fixture",
@@ -2092,15 +2097,21 @@ class ScannerTests(unittest.TestCase):
                     spread_pct=0.01,
                     quote_volume_24h=20_000_000,
                     closed_candle_ts=1,
-                    market_metrics={"rsi_core": rsi},
+                    market_metrics={"rsi_core": rsi, "rsi_24h": rsi_24h},
                 ),
             )
 
+        filtered = bullish("FILTERED-USDT-SWAP", 5.0, 100.0)
+        filtered = replace(
+            filtered,
+            market_state=replace(filtered.market_state, status="FILTERED"),
+        )
         bias = scanner._calculate_market_bias(
             {
-                "BTC-USDT-SWAP": bullish("BTC-USDT-SWAP", 40.0),
-                "ETH-USDT-SWAP": bullish("ETH-USDT-SWAP", 60.0),
-                "AAA-USDT-SWAP": bullish("AAA-USDT-SWAP", 80.0),
+                "BTC-USDT-SWAP": bullish("BTC-USDT-SWAP", 40.0, 59.0),
+                "ETH-USDT-SWAP": bullish("ETH-USDT-SWAP", 60.0, 61.0),
+                "AAA-USDT-SWAP": bullish("AAA-USDT-SWAP", 80.0, 64.0),
+                "FILTERED-USDT-SWAP": filtered,
             }
         )
         self.assertEqual(bias["label"], "偏多")
@@ -2108,7 +2119,18 @@ class ScannerTests(unittest.TestCase):
         self.assertEqual(bias["market_breadth_long_pct"], 100.0)
         self.assertEqual(bias["market_average_rsi"], 60.0)
         self.assertEqual(bias["market_average_rsi_sample_count"], 3)
+        self.assertEqual(bias["market_rsi_24h"], 71.0)
+        self.assertEqual(bias["market_rsi_24h_sample_count"], 4)
+        self.assertEqual(bias["market_rsi_24h_state"], "STRONG_LONG")
+        self.assertEqual(bias["market_rsi_24h_label"], "強多")
         self.assertEqual(bias["btc"]["core_rsi"], 40.0)
+
+    def test_full_market_24h_rsi_labels_have_explicit_boundaries(self):
+        self.assertEqual(_market_rsi_24h_state(60.0), ("STRONG_LONG", "強多"))
+        self.assertEqual(_market_rsi_24h_state(55.0), ("LONG", "偏多"))
+        self.assertEqual(_market_rsi_24h_state(45.0), ("NEUTRAL", "中性"))
+        self.assertEqual(_market_rsi_24h_state(40.0), ("SHORT", "偏空"))
+        self.assertEqual(_market_rsi_24h_state(39.9), ("STRONG_SHORT", "強空"))
 
 
 if __name__ == "__main__":

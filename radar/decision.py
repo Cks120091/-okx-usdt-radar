@@ -1141,19 +1141,39 @@ def _continuation_observer_vote(
     state = str(domain.get("state") or "UNKNOWN").strip().upper()
     reason = str(domain.get("reason") or domain.get("detail") or label)
     if state == "SUPPORT":
-        return _vote("SUPPORT", reason)
-    if state == "CONFLICT":
-        return _vote(
+        vote = _vote("SUPPORT", reason)
+    elif state == "CONFLICT":
+        vote = _vote(
             "CONFLICT",
             reason,
             severe=domain.get("severe") is True,
         )
-    if state == "NEUTRAL":
-        return _vote("NEUTRAL", warnings=[reason])
-    return _vote(
-        "UNKNOWN",
-        missing=[str(domain.get("missing") or f"{label}資料不足")],
-    )
+    elif state == "NEUTRAL":
+        vote = _vote("NEUTRAL", warnings=[reason])
+    else:
+        vote = _vote(
+            "UNKNOWN",
+            missing=[str(domain.get("missing") or f"{label}資料不足")],
+        )
+    # Publish only compact interpretation fields; raw OI samples remain
+    # private.  This lets the UI show an actual quantity delta (for example
+    # 1 億 -> 3 億 = +2 億) without turning it into a score.
+    for key in (
+        "change_amount",
+        "change_pct",
+        "prior_average",
+        "latest_value",
+        "comparison_points",
+        "unit",
+        "capital_state",
+        "persistent_increase",
+        "material_increase",
+        "directional_bias",
+        "directional_bias_label",
+    ):
+        if key in domain:
+            vote[key] = domain[key]
+    return vote
 
 
 def _continuation_oi_vote(
@@ -1340,7 +1360,7 @@ def _vote(
 def _continuation_vote_summary(
     domain: str,
     vote: Mapping[str, Any],
-) -> dict[str, str]:
+) -> dict[str, Any]:
     state = str(vote.get("state") or "UNKNOWN").upper()
     labels = {
         "SUPPORT": "同向支持",
@@ -1358,11 +1378,27 @@ def _continuation_vote_summary(
         "TAKER_CVD": "Taker／CVD 尚未提供明確主動成交方向",
         "VOLUME": "成交量尚未提供明確同向參與",
     }
-    return {
+    summary: dict[str, Any] = {
         "state": state if state in labels else "UNKNOWN",
         "label": labels.get(state, labels["UNKNOWN"]),
         "detail": details[0] if details else fallbacks.get(domain, "方向資料不足"),
     }
+    for key in (
+        "change_amount",
+        "change_pct",
+        "prior_average",
+        "latest_value",
+        "comparison_points",
+        "unit",
+        "capital_state",
+        "persistent_increase",
+        "material_increase",
+        "directional_bias",
+        "directional_bias_label",
+    ):
+        if key in vote:
+            summary[key] = vote[key]
+    return summary
 
 
 def _directional_core_return(

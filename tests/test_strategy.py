@@ -7,6 +7,7 @@ from radar.indicators import features
 from radar.strategy import (
     AdaptiveStrategyEngine,
     StrategyConfig,
+    _completed_24h_rsi,
     _entry_eligibility,
     _format_price,
 )
@@ -108,6 +109,23 @@ def valid_breakout_frames(opposed_context=False):
 class StrategyTests(unittest.TestCase):
     def setUp(self):
         self.instrument = Instrument("TEST-USDT-SWAP", "live", "USDT", "linear", 0.01)
+
+    def test_full_day_rsi_uses_exactly_24_completed_hourly_changes(self):
+        hourly = story_candles(
+            [100.0 + index for index in range(25)],
+            step_ms=3_600_000,
+        )
+
+        self.assertEqual(_completed_24h_rsi(hourly), 100.0)
+
+        with_gap = list(hourly)
+        with_gap[-1] = Candle(
+            **{
+                **with_gap[-1].__dict__,
+                "ts": with_gap[-1].ts + 3_600_000,
+            }
+        )
+        self.assertIsNone(_completed_24h_rsi(with_gap))
 
     def test_v33_stop_uses_structural_level_with_atr_floor(self):
         engine = AdaptiveStrategyEngine(StrategyConfig(minimum_rr=1.8))
