@@ -3,11 +3,58 @@ from __future__ import annotations
 from collections.abc import Mapping
 from typing import Any
 
-from .continuation import LOOKBACK_ALGORITHM_VERSION
+from .continuation import CAPITAL_FLOW_ALGORITHM_VERSION, LOOKBACK_ALGORITHM_VERSION
 from .price_display import signal_plan_display_fields
 
 
 _MISSING = object()
+
+_PUBLIC_CAPITAL_FLOW_FIELDS = (
+    "algorithm_version",
+    "source_mode",
+    "status",
+    "sample_count",
+    "required_sample_count",
+    "baseline_window_count",
+    "as_of_close_ms",
+    "continuity_reset",
+    "detected",
+    "strongest_window",
+    "headline_state",
+    "headline_direction",
+    "headline_label",
+    "minimum_change_pct",
+    "large_ratio_threshold",
+    "persistence_threshold_pct",
+    "meaning",
+    "permission",
+)
+
+_PUBLIC_CAPITAL_FLOW_WINDOW_FIELDS = (
+    "key",
+    "hours",
+    "ready",
+    "sample_count",
+    "required_sample_count",
+    "baseline_window_count",
+    "state",
+    "label",
+    "as_of_close_ms",
+    "latest_value",
+    "window_start_value",
+    "change_amount",
+    "change_pct",
+    "baseline_average_change_pct",
+    "change_vs_average_ratio",
+    "above_average",
+    "large_inflow",
+    "persistence_pct",
+    "unit",
+    "directional_bias",
+    "directional_bias_label",
+    "price_return_pct",
+    "price_consistency_pct",
+)
 
 _REPORT_FIELDS = (
     "status",
@@ -572,6 +619,37 @@ def _public_continuation_observer(observer: Any) -> dict[str, Any]:
                 "known_count",
                 "unknown_count",
             ),
+        )
+    # Capital-flow history is a separate, advisory-only 1h/2h/4h contract.
+    # Project it from the selected closed-bar observer only; never reconstruct
+    # it from a current OI snapshot or expose its private samples.
+    payload["capital_flow"] = _public_capital_flow(
+        _read(observer, "capital_flow", {})
+    )
+    return payload
+
+
+def _public_capital_flow(capital_flow: Any) -> dict[str, Any]:
+    """Return the strict public projection of the historical OI-flow view."""
+
+    if (
+        not isinstance(capital_flow, Mapping)
+        or capital_flow.get("algorithm_version")
+        != CAPITAL_FLOW_ALGORITHM_VERSION
+    ):
+        return {}
+    payload = _select(capital_flow, _PUBLIC_CAPITAL_FLOW_FIELDS)
+    payload["windows"] = {}
+    windows = _read(capital_flow, "windows", {})
+    if not isinstance(windows, Mapping):
+        return payload
+    for key in ("1h", "2h", "4h"):
+        source = _read(windows, key, None)
+        if not isinstance(source, Mapping):
+            continue
+        payload["windows"][key] = _select(
+            source,
+            _PUBLIC_CAPITAL_FLOW_WINDOW_FIELDS,
         )
     return payload
 

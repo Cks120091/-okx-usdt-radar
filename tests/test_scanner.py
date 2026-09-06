@@ -46,6 +46,22 @@ def aligned_five_minute_candles(count=120, base_ms=1_700_000_100_000):
     ]
 
 
+def aligned_hourly_candles(count=240, base_ms=1_699_999_200_000):
+    return [
+        Candle(
+            base_ms + index * 3_600_000,
+            100.0 + index * 0.4,
+            100.6 + index * 0.4,
+            99.7 + index * 0.4,
+            100.4 + index * 0.4,
+            10.0,
+            12_000_000.0 * (1.5 if index >= count - 4 else 1.0),
+            True,
+        )
+        for index in range(count)
+    ]
+
+
 class FakeClient:
     def __init__(self, fail_id=None):
         self.fail_id = fail_id
@@ -1092,8 +1108,37 @@ class ScannerTests(unittest.TestCase):
         class ReanalysisClient(ContextFakeClient):
             price = 101.0
 
+            def __init__(self):
+                super().__init__()
+                self.history_calls = []
+
             def get_ticker(self, inst_id):
                 return Ticker(inst_id, self.price, self.price - 0.01, self.price + 0.01, 2_000)
+
+            def get_candles(self, inst_id, bar, limit=100):
+                self.candle_requests.append((inst_id, bar, limit))
+                if bar == "5m":
+                    return aligned_five_minute_candles(limit)
+                if bar == "1H":
+                    return aligned_hourly_candles(limit)
+                return candles(limit)
+
+            def get_open_interest_history(self, inst_id, period="5m", limit=20):
+                self.history_calls.append((inst_id, period, limit))
+                interval_ms = 3_600_000 if period == "1H" else 300_000
+                series = (
+                    aligned_hourly_candles(240)
+                    if period == "1H"
+                    else aligned_five_minute_candles(120)
+                )[-limit:]
+                return [
+                    {
+                        "ts": candle.ts + interval_ms,
+                        "oi": 10_000.0 + index * 25.0,
+                        "oiCcy": 100.0 + index * 0.25,
+                    }
+                    for index, candle in enumerate(series)
+                ]
 
         class ReanalysisEngine:
             def analyze(self, *args, previous_story=None):
@@ -1117,12 +1162,27 @@ class ScannerTests(unittest.TestCase):
             {bar for inst_id, bar, _ in client.candle_requests if inst_id == previous.inst_id},
             {"4H", "1H", "15m", "5m"},
         )
+        self.assertEqual(
+            client.history_calls,
+            [
+                ("AAA-USDT-SWAP", "5m", 20),
+                ("AAA-USDT-SWAP", "1H", 30),
+            ],
+        )
 
         client.price = 109.0
+        client.history_calls.clear()
         missed = scanner.reanalyze_instrument(previous)
 
         self.assertIsNone(missed.raw_signal)
         self.assertEqual(missed.reason, "new_trigger_not_an_entry_opportunity")
+        self.assertEqual(
+            client.history_calls,
+            [
+                ("AAA-USDT-SWAP", "5m", 20),
+                ("AAA-USDT-SWAP", "1H", 30),
+            ],
+        )
 
     def test_single_reanalysis_never_repackages_the_same_trigger_event(self):
         previous = Signal(
@@ -1834,6 +1894,7 @@ class ScannerTests(unittest.TestCase):
                 super().__init__()
                 self.instruments = [self.instruments[0]]
                 self.history_calls = []
+                self.failed_history_periods = set()
 
             def get_usdt_swap_instrument(self, inst_id):
                 return self.instruments[0] if inst_id == self.instruments[0].inst_id else None
@@ -1848,14 +1909,23 @@ class ScannerTests(unittest.TestCase):
                 self.candle_requests.append((inst_id, bar, limit))
                 if bar == "5m":
                     return aligned_five_minute_candles(limit)
+                if bar == "1H":
+                    return aligned_hourly_candles(limit)
                 return candles(limit)
 
             def get_open_interest_history(self, inst_id, period="5m", limit=20):
                 self.history_calls.append((inst_id, period, limit))
-                series = aligned_five_minute_candles(120)[-limit:]
+                if period in self.failed_history_periods:
+                    raise RuntimeError(f"fixture {period} historical OI outage")
+                interval_ms = 3_600_000 if period == "1H" else 300_000
+                series = (
+                    aligned_hourly_candles(240)
+                    if period == "1H"
+                    else aligned_five_minute_candles(120)
+                )[-limit:]
                 return [
                     {
-                        "ts": candle.ts + 300_000,
+                        "ts": candle.ts + interval_ms,
                         "oi": 10_000.0 + index * 25.0,
                         "oiCcy": 100.0 + index * 0.25,
                     }
@@ -1895,7 +1965,10 @@ class ScannerTests(unittest.TestCase):
 
         self.assertEqual(
             client.history_calls,
-            [("AAA-USDT-SWAP", "5m", 20)],
+            [
+                ("AAA-USDT-SWAP", "5m", 20),
+                ("AAA-USDT-SWAP", "1H", 30),
+            ],
         )
         short = analysis.short_result.market_state.market_metrics[
             "continuation_lookback"
@@ -1908,6 +1981,18 @@ class ScannerTests(unittest.TestCase):
         self.assertEqual(short["as_of_close_ms"], long["as_of_close_ms"])
         self.assertEqual(short["source_mode"], "HISTORICAL_CLOSED_BARS")
         self.assertNotIn("samples", short)
+        short_capital = short["capital_flow"]
+        long_capital = long["capital_flow"]
+        self.assertEqual(
+            short_capital["algorithm_version"],
+            "CAPITAL_FLOW_LOOKBACK_V1",
+        )
+        self.assertTrue(short_capital["windows"]["4h"]["ready"])
+        self.assertEqual(
+            short_capital["as_of_close_ms"],
+            long_capital["as_of_close_ms"],
+        )
+        self.assertNotIn("samples", short_capital)
         continuation = analysis.short_result.market_state.decision_context[
             "continuation_confirmation"
         ]
@@ -1923,7 +2008,10 @@ class ScannerTests(unittest.TestCase):
         report = scanner.scan_once(scan_mode="FULL")
         self.assertEqual(
             client.history_calls,
-            [("AAA-USDT-SWAP", "5m", 20)],
+            [
+                ("AAA-USDT-SWAP", "5m", 20),
+                ("AAA-USDT-SWAP", "1H", 30),
+            ],
         )
         self.assertEqual(
             report.signals[0].decision_context["continuation_confirmation"][
@@ -1952,26 +2040,67 @@ class ScannerTests(unittest.TestCase):
         )
         self.assertIn("AAA-USDT-SWAP", context_degraded.context_failures)
 
-        def failed_history(*args, **kwargs):
-            raise RuntimeError("fixture historical OI outage")
-
-        client.get_open_interest_history = failed_history
+        client.history_calls.clear()
+        client.failed_history_periods = {"1H"}
         degraded = scanner.scan_instrument(
             "AAA-USDT-SWAP",
             requested_horizon="SHORT",
         )
+        self.assertEqual(
+            client.history_calls,
+            [
+                ("AAA-USDT-SWAP", "5m", 20),
+                ("AAA-USDT-SWAP", "1H", 30),
+            ],
+        )
         self.assertEqual(degraded.short_result.signal.entry_low, "99")
         self.assertEqual(degraded.short_result.signal.stop_loss, "97")
+        self.assertTrue(degraded.short_result.signal.actionable)
+        self.assertFalse(
+            any("大額資金 OI" in message for message in degraded.context.failures)
+        )
         self.assertTrue(
-            any("歷史 OI" in message for message in degraded.errors)
+            any("大額資金 OI" in message for message in degraded.errors)
         )
         degraded_continuation = degraded.short_result.signal.decision_context[
             "continuation_confirmation"
         ]
-        self.assertEqual(degraded_continuation["key"], "UNKNOWN")
+        self.assertEqual(degraded_continuation["core_votes"]["OI"]["state"], "SUPPORT")
         self.assertEqual(
-            degraded_continuation["observer"]["status"],
+            degraded_continuation["observer"]["capital_flow"]["status"],
             "INSUFFICIENT",
+        )
+
+        client.history_calls.clear()
+        client.failed_history_periods = {"5m"}
+        capital_only = scanner.scan_instrument(
+            "AAA-USDT-SWAP",
+            requested_horizon="SHORT",
+        )
+        self.assertEqual(
+            client.history_calls,
+            [
+                ("AAA-USDT-SWAP", "5m", 20),
+                ("AAA-USDT-SWAP", "1H", 30),
+            ],
+        )
+        capital_only_confirmation = capital_only.short_result.signal.decision_context[
+            "continuation_confirmation"
+        ]
+        self.assertEqual(
+            capital_only_confirmation["observer"]["status"],
+            "INSUFFICIENT",
+        )
+        self.assertEqual(
+            capital_only_confirmation["observer"]["capital_flow"][
+                "algorithm_version"
+            ],
+            "CAPITAL_FLOW_LOOKBACK_V1",
+        )
+        self.assertTrue(
+            capital_only_confirmation["observer"]["capital_flow"]["windows"][
+                "4h"
+            ]["ready"]
         )
 
     def test_closed_oi_alignment_includes_latest_close_and_excludes_future_point(self):
@@ -2078,6 +2207,108 @@ class ScannerTests(unittest.TestCase):
             rejected_close,
             [sample["bucket_end_ms"] for sample in samples],
         )
+
+    def test_closed_oi_alignment_supports_completed_hourly_capital_samples(self):
+        hourly = aligned_hourly_candles(35)
+        selected = hourly[-30:]
+        latest_close = selected[-1].ts + 3_600_000
+        history = [
+            {
+                "ts": candle.ts + 3_600_000 + 83_085,
+                "oi": 10_000.0 + index * 10.0,
+                "oiCcy": 100.0 + index * 0.1,
+            }
+            for index, candle in enumerate(selected)
+        ]
+
+        samples = MarketScanner._build_closed_oi_lookback_samples(
+            hourly,
+            history,
+            bar="1H",
+            observed_at_ms=latest_close + 100_000,
+        )
+
+        self.assertEqual(len(samples), 30)
+        self.assertEqual(samples[-1]["bucket_end_ms"], latest_close)
+        self.assertEqual(samples[-1]["candle_bar"], "1H")
+        self.assertEqual(
+            samples[-1]["open_interest_alignment"],
+            "PRECEDING_COMPLETED_1H_CLOSE",
+        )
+        self.assertEqual(
+            samples[-1]["bucket_end_ms"] - samples[-2]["bucket_end_ms"],
+            3_600_000,
+        )
+
+    def test_continuation_refresh_fetches_hourly_history_without_snapshot_fallback(self):
+        class RefreshClient:
+            def __init__(self):
+                self.history_calls = []
+                self.failed_history_periods = set()
+
+            def get_candles(self, inst_id, bar, limit=100):
+                if bar == "5m":
+                    return aligned_five_minute_candles(limit)
+                if bar == "1H":
+                    return aligned_hourly_candles(limit)
+                return candles(limit)
+
+            def get_open_interest_history(self, inst_id, period="5m", limit=20):
+                self.history_calls.append((inst_id, period, limit))
+                if period in self.failed_history_periods:
+                    raise RuntimeError(f"fixture {period} history outage")
+                interval_ms = 3_600_000 if period == "1H" else 300_000
+                series = (
+                    aligned_hourly_candles(240)
+                    if period == "1H"
+                    else aligned_five_minute_candles(120)
+                )[-limit:]
+                return [
+                    {
+                        "ts": candle.ts + interval_ms,
+                        "oi": 10_000.0 + index * 25.0,
+                        "oiCcy": 100.0 + index * 0.25,
+                    }
+                    for index, candle in enumerate(series)
+                ]
+
+        client = RefreshClient()
+        scanner = MarketScanner(client)
+        signal = qualified_signal()
+        refreshed = scanner.refresh_continuation_for_signal(signal)
+
+        self.assertEqual(
+            client.history_calls,
+            [
+                ("AAA-USDT-SWAP", "5m", 20),
+                ("AAA-USDT-SWAP", "1H", 30),
+            ],
+        )
+        self.assertTrue(refreshed["observer"]["capital_flow"]["windows"]["4h"]["ready"])
+
+        client.history_calls.clear()
+        client.failed_history_periods = {"1H"}
+        snapshot_metrics = {
+            **signal.market_metrics,
+            "open_interest_usd": 9_999_999_999.0,
+            "open_interest_change_pct": 99.0,
+            "oi_flow_state": "LONG_BUILD",
+        }
+        degraded = scanner.refresh_continuation_for_signal(
+            replace(signal, market_metrics=snapshot_metrics)
+        )
+
+        self.assertEqual(
+            client.history_calls,
+            [
+                ("AAA-USDT-SWAP", "5m", 20),
+                ("AAA-USDT-SWAP", "1H", 30),
+            ],
+        )
+        capital = degraded["observer"]["capital_flow"]
+        self.assertEqual(capital["status"], "INSUFFICIENT")
+        self.assertFalse(capital["detected"])
+        self.assertEqual(capital["sample_count"], 0)
 
     def test_market_bias_turns_bullish_when_breadth_and_anchors_align(self):
         scanner = MarketScanner(FakeClient())

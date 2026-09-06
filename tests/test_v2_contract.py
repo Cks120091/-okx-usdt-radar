@@ -113,7 +113,7 @@ class V33ContractTests(unittest.TestCase):
         self.assertIn('<body data-active-group="home">', html)
         self.assertIn('body:not([data-active-group="home"]) .command-deck', html)
         self.assertIn("document.body.dataset.activeGroup=group", html)
-        self.assertIn("okx-radar-shell-v4.3-interface-refine-1", service_worker)
+        self.assertIn("okx-radar-shell-v4.3-capital-flow-1", service_worker)
         self.assertIn("市場方向 · 24H 全市場平均 RSI", html)
         self.assertIn("bias.market_average_rsi", html)
         self.assertIn("rsi24.market_rsi_24h_label", html)
@@ -241,7 +241,7 @@ class V33ContractTests(unittest.TestCase):
         self.assertIn("function signalTriggerTime(item)", html)
         self.assertIn("訊號觸發時間（台灣）", html)
         self.assertNotIn("status!=='ENTRY_READY'&&status!=='MISSED_ENTRY'", html)
-        self.assertIn("okx-radar-shell-v4.3-interface-refine-1", service_worker)
+        self.assertIn("okx-radar-shell-v4.3-capital-flow-1", service_worker)
         self.assertIn("$('#preflightRefresh').addEventListener('click',loadPreflight)", html)
         self.assertIn("${decisionPanel(item)}", html)
         self.assertNotIn("showPreflight", html)
@@ -705,6 +705,11 @@ class V33ContractTests(unittest.TestCase):
         self.assertIn("observer.as_of_close_ms", fingerprint)
         self.assertIn("windows['5m']?.bucket_count", fingerprint)
         self.assertIn("windows['60m']?.bucket_count", fingerprint)
+        self.assertIn("observer.capital_flow||{}", fingerprint)
+        self.assertIn("capital.algorithm_version", fingerprint)
+        self.assertIn("capitalWindows['1h']?.change_pct", fingerprint)
+        self.assertIn("capitalWindows['2h']?.change_vs_average_ratio", fingerprint)
+        self.assertIn("capitalWindows['4h']?.state", fingerprint)
         render_signals = html.split("function renderSignals(items", 1)[1].split(
             "function renderWatchlist", 1
         )[0]
@@ -712,9 +717,14 @@ class V33ContractTests(unittest.TestCase):
         self.assertNotIn("${entryBadge(item)}", render_signals)
         self.assertNotIn("${continuationStrip(item)}", render_signals)
         self.assertIn("${continuationStrip(item)}", decision_panel)
+        self.assertIn("${capitalFlowStrip(item)}", decision_panel)
         active_decision = decision_panel.split("const entry=item.entry_eligibility||{}", 1)[1]
         self.assertLess(
             active_decision.index("${continuationStrip(item)}"),
+            active_decision.index("${capitalFlowStrip(item)}"),
+        )
+        self.assertLess(
+            active_decision.index("${capitalFlowStrip(item)}"),
             active_decision.index("${signalTradeGrid(item)}"),
         )
         self.assertIn("signal-status-line", render_signals)
@@ -852,6 +862,45 @@ class V33ContractTests(unittest.TestCase):
         self.assertNotIn("成交量", continuation_markup)
         self.assertNotIn("加成", continuation_markup)
 
+    def test_signal_card_capital_flow_uses_scan_time_history_not_snapshot(self):
+        html = (
+            Path(__file__).parents[1] / "radar" / "static" / "pages.html"
+        ).read_text(encoding="utf-8")
+
+        capital = html.split("function capitalFlowData(item)", 1)[1].split(
+            "function horizonBadge", 1
+        )[0]
+        self.assertIn(
+            "decision_context?.continuation_confirmation?.observer?.capital_flow",
+            capital,
+        )
+        self.assertIn("CAPITAL_FLOW_LOOKBACK_V1", capital)
+        self.assertIn("['1h','2h','4h']", capital)
+        self.assertIn("最近淨增量 vs 前 6 個同長區間", capital)
+        self.assertIn("本窗 ${signed(row.change_pct)}", capital)
+        self.assertIn("row.baseline_average_change_pct", capital)
+        self.assertIn("row.change_vs_average_ratio", capital)
+        self.assertIn("LARGE_LONG", capital)
+        self.assertIn("LARGE_SHORT", capital)
+        self.assertIn("1–4H 歷史資料不足", capital)
+        self.assertIn("不使用上一輪掃描快照代替", capital)
+        self.assertIn("不代表錢包入金或單一大戶", capital)
+        self.assertIn("terminalSignalOutcome(item)||isPreviewItem(item)", capital)
+        self.assertNotIn("open_interest_change_pct", capital)
+        self.assertNotIn("oi_flow_state", capital)
+        self.assertNotIn("taker_buy_pct", capital)
+
+        entry_status = html.split("function itemEntryStatus(item)", 1)[1].split(
+            "function itemStoredEntryStatus", 1
+        )[0]
+        comparator = html.split("function signalSortComparator(a,b){", 1)[1].split(
+            "function renderContextCoverage", 1
+        )[0]
+        self.assertNotIn("capitalFlow", entry_status)
+        self.assertNotIn("capital_flow", entry_status)
+        self.assertNotIn("capitalFlow", comparator)
+        self.assertNotIn("capital_flow", comparator)
+
     def test_pwa_never_caches_live_market_api(self):
         root = Path(__file__).parents[1] / "radar" / "static"
         worker = (root / "service-worker.js").read_text(encoding="utf-8")
@@ -900,7 +949,7 @@ class V33ContractTests(unittest.TestCase):
         self.assertIn("舊 Entry／SL／TP 不會復活", html)
         self.assertIn("舊交易計畫已結束", html)
         self.assertIn("signalTradeGrid(item,{prefix:'原始 ',original:true})", html)
-        self.assertIn("okx-radar-shell-v4.3-interface-refine-1", worker)
+        self.assertIn("okx-radar-shell-v4.3-capital-flow-1", worker)
 
     def test_market_scan_has_no_github_schedule(self):
         root = Path(__file__).parents[1]

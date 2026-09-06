@@ -19,7 +19,10 @@ from .context import (
     detect_anomaly,
     summarize_flow_history,
 )
-from .continuation import summarize_closed_lookback_samples
+from .continuation import (
+    CAPITAL_FLOW_HISTORY_LIMIT,
+    summarize_closed_lookback_samples,
+)
 from .decision import build_decision_context
 from .models import Candle, Instrument, MarketContext, MarketState, RadarReport, Signal, Ticker
 from .repository import SignalRepository, classify_microstructure
@@ -500,6 +503,7 @@ class MarketScanner:
         contexts: dict[str, MarketContext] = {}
         micro_candles: dict[str, list[Candle]] = {}
         continuation_lookback_samples: dict[str, list[dict[str, Any]]] = {}
+        capital_flow_lookback_samples: dict[str, list[dict[str, Any]]] = {}
         context_enriched_count = 0
         context_complete_count = 0
         source_success = Counter()
@@ -525,12 +529,14 @@ class MarketScanner:
                 MarketContext | None,
                 list[Candle],
                 list[dict[str, Any]],
+                list[dict[str, Any]],
                 list[str],
             ]:
                 local_errors: list[str] = []
                 context_timing: list[Candle] = list(bundles[inst_id].get("1H", []))
                 five_minute_candles: list[Candle] = []
                 lookback_samples: list[dict[str, Any]] = []
+                capital_samples: list[dict[str, Any]] = []
                 if include_short or callable(oi_history_loader):
                     try:
                         five_minute_candles = self._cached_or_fresh_candles(
@@ -544,7 +550,7 @@ class MarketScanner:
                             context_timing = five_minute_candles
                     except Exception as exc:
                         local_errors.append(f"5m: {exc}")
-                if callable(oi_history_loader) and five_minute_candles:
+                if callable(oi_history_loader):
                     try:
                         history = oi_history_loader(inst_id, "5m", 20)
                         lookback_samples = self._build_closed_oi_lookback_samples(
@@ -555,6 +561,23 @@ class MarketScanner:
                             local_errors.append("歷史 OI 與已收線 5m K 線無法對齊")
                     except Exception as exc:
                         local_errors.append(f"歷史 OI: {exc}")
+                    try:
+                        capital_history = oi_history_loader(
+                            inst_id,
+                            "1H",
+                            CAPITAL_FLOW_HISTORY_LIMIT,
+                        )
+                        capital_samples = self._build_closed_oi_lookback_samples(
+                            list(bundles[inst_id].get("1H", [])),
+                            capital_history,
+                            bar="1H",
+                        )
+                        if not capital_samples:
+                            local_errors.append(
+                                "大額資金 OI 與已收線 1H K 線無法對齊"
+                            )
+                    except Exception as exc:
+                        local_errors.append(f"大額資金 OI: {exc}")
                 try:
                     context = context_loader(inst_id, open_interest.get(inst_id))
                     context = replace(
@@ -570,7 +593,13 @@ class MarketScanner:
                     # trades or order-book context fails for this symbol.
                     local_errors.append(f"Market Context: {exc}")
                     context = None
-                return context, context_timing, lookback_samples, local_errors
+                return (
+                    context,
+                    context_timing,
+                    lookback_samples,
+                    capital_samples,
+                    local_errors,
+                )
 
             with ThreadPoolExecutor(max_workers=max(1, min(self.config.workers, 8))) as executor:
                 future_map = {
@@ -580,11 +609,18 @@ class MarketScanner:
                 for completed, future in enumerate(as_completed(future_map), 1):
                     inst_id = future_map[future]
                     try:
-                        context, timing, lookback_samples, local_errors = future.result()
+                        (
+                            context,
+                            timing,
+                            lookback_samples,
+                            capital_samples,
+                            local_errors,
+                        ) = future.result()
                         if include_short and timing:
                             micro_candles[inst_id] = timing
                         if callable(oi_history_loader):
                             continuation_lookback_samples[inst_id] = lookback_samples
+                            capital_flow_lookback_samples[inst_id] = capital_samples
                         if context is None:
                             context_failures[inst_id] = (
                                 local_errors or ["Deep Data 暫缺"]
@@ -719,7 +755,7 @@ class MarketScanner:
 
         # Historical OI is a scan-time advisory.  Attach it only after all
         # professional context transformations so it cannot be lost, and keep
-        # the same raw closed 5m sequence shared by SHORT and LONG.
+        # the same raw closed 5m and 1H sequences shared by SHORT and LONG.
         for inst_id, samples in continuation_lookback_samples.items():
             for horizon, results in (
                 ("SHORT", short_results),
@@ -731,6 +767,10 @@ class MarketScanner:
                         result,
                         samples,
                         horizon,
+                        capital_samples=capital_flow_lookback_samples.get(
+                            inst_id,
+                            [],
+                        ),
                     )
 
         if open_interest:
@@ -1193,11 +1233,13 @@ class MarketScanner:
         context_applier = getattr(self.engine, "apply_market_context", None)
 
         errors: list[str] = []
+        advisory_errors: list[str] = []
         bundle = self._fetch_bundle(inst_id, tuple(core_bars))
         bar_errors: dict[str, Exception] = {}
         open_interest_usd: float | None = None
         timing: list[Candle] = []
         lookback_samples: list[dict[str, Any]] = []
+        capital_samples: list[dict[str, Any]] = []
         loaded_context: MarketContext | None = None
         try:
             if callable(oi_loader):
@@ -1213,7 +1255,7 @@ class MarketScanner:
             except Exception as exc:
                 bar_errors["5m"] = exc
 
-        if callable(oi_history_loader) and timing:
+        if callable(oi_history_loader):
             try:
                 history = self._single_scan_call(
                     oi_history_loader,
@@ -1228,9 +1270,29 @@ class MarketScanner:
                     history,
                 )
                 if not lookback_samples:
-                    errors.append("歷史 OI 與已收線 5m K 線無法對齊")
+                    advisory_errors.append("歷史 OI 與已收線 5m K 線無法對齊")
             except Exception as exc:
-                errors.append(f"歷史 OI：{exc}")
+                advisory_errors.append(f"歷史 OI：{exc}")
+            try:
+                capital_history = self._single_scan_call(
+                    oi_history_loader,
+                    inst_id,
+                    "1H",
+                    CAPITAL_FLOW_HISTORY_LIMIT,
+                    _retry_limit=1,
+                    _timeout_limit=6.0,
+                )
+                capital_samples = self._build_closed_oi_lookback_samples(
+                    list(bundle.get("1H", [])),
+                    capital_history,
+                    bar="1H",
+                )
+                if not capital_samples:
+                    advisory_errors.append(
+                        "大額資金 OI 與已收線 1H K 線無法對齊"
+                    )
+            except Exception as exc:
+                advisory_errors.append(f"大額資金 OI：{exc}")
 
         if callable(context_loader) and callable(context_applier):
             try:
@@ -1397,12 +1459,14 @@ class MarketScanner:
                     short_result,
                     lookback_samples,
                     "SHORT",
+                    capital_samples=capital_samples,
                 )
             if long_result is not None:
                 long_result = self._attach_continuation_lookback(
                     long_result,
                     lookback_samples,
                     "LONG",
+                    capital_samples=capital_samples,
                 )
 
         if open_interest_usd is not None:
@@ -1491,7 +1555,7 @@ class MarketScanner:
             short_result=finalized_short,
             long_result=finalized_long,
             analyzed_at=analyzed_at,
-            errors=list(dict.fromkeys(errors)),
+            errors=list(dict.fromkeys([*errors, *advisory_errors])),
         )
 
     @staticmethod
@@ -1632,6 +1696,7 @@ class MarketScanner:
         timing: list[Candle] = []
         lookback_candles: list[Candle] = []
         lookback_samples: list[dict[str, Any]] = []
+        capital_samples: list[dict[str, Any]] = []
         if horizon == "SHORT":
             try:
                 timing = self.client.get_candles(
@@ -1650,24 +1715,40 @@ class MarketScanner:
 
         oi_history_loader = getattr(self.client, "get_open_interest_history", None)
         if callable(oi_history_loader):
-            try:
-                if not lookback_candles:
+            if not lookback_candles:
+                try:
                     lookback_candles = self.client.get_candles(
                         inst_id,
                         "5m",
                         self.config.candle_limit_5m,
                     )
+                except Exception:
+                    # Historical continuation is advisory-only. Its outage
+                    # must not become a MarketContext API failure or gate.
+                    pass
+            try:
                 history = oi_history_loader(inst_id, "5m", 20)
                 lookback_samples = self._build_closed_oi_lookback_samples(
                     lookback_candles,
                     history,
                 )
-                if not lookback_samples:
-                    context_errors.append(
-                        "歷史 OI 與已收線 5m K 線無法對齊"
-                    )
-            except Exception as exc:
-                context_errors.append(f"歷史 OI: {exc}")
+            except Exception:
+                pass
+            try:
+                capital_history = oi_history_loader(
+                    inst_id,
+                    "1H",
+                    CAPITAL_FLOW_HISTORY_LIMIT,
+                )
+                capital_samples = self._build_closed_oi_lookback_samples(
+                    list(bundle.get("1H", [])),
+                    capital_history,
+                    bar="1H",
+                )
+            except Exception:
+                # Capital flow is also advisory-only and fails closed through
+                # an INSUFFICIENT summary, never through the snapshot OI.
+                pass
 
         context = MarketContext(
             inst_id=inst_id,
@@ -1743,6 +1824,7 @@ class MarketScanner:
                 result,
                 lookback_samples,
                 horizon,
+                capital_samples=capital_samples,
             )
 
         if open_interest_usd is not None:
@@ -2102,19 +2184,22 @@ class MarketScanner:
         candles: list[Candle],
         history: list[dict[str, Any]],
         *,
+        bar: str = "5m",
         observed_at_ms: int | None = None,
     ) -> list[dict[str, Any]]:
-        """Align raw historical OI with exact confirmed 5m candle closes.
+        """Align raw historical OI with exact confirmed candle closes.
 
         OKX candle timestamps identify the candle open, while Rubik ``oi.ts``
         is documented as the data-generation time and may contain seconds or
         milliseconds rather than an exact candle boundary.  Each historical
-        OI point is therefore assigned to the most recent confirmed 5m close;
+        OI point is therefore assigned to the most recent confirmed bar close;
         its original timestamp is retained for freshness/continuity checks.
         Missing or conflicting endpoints are never filled or interpolated.
         """
 
-        interval_ms = cls._bar_interval_ms["5m"]
+        interval_ms = cls._bar_interval_ms.get(bar)
+        if interval_ms is None:
+            return []
         candles_by_start = {
             int(candle.ts): candle
             for candle in candles
@@ -2217,11 +2302,13 @@ class MarketScanner:
                     "bucket_end_ms": close_timestamp,
                     "open_interest_contracts": oi["contracts"],
                     "open_interest_ccy": oi["currency_amount"],
-                    "open_interest_alignment": "PRECEDING_COMPLETED_5M_CLOSE",
+                    "open_interest_alignment": (
+                        f"PRECEDING_COMPLETED_{bar.upper()}_CLOSE"
+                    ),
                     "price": candle.close,
                     "candle_ts": candle.ts,
                     "candle_close_ts": close_timestamp,
-                    "candle_bar": "5m",
+                    "candle_bar": bar,
                     "candle_open": candle.open,
                     "candle_close": candle.close,
                     "quote_volume": candle.quote_volume,
@@ -2240,6 +2327,8 @@ class MarketScanner:
         result: AnalysisResult,
         samples: list[dict[str, Any]],
         horizon: str,
+        *,
+        capital_samples: list[dict[str, Any]] | None = None,
     ) -> AnalysisResult:
         state = result.market_state
         if state is None:
@@ -2248,6 +2337,7 @@ class MarketScanner:
             samples,
             horizon,
             state.direction,
+            capital_samples=capital_samples,
         )
         summary["attempted_at_ms"] = int(time.time() * 1000)
         metrics = dict(state.market_metrics)
@@ -2278,21 +2368,54 @@ class MarketScanner:
         continuation model used by a full scan.
         """
 
-        candles = self.client.get_candles(
-            signal.inst_id,
-            "5m",
-            self.config.candle_limit_5m,
-        )
-        history = self.client.get_open_interest_history(
-            signal.inst_id,
-            "5m",
-            20,
-        )
+        try:
+            candles = self.client.get_candles(
+                signal.inst_id,
+                "5m",
+                self.config.candle_limit_5m,
+            )
+        except Exception:
+            candles = []
+        try:
+            history = self._single_scan_call(
+                self.client.get_open_interest_history,
+                signal.inst_id,
+                "5m",
+                20,
+                _retry_limit=1,
+                _timeout_limit=6.0,
+            )
+        except Exception:
+            history = []
         samples = self._build_closed_oi_lookback_samples(candles, history)
+        try:
+            capital_candles = self._cached_or_fresh_candles(
+                signal.inst_id,
+                "1H",
+            )
+        except Exception:
+            capital_candles = []
+        try:
+            capital_history = self._single_scan_call(
+                self.client.get_open_interest_history,
+                signal.inst_id,
+                "1H",
+                CAPITAL_FLOW_HISTORY_LIMIT,
+                _retry_limit=1,
+                _timeout_limit=6.0,
+            )
+        except Exception:
+            capital_history = []
+        capital_samples = self._build_closed_oi_lookback_samples(
+            capital_candles,
+            capital_history,
+            bar="1H",
+        )
         summary = summarize_closed_lookback_samples(
             samples,
             signal.radar_horizon,
             signal.direction,
+            capital_samples=capital_samples,
         )
         summary["attempted_at_ms"] = int(time.time() * 1000)
         metrics = dict(signal.market_metrics)

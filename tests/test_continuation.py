@@ -1,7 +1,10 @@
 import unittest
 
 from radar.continuation import (
+    CAPITAL_FLOW_ALGORITHM_VERSION,
+    CAPITAL_FLOW_HISTORY_LIMIT,
     LOOKBACK_ALGORITHM_VERSION,
+    summarize_capital_flow_samples,
     summarize_closed_lookback_samples,
     summarize_continuation_samples,
 )
@@ -57,6 +60,30 @@ def closed_lookback_samples(count, **kwargs):
         sample.pop("taker_buy_volume", None)
         sample.pop("taker_sell_volume", None)
         sample.pop("cvd", None)
+    return samples
+
+
+def _compounded_values(changes, *, start=1_000.0):
+    values = [float(start)]
+    for change in changes:
+        values.append(values[-1] * (1.0 + float(change) / 100.0))
+    return values
+
+
+def capital_flow_samples(oi_changes, *, price_changes=None):
+    price_changes = price_changes or [0.20] * len(oi_changes)
+    oi_values = _compounded_values(oi_changes, start=100_000.0)
+    prices = _compounded_values(price_changes, start=100.0)
+    samples = observer_samples(
+        len(oi_values),
+        step_ms=3_600_000,
+        oi_values=oi_values,
+        prices=prices,
+    )
+    for index, sample in enumerate(samples):
+        sample["open_interest_ccy"] = oi_values[index] / 10.0
+        sample["open_interest_alignment"] = "PRECEDING_COMPLETED_1H_CLOSE"
+        sample["candle_bar"] = "1H"
     return samples
 
 
@@ -335,6 +362,269 @@ class ContinuationAverageTests(unittest.TestCase):
                 for domain in wrong_result["windows"]["10m"]["domains"].values()
             )
         )
+
+
+class CapitalFlowLookbackTests(unittest.TestCase):
+    def test_large_inflow_is_compared_with_six_prior_non_overlapping_windows(self):
+        samples = capital_flow_samples([0.10] * 24 + [1.0] * 4)
+
+        result = summarize_capital_flow_samples(samples)
+        row = result["windows"]["4h"]
+
+        self.assertEqual(result["algorithm_version"], CAPITAL_FLOW_ALGORITHM_VERSION)
+        self.assertEqual(result["source_mode"], "HISTORICAL_CLOSED_1H_AT_SCAN")
+        self.assertEqual(result["status"], "READY")
+        self.assertEqual(result["sample_count"], 29)
+        self.assertEqual(result["required_sample_count"], 29)
+        self.assertEqual(result["baseline_window_count"], 6)
+        self.assertEqual(result["minimum_change_pct"], 0.5)
+        self.assertEqual(result["large_ratio_threshold"], 1.5)
+        self.assertEqual(result["persistence_threshold_pct"], 60.0)
+        self.assertTrue(result["detected"])
+        self.assertEqual(result["headline_state"], "LARGE_LONG")
+        self.assertEqual(result["headline_direction"], "LONG")
+        self.assertEqual(row["state"], "LARGE_LONG")
+        self.assertTrue(row["large_inflow"])
+        self.assertTrue(row["above_average"])
+        self.assertGreater(row["change_pct"], 0.5)
+        self.assertGreaterEqual(row["change_vs_average_ratio"], 1.5)
+        self.assertEqual(row["persistence_pct"], 100.0)
+        self.assertEqual(row["directional_bias"], "LONG")
+        self.assertEqual(row["price_consistency_pct"], 100.0)
+        self.assertEqual(row["unit"], "CONTRACTS")
+
+    def test_large_inflow_can_be_directionally_short(self):
+        samples = capital_flow_samples(
+            [0.10] * 24 + [1.0] * 4,
+            price_changes=[-0.20] * 28,
+        )
+
+        result = summarize_capital_flow_samples(samples)
+
+        self.assertEqual(result["headline_state"], "LARGE_SHORT")
+        self.assertEqual(result["headline_direction"], "SHORT")
+        self.assertEqual(result["windows"]["4h"]["state"], "LARGE_SHORT")
+        self.assertLess(result["windows"]["4h"]["price_return_pct"], -0.05)
+
+    def test_large_inflow_without_confirmed_price_direction_stays_unconfirmed(self):
+        samples = capital_flow_samples(
+            [0.10] * 24 + [1.0] * 4,
+            price_changes=[0.0] * 28,
+        )
+
+        result = summarize_capital_flow_samples(samples)
+
+        self.assertTrue(result["detected"])
+        self.assertEqual(result["headline_state"], "LARGE_UNCONFIRMED")
+        self.assertEqual(result["headline_direction"], "NEUTRAL")
+        self.assertEqual(
+            result["windows"]["4h"]["state"],
+            "LARGE_UNCONFIRMED",
+        )
+
+    def test_one_directional_window_cannot_override_an_unconfirmed_large_window(self):
+        samples = capital_flow_samples(
+            [0.10] * 24 + [1.0] * 4,
+            price_changes=[0.20] * 24 + [-0.10, -0.10, -0.10, 0.30],
+        )
+
+        result = summarize_capital_flow_samples(samples)
+
+        self.assertEqual(result["windows"]["1h"]["state"], "LARGE_LONG")
+        self.assertEqual(
+            result["windows"]["4h"]["state"],
+            "LARGE_UNCONFIRMED",
+        )
+        self.assertEqual(result["headline_state"], "LARGE_UNCONFIRMED")
+        self.assertEqual(result["headline_direction"], "NEUTRAL")
+
+    def test_conflicting_large_window_directions_have_mixed_headline(self):
+        price_changes = [0.20] * 24 + [1.0, 1.0, 1.0, -0.20]
+        samples = capital_flow_samples(
+            [0.10] * 24 + [1.0] * 4,
+            price_changes=price_changes,
+        )
+
+        result = summarize_capital_flow_samples(samples)
+
+        self.assertEqual(result["windows"]["1h"]["state"], "LARGE_SHORT")
+        self.assertEqual(result["windows"]["4h"]["state"], "LARGE_LONG")
+        self.assertEqual(result["headline_state"], "LARGE_MIXED")
+        self.assertEqual(result["headline_direction"], "MIXED")
+
+    def test_minimum_change_without_beating_average_is_not_large(self):
+        result = summarize_capital_flow_samples(
+            capital_flow_samples([1.0] * 6 + [0.60])
+        )
+        row = result["windows"]["1h"]
+
+        self.assertGreaterEqual(row["change_pct"], 0.5)
+        self.assertFalse(row["above_average"])
+        self.assertFalse(row["large_inflow"])
+        self.assertEqual(row["state"], "NORMAL_INCREASE")
+        self.assertEqual(result["headline_state"], "NO_LARGE_INFLOW")
+
+    def test_above_average_but_below_large_ratio_is_reported_separately(self):
+        result = summarize_capital_flow_samples(
+            capital_flow_samples([0.50] * 6 + [0.60])
+        )
+        row = result["windows"]["1h"]
+
+        self.assertTrue(row["above_average"])
+        self.assertLess(row["change_vs_average_ratio"], 1.5)
+        self.assertFalse(row["large_inflow"])
+        self.assertEqual(row["state"], "ABOVE_AVERAGE")
+
+    def test_outflow_is_not_mislabelled_as_new_capital(self):
+        result = summarize_capital_flow_samples(
+            capital_flow_samples([0.10] * 6 + [-1.0])
+        )
+        row = result["windows"]["1h"]
+
+        self.assertLess(row["change_amount"], 0)
+        self.assertLess(row["change_pct"], 0)
+        self.assertEqual(row["state"], "OUTFLOW")
+        self.assertFalse(row["above_average"])
+        self.assertFalse(row["large_inflow"])
+        self.assertFalse(result["detected"])
+
+    def test_oi_usd_never_changes_capital_flow_result(self):
+        samples = capital_flow_samples([0.0] * 7)
+        for index, sample in enumerate(samples):
+            sample["open_interest_usd"] = 1_000.0 * (10 ** index)
+
+        result = summarize_capital_flow_samples(samples)
+        row = result["windows"]["1h"]
+
+        self.assertTrue(row["ready"])
+        self.assertEqual(row["change_pct"], 0.0)
+        self.assertEqual(row["state"], "FLAT")
+        self.assertFalse(row["large_inflow"])
+
+    def test_one_two_and_four_hour_windows_require_8_15_and_29_endpoints(self):
+        seven = summarize_capital_flow_samples(capital_flow_samples([0.10] * 6))
+        eight = summarize_capital_flow_samples(capital_flow_samples([0.10] * 7))
+        fourteen = summarize_capital_flow_samples(capital_flow_samples([0.10] * 13))
+        fifteen = summarize_capital_flow_samples(capital_flow_samples([0.10] * 14))
+        twenty_eight = summarize_capital_flow_samples(
+            capital_flow_samples([0.10] * 27)
+        )
+        twenty_nine = summarize_capital_flow_samples(
+            capital_flow_samples([0.10] * 28)
+        )
+
+        self.assertFalse(seven["windows"]["1h"]["ready"])
+        self.assertTrue(eight["windows"]["1h"]["ready"])
+        self.assertFalse(fourteen["windows"]["2h"]["ready"])
+        self.assertTrue(fifteen["windows"]["2h"]["ready"])
+        self.assertFalse(twenty_eight["windows"]["4h"]["ready"])
+        self.assertTrue(twenty_nine["windows"]["4h"]["ready"])
+        self.assertEqual(twenty_nine["windows"]["1h"]["required_sample_count"], 8)
+        self.assertEqual(twenty_nine["windows"]["2h"]["required_sample_count"], 15)
+        self.assertEqual(twenty_nine["windows"]["4h"]["required_sample_count"], 29)
+
+    def test_gap_and_conflicting_duplicate_are_never_filled(self):
+        gapped = capital_flow_samples([0.10] * 28)
+        gapped.pop(-3)
+        gap_result = summarize_capital_flow_samples(gapped)
+
+        conflicted = capital_flow_samples([0.10] * 28)
+        duplicate = dict(conflicted[-3])
+        duplicate["open_interest_contracts"] *= 2
+        conflict_result = summarize_capital_flow_samples([*conflicted, duplicate])
+
+        self.assertEqual(gap_result["sample_count"], 2)
+        self.assertFalse(gap_result["windows"]["1h"]["ready"])
+        self.assertTrue(gap_result["continuity_reset"])
+        self.assertEqual(conflict_result["sample_count"], 2)
+        self.assertFalse(conflict_result["windows"]["1h"]["ready"])
+        self.assertTrue(conflict_result["continuity_reset"])
+
+    def test_unclosed_or_bad_source_clock_endpoint_does_not_count(self):
+        unclosed = capital_flow_samples([0.10] * 28)
+        unclosed[-1]["observed_at_ms"] = unclosed[-1]["bucket_end_ms"] - 1
+        unclosed_result = summarize_capital_flow_samples(unclosed)
+
+        bad_clock = capital_flow_samples([0.10] * 28)
+        bad_clock[-1]["source_timestamps"]["open_interest"] = (
+            bad_clock[-1]["bucket_end_ms"] + 3_600_000
+        )
+        bad_clock_result = summarize_capital_flow_samples(bad_clock)
+
+        self.assertEqual(unclosed_result["sample_count"], 28)
+        self.assertFalse(unclosed_result["windows"]["4h"]["ready"])
+        self.assertEqual(
+            unclosed_result["as_of_close_ms"],
+            unclosed[-2]["bucket_end_ms"],
+        )
+        self.assertEqual(bad_clock_result["sample_count"], 28)
+        self.assertFalse(bad_clock_result["windows"]["4h"]["ready"])
+
+    def test_oi_must_use_one_consistent_non_usd_unit_for_the_whole_window(self):
+        fallback = capital_flow_samples([0.10] * 7)
+        fallback[3]["open_interest_contracts"] = None
+        fallback_result = summarize_capital_flow_samples(fallback)
+        self.assertEqual(fallback_result["windows"]["1h"]["unit"], "BASE_CCY")
+
+        mixed = capital_flow_samples([0.10] * 7)
+        mixed[3]["open_interest_contracts"] = None
+        mixed[4]["open_interest_ccy"] = None
+        mixed_result = summarize_capital_flow_samples(mixed)
+        self.assertFalse(mixed_result["windows"]["1h"]["ready"])
+        self.assertEqual(mixed_result["windows"]["1h"]["state"], "UNKNOWN")
+
+    def test_positive_oi_persistence_must_reach_sixty_percent(self):
+        changes = [0.10] * 24 + [-0.20, -0.20, -0.20, 4.0]
+        result = summarize_capital_flow_samples(capital_flow_samples(changes))
+        row = result["windows"]["4h"]
+
+        self.assertGreater(row["change_pct"], 0.5)
+        self.assertGreater(row["change_vs_average_ratio"], 1.5)
+        self.assertEqual(row["persistence_pct"], 25.0)
+        self.assertFalse(row["large_inflow"])
+
+    def test_price_direction_is_independent_of_trigger_direction(self):
+        capital = capital_flow_samples([0.10] * 24 + [1.0] * 4)
+        result = summarize_closed_lookback_samples(
+            closed_lookback_samples(3),
+            "SHORT",
+            "SHORT",
+            capital_samples=capital,
+        )
+
+        self.assertEqual(result["direction"], "SHORT")
+        self.assertEqual(result["capital_flow"]["headline_direction"], "LONG")
+        self.assertEqual(
+            result["capital_flow"]["windows"]["4h"]["directional_bias"],
+            "LONG",
+        )
+
+    def test_existing_continuation_values_do_not_change_when_capital_is_added(self):
+        lookback = closed_lookback_samples(3)
+        without_capital = summarize_closed_lookback_samples(
+            lookback,
+            "SHORT",
+            "LONG",
+        )
+        with_capital = summarize_closed_lookback_samples(
+            lookback,
+            "SHORT",
+            "LONG",
+            capital_samples=capital_flow_samples([0.10] * 7),
+        )
+
+        self.assertEqual(
+            {key: value for key, value in without_capital.items() if key != "capital_flow"},
+            {key: value for key, value in with_capital.items() if key != "capital_flow"},
+        )
+        self.assertEqual(without_capital["capital_flow"]["status"], "INSUFFICIENT")
+        self.assertTrue(with_capital["capital_flow"]["windows"]["1h"]["ready"])
+
+    def test_history_is_bounded_to_thirty_rows(self):
+        result = summarize_capital_flow_samples(capital_flow_samples([0.10] * 30))
+
+        self.assertEqual(CAPITAL_FLOW_HISTORY_LIMIT, 30)
+        self.assertEqual(result["sample_count"], 30)
 
 
 class ClosedLookbackTests(unittest.TestCase):

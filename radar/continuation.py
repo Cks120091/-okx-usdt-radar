@@ -6,6 +6,8 @@ from typing import Any, Iterable, Mapping
 
 ALGORITHM_VERSION = "CONTINUATION_AVG_V2"
 LOOKBACK_ALGORITHM_VERSION = "CONTINUATION_LOOKBACK_V1"
+CAPITAL_FLOW_ALGORITHM_VERSION = "CAPITAL_FLOW_LOOKBACK_V1"
+CAPITAL_FLOW_HISTORY_LIMIT = 30
 
 _WINDOW_SPECS = {
     "SHORT": (
@@ -20,6 +22,19 @@ _WINDOW_SPECS = {
 
 _INTERVAL_SECONDS = {"SHORT": 60, "LONG": 300}
 _LOOKBACK_INTERVAL_SECONDS = 300
+_CAPITAL_FLOW_INTERVAL_MS = 3_600_000
+_CAPITAL_FLOW_BASELINE_WINDOW_COUNT = 6
+_CAPITAL_FLOW_WINDOW_SPECS = (
+    ("1h", 1, 8),
+    ("2h", 2, 15),
+    ("4h", 4, 29),
+)
+_CAPITAL_FLOW_MIN_CHANGE_PCT = 0.50
+_CAPITAL_FLOW_MIN_RATIO = 1.50
+_CAPITAL_FLOW_RATIO_FLOOR_PCT = 0.10
+_CAPITAL_FLOW_MIN_PERSISTENCE_PCT = 60.0
+_CAPITAL_FLOW_MIN_PRICE_RETURN_PCT = 0.05
+_CAPITAL_FLOW_MIN_PRICE_CONSISTENCY_PCT = 60.0
 _LOOKBACK_WINDOW_SPECS = {
     # Historical lookback always uses completed 5m bars.  The number in the
     # third position is the number of intervals, so each window needs one
@@ -174,6 +189,8 @@ def summarize_closed_lookback_samples(
     samples: Iterable[Mapping[str, Any]],
     horizon: str,
     direction: str,
+    *,
+    capital_samples: Iterable[Mapping[str, Any]] | None = None,
 ) -> dict[str, Any]:
     """Summarize completed historical 5m bars available at scan time.
 
@@ -262,6 +279,434 @@ def summarize_closed_lookback_samples(
             "這是同向延續證據，不是勝率，也不會建立、取消或翻轉正式 Trigger。"
         ),
         "permission": "ADVISORY_ONLY_NEVER_CHANGES_TRIGGER_OR_PLAN",
+        "capital_flow": summarize_capital_flow_samples(capital_samples or []),
+    }
+
+
+def summarize_capital_flow_samples(
+    samples: Iterable[Mapping[str, Any]],
+) -> dict[str, Any]:
+    """Compare recent closed 1H OI changes with six prior like-for-like windows.
+
+    Every comparison is made from exact, contiguous, completed 1H endpoints
+    already aligned by the scanner.  The current 1H/2H/4H net change is
+    compared with the mean absolute percentage change of the preceding six
+    non-overlapping windows of the same duration.  Missing or conflicting
+    endpoints are never filled, and USD notional is never an OI input.
+    """
+
+    all_samples = _bounded_capital_flow_samples(samples)
+    prepared = _continuous_tail_ms(all_samples, _CAPITAL_FLOW_INTERVAL_MS)
+    continuity_reset = len(prepared) < len(all_samples)
+    windows = {
+        key: _summarize_capital_flow_window(
+            prepared,
+            key,
+            hours,
+            required_sample_count,
+        )
+        for key, hours, required_sample_count in _CAPITAL_FLOW_WINDOW_SPECS
+    }
+    ready_rows = [row for row in windows.values() if row["ready"]]
+    detected_rows = [row for row in ready_rows if row["large_inflow"]]
+
+    strongest: dict[str, Any] | None
+    if detected_rows:
+        strongest = max(
+            detected_rows,
+            key=lambda row: (
+                _number(row.get("change_vs_average_ratio")) or 0.0,
+                _number(row.get("change_pct")) or 0.0,
+                int(row["hours"]),
+            ),
+        )
+        detected_directions = {
+            row["directional_bias"]
+            for row in detected_rows
+            if row["directional_bias"] in {"LONG", "SHORT"}
+        }
+        has_unconfirmed_direction = any(
+            row["directional_bias"] == "NEUTRAL" for row in detected_rows
+        )
+        if detected_directions == {"LONG", "SHORT"}:
+            headline_state = "LARGE_MIXED"
+            headline_direction = "MIXED"
+            headline_label = "多個推定大量資金時窗的多空方向互相衝突"
+        elif has_unconfirmed_direction:
+            # One directional short window must not overstate an otherwise
+            # unconfirmed wider-window build as globally long or short.
+            headline_state = "LARGE_UNCONFIRMED"
+            headline_direction = "NEUTRAL"
+            headline_label = "推定有大量資金流入，但多空方向尚未確認"
+        elif "LONG" in detected_directions:
+            headline_state = "LARGE_LONG"
+            headline_direction = "LONG"
+            headline_label = "推定有大量偏多資金流入"
+        elif "SHORT" in detected_directions:
+            headline_state = "LARGE_SHORT"
+            headline_direction = "SHORT"
+            headline_label = "推定有大量偏空資金流入"
+        else:
+            headline_state = "LARGE_UNCONFIRMED"
+            headline_direction = "NEUTRAL"
+            headline_label = "推定有大量資金流入，但多空方向尚未確認"
+    else:
+        if ready_rows:
+            strongest = max(
+                ready_rows,
+                key=lambda row: (
+                    _number(row.get("change_vs_average_ratio")) or 0.0,
+                    abs(_number(row.get("change_pct")) or 0.0),
+                    int(row["hours"]),
+                ),
+            )
+            headline_state = "NO_LARGE_INFLOW"
+            headline_direction = "NEUTRAL"
+            headline_label = "未推定出高於歷史平均的大量資金流入"
+        else:
+            strongest = None
+            headline_state = "INSUFFICIENT"
+            headline_direction = "NEUTRAL"
+            headline_label = "完整 1H 歷史 OI 資料不足"
+
+    required_sample_count = _CAPITAL_FLOW_WINDOW_SPECS[-1][2]
+    status = (
+        "READY"
+        if windows["4h"]["ready"]
+        else "PARTIAL"
+        if ready_rows
+        else "INSUFFICIENT"
+    )
+    return {
+        "algorithm_version": CAPITAL_FLOW_ALGORITHM_VERSION,
+        "source_mode": "HISTORICAL_CLOSED_1H_AT_SCAN",
+        "status": status,
+        "sample_count": len(prepared),
+        "required_sample_count": required_sample_count,
+        "baseline_window_count": _CAPITAL_FLOW_BASELINE_WINDOW_COUNT,
+        "as_of_close_ms": (
+            _integer(prepared[-1].get("bucket_end_ms")) if prepared else None
+        ),
+        "detected": bool(detected_rows),
+        "strongest_window": strongest["key"] if strongest else None,
+        "headline_state": headline_state,
+        "headline_direction": headline_direction,
+        "headline_label": headline_label,
+        "minimum_change_pct": _CAPITAL_FLOW_MIN_CHANGE_PCT,
+        "large_ratio_threshold": _CAPITAL_FLOW_MIN_RATIO,
+        "persistence_threshold_pct": _CAPITAL_FLOW_MIN_PERSISTENCE_PCT,
+        "thresholds": {
+            "minimum_inflow_change_pct": _CAPITAL_FLOW_MIN_CHANGE_PCT,
+            "minimum_change_vs_average_ratio": _CAPITAL_FLOW_MIN_RATIO,
+            "average_denominator_floor_pct": _CAPITAL_FLOW_RATIO_FLOOR_PCT,
+            "minimum_oi_persistence_pct": _CAPITAL_FLOW_MIN_PERSISTENCE_PCT,
+            "minimum_price_return_pct": _CAPITAL_FLOW_MIN_PRICE_RETURN_PCT,
+            "minimum_price_consistency_pct": (
+                _CAPITAL_FLOW_MIN_PRICE_CONSISTENCY_PCT
+            ),
+        },
+        "meaning": (
+            "以掃描當下已完整收線的 1H OI 端點，檢查最近 1H／2H／4H "
+            "淨變動是否明顯高於前六個互不重疊同長時窗的平均絕對變動；"
+            "多空方向只由同一目前時窗的完整 1H 收盤價格推定。"
+        ),
+        "permission": "ADVISORY_ONLY_NEVER_CHANGES_TRIGGER_OR_PLAN",
+        "continuity_reset": continuity_reset,
+        "windows": windows,
+    }
+
+
+def _bounded_capital_flow_samples(
+    samples: Iterable[Mapping[str, Any]],
+) -> list[dict[str, Any]]:
+    """Return at most 30 trustworthy, ordered, completed 1H endpoints."""
+
+    by_timestamp: dict[int, dict[str, Any]] = {}
+    invalid_timestamps: set[int] = set()
+    for source in samples:
+        if not isinstance(source, Mapping):
+            continue
+        raw_timestamp = _integer(source.get("bucket_end_ms"))
+        timestamp = _canonical_capital_flow_end(source)
+        if timestamp is None:
+            # A malformed duplicate must not be ignored in favour of a valid
+            # row at the same close.  Invalidate that endpoint fail-closed.
+            if (
+                raw_timestamp is not None
+                and raw_timestamp > 0
+                and raw_timestamp % _CAPITAL_FLOW_INTERVAL_MS == 0
+            ):
+                by_timestamp.pop(raw_timestamp, None)
+                invalid_timestamps.add(raw_timestamp)
+            continue
+        if timestamp in invalid_timestamps:
+            continue
+        normalized = dict(source)
+        existing = by_timestamp.get(timestamp)
+        if existing is not None and _capital_flow_duplicate_conflicts(
+            existing,
+            normalized,
+        ):
+            by_timestamp.pop(timestamp, None)
+            invalid_timestamps.add(timestamp)
+            continue
+        by_timestamp[timestamp] = normalized
+    ordered = [by_timestamp[key] for key in sorted(by_timestamp)]
+    return ordered[-CAPITAL_FLOW_HISTORY_LIMIT:]
+
+
+def _canonical_capital_flow_end(sample: Mapping[str, Any]) -> int | None:
+    bucket_end = _integer(sample.get("bucket_end_ms"))
+    bucket_start = _integer(sample.get("bucket_start_ms"))
+    observed_at = _integer(sample.get("observed_at_ms"))
+    candle_start = _integer(sample.get("candle_ts"))
+    candle_close = _integer(sample.get("candle_close_ts"))
+    source_timestamp = _source_timestamp(sample, "open_interest")
+    price = _number(sample.get("price"))
+    contracts = _number(sample.get("open_interest_contracts"))
+    currency = _number(sample.get("open_interest_ccy"))
+    candle_bar = str(sample.get("candle_bar") or "1H").strip().upper()
+    explicitly_unconfirmed = any(
+        key in sample and not bool(sample.get(key))
+        for key in ("confirmed", "candle_confirmed")
+    )
+    if (
+        bucket_end is None
+        or bucket_end <= 0
+        or bucket_end % _CAPITAL_FLOW_INTERVAL_MS != 0
+        or bucket_start != bucket_end - _CAPITAL_FLOW_INTERVAL_MS
+        or observed_at is None
+        or observed_at < bucket_end
+        or candle_start != bucket_start
+        or candle_close != bucket_end
+        or candle_bar != "1H"
+        or explicitly_unconfirmed
+        or price is None
+        or price <= 0
+        or (
+            (contracts is None or contracts <= 0)
+            and (currency is None or currency <= 0)
+        )
+        or source_timestamp is None
+        or source_timestamp > observed_at + _SOURCE_FUTURE_SKEW_MS
+    ):
+        return None
+
+    historical_alignment = (
+        str(sample.get("open_interest_alignment") or "").strip().upper()
+        == "PRECEDING_COMPLETED_1H_CLOSE"
+    )
+    source_aligned = (
+        bucket_end
+        <= source_timestamp
+        < bucket_end + _CAPITAL_FLOW_INTERVAL_MS
+        if historical_alignment
+        else abs(source_timestamp - bucket_end) <= _OI_BUCKET_GRACE_MS
+    )
+    return bucket_end if source_aligned else None
+
+
+def _capital_flow_duplicate_conflicts(
+    left: Mapping[str, Any],
+    right: Mapping[str, Any],
+) -> bool:
+    numeric_fields = (
+        "bucket_start_ms",
+        "bucket_end_ms",
+        "open_interest_contracts",
+        "open_interest_ccy",
+        "price",
+        "candle_ts",
+        "candle_close_ts",
+    )
+    if any(_number(left.get(key)) != _number(right.get(key)) for key in numeric_fields):
+        return True
+    return (
+        _source_timestamp(left, "open_interest")
+        != _source_timestamp(right, "open_interest")
+        or str(left.get("open_interest_alignment") or "").strip().upper()
+        != str(right.get("open_interest_alignment") or "").strip().upper()
+        or str(left.get("candle_bar") or "1H").strip().upper()
+        != str(right.get("candle_bar") or "1H").strip().upper()
+    )
+
+
+def _summarize_capital_flow_window(
+    samples: list[dict[str, Any]],
+    key: str,
+    hours: int,
+    required_sample_count: int,
+) -> dict[str, Any]:
+    selected = samples[-required_sample_count:]
+    sample_count = len(selected)
+    as_of_close_ms = (
+        _integer(selected[-1].get("bucket_end_ms")) if selected else None
+    )
+    base = {
+        "key": key,
+        "hours": hours,
+        "ready": False,
+        "sample_count": sample_count,
+        "required_sample_count": required_sample_count,
+        "baseline_window_count": _CAPITAL_FLOW_BASELINE_WINDOW_COUNT,
+        "state": "UNKNOWN",
+        "label": f"{hours}H 完整歷史端點不足 {sample_count}/{required_sample_count}",
+        "as_of_close_ms": as_of_close_ms,
+        "latest_value": None,
+        "window_start_value": None,
+        "change_amount": None,
+        "change_pct": None,
+        "baseline_average_change_pct": None,
+        "change_vs_average_ratio": None,
+        "above_average": False,
+        "large_inflow": False,
+        "persistence_pct": None,
+        "unit": None,
+        "directional_bias": "NEUTRAL",
+        "directional_bias_label": "方向待確認",
+        "price_return_pct": None,
+        "price_consistency_pct": None,
+    }
+    if sample_count < required_sample_count:
+        return base
+
+    first_close = _integer(selected[0].get("bucket_end_ms"))
+    last_close = _integer(selected[-1].get("bucket_end_ms"))
+    expected_span = (required_sample_count - 1) * _CAPITAL_FLOW_INTERVAL_MS
+    if (
+        first_close is None
+        or last_close is None
+        or last_close - first_close != expected_span
+    ):
+        return base
+
+    contracts = [
+        _number(sample.get("open_interest_contracts")) for sample in selected
+    ]
+    currencies = [_number(sample.get("open_interest_ccy")) for sample in selected]
+    if all(value is not None and value > 0 for value in contracts):
+        oi_values = [float(value) for value in contracts if value is not None]
+        unit = "CONTRACTS"
+    elif all(value is not None and value > 0 for value in currencies):
+        oi_values = [float(value) for value in currencies if value is not None]
+        unit = "BASE_CCY"
+    else:
+        base["label"] = f"{hours}H OI 單位無法在完整比較窗內保持一致"
+        return base
+
+    prices = [_number(sample.get("price")) for sample in selected]
+    if not all(value is not None and value > 0 for value in prices):
+        base["label"] = f"{hours}H 完整 1H 收盤價格不足"
+        return base
+    price_values = [float(value) for value in prices if value is not None]
+
+    baseline_changes: list[float] = []
+    for index in range(_CAPITAL_FLOW_BASELINE_WINDOW_COUNT):
+        start = oi_values[index * hours]
+        end = oi_values[(index + 1) * hours]
+        baseline_changes.append(abs((end - start) / start * 100.0))
+    baseline_average = sum(baseline_changes) / len(baseline_changes)
+
+    window_start_index = _CAPITAL_FLOW_BASELINE_WINDOW_COUNT * hours
+    window_values = oi_values[window_start_index:]
+    window_start_value = window_values[0]
+    latest_value = window_values[-1]
+    change_amount = latest_value - window_start_value
+    change_pct = change_amount / window_start_value * 100.0
+    ratio = abs(change_pct) / max(
+        baseline_average,
+        _CAPITAL_FLOW_RATIO_FLOOR_PCT,
+    )
+    # ``above_average`` is deliberately an inflow-only statement.  A large
+    # absolute OI contraction may have a high ratio, but it is not new money.
+    above_average = change_pct > baseline_average
+    positive_hours = sum(
+        right > left for left, right in zip(window_values, window_values[1:])
+    )
+    persistence_pct = positive_hours / hours * 100.0
+
+    current_prices = price_values[window_start_index:]
+    price_return_pct = (
+        (current_prices[-1] - current_prices[0]) / current_prices[0] * 100.0
+    )
+    if price_return_pct > 0:
+        aligned_price_hours = sum(
+            right > left
+            for left, right in zip(current_prices, current_prices[1:])
+        )
+    elif price_return_pct < 0:
+        aligned_price_hours = sum(
+            right < left
+            for left, right in zip(current_prices, current_prices[1:])
+        )
+    else:
+        aligned_price_hours = 0
+    price_consistency_pct = aligned_price_hours / hours * 100.0
+    directional_bias = (
+        "LONG"
+        if price_return_pct > _CAPITAL_FLOW_MIN_PRICE_RETURN_PCT
+        and price_consistency_pct >= _CAPITAL_FLOW_MIN_PRICE_CONSISTENCY_PCT
+        else "SHORT"
+        if price_return_pct < -_CAPITAL_FLOW_MIN_PRICE_RETURN_PCT
+        and price_consistency_pct >= _CAPITAL_FLOW_MIN_PRICE_CONSISTENCY_PCT
+        else "NEUTRAL"
+    )
+    directional_bias_label = {
+        "LONG": "價格推定偏多",
+        "SHORT": "價格推定偏空",
+        "NEUTRAL": "價格方向待確認",
+    }[directional_bias]
+    large_inflow = bool(
+        change_pct >= _CAPITAL_FLOW_MIN_CHANGE_PCT
+        and above_average
+        and ratio >= _CAPITAL_FLOW_MIN_RATIO
+        and persistence_pct >= _CAPITAL_FLOW_MIN_PERSISTENCE_PCT
+    )
+    if large_inflow:
+        state = {
+            "LONG": "LARGE_LONG",
+            "SHORT": "LARGE_SHORT",
+            "NEUTRAL": "LARGE_UNCONFIRMED",
+        }[directional_bias]
+        side = {
+            "LONG": "偏多",
+            "SHORT": "偏空",
+            "NEUTRAL": "方向未確認",
+        }[directional_bias]
+        label = f"{hours}H 推定大量{side}資金流入"
+    elif change_pct > 0:
+        state = "ABOVE_AVERAGE" if above_average else "NORMAL_INCREASE"
+        label = (
+            f"{hours}H OI 增加且高於平均，但未達完整大量門檻"
+            if above_average
+            else f"{hours}H OI 正常增加，未達大量門檻"
+        )
+    elif change_pct < 0:
+        state = "OUTFLOW"
+        label = f"{hours}H OI 減少，推定較像資金退出／平倉"
+    else:
+        state = "FLAT"
+        label = f"{hours}H OI 持平"
+
+    return {
+        **base,
+        "ready": True,
+        "state": state,
+        "label": label,
+        "latest_value": _round(latest_value, 8),
+        "window_start_value": _round(window_start_value, 8),
+        "change_amount": _round(change_amount, 8),
+        "change_pct": _round(change_pct, 6),
+        "baseline_average_change_pct": _round(baseline_average, 6),
+        "change_vs_average_ratio": _round(ratio, 6),
+        "above_average": above_average,
+        "large_inflow": large_inflow,
+        "persistence_pct": _round(persistence_pct, 1),
+        "unit": unit,
+        "directional_bias": directional_bias,
+        "directional_bias_label": directional_bias_label,
+        "price_return_pct": _round(price_return_pct, 6),
+        "price_consistency_pct": _round(price_consistency_pct, 1),
     }
 
 

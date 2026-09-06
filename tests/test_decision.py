@@ -141,6 +141,71 @@ def fixed_continuation_summary(
     }
 
 
+def fixed_capital_flow_summary(
+    *,
+    algorithm_version="CAPITAL_FLOW_LOOKBACK_V1",
+):
+    windows = {}
+    required_samples = {"1h": 8, "2h": 15, "4h": 29}
+    for key, hours, change_pct, ratio in (
+        ("1h", 1, 3.2, 2.4),
+        ("2h", 2, 5.1, 2.1),
+        ("4h", 4, 8.6, 1.8),
+    ):
+        windows[key] = {
+            "key": key,
+            "hours": hours,
+            "ready": True,
+            "sample_count": required_samples[key],
+            "required_sample_count": required_samples[key],
+            "baseline_window_count": 6,
+            "state": "LARGE_LONG",
+            "label": f"{key} 推定大量偏多資金流入",
+            "as_of_close_ms": 1_234_000,
+            "latest_value": 108_600_000.0,
+            "window_start_value": 100_000_000.0,
+            "change_amount": 8_600_000.0,
+            "change_pct": change_pct,
+            "baseline_average_change_pct": 2.0,
+            "change_vs_average_ratio": ratio,
+            "above_average": True,
+            "large_inflow": True,
+            "persistence_pct": 83.3,
+            "unit": "CONTRACTS",
+            "directional_bias": "LONG",
+            "directional_bias_label": "推定偏多新增參與",
+            "price_return_pct": 2.8,
+            "price_consistency_pct": 75.0,
+            "raw_points": [{"oi": "must-not-leak"}],
+            "samples": [{"oi": "must-not-leak"}],
+            "reason": "internal classification detail",
+        }
+    return {
+        "algorithm_version": algorithm_version,
+        "source_mode": "HISTORICAL_CLOSED_1H_AT_SCAN",
+        "status": "READY",
+        "sample_count": 29,
+        "required_sample_count": 29,
+        "baseline_window_count": 6,
+        "as_of_close_ms": 1_234_000,
+        "continuity_reset": False,
+        "detected": True,
+        "strongest_window": "4h",
+        "headline_state": "LARGE_LONG",
+        "headline_direction": "LONG",
+        "headline_label": "推定有大量偏多資金流入",
+        "minimum_change_pct": 0.5,
+        "large_ratio_threshold": 1.5,
+        "persistence_threshold_pct": 60.0,
+        "meaning": "比較最近 1h/2h/4h OI 變化與歷史平均。",
+        "permission": "ADVISORY_ONLY_NEVER_CHANGES_TRIGGER_OR_PLAN",
+        "windows": windows,
+        "samples": [{"oi": "must-not-leak"}],
+        "raw_points": [{"oi": "must-not-leak"}],
+        "reason": "internal headline reason",
+    }
+
+
 class DecisionContextTests(unittest.TestCase):
     def test_complete_signal_produces_one_enter_decision(self):
         result = build_decision_context(complete_signal())
@@ -1857,6 +1922,154 @@ class DecisionContextTests(unittest.TestCase):
         self.assertNotIn("selected", projected)
         self.assertNotIn("raw_points", projected["windows"]["10m"])
         self.assertNotIn("continuation_lookback", public["market_metrics"])
+
+    def test_public_projection_exposes_strict_capital_flow_windows(self):
+        item = complete_signal()
+        lookback = fixed_continuation_summary(as_of_close_ms=1_234_000)
+        lookback["capital_flow"] = fixed_capital_flow_summary()
+        # Even valid capital-flow data must expose only the three contractual
+        # horizons and never forward arbitrary internal windows.
+        lookback["capital_flow"]["windows"]["8h"] = {
+            "key": "8h",
+            "large_inflow": True,
+            "samples": [{"oi": "must-not-leak"}],
+        }
+        item["market_metrics"]["continuation_lookback"] = lookback
+        item["decision_context"] = build_decision_context(item)
+
+        public = public_candidate_payload(item, signal=True)
+        capital_flow = public["decision_context"]["continuation_confirmation"][
+            "observer"
+        ]["capital_flow"]
+
+        self.assertEqual(
+            set(capital_flow),
+            {
+                "algorithm_version",
+                "source_mode",
+                "status",
+                "sample_count",
+                "required_sample_count",
+                "baseline_window_count",
+                "as_of_close_ms",
+                "continuity_reset",
+                "detected",
+                "strongest_window",
+                "headline_state",
+                "headline_direction",
+                "headline_label",
+                "minimum_change_pct",
+                "large_ratio_threshold",
+                "persistence_threshold_pct",
+                "meaning",
+                "permission",
+                "windows",
+            },
+        )
+        self.assertEqual(set(capital_flow["windows"]), {"1h", "2h", "4h"})
+        expected_window_fields = {
+            "key",
+            "hours",
+            "ready",
+            "sample_count",
+            "required_sample_count",
+            "baseline_window_count",
+            "state",
+            "label",
+            "as_of_close_ms",
+            "latest_value",
+            "window_start_value",
+            "change_amount",
+            "change_pct",
+            "baseline_average_change_pct",
+            "change_vs_average_ratio",
+            "above_average",
+            "large_inflow",
+            "persistence_pct",
+            "unit",
+            "directional_bias",
+            "directional_bias_label",
+            "price_return_pct",
+            "price_consistency_pct",
+        }
+        for key in ("1h", "2h", "4h"):
+            self.assertEqual(
+                set(capital_flow["windows"][key]),
+                expected_window_fields,
+            )
+            self.assertNotIn("samples", capital_flow["windows"][key])
+            self.assertNotIn("raw_points", capital_flow["windows"][key])
+            self.assertNotIn("reason", capital_flow["windows"][key])
+        self.assertEqual(capital_flow["strongest_window"], "4h")
+        self.assertTrue(capital_flow["windows"]["4h"]["above_average"])
+        self.assertTrue(capital_flow["windows"]["4h"]["large_inflow"])
+        self.assertNotIn("samples", capital_flow)
+        self.assertNotIn("raw_points", capital_flow)
+        self.assertNotIn("reason", capital_flow)
+
+    def test_public_projection_rejects_stale_capital_flow_algorithm(self):
+        item = complete_signal()
+        lookback = fixed_continuation_summary()
+        lookback["capital_flow"] = fixed_capital_flow_summary(
+            algorithm_version="CAPITAL_FLOW_LOOKBACK_V0"
+        )
+        item["market_metrics"]["continuation_lookback"] = lookback
+        item["decision_context"] = build_decision_context(item)
+
+        public = public_candidate_payload(item, signal=True)
+
+        self.assertEqual(
+            public["decision_context"]["continuation_confirmation"]["observer"]
+            ["capital_flow"],
+            {},
+        )
+
+    def test_public_projection_missing_capital_flow_never_uses_snapshot_oi(self):
+        for missing_value in (None, "invalid", {"status": "READY"}):
+            with self.subTest(missing_value=missing_value):
+                item = complete_signal()
+                lookback = fixed_continuation_summary()
+                lookback["capital_flow"] = missing_value
+                item["market_metrics"].update(
+                    {
+                        "continuation_lookback": lookback,
+                        "open_interest_change_pct": 999.0,
+                    }
+                )
+                item["decision_context"] = build_decision_context(item)
+
+                public = public_candidate_payload(item, signal=True)
+
+                self.assertEqual(
+                    public["decision_context"]["continuation_confirmation"]
+                    ["observer"]["capital_flow"],
+                    {},
+                )
+
+    def test_capital_flow_observer_does_not_change_existing_decision(self):
+        baseline_item = complete_signal()
+        baseline_item["market_metrics"]["continuation_lookback"] = (
+            fixed_continuation_summary()
+        )
+        enriched_item = copy.deepcopy(baseline_item)
+        enriched_item["market_metrics"]["continuation_lookback"][
+            "capital_flow"
+        ] = fixed_capital_flow_summary()
+
+        baseline = build_decision_context(baseline_item)
+        enriched = build_decision_context(enriched_item)
+
+        self.assertEqual(enriched["hard_gate"], baseline["hard_gate"])
+        self.assertEqual(enriched["final"], baseline["final"])
+        self.assertEqual(enriched["confidence"], baseline["confidence"])
+        self.assertEqual(
+            enriched["continuation_confirmation"]["key"],
+            baseline["continuation_confirmation"]["key"],
+        )
+        self.assertEqual(
+            enriched["continuation_confirmation"]["core_votes"],
+            baseline["continuation_confirmation"]["core_votes"],
+        )
 
     def test_public_projection_hides_stale_observer_algorithm(self):
         item = complete_signal()
