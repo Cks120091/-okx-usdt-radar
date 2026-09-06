@@ -623,13 +623,13 @@ def _public_continuation_observer(observer: Any) -> dict[str, Any]:
     # Capital-flow history is a separate, advisory-only 1h/2h/4h contract.
     # Project it from the selected closed-bar observer only; never reconstruct
     # it from a current OI snapshot or expose its private samples.
-    payload["capital_flow"] = _public_capital_flow(
+    payload["capital_flow"] = public_capital_flow_payload(
         _read(observer, "capital_flow", {})
     )
     return payload
 
 
-def _public_capital_flow(capital_flow: Any) -> dict[str, Any]:
+def public_capital_flow_payload(capital_flow: Any) -> dict[str, Any]:
     """Return the strict public projection of the historical OI-flow view."""
 
     if (

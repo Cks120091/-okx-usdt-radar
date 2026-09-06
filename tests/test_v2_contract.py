@@ -113,7 +113,7 @@ class V33ContractTests(unittest.TestCase):
         self.assertIn('<body data-active-group="home">', html)
         self.assertIn('body:not([data-active-group="home"]) .command-deck', html)
         self.assertIn("document.body.dataset.activeGroup=group", html)
-        self.assertIn("okx-radar-shell-v4.3-capital-flow-1", service_worker)
+        self.assertIn("okx-radar-shell-v4.3-preflight-flow-2", service_worker)
         self.assertIn("市場方向 · 24H 全市場平均 RSI", html)
         self.assertIn("bias.market_average_rsi", html)
         self.assertIn("rsi24.market_rsi_24h_label", html)
@@ -214,10 +214,10 @@ class V33ContractTests(unittest.TestCase):
         self.assertNotIn("分組績效 JSON", html)
         self.assertNotIn("raw_indicators", html)
         self.assertIn("⚡ ${frame} 進場前更新", html)
-        self.assertIn("更新進場判定與成交資料", html)
+        self.assertIn("更新進場判定與資金動向", html)
         self.assertIn("進場檢查", html)
         self.assertIn("/api/preflight", html)
-        self.assertIn("更新現價、進場距離、成交條件與續走力道；不改寫方向或原 Entry／SL／TP", html)
+        self.assertIn("更新現價、進場距離、成交條件、續走力道與歷史 OI 資金動向；不改寫方向或原 Entry／SL／TP", html)
         self.assertIn("原始 Trigger（價格觸發）沒有被修改", html)
         self.assertIn("data-preflight-id", html)
         self.assertIn("data-preflight-trigger-id", html)
@@ -239,9 +239,9 @@ class V33ContractTests(unittest.TestCase):
         self.assertNotIn("舊計畫失效；方向不會自動變成", html)
         self.assertIn("status==='MISSED_ENTRY'", html)
         self.assertIn("function signalTriggerTime(item)", html)
-        self.assertIn("訊號觸發時間（台灣）", html)
+        self.assertIn("訊號觸發時間（台灣 UTC+8）", html)
         self.assertNotIn("status!=='ENTRY_READY'&&status!=='MISSED_ENTRY'", html)
-        self.assertIn("okx-radar-shell-v4.3-capital-flow-1", service_worker)
+        self.assertIn("okx-radar-shell-v4.3-preflight-flow-2", service_worker)
         self.assertIn("$('#preflightRefresh').addEventListener('click',loadPreflight)", html)
         self.assertIn("${decisionPanel(item)}", html)
         self.assertNotIn("showPreflight", html)
@@ -254,7 +254,7 @@ class V33ContractTests(unittest.TestCase):
         self.assertNotIn("二次反轉確認", html)
         self.assertNotIn("重新分析最新多週期資料", html)
         self.assertIn("不重新掃描多週期 K 線", html)
-        self.assertIn("訊號觸發時間（台灣）", html)
+        self.assertIn("訊號觸發時間（台灣 UTC+8）", html)
         self.assertIn("15m 短線歷史", html)
         self.assertIn("4H 長線歷史", html)
         self.assertIn("24 小時內", html)
@@ -448,12 +448,21 @@ class V33ContractTests(unittest.TestCase):
         self.assertIn("readyCount=rows.filter(isReady).length", rankings)
 
         continuation = html.split("function preflightContinuation(data)", 1)[1].split(
-            "function preflightPositionMetric", 1
+            "function preflightCapitalFlow", 1
         )[0]
         self.assertIn("rawWindow=String(current.primary_window||'')", continuation)
         self.assertNotIn("horizon==='LONG'?'60m':'10m'", continuation)
         self.assertIn("本次輔助資料未取得", continuation)
         self.assertIn("基準視窗未建立", continuation)
+        preflight_capital = html.split("function preflightCapitalFlow(data)", 1)[
+            1
+        ].split("function preflightPositionMetric", 1)[0]
+        self.assertIn("continuation.current", preflight_capital)
+        self.assertIn("current.capital_flow", preflight_capital)
+        self.assertIn("continuation.refresh_failed===true?null", preflight_capital)
+        self.assertNotIn("continuation.original", preflight_capital)
+        self.assertIn("source:'PREFLIGHT'", preflight_capital)
+        self.assertIn("referenceTime:data?.live?.sampled_at", preflight_capital)
         self.assertIn("function preflightTerminalKind(data)", html)
         self.assertIn("statuses.includes('CLOSED_UNKNOWN')", html)
         self.assertIn("return Boolean(preflightTerminalKind(data))", html)
@@ -469,6 +478,14 @@ class V33ContractTests(unittest.TestCase):
         self.assertLess(
             preflight.index("現在位置與進場資格"),
             preflight.index("${preflightContinuation(data)}"),
+        )
+        self.assertLess(
+            preflight.index("${preflightContinuation(data)}"),
+            preflight.index("${preflightCapitalFlow(data)}"),
+        )
+        self.assertLess(
+            preflight.index("${preflightCapitalFlow(data)}"),
+            preflight.index('class="preflight-disclosure"'),
         )
 
     def test_scan_round_hides_requested_horizons_but_stale_cards_are_retained(self):
@@ -875,16 +892,45 @@ class V33ContractTests(unittest.TestCase):
             capital,
         )
         self.assertIn("CAPITAL_FLOW_LOOKBACK_V1", capital)
-        self.assertIn("['1h','2h','4h']", capital)
-        self.assertIn("最近淨增量 vs 前 6 個同長區間", capital)
-        self.assertIn("本窗 ${signed(row.change_pct)}", capital)
-        self.assertIn("row.baseline_average_change_pct", capital)
-        self.assertIn("row.change_vs_average_ratio", capital)
-        self.assertIn("LARGE_LONG", capital)
-        self.assertIn("LARGE_SHORT", capital)
-        self.assertIn("1–4H 歷史資料不足", capital)
+        self.assertIn("function capitalFlowProfile(horizon)", capital)
+        self.assertIn("{key:'1h',role:'近端資金',period:'最近 1 小時'}", capital)
+        self.assertIn("{key:'4h',role:'波段資金',period:'最近 4 小時'}", capital)
+        self.assertLess(
+            capital.index("{key:'4h',role:'波段資金'"),
+            capital.index("{key:'1h',role:'短線脈衝'"),
+        )
+        self.assertLess(
+            capital.index("{key:'1h',role:'近端資金'"),
+            capital.index("{key:'4h',role:'大級別背景'"),
+        )
+        self.assertIn("primaryMeta=profile[0]", capital)
+        self.assertIn("疑似大量新增持倉 · 配合${side}", capital)
+        self.assertIn("疑似大量新增持倉 · 與${side}反向", capital)
+        self.assertIn("異常增倉 · 高於平常但未達大量門檻", capital)
+        self.assertIn("持倉下降 · 較像退場或平倉", capital)
+        self.assertIn("層級分歧", capital)
+        self.assertIn("largeDirections.size>1", capital)
+        self.assertIn("secondaryRelation.tone==='conflict'?'conflict':'pending'", capital)
+        self.assertIn("${primaryMeta.role}：${relation.label}", capital)
+        self.assertIn("完整資料約 ${minutes} 分鐘前", capital)
+        self.assertIn("capitalFlowAge(asOf,referenceTime)", capital)
+        self.assertIn("capitalFlowRange(row)", capital)
+        self.assertIn("flow.as_of_close_ms", capital)
+        self.assertIn("function capitalFlowScanReference(item)", capital)
+        self.assertIn("report.long_completed_at", capital)
+        self.assertIn("report.short_completed_at", capital)
+        self.assertIn("referenceTime:capitalFlowScanReference(item)", capital)
+        self.assertIn("elapsed < -120000", capital)
+        self.assertIn("資料時間異常", capital)
+        self.assertIn("台灣 UTC+8", capital)
+        self.assertIn("完整 1 小時收線", capital)
+        self.assertIn("前 6 個同長區間平均 1.5 倍", capital)
+        self.assertIn("OI ${signed(row?.change_pct)}", capital)
+        self.assertIn("row?.baseline_average_change_pct", capital)
+        self.assertIn("row?.change_vs_average_ratio", capital)
         self.assertIn("不使用上一輪掃描快照代替", capital)
-        self.assertIn("不代表錢包入金或單一大戶", capital)
+        self.assertIn("不等於錢包入金或單一大戶", capital)
+        self.assertIn("<details class=\"capital-flow-details\">", capital)
         self.assertIn("terminalSignalOutcome(item)||isPreviewItem(item)", capital)
         self.assertNotIn("open_interest_change_pct", capital)
         self.assertNotIn("oi_flow_state", capital)
@@ -900,6 +946,23 @@ class V33ContractTests(unittest.TestCase):
         self.assertNotIn("capital_flow", entry_status)
         self.assertNotIn("capitalFlow", comparator)
         self.assertNotIn("capital_flow", comparator)
+
+    def test_market_times_are_explicit_taiwan_h23_and_separate_from_oi_close(self):
+        html = (
+            Path(__file__).parents[1] / "radar" / "static" / "pages.html"
+        ).read_text(encoding="utf-8")
+
+        time_helpers = html.split("function timestampDate(value)", 1)[1].split(
+            "async function api", 1
+        )[0]
+        self.assertIn("timeZone:'Asia/Taipei'", time_helpers)
+        self.assertIn("hourCycle:'h23'", time_helpers)
+        self.assertNotIn("hour12:false", time_helpers)
+        self.assertIn("normalized=`${normalized}Z`", time_helpers)
+        self.assertIn("year:'numeric'", time_helpers)
+        self.assertIn("最新行情時間（台灣 UTC+8）", html)
+        self.assertIn("資金資料截止：${esc(taiwanMinute(asOf))}（台灣 UTC+8）", html)
+        self.assertNotIn("<br>取得時間：", html)
 
     def test_pwa_never_caches_live_market_api(self):
         root = Path(__file__).parents[1] / "radar" / "static"
@@ -949,7 +1012,7 @@ class V33ContractTests(unittest.TestCase):
         self.assertIn("舊 Entry／SL／TP 不會復活", html)
         self.assertIn("舊交易計畫已結束", html)
         self.assertIn("signalTradeGrid(item,{prefix:'原始 ',original:true})", html)
-        self.assertIn("okx-radar-shell-v4.3-capital-flow-1", worker)
+        self.assertIn("okx-radar-shell-v4.3-preflight-flow-2", worker)
 
     def test_market_scan_has_no_github_schedule(self):
         root = Path(__file__).parents[1]

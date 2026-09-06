@@ -94,6 +94,59 @@ def make_report(item: Signal) -> RadarReport:
     )
 
 
+def make_capital_flow(as_of_close_ms: int = 1_700_000_000_000) -> dict:
+    windows = {}
+    for key, hours, required in (("1h", 1, 8), ("2h", 2, 15), ("4h", 4, 29)):
+        windows[key] = {
+            "key": key,
+            "hours": hours,
+            "ready": True,
+            "sample_count": required,
+            "required_sample_count": required,
+            "baseline_window_count": 6,
+            "state": "LARGE_LONG",
+            "label": f"{hours}H 推定大量偏多資金流入",
+            "as_of_close_ms": as_of_close_ms,
+            "latest_value": 102_000_000.0,
+            "window_start_value": 100_000_000.0,
+            "change_amount": 2_000_000.0,
+            "change_pct": 2.0,
+            "baseline_average_change_pct": 0.8,
+            "change_vs_average_ratio": 2.5,
+            "above_average": True,
+            "large_inflow": True,
+            "persistence_pct": 100.0,
+            "unit": "CONTRACTS",
+            "directional_bias": "LONG",
+            "directional_bias_label": "價格推定偏多",
+            "price_return_pct": 0.6,
+            "price_consistency_pct": 100.0,
+            "samples": [{"private": True}],
+        }
+    windows["8h"] = {"ready": True, "samples": [{"private": True}]}
+    return {
+        "algorithm_version": "CAPITAL_FLOW_LOOKBACK_V1",
+        "source_mode": "HISTORICAL_CLOSED_1H_AT_SCAN",
+        "status": "READY",
+        "sample_count": 29,
+        "required_sample_count": 29,
+        "baseline_window_count": 6,
+        "as_of_close_ms": as_of_close_ms,
+        "detected": True,
+        "strongest_window": "4h",
+        "headline_state": "LARGE_LONG",
+        "headline_direction": "LONG",
+        "headline_label": "推定有大量偏多資金流入",
+        "minimum_change_pct": 0.5,
+        "large_ratio_threshold": 1.5,
+        "persistence_threshold_pct": 60.0,
+        "meaning": "fixture",
+        "permission": "ADVISORY_ONLY_NEVER_CHANGES_TRIGGER_OR_PLAN",
+        "windows": windows,
+        "raw_points": [{"private": True}],
+    }
+
+
 class PreflightClient:
     def __init__(self, price: float = 100.1):
         self.price = price
@@ -163,8 +216,14 @@ class ContinuationPreflightScanner(PreflightScanner):
                 "primary_window": "10m",
                 "as_of_close_ms": 1_700_000_000_000,
                 "windows": {"10m": {"ready": True}},
+                "capital_flow": make_capital_flow(),
             },
         }
+
+
+class FailingContinuationPreflightScanner(PreflightScanner):
+    def refresh_continuation_for_signal(self, signal):
+        raise RuntimeError("fixture history unavailable")
 
 
 class FullCapablePreflightScanner(PreflightScanner):
@@ -483,6 +542,20 @@ class PreflightTests(unittest.TestCase):
     def test_preflight_refresh_adds_directional_continuation_without_mutating_plan(self):
         with tempfile.TemporaryDirectory() as directory:
             item = make_signal()
+            original_flow = make_capital_flow(1_699_996_400_000)
+            item.decision_context = {
+                "continuation_confirmation": {
+                    "key": "FORMING",
+                    "core_votes": {"OI": {"state": "SUPPORT"}},
+                    "observer": {
+                        "status": "READY",
+                        "primary_window": "10m",
+                        "as_of_close_ms": 1_699_996_400_000,
+                        "windows": {"10m": {"ready": True}},
+                        "capital_flow": original_flow,
+                    },
+                }
+            }
             original_plan = (
                 item.direction,
                 item.entry_low,
@@ -503,6 +576,22 @@ class PreflightTests(unittest.TestCase):
             self.assertEqual(payload["continuation"]["current"]["label"], "強")
             self.assertEqual(payload["continuation"]["current"]["primary_window"], "10m")
             self.assertNotIn("score", payload["continuation"]["current"])
+            current_flow = payload["continuation"]["current"]["capital_flow"]
+            self.assertEqual(current_flow["as_of_close_ms"], 1_700_000_000_000)
+            self.assertEqual(set(current_flow["windows"]), {"1h", "2h", "4h"})
+            self.assertEqual(
+                current_flow["windows"]["1h"]["change_vs_average_ratio"],
+                2.5,
+            )
+            self.assertNotIn("samples", current_flow["windows"]["1h"])
+            self.assertNotIn("raw_points", current_flow)
+            self.assertNotIn("8h", current_flow["windows"])
+            self.assertEqual(
+                payload["continuation"]["original"]["capital_flow"][
+                    "as_of_close_ms"
+                ],
+                1_699_996_400_000,
+            )
             self.assertTrue(payload["safety"]["stored_trigger_unchanged"])
             self.assertEqual(
                 (
@@ -514,6 +603,37 @@ class PreflightTests(unittest.TestCase):
                     item.take_profit_2,
                 ),
                 original_plan,
+            )
+
+    def test_failed_preflight_history_never_reuses_scan_time_capital_flow(self):
+        with tempfile.TemporaryDirectory() as directory:
+            item = make_signal()
+            item.decision_context = {
+                "continuation_confirmation": {
+                    "key": "CONFIRMED",
+                    "observer": {
+                        "status": "READY",
+                        "primary_window": "10m",
+                        "windows": {"10m": {"ready": True}},
+                        "capital_flow": make_capital_flow(),
+                    },
+                }
+            }
+            runtime = RadarRuntime(
+                FailingContinuationPreflightScanner(PreflightClient()),
+                AppConfig(data_dir=directory),
+            )
+            runtime._latest = make_report(item)
+
+            payload = runtime.preflight_dict(item.inst_id, "SHORT")
+
+            self.assertTrue(payload["continuation"]["refresh_failed"])
+            self.assertTrue(
+                payload["continuation"]["original"]["capital_flow"]["detected"]
+            )
+            self.assertEqual(
+                payload["continuation"]["current"]["capital_flow"],
+                {},
             )
 
     def test_wrong_expected_trigger_is_structured_conflict_before_live_fetch(self):

@@ -24,7 +24,11 @@ from .continuation import ALGORITHM_VERSION, observer_schedule
 from .models import RadarReport
 from .price_display import signal_plan_display_fields
 from .preflight import build_preflight_payload
-from .public_payload import public_candidate_payload, public_report_payload
+from .public_payload import (
+    public_candidate_payload,
+    public_capital_flow_payload,
+    public_report_payload,
+)
 from .push import PushSubscriptionError, build_push_notifier
 from .repository import terminal_card_retention_until
 from .reporting import (
@@ -74,6 +78,12 @@ def _preflight_continuation_state(value: dict[str, Any]) -> dict[str, Any]:
         "label": label,
         "primary_window": primary or None,
         "as_of_close_ms": observer.get("as_of_close_ms"),
+        # Reuse the report's strict allow-list.  Preflight responses bypass the
+        # report projector, so copying the observer wholesale here would leak
+        # private samples as the capital-flow contract evolves.
+        "capital_flow": public_capital_flow_payload(
+            observer.get("capital_flow")
+        ),
     }
 
 
@@ -92,6 +102,8 @@ def _preflight_continuation_payload(
             "key": "UNKNOWN",
             "strength": "UNKNOWN",
             "label": "資料不足",
+            # A failed refresh must never make the scan-time view look current.
+            "capital_flow": {},
         }
     direction = str(getattr(signal, "direction", "") or "").upper()
     return {
