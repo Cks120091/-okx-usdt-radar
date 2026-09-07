@@ -383,7 +383,15 @@ class CapitalFlowLookbackTests(unittest.TestCase):
         self.assertTrue(result["detected"])
         self.assertEqual(result["headline_state"], "LARGE_LONG")
         self.assertEqual(result["headline_direction"], "LONG")
+        self.assertEqual(
+            result["direction_basis"],
+            "SAME_WINDOW_PRICE_ACTION_INFERENCE",
+        )
+        self.assertFalse(result["long_short_split_available"])
+        self.assertIn("價格推定偏多主導", result["headline_label"])
+        self.assertIn("OI 本身不能拆成多單量與空單量", result["meaning"])
         self.assertEqual(row["state"], "LARGE_LONG")
+        self.assertIn("OI 相對異常增倉", row["label"])
         self.assertTrue(row["large_inflow"])
         self.assertTrue(row["above_average"])
         self.assertGreater(row["change_pct"], 0.5)
@@ -403,6 +411,7 @@ class CapitalFlowLookbackTests(unittest.TestCase):
 
         self.assertEqual(result["headline_state"], "LARGE_SHORT")
         self.assertEqual(result["headline_direction"], "SHORT")
+        self.assertIn("價格推定偏空主導", result["headline_label"])
         self.assertEqual(result["windows"]["4h"]["state"], "LARGE_SHORT")
         self.assertLess(result["windows"]["4h"]["price_return_pct"], -0.05)
 

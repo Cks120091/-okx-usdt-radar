@@ -2057,10 +2057,10 @@ class ScannerTests(unittest.TestCase):
         self.assertEqual(degraded.short_result.signal.stop_loss, "97")
         self.assertTrue(degraded.short_result.signal.actionable)
         self.assertFalse(
-            any("大額資金 OI" in message for message in degraded.context.failures)
+            any("歷史 OI 持倉資料" in message for message in degraded.context.failures)
         )
         self.assertTrue(
-            any("大額資金 OI" in message for message in degraded.errors)
+            any("歷史 OI 持倉資料" in message for message in degraded.errors)
         )
         degraded_continuation = degraded.short_result.signal.decision_context[
             "continuation_confirmation"

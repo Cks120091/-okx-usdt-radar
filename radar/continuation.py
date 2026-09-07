@@ -331,25 +331,25 @@ def summarize_capital_flow_samples(
         if detected_directions == {"LONG", "SHORT"}:
             headline_state = "LARGE_MIXED"
             headline_direction = "MIXED"
-            headline_label = "多個推定大量資金時窗的多空方向互相衝突"
+            headline_label = "多個相對異常增倉時窗的價格推定方向互相衝突"
         elif has_unconfirmed_direction:
             # One directional short window must not overstate an otherwise
             # unconfirmed wider-window build as globally long or short.
             headline_state = "LARGE_UNCONFIRMED"
             headline_direction = "NEUTRAL"
-            headline_label = "推定有大量資金流入，但多空方向尚未確認"
+            headline_label = "發現相對異常增倉，但價格方向尚未確認"
         elif "LONG" in detected_directions:
             headline_state = "LARGE_LONG"
             headline_direction = "LONG"
-            headline_label = "推定有大量偏多資金流入"
+            headline_label = "發現相對異常增倉，價格推定偏多主導"
         elif "SHORT" in detected_directions:
             headline_state = "LARGE_SHORT"
             headline_direction = "SHORT"
-            headline_label = "推定有大量偏空資金流入"
+            headline_label = "發現相對異常增倉，價格推定偏空主導"
         else:
             headline_state = "LARGE_UNCONFIRMED"
             headline_direction = "NEUTRAL"
-            headline_label = "推定有大量資金流入，但多空方向尚未確認"
+            headline_label = "發現相對異常增倉，但價格方向尚未確認"
     else:
         if ready_rows:
             strongest = max(
@@ -362,7 +362,7 @@ def summarize_capital_flow_samples(
             )
             headline_state = "NO_LARGE_INFLOW"
             headline_direction = "NEUTRAL"
-            headline_label = "未推定出高於歷史平均的大量資金流入"
+            headline_label = "未發現高於歷史平均的相對異常增倉"
         else:
             strongest = None
             headline_state = "INSUFFICIENT"
@@ -392,6 +392,11 @@ def summarize_capital_flow_samples(
         "headline_state": headline_state,
         "headline_direction": headline_direction,
         "headline_label": headline_label,
+        # Aggregate OI never contains separate long-side and short-side
+        # quantities: every open contract has both counterparties.  Direction
+        # is therefore an explicitly labelled price-action inference only.
+        "direction_basis": "SAME_WINDOW_PRICE_ACTION_INFERENCE",
+        "long_short_split_available": False,
         "minimum_change_pct": _CAPITAL_FLOW_MIN_CHANGE_PCT,
         "large_ratio_threshold": _CAPITAL_FLOW_MIN_RATIO,
         "persistence_threshold_pct": _CAPITAL_FLOW_MIN_PERSISTENCE_PCT,
@@ -408,7 +413,8 @@ def summarize_capital_flow_samples(
         "meaning": (
             "以掃描當下已完整收線的 1H OI 端點，檢查最近 1H／2H／4H "
             "淨變動是否明顯高於前六個互不重疊同長時窗的平均絕對變動；"
-            "多空方向只由同一目前時窗的完整 1H 收盤價格推定。"
+            "OI 本身不能拆成多單量與空單量，每張未平倉合約同時有多空雙方；"
+            "多空主導方向只由同一目前時窗的完整 1H 收盤價格推定。"
         ),
         "permission": "ADVISORY_ONLY_NEVER_CHANGES_TRIGGER_OR_PLAN",
         "continuity_reset": continuity_reset,
@@ -669,21 +675,21 @@ def _summarize_capital_flow_window(
             "NEUTRAL": "LARGE_UNCONFIRMED",
         }[directional_bias]
         side = {
-            "LONG": "偏多",
-            "SHORT": "偏空",
-            "NEUTRAL": "方向未確認",
+            "LONG": "價格推定偏多主導",
+            "SHORT": "價格推定偏空主導",
+            "NEUTRAL": "價格方向未確認",
         }[directional_bias]
-        label = f"{hours}H 推定大量{side}資金流入"
+        label = f"{hours}H OI 相對異常增倉，{side}"
     elif change_pct > 0:
         state = "ABOVE_AVERAGE" if above_average else "NORMAL_INCREASE"
         label = (
-            f"{hours}H OI 增加且高於平均，但未達完整大量門檻"
+            f"{hours}H OI 增加且高於平均，但未達相對異常門檻"
             if above_average
-            else f"{hours}H OI 正常增加，未達大量門檻"
+            else f"{hours}H OI 一般增加，未達相對異常門檻"
         )
     elif change_pct < 0:
         state = "OUTFLOW"
-        label = f"{hours}H OI 減少，推定較像資金退出／平倉"
+        label = f"{hours}H OI 減少，較像去槓桿／平倉，單靠 OI 無法確認哪一方"
     else:
         state = "FLAT"
         label = f"{hours}H OI 持平"

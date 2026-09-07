@@ -121,7 +121,7 @@ class V33ContractTests(unittest.TestCase):
         self.assertIn("report.short_completed_at", html)
         self.assertIn("report.long_completed_at", html)
         self.assertIn("24H", html)
-        self.assertIn("完整收線數量方向輔助（不計分）", html)
+        self.assertIn("完整收線 OI 數量方向輔助（不計分）", html)
         self.assertIn("function preflightContinuation(data)", html)
         self.assertIn("原方向續走力道", html)
         self.assertIn("純輔助 · 不影響進場資格", html)
@@ -214,10 +214,10 @@ class V33ContractTests(unittest.TestCase):
         self.assertNotIn("分組績效 JSON", html)
         self.assertNotIn("raw_indicators", html)
         self.assertIn("⚡ ${frame} 進場前更新", html)
-        self.assertIn("更新進場判定與資金動向", html)
+        self.assertIn("更新進場判定與持倉動向", html)
         self.assertIn("進場檢查", html)
         self.assertIn("/api/preflight", html)
-        self.assertIn("更新現價、進場距離、成交條件、續走力道與歷史 OI 資金動向；不改寫方向或原 Entry／SL／TP", html)
+        self.assertIn("更新現價、進場距離、成交條件、續走力道與歷史 OI 持倉動向；不改寫方向或原 Entry／SL／TP", html)
         self.assertIn("原始 Trigger（價格觸發）沒有被修改", html)
         self.assertIn("data-preflight-id", html)
         self.assertIn("data-preflight-trigger-id", html)
@@ -854,20 +854,28 @@ class V33ContractTests(unittest.TestCase):
         self.assertIn("key:'MISSING'", availability)
         self.assertIn("key:'NO_BASELINE'", availability)
         self.assertIn("key:'COMPARED'", availability)
-        self.assertIn("本輪未取得 OI 數值", availability)
-        self.assertIn("OI 數值已取得，但尚無上一輪比較基準", availability)
+        self.assertIn("本輪未取得 OI USD 名目值", availability)
+        self.assertIn("OI USD 名目值已取得，但尚無上一輪掃描基準", availability)
+        self.assertIn("此數值含幣價影響", availability)
 
         anomaly = html.split("function oiAnomalyEmptyState(markets)", 1)[1].split(
             "function renderAnomalies", 1
         )[0]
         self.assertIn("目前沒有幣種達到異動門檻", anomaly)
-        self.assertIn("但尚無上一輪比較基準", anomaly)
+        self.assertIn("但尚無上一輪掃描基準", anomaly)
         self.assertIn("noBaselineCount", anomaly)
-        self.assertIn("已取得 OI、仍待下一輪基準", anomaly)
+        self.assertIn("已取得名目值、仍待下一輪基準", anomaly)
         self.assertIn("OI API 或該幣資料可能暫時不可用", anomaly)
         self.assertIn("oiAnomalyEmptyState(markets)", anomaly)
         self.assertNotIn("至少需要連續兩輪", anomaly)
         self.assertNotIn("需要至少兩輪掃描才能比較 OI", html)
+        self.assertIn("OI 沒有「多單 OI」和「空單 OI」兩個獨立數字", html)
+        self.assertIn("每張未平倉合約同時有一方做多、一方做空", html)
+        self.assertIn("OI USD 名目值較上輪 ${signed", html)
+        self.assertIn("Math.abs(move)<.05", html)
+        self.assertNotIn("新增買方部位", html)
+        self.assertNotIn("新增賣方部位", html)
+        self.assertIn(".capital-flow-row{grid-template-columns:minmax(0,1fr)", html)
 
         continuation = html.split("function continuationStrip(item)", 1)[1].split(
             "function directionBadge", 1
@@ -893,24 +901,27 @@ class V33ContractTests(unittest.TestCase):
         )
         self.assertIn("CAPITAL_FLOW_LOOKBACK_V1", capital)
         self.assertIn("function capitalFlowProfile(horizon)", capital)
-        self.assertIn("{key:'1h',role:'近端資金',period:'最近 1 小時'}", capital)
-        self.assertIn("{key:'4h',role:'波段資金',period:'最近 4 小時'}", capital)
+        self.assertIn("{key:'1h',role:'近端持倉',period:'最近 1 小時'}", capital)
+        self.assertIn("{key:'4h',role:'波段持倉',period:'最近 4 小時'}", capital)
         self.assertLess(
-            capital.index("{key:'4h',role:'波段資金'"),
+            capital.index("{key:'4h',role:'波段持倉'"),
             capital.index("{key:'1h',role:'短線脈衝'"),
         )
         self.assertLess(
-            capital.index("{key:'1h',role:'近端資金'"),
+            capital.index("{key:'1h',role:'近端持倉'"),
             capital.index("{key:'4h',role:'大級別背景'"),
         )
         self.assertIn("primaryMeta=profile[0]", capital)
-        self.assertIn("疑似大量新增持倉 · 配合${side}", capital)
-        self.assertIn("疑似大量新增持倉 · 與${side}反向", capital)
-        self.assertIn("異常增倉 · 高於平常但未達大量門檻", capital)
-        self.assertIn("持倉下降 · 較像退場或平倉", capital)
-        self.assertIn("層級分歧", capital)
+        self.assertIn("function capitalFlowBias(row)", capital)
+        self.assertIn("價格推定偏多主導", capital)
+        self.assertIn("價格推定偏空主導", capital)
+        self.assertIn("支持${cardLabel}", capital)
+        self.assertIn("與${cardLabel}衝突", capital)
+        self.assertIn("相對異常增倉｜${bias.label}", capital)
+        self.assertIn("高於平常的增倉", capital)
+        self.assertIn("無法單靠 OI 確認哪一方", capital)
+        self.assertIn("時窗方向分歧", capital)
         self.assertIn("largeDirections.size>1", capital)
-        self.assertIn("secondaryRelation.tone==='conflict'?'conflict':'pending'", capital)
         self.assertIn("${primaryMeta.role}：${relation.label}", capital)
         self.assertIn("完整資料約 ${minutes} 分鐘前", capital)
         self.assertIn("capitalFlowAge(asOf,referenceTime)", capital)
@@ -925,11 +936,12 @@ class V33ContractTests(unittest.TestCase):
         self.assertIn("台灣 UTC+8", capital)
         self.assertIn("完整 1 小時收線", capital)
         self.assertIn("前 6 個同長區間平均 1.5 倍", capital)
-        self.assertIn("OI ${signed(row?.change_pct)}", capital)
+        self.assertIn("OI 變化 ${signed(row?.change_pct)}", capital)
         self.assertIn("row?.baseline_average_change_pct", capital)
         self.assertIn("row?.change_vs_average_ratio", capital)
         self.assertIn("不使用上一輪掃描快照代替", capital)
         self.assertIn("不等於錢包入金或單一大戶", capital)
+        self.assertIn("OI 本身不能拆成多單量與空單量", capital)
         self.assertIn("<details class=\"capital-flow-details\">", capital)
         self.assertIn("terminalSignalOutcome(item)||isPreviewItem(item)", capital)
         self.assertNotIn("open_interest_change_pct", capital)
@@ -961,7 +973,7 @@ class V33ContractTests(unittest.TestCase):
         self.assertIn("normalized=`${normalized}Z`", time_helpers)
         self.assertIn("year:'numeric'", time_helpers)
         self.assertIn("最新行情時間（台灣 UTC+8）", html)
-        self.assertIn("資金資料截止：${esc(taiwanMinute(asOf))}（台灣 UTC+8）", html)
+        self.assertIn("持倉資料截止：${esc(taiwanMinute(asOf))}（台灣 UTC+8）", html)
         self.assertNotIn("<br>取得時間：", html)
 
     def test_pwa_never_caches_live_market_api(self):

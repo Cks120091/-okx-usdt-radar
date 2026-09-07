@@ -23,6 +23,8 @@ _PUBLIC_CAPITAL_FLOW_FIELDS = (
     "headline_state",
     "headline_direction",
     "headline_label",
+    "direction_basis",
+    "long_short_split_available",
     "minimum_change_pct",
     "large_ratio_threshold",
     "persistence_threshold_pct",

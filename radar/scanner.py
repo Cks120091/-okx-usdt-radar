@@ -574,10 +574,10 @@ class MarketScanner:
                         )
                         if not capital_samples:
                             local_errors.append(
-                                "大額資金 OI 與已收線 1H K 線無法對齊"
+                                "歷史 OI 持倉資料與已收線 1H K 線無法對齊"
                             )
                     except Exception as exc:
-                        local_errors.append(f"大額資金 OI: {exc}")
+                        local_errors.append(f"歷史 OI 持倉資料: {exc}")
                 try:
                     context = context_loader(inst_id, open_interest.get(inst_id))
                     context = replace(
@@ -1289,10 +1289,10 @@ class MarketScanner:
                 )
                 if not capital_samples:
                     advisory_errors.append(
-                        "大額資金 OI 與已收線 1H K 線無法對齊"
+                        "歷史 OI 持倉資料與已收線 1H K 線無法對齊"
                     )
             except Exception as exc:
-                advisory_errors.append(f"大額資金 OI：{exc}")
+                advisory_errors.append(f"歷史 OI 持倉資料：{exc}")
 
         if callable(context_loader) and callable(context_applier):
             try:
