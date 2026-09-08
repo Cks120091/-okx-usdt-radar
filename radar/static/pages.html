@@ -694,7 +694,7 @@
       <div class="manual-grid">
         <section class="manual-section"><div class="manual-section-title"><span>01</span><div><h3>開始使用</h3><p>掃描什麼、資料何時有效</p></div></div>
           <details class="manual-card" open><summary>快速開始／三種掃描</summary><div class="manual-body"><p>選擇 <span class="manual-term">15m 掃描</span>、<span class="manual-term">4H 掃描</span>，或<span class="manual-term">全市場掃描（15m＋4H）</span>建立正式交易計畫；先看「已觸發、等回踩、已錯過、接近」，再依卡片的「現在能否進場」判定。下單前按卡片上的「進場前更新」，重新檢查現價、深度、滑價、成本與歷史 OI 持倉動向，不會改寫原方向或 Entry／SL／TP。雷達只分析、不自動下單。</p></div></details>
-          <details class="manual-card"><summary>掃描市場範圍</summary><div class="manual-body"><p>雷達只掃描 OKX 分類為加密資產的 USDT 永續合約（instCategory＝1）。股票型永續合約（instCategory＝3）及其他非加密分類會在合約清單入口直接排除，不抓取後續行情，也不產生卡片。</p></div></details>
+          <details class="manual-card"><summary>掃描市場範圍</summary><div class="manual-body"><p>全市場雷達只掃描 OKX 分類為加密資產的 USDT 永續合約（instCategory＝1），並對 24H USDT 成交額使用「上 200 萬、向下緩衝 50 萬」規則：新標的達 200 萬就納入；已經納入的標的，跌破 150 萬才移除。這樣不會在 200 萬附近一下出現、一下消失，而且未通過者不抓多週期 K 線。股票型永續合約（instCategory＝3）及其他非加密分類也會在合約清單入口直接排除。手動指定的單幣掃描維持獨立路徑，不受全市場成交額緩衝帶限制。</p></div></details>
           <details class="manual-card"><summary>15m 短線／4H 波段</summary><div class="manual-body"><p>短線固定採用 <span class="manual-term">4H 判斷方向</span>、<span class="manual-term">1H 判斷背景／形態</span>、<span class="manual-term">15m 作為 Trigger 與入場時間</span>，5m 只補充 Timing（進場時機），不單獨翻向。4H 波段則是獨立交易計畫，兩套 Entry／SL／TP 不串台。</p></div></details>
           <details class="manual-card"><summary>掃描中／資料期限</summary><div class="manual-body"><p>掃描哪個週期，該週期先不顯示上一輪卡片；完成後一次換成最新結果。未被掃描的另一週期若仍是 Fresh（最新）就照常有效，不會被誤標為只供參考。只有 STALE（超過 30 分鐘）、本次錯誤或初步預覽才不可直接進場。</p></div></details>
         </section>

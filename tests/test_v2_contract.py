@@ -16,6 +16,15 @@ class V33ContractTests(unittest.TestCase):
         self.assertEqual(config.workers, 12)
         self.assertEqual(config.rate_limit_requests_per_2s, 30)
         self.assertEqual(config.candle_limit_1d, 200)
+        self.assertEqual(config.min_quote_volume_24h, 2_000_000.0)
+        self.assertEqual(config.quote_volume_buffer_24h, 500_000.0)
+        self.assertEqual(ScannerConfig().min_quote_volume_24h, 2_000_000.0)
+        self.assertEqual(ScannerConfig().quote_volume_buffer_24h, 500_000.0)
+        self.assertEqual(StrategyConfig().min_quote_volume_24h, 2_000_000.0)
+        self.assertEqual(
+            DEFAULT_THRESHOLDS["min_quote_volume_24h"],
+            2_000_000.0,
+        )
         self.assertEqual(config.universe_max_spread_pct, 1.0)
         self.assertEqual(config.stale_after_seconds, 1800)
         self.assertEqual(config.early_signal_max_age_bars, 2)
@@ -32,6 +41,28 @@ class V33ContractTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as directory:
             path = Path(directory) / "bad.json"
             path.write_text('{"max_signals": 21}', encoding="utf-8")
+            with self.assertRaises(ValueError):
+                AppConfig.load(str(path))
+            path.write_text(
+                '{"min_quote_volume_24h": 0}',
+                encoding="utf-8",
+            )
+            disabled = AppConfig.load(str(path))
+            self.assertEqual(disabled.min_quote_volume_24h, 0)
+            self.assertEqual(disabled.quote_volume_buffer_24h, 500_000.0)
+            for invalid_volume in ("NaN", "Infinity"):
+                with self.subTest(invalid_volume=invalid_volume):
+                    path.write_text(
+                        f'{{"min_quote_volume_24h": {invalid_volume}}}',
+                        encoding="utf-8",
+                    )
+                    with self.assertRaises(ValueError):
+                        AppConfig.load(str(path))
+            path.write_text(
+                '{"min_quote_volume_24h": 2000000, '
+                '"quote_volume_buffer_24h": 2500000}',
+                encoding="utf-8",
+            )
             with self.assertRaises(ValueError):
                 AppConfig.load(str(path))
 

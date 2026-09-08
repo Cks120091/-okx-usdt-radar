@@ -368,6 +368,7 @@ class OKXPublicClient:
                 bid=_float(row.get("bidPx")),
                 ask=_float(row.get("askPx")),
                 ts=_int(row.get("ts")),
+                quote_volume_24h=_ticker_quote_volume_24h(row),
             )
             tickers[inst_id] = ticker
         return tickers
@@ -401,6 +402,7 @@ class OKXPublicClient:
             bid=_float(row.get("bidPx")),
             ask=_float(row.get("askPx")),
             ts=_int(row.get("ts")),
+            quote_volume_24h=_ticker_quote_volume_24h(row),
         )
         if ticker.last <= 0 or ticker.bid <= 0 or ticker.ask <= 0:
             raise OKXAPIError(f"ticker contains invalid prices for {inst_id}")
@@ -1191,8 +1193,26 @@ def _int(value: Any, default: int = 0) -> int:
 def _float_or_none(value: Any) -> float | None:
     try:
         return float(value)
-    except (TypeError, ValueError):
+    except (TypeError, ValueError, OverflowError):
         return None
+
+
+def _ticker_quote_volume_24h(row: dict[str, Any]) -> float | None:
+    """Convert an OKX derivatives ticker's base volume to USDT notional."""
+
+    base_volume = _float_or_none(row.get("volCcy24h"))
+    last = _float_or_none(row.get("last"))
+    if (
+        base_volume is None
+        or last is None
+        or not math.isfinite(base_volume)
+        or not math.isfinite(last)
+        or base_volume < 0
+        or last <= 0
+    ):
+        return None
+    quote_volume = base_volume * last
+    return quote_volume if math.isfinite(quote_volume) else None
 
 
 def _weighted_depth(levels: list[Any]) -> float:

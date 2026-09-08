@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import math
 import os
 from dataclasses import dataclass
 from pathlib import Path
@@ -24,7 +25,8 @@ class AppConfig:
     request_timeout_seconds: float = 12.0
     request_retries: int = 3
     rate_limit_requests_per_2s: int = 30
-    min_quote_volume_24h: float = 5_000_000.0
+    min_quote_volume_24h: float = 2_000_000.0
+    quote_volume_buffer_24h: float = 500_000.0
     max_spread_pct: float = 0.10
     universe_max_spread_pct: float = 1.00
     min_open_interest_usd: float = 3_000_000.0
@@ -65,6 +67,7 @@ class AppConfig:
             "RADAR_CANDLE_LIMIT_15M": ("candle_limit_15m", int),
             "RADAR_CANDLE_LIMIT_5M": ("candle_limit_5m", int),
             "RADAR_MIN_QUOTE_VOLUME": ("min_quote_volume_24h", float),
+            "RADAR_QUOTE_VOLUME_BUFFER": ("quote_volume_buffer_24h", float),
             "RADAR_MAX_SPREAD_PCT": ("max_spread_pct", float),
             "RADAR_UNIVERSE_MAX_SPREAD_PCT": ("universe_max_spread_pct", float),
             "RADAR_MIN_OPEN_INTEREST_USD": ("min_open_interest_usd", float),
@@ -96,8 +99,22 @@ class AppConfig:
             raise ValueError("max_watchlist must be between 0 and 100")
         if not 0 <= config.context_candidates <= 100:
             raise ValueError("context_candidates must be between 0 and 100")
-        if config.min_quote_volume_24h < 0 or config.min_open_interest_usd < 0:
-            raise ValueError("liquidity thresholds must not be negative")
+        if (
+            not math.isfinite(config.min_quote_volume_24h)
+            or not math.isfinite(config.quote_volume_buffer_24h)
+            or not math.isfinite(config.min_open_interest_usd)
+            or config.min_quote_volume_24h < 0
+            or config.quote_volume_buffer_24h < 0
+            or (
+                config.min_quote_volume_24h > 0
+                and config.quote_volume_buffer_24h > config.min_quote_volume_24h
+            )
+            or config.min_open_interest_usd < 0
+        ):
+            raise ValueError(
+                "liquidity thresholds and buffer must be finite, non-negative, "
+                "and the buffer cannot exceed the reference volume"
+            )
         if (
             config.max_spread_pct < 0
             or config.universe_max_spread_pct <= 0

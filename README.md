@@ -1,6 +1,6 @@
 # OKX Radar V3.4
 
-以 OKX 公開市場資料運作的加密資產 USDT 線性永續合約雙雷達。Universe 只接受 OKX `instCategory=1`；股票型永續（`instCategory=3`）與其他非加密分類會在合約清單入口直接排除，不進入個別行情與策略分析。系統只做分析，不接受 API Key、Secret 或 Passphrase，也沒有自動下單、Paper Trading 或 Live Trading 路徑。V3.4 延續既有 Price-first（價格優先）Trigger 與 Signal Episode（訊號生命週期）。Market Context、流動性、Spread、Slippage、成交成本、R:R 與異常行情都保留為詳細風險提醒，不再作反向判定或硬性否決正式訊號。
+以 OKX 公開市場資料運作的加密資產 USDT 線性永續合約雙雷達。全市場 Universe 只接受 OKX `instCategory=1`，並對 24H USDT 成交額套用「上 200 萬、向下緩衝 50 萬」規則：新標的達 200 萬就納入，已納入標的跌破 150 萬才移除，避免在 200 萬附近反覆進出。股票型永續（`instCategory=3`）、其他非加密分類與未通過緩衝帶的合約都會在多週期 K 線請求前排除。系統只做分析，不接受 API Key、Secret 或 Passphrase，也沒有自動下單、Paper Trading 或 Live Trading 路徑。V3.4 延續既有 Price-first（價格優先）Trigger 與 Signal Episode（訊號生命週期）。Market Context、Spread、Slippage、成交成本、R:R 與已進入 Universe 後計算的流動性狀況都保留為詳細風險提醒，不作反向判定或改寫正式訊號。
 
 手機介面將 Entry Zone 統一顯示為「Entry（最佳進場點位）」，並依「方向 → 現在能否進場 → 同向續走力道 → Entry／SL／TP／R:R」排列。續走區只回答「多頭／空頭續走力道：強、中等、偏弱或資料不足」，不顯示也不產生加分或一致度分數。它只作多空輔助觀察，不加入交易品質、訊號準備度、排序或進場判定；完整原始依據只保留在「完整判定資料」。首頁把可進候選與交易品質排序放在最前面，市場方向新增由每個具有連續完整 1H 收盤資料的市場，以 25 個收盤計算 24H RSI(24) 後作全市場等權平均，直接顯示真實數字與「強多／偏多／中性／偏空／強空」；原有 15m／4H RSI(14) 平均與樣本數仍保留，不拿 BTC RSI 冒充市場平均。通知與收藏改為收合，完整 OI 異動雷達移到「更多」。Funding（資金費率）、Spread（買賣價差）、Slippage（滑價）與 Order Book（訂單簿）仍收進詳細資料。單幣請求期間只使用輕量 CSS 掃描動畫，不載入 GIF、影片、Canvas 或大型外部資源。
 
@@ -25,7 +25,7 @@ Market Context、OI、Taker、CVD、Funding 與 Order Book 仍會保存並放在
 
 ## 系統流程
 
-1. 動態取得所有 `instCategory=1`、`state=live`、USDT 結算、線性 `*-USDT-SWAP`；股票型與其他非加密合約在此步即排除。
+1. 動態取得所有 `instCategory=1`、`state=live`、USDT 結算、線性 `*-USDT-SWAP`，再以 bulk ticker 套用 200 萬納入線與向下 50 萬緩衝；新標的達 200 萬就加入，既有標的跌破 150 萬才移除，通過後才抓多週期 K 線。股票型與其他非加密合約更早在合約入口排除。
 2. 依掃描範圍載入資料：15m 掃描使用 4H／1H／15m，4H 掃描使用 1D／4H／1H，全市場掃描同時執行兩套雷達。
 3. 短線與長線雷達各自建立 Market Story，不共用 Trigger。
 4. 15m 核心判定完成後可先發布只讀 `CORE_PREVIEW`；它不建立／推進持久 Signal Episode，也一律不可進場。
@@ -256,7 +256,8 @@ iPhone／iPad 的背景通知需先用 Safari 將雷達「加入主畫面」，�
 | `candle_limit_1h` | 240 | 1H 已收盤 K 線 |
 | `candle_limit_15m` | 200 | 15m 已收盤 K 線 |
 | `candle_limit_5m` | 120 | 最高順位候選 5m K 線 |
-| `min_quote_volume_24h` | 5,000,000 | 24H 成交額風險提醒與排序參考 |
+| `min_quote_volume_24h` | 2,000,000 | 全市場 24H USDT 成交額的新標的納入線 |
+| `quote_volume_buffer_24h` | 500,000 | 從納入線向下延伸的保留緩衝：新標的達 2,000,000 就納入；已納入標的跌破 1,500,000 才移除；單幣掃描不受限制 |
 | `universe_max_spread_pct` | 1.00 | Universe 極端 Spread 提醒值 |
 | `max_spread_pct` | 0.10 | Spread 風險提醒值 |
 | `min_open_interest_usd` | 3,000,000 | OI Context 參考／舊設定相容，非硬門檻 |

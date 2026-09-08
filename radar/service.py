@@ -900,6 +900,20 @@ class RadarRuntime:
         self._preflight_cache_ttl_seconds = 12.0
         self._latest: RadarReport | None = load_latest_report(config.data_dir)
         self._prune_restored_terminal_cards()
+        restore_volume_universe = getattr(
+            self.scanner,
+            "restore_volume_universe",
+            None,
+        )
+        if self._latest is not None and callable(restore_volume_universe):
+            hysteresis_state = (self._latest.data_quality or {}).get(
+                "universe_volume_hysteresis"
+            )
+            restore_volume_universe(
+                dict(hysteresis_state)
+                if isinstance(hysteresis_state, dict)
+                else None
+            )
         restored_runtime = load_runtime_state(config.data_dir)
         self._preview: RadarReport | None = None
         self._running = False
@@ -2637,6 +2651,43 @@ class RadarRuntime:
         )
 
     @staticmethod
+    def _assert_preflight_signal_available(signal: Any) -> None:
+        entry_eligibility = dict(
+            getattr(signal, "entry_eligibility", {}) or {}
+        )
+        data_quality = dict(getattr(signal, "data_quality", {}) or {})
+        lifecycle = dict(getattr(signal, "lifecycle", {}) or {})
+        availability_markers = {
+            str(value or "").strip().upper()
+            for value in (
+                getattr(signal, "freshness", ""),
+                entry_eligibility.get("status"),
+                data_quality.get("status"),
+                data_quality.get("core"),
+                data_quality.get("core_status"),
+                lifecycle.get("transition"),
+            )
+        }
+        if "DATA_UNAVAILABLE" not in availability_markers and not bool(
+            lifecycle.get("read_only")
+        ):
+            return
+        raise PreflightError(
+            HTTPStatus.CONFLICT,
+            "這張卡目前是資料不足的唯讀計畫，禁止進場前更新；請等待新的完整掃描重新納入。",
+            code="SIGNAL_DATA_UNAVAILABLE",
+            details={
+                "inst_id": str(getattr(signal, "inst_id", "") or ""),
+                "horizon": str(
+                    getattr(signal, "radar_horizon", "") or ""
+                ),
+                "trigger_id": str(
+                    getattr(signal, "trigger_id", "") or ""
+                ),
+            },
+        )
+
+    @staticmethod
     def _preflight_trigger_mismatch(
         *,
         inst_id: str,
@@ -2701,6 +2752,7 @@ class RadarRuntime:
                 expected_trigger_id=expected_trigger_id,
                 current_trigger_id=current_trigger_id or None,
             )
+        self._assert_preflight_signal_available(current_signal)
         return current_signal
 
     def preflight_dict(
@@ -2758,6 +2810,7 @@ class RadarRuntime:
                     expected_trigger_id=normalized_expected_trigger,
                     current_trigger_id=trigger_id or None,
                 )
+            self._assert_preflight_signal_available(signal)
             repository = getattr(self.scanner, "repository", None)
             cache_key = (report_generated_at, normalized_horizon, normalized_id)
             cached = self._cached_preflight_locked(cache_key)

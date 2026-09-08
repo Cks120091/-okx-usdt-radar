@@ -672,6 +672,46 @@ class PreflightTests(unittest.TestCase):
             self.assertEqual(client.ticker_calls, 0)
             self.assertEqual(client.context_calls, 0)
 
+    def test_data_unavailable_card_cannot_be_reopened_by_preflight(self):
+        with tempfile.TemporaryDirectory() as directory:
+            original = make_signal()
+            item = replace(
+                original,
+                freshness="DATA_UNAVAILABLE",
+                actionable=False,
+                entry_eligibility={
+                    **original.entry_eligibility,
+                    "status": "DATA_UNAVAILABLE",
+                    "actionable": False,
+                    "new_entry_allowed": False,
+                },
+                data_quality={"status": "DATA_UNAVAILABLE"},
+                lifecycle={
+                    **original.lifecycle,
+                    "transition": "DATA_UNAVAILABLE",
+                    "read_only": True,
+                },
+            )
+            client = PreflightClient(price=100.0)
+            runtime = RadarRuntime(
+                PreflightScanner(client),
+                AppConfig(data_dir=directory),
+            )
+            runtime._latest = make_report(item)
+            runtime._latest.status = "NO_QUALIFIED_SIGNAL"
+
+            with self.assertRaises(PreflightError) as caught:
+                runtime.preflight_dict(item.inst_id, "SHORT", item.trigger_id)
+
+            self.assertEqual(caught.exception.status.value, 409)
+            self.assertEqual(
+                caught.exception.code,
+                "SIGNAL_DATA_UNAVAILABLE",
+            )
+            self.assertEqual(caught.exception.details["trigger_id"], item.trigger_id)
+            self.assertEqual(client.ticker_calls, 0)
+            self.assertEqual(client.context_calls, 0)
+
     def test_trigger_replacement_during_fetch_is_rejected_before_cache(self):
         for expected_trigger_id in ("old-trigger-id", None):
             with self.subTest(expected_trigger_id=expected_trigger_id):

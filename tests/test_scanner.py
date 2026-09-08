@@ -76,7 +76,14 @@ class FakeClient:
 
     def get_swap_tickers(self):
         return {
-            item.inst_id: Ticker(item.inst_id, 110, 109.99, 110.01, 1)
+            item.inst_id: Ticker(
+                item.inst_id,
+                110,
+                109.99,
+                110.01,
+                1,
+                20_000_000,
+            )
             for item in self.instruments
         }
 
@@ -85,6 +92,29 @@ class FakeClient:
         if inst_id == self.fail_id and bar == "1H":
             raise RuntimeError("fixture failure")
         return candles(limit)
+
+
+class VolumeFilterClient(FakeClient):
+    def __init__(self, volumes):
+        super().__init__()
+        self.volumes = dict(volumes)
+        self.instruments = [
+            Instrument(inst_id, "live", "USDT", "linear", 0.01)
+            for inst_id in self.volumes
+        ]
+
+    def get_swap_tickers(self):
+        return {
+            item.inst_id: Ticker(
+                item.inst_id,
+                110,
+                109.99,
+                110.01,
+                1,
+                self.volumes[item.inst_id],
+            )
+            for item in self.instruments
+        }
 
 
 class ScannerMarketPulseTests(unittest.TestCase):
@@ -324,6 +354,311 @@ def qualified_state(signal):
 
 
 class ScannerTests(unittest.TestCase):
+    def test_full_scan_applies_24h_volume_hysteresis_before_candles(self):
+        client = VolumeFilterClient(
+            {
+                "LOW-USDT-SWAP": 1_499_999,
+                "BAND-USDT-SWAP": 1_999_999,
+                "ENTRY-USDT-SWAP": 2_000_000,
+                "HIGH-USDT-SWAP": 2_000_001,
+            }
+        )
+        scanner = MarketScanner(
+            client,
+            ScannerConfig(
+                workers=2,
+                min_quote_volume_24h=2_000_000,
+                quote_volume_buffer_24h=500_000,
+            ),
+        )
+
+        first = scanner.scan_once(scan_mode="SHORT")
+
+        requested_ids = {inst_id for inst_id, _, _ in client.candle_requests}
+        self.assertEqual(
+            requested_ids,
+            {"ENTRY-USDT-SWAP", "HIGH-USDT-SWAP"},
+        )
+        self.assertEqual(first.target_count, 2)
+        self.assertEqual(
+            first.target_instruments,
+            ["ENTRY-USDT-SWAP", "HIGH-USDT-SWAP"],
+        )
+        self.assertEqual(first.coverage_pct, 100.0)
+        self.assertNotIn("LOW-USDT-SWAP", first.failed_instruments)
+        self.assertEqual(
+            first.exclusion_counts["24H_USDT_VOLUME_BUFFER_EXCLUDED"],
+            2,
+        )
+        self.assertEqual(
+            first.data_quality["universe_volume_reference_usdt"],
+            2_000_000,
+        )
+        self.assertEqual(
+            first.data_quality["universe_volume_buffer_usdt"],
+            500_000,
+        )
+        self.assertEqual(
+            first.data_quality["universe_volume_entry_usdt"],
+            2_000_000,
+        )
+        self.assertEqual(
+            first.data_quality["universe_volume_exit_usdt"],
+            1_500_000,
+        )
+
+        client.volumes.update(
+            {
+                "LOW-USDT-SWAP": 1_500_000,
+                "BAND-USDT-SWAP": 1_999_999,
+                "ENTRY-USDT-SWAP": 1_500_000,
+                "HIGH-USDT-SWAP": 1_499_999,
+            }
+        )
+        client.candle_requests.clear()
+
+        second = scanner.scan_once(scan_mode="SHORT")
+
+        self.assertEqual(
+            {inst_id for inst_id, _, _ in client.candle_requests},
+            {"ENTRY-USDT-SWAP"},
+        )
+        self.assertEqual(second.target_instruments, ["ENTRY-USDT-SWAP"])
+        self.assertEqual(
+            second.exclusion_counts["24H_USDT_VOLUME_BUFFER_EXCLUDED"],
+            3,
+        )
+        self.assertEqual(
+            second.exclusion_counts["24H_USDT_VOLUME_BELOW_EXIT"],
+            1,
+        )
+        self.assertEqual(
+            second.exclusion_counts["24H_USDT_VOLUME_WAITING_FOR_ENTRY"],
+            2,
+        )
+        self.assertEqual(
+            second.data_quality["universe_volume_retained_in_buffer_count"],
+            1,
+        )
+
+    def test_all_below_volume_threshold_is_valid_empty_universe(self):
+        client = VolumeFilterClient(
+            {
+                "LOW-A-USDT-SWAP": 1_999_999,
+                "LOW-B-USDT-SWAP": 0,
+            }
+        )
+
+        report = MarketScanner(
+            client,
+            ScannerConfig(workers=2, min_quote_volume_24h=2_000_000),
+        ).scan_once(scan_mode="SHORT")
+
+        self.assertEqual(client.candle_requests, [])
+        self.assertEqual(report.status, "NO_QUALIFIED_SIGNAL")
+        self.assertEqual(report.runtime_status, "FRESH")
+        self.assertEqual(report.target_count, 0)
+        self.assertEqual(report.fetched_count, 0)
+        self.assertEqual(report.analyzable_count, 0)
+        self.assertEqual(report.coverage_pct, 100.0)
+        self.assertEqual(report.failed_instruments, {})
+        self.assertEqual(
+            report.exclusion_counts["24H_USDT_VOLUME_BUFFER_EXCLUDED"],
+            2,
+        )
+
+    def test_restored_volume_member_stays_inside_hysteresis_band(self):
+        client = VolumeFilterClient(
+            {
+                "RESTORED-USDT-SWAP": 1_750_000,
+                "NEW-USDT-SWAP": 1_750_000,
+            }
+        )
+        scanner = MarketScanner(
+            client,
+            ScannerConfig(
+                workers=1,
+                min_quote_volume_24h=2_000_000,
+                quote_volume_buffer_24h=500_000,
+            ),
+        )
+        scanner.restore_volume_universe(
+            {
+                "version": 1,
+                "entry_usdt": 2_000_000,
+                "buffer_usdt": 500_000,
+                "members": ["RESTORED-USDT-SWAP"],
+            }
+        )
+
+        report = scanner.scan_once(scan_mode="SHORT")
+
+        self.assertEqual(report.target_instruments, ["RESTORED-USDT-SWAP"])
+        self.assertEqual(
+            {inst_id for inst_id, _, _ in client.candle_requests},
+            {"RESTORED-USDT-SWAP"},
+        )
+        self.assertEqual(
+            report.data_quality["universe_volume_retained_in_buffer_count"],
+            1,
+        )
+        self.assertEqual(
+            report.data_quality["universe_volume_waiting_for_entry_count"],
+            1,
+        )
+
+    def test_missing_24h_usdt_volume_is_an_explicit_data_failure(self):
+        client = VolumeFilterClient({"UNKNOWN-USDT-SWAP": None})
+
+        report = MarketScanner(
+            client,
+            ScannerConfig(workers=1, min_quote_volume_24h=2_000_000),
+        ).scan_once(scan_mode="SHORT")
+
+        self.assertEqual(client.candle_requests, [])
+        self.assertEqual(report.status, "PARTIAL_DATA")
+        self.assertEqual(report.target_count, 0)
+        self.assertEqual(report.coverage_pct, 0.0)
+        self.assertIn("UNKNOWN-USDT-SWAP", report.failed_instruments)
+        self.assertIn(
+            "24H USDT 成交額資料缺失",
+            report.failed_instruments["UNKNOWN-USDT-SWAP"],
+        )
+        self.assertNotIn(
+            "24H_USDT_VOLUME_BUFFER_EXCLUDED",
+            report.exclusion_counts,
+        )
+
+    def test_volume_membership_survives_data_gap_and_restart(self):
+        client = VolumeFilterClient({"RESTORED-USDT-SWAP": 2_000_000})
+        config = ScannerConfig(
+            workers=1,
+            min_quote_volume_24h=2_000_000,
+            quote_volume_buffer_24h=500_000,
+        )
+        scanner = MarketScanner(client, config)
+        scanner.scan_once(scan_mode="SHORT")
+        client.volumes["RESTORED-USDT-SWAP"] = None
+        client.candle_requests.clear()
+
+        missing = scanner.scan_once(scan_mode="SHORT")
+        state = missing.data_quality["universe_volume_hysteresis"]
+
+        self.assertEqual(state["version"], 1)
+        self.assertEqual(state["members"], ["RESTORED-USDT-SWAP"])
+        restarted = MarketScanner(client, config)
+        restarted.restore_volume_universe(state)
+        client.volumes["RESTORED-USDT-SWAP"] = 1_750_000
+        client.candle_requests.clear()
+
+        restored = restarted.scan_once(scan_mode="SHORT")
+
+        self.assertEqual(
+            restored.target_instruments,
+            ["RESTORED-USDT-SWAP"],
+        )
+        self.assertEqual(
+            {inst_id for inst_id, _, _ in client.candle_requests},
+            {"RESTORED-USDT-SWAP"},
+        )
+
+    def test_non_finite_volume_threshold_fails_closed_to_two_million(self):
+        client = VolumeFilterClient({"LOW-USDT-SWAP": 1_999_999})
+
+        report = MarketScanner(
+            client,
+            ScannerConfig(workers=1, min_quote_volume_24h=float("nan")),
+        ).scan_once(scan_mode="SHORT")
+
+        self.assertEqual(client.candle_requests, [])
+        self.assertEqual(report.target_count, 0)
+        self.assertEqual(
+            report.data_quality["universe_volume_reference_usdt"],
+            2_000_000,
+        )
+        self.assertEqual(
+            report.data_quality["universe_volume_entry_usdt"],
+            2_000_000,
+        )
+
+    def test_filtered_symbol_keeps_active_plan_read_only(self):
+        client = VolumeFilterClient({"AAA-USDT-SWAP": 2_000_000})
+        scanner = MarketScanner(
+            client,
+            ScannerConfig(workers=1, min_quote_volume_24h=2_000_000),
+        )
+        scanner.engine = AlwaysSignalEngine()
+
+        first = scanner.scan_once(scan_mode="SHORT")
+        original = first.signals[0]
+        client.volumes["AAA-USDT-SWAP"] = 1_499_999
+        client.candle_requests.clear()
+
+        filtered = scanner.scan_once(scan_mode="SHORT")
+
+        self.assertEqual(client.candle_requests, [])
+        self.assertEqual(filtered.status, "NO_QUALIFIED_SIGNAL")
+        self.assertEqual(len(filtered.signals), 1)
+        preserved = filtered.signals[0]
+        self.assertEqual(preserved.trigger_id, original.trigger_id)
+        self.assertEqual(preserved.entry_low, original.entry_low)
+        self.assertEqual(preserved.entry_high, original.entry_high)
+        self.assertEqual(preserved.stop_loss, original.stop_loss)
+        self.assertEqual(preserved.take_profit_1, original.take_profit_1)
+        self.assertEqual(preserved.take_profit_2, original.take_profit_2)
+        self.assertEqual(preserved.freshness, "DATA_UNAVAILABLE")
+        self.assertEqual(
+            preserved.entry_eligibility["status"],
+            "DATA_UNAVAILABLE",
+        )
+        self.assertFalse(preserved.actionable)
+
+    def test_partial_failure_does_not_hide_filtered_active_plan(self):
+        client = VolumeFilterClient(
+            {
+                "AAA-USDT-SWAP": 2_000_000,
+                "BBB-USDT-SWAP": 1_499_999,
+            }
+        )
+        scanner = MarketScanner(
+            client,
+            ScannerConfig(workers=1, min_quote_volume_24h=2_000_000),
+        )
+        scanner.engine = AlwaysSignalEngine()
+        original = scanner.scan_once(scan_mode="SHORT").signals[0]
+        client.volumes.update(
+            {
+                "AAA-USDT-SWAP": 1_499_999,
+                "BBB-USDT-SWAP": 2_000_000,
+            }
+        )
+        client.fail_id = "BBB-USDT-SWAP"
+        client.candle_requests.clear()
+        previews = []
+
+        report = scanner.scan_once(
+            scan_mode="SHORT",
+            preview=previews.append,
+        )
+
+        self.assertEqual(previews, [])
+        self.assertEqual(report.status, "DATA_INCOMPLETE")
+        self.assertEqual(report.runtime_status, "ERROR")
+        self.assertFalse(report.actionable)
+        self.assertIn("BBB-USDT-SWAP", report.failed_instruments)
+        self.assertEqual(
+            report.exclusion_counts["24H_USDT_VOLUME_BUFFER_EXCLUDED"],
+            1,
+        )
+        self.assertEqual(len(report.signals), 1)
+        preserved = report.signals[0]
+        self.assertEqual(preserved.trigger_id, original.trigger_id)
+        self.assertEqual(preserved.entry_low, original.entry_low)
+        self.assertEqual(preserved.stop_loss, original.stop_loss)
+        self.assertEqual(preserved.take_profit_1, original.take_profit_1)
+        self.assertEqual(preserved.freshness, "DATA_UNAVAILABLE")
+        self.assertFalse(preserved.actionable)
+
     def test_excluded_contract_terminal_cards_do_not_reenter_report(self):
         scanner = MarketScanner(
             FakeClient(),
@@ -633,7 +968,14 @@ class ScannerTests(unittest.TestCase):
                 )
 
             def get_ticker(self, inst_id):
-                return Ticker(inst_id, 110, 109.99, 110.01, 1)
+                return Ticker(
+                    inst_id,
+                    110,
+                    109.99,
+                    110.01,
+                    1,
+                    quote_volume_24h=1,
+                )
 
             def get_open_interest_for(self, inst_id):
                 return 5_000_000
@@ -836,7 +1178,10 @@ class ScannerTests(unittest.TestCase):
         client = SingleInstrumentClient()
         scanner = MarketScanner(
             client,
-            ScannerConfig(min_quote_volume_24h=0, universe_max_spread_pct=1.0),
+            ScannerConfig(
+                min_quote_volume_24h=2_000_000,
+                universe_max_spread_pct=1.0,
+            ),
         )
 
         analysis = scanner.scan_instrument("AAA-USDT-SWAP")

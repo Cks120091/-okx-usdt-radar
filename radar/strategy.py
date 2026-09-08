@@ -25,7 +25,7 @@ from .models import Candle, Instrument, MarketContext, MarketState, Signal, Tick
 
 @dataclass(frozen=True)
 class StrategyConfig:
-    min_quote_volume_24h: float = 5_000_000.0
+    min_quote_volume_24h: float = 2_000_000.0
     max_spread_pct: float = 0.10
     min_open_interest_usd: float = 3_000_000.0
     require_micro_volume_anomaly: bool = False

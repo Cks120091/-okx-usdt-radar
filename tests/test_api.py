@@ -121,6 +121,78 @@ class APITests(unittest.TestCase):
 
         self.assertEqual(FixtureClient(rows).get_usdt_swap_instruments(), [])
 
+    def test_swap_tickers_convert_base_volume_to_usdt_notional(self):
+        rows = [
+            {
+                "instId": "LOW-USDT-SWAP",
+                "last": "100",
+                "bidPx": "99.9",
+                "askPx": "100.1",
+                "volCcy24h": "19999.99",
+                "vol24h": "999999999",
+                "ts": "1",
+            },
+            {
+                "instId": "EDGE-USDT-SWAP",
+                "last": "100",
+                "bidPx": "99.9",
+                "askPx": "100.1",
+                "volCcy24h": "20000",
+                "vol24h": "1",
+                "ts": "1",
+            },
+            {
+                "instId": "ZERO-USDT-SWAP",
+                "last": "100",
+                "bidPx": "99.9",
+                "askPx": "100.1",
+                "volCcy24h": "0",
+                "ts": "1",
+            },
+            {
+                "instId": "UNKNOWN-USDT-SWAP",
+                "last": "100",
+                "bidPx": "99.9",
+                "askPx": "100.1",
+                "volCcy24h": "nan",
+                "ts": "1",
+            },
+            {
+                "instId": "NEGATIVE-USDT-SWAP",
+                "last": "100",
+                "bidPx": "99.9",
+                "askPx": "100.1",
+                "volCcy24h": "-1",
+                "ts": "1",
+            },
+            {
+                "instId": "BADPRICE-USDT-SWAP",
+                "last": "0",
+                "bidPx": "0",
+                "askPx": "0",
+                "volCcy24h": "999999999",
+                "ts": "1",
+            },
+            {
+                "instId": "INFINITE-USDT-SWAP",
+                "last": "1e308",
+                "bidPx": "1e308",
+                "askPx": "1e308",
+                "volCcy24h": "1e308",
+                "ts": "1",
+            },
+        ]
+
+        tickers = FixtureClient(rows).get_swap_tickers()
+
+        self.assertAlmostEqual(tickers["LOW-USDT-SWAP"].quote_volume_24h, 1_999_999)
+        self.assertEqual(tickers["EDGE-USDT-SWAP"].quote_volume_24h, 2_000_000)
+        self.assertEqual(tickers["ZERO-USDT-SWAP"].quote_volume_24h, 0)
+        self.assertIsNone(tickers["UNKNOWN-USDT-SWAP"].quote_volume_24h)
+        self.assertIsNone(tickers["NEGATIVE-USDT-SWAP"].quote_volume_24h)
+        self.assertIsNone(tickers["BADPRICE-USDT-SWAP"].quote_volume_24h)
+        self.assertIsNone(tickers["INFINITE-USDT-SWAP"].quote_volume_24h)
+
     def test_single_instrument_lookup_cannot_scan_stock_perpetual(self):
         rows = [
             {"instId": "TSLA-USDT-SWAP", "state": "live", "settleCcy": "USDT", "ctType": "linear", "tickSz": "0.01", "instCategory": "3"},

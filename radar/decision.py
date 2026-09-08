@@ -8,7 +8,7 @@ from .continuation import LOOKBACK_ALGORITHM_VERSION
 
 
 DEFAULT_THRESHOLDS: dict[str, float] = {
-    "min_quote_volume_24h": 5_000_000.0,
+    "min_quote_volume_24h": 2_000_000.0,
     "max_spread_pct": 0.10,
     "max_slippage_pct": 0.15,
     "execution_cost_warning_to_risk_pct": 10.0,

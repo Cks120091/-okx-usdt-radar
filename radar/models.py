@@ -36,6 +36,10 @@ class Ticker:
     bid: float
     ask: float
     ts: int
+    # OKX reports derivatives ``volCcy24h`` in base currency.  The public
+    # client converts it to an estimated USDT notional with the current price
+    # so the universe can be filtered before any candle requests are made.
+    quote_volume_24h: float | None = None
 
     @property
     def spread_pct(self) -> float:

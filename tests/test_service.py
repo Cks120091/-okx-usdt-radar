@@ -1913,6 +1913,20 @@ class RuntimeSafetyTests(unittest.TestCase):
             current.context_target_count = 83
             current.context_enriched_count = 83
             current.data_quality = {
+                "universe_volume_min_usdt": 1_500_000,
+                "universe_volume_reference_usdt": 2_000_000,
+                "universe_volume_buffer_usdt": 500_000,
+                "universe_volume_entry_usdt": 2_000_000,
+                "universe_volume_exit_usdt": 1_500_000,
+                "universe_volume_excluded_count": 17,
+                "universe_volume_waiting_for_entry_count": 10,
+                "universe_volume_retained_in_buffer_count": 3,
+                "universe_volume_hysteresis": {
+                    "version": 1,
+                    "entry_usdt": 2_000_000,
+                    "buffer_usdt": 500_000,
+                    "members": ["PRIVATE-USDT-SWAP"],
+                },
                 "deep_target_count": 83,
                 "deep_enriched_count": 83,
                 "deep_complete_count": 77,
@@ -1944,6 +1958,26 @@ class RuntimeSafetyTests(unittest.TestCase):
             self.assertNotIn("api_metrics", payload)
             self.assertNotIn("long_market_map", payload)
             self.assertEqual(payload["context_enriched_count"], 83)
+            self.assertEqual(
+                payload["data_quality"]["universe_volume_min_usdt"],
+                1_500_000,
+            )
+            self.assertEqual(
+                payload["data_quality"]["universe_volume_entry_usdt"],
+                2_000_000,
+            )
+            self.assertEqual(
+                payload["data_quality"]["universe_volume_exit_usdt"],
+                1_500_000,
+            )
+            self.assertEqual(
+                payload["data_quality"]["universe_volume_excluded_count"],
+                17,
+            )
+            self.assertNotIn(
+                "universe_volume_hysteresis",
+                payload["data_quality"],
+            )
             self.assertEqual(payload["data_quality"]["deep_target_count"], 83)
             self.assertEqual(
                 payload["data_quality"]["deep_complete_count"],
@@ -2525,6 +2559,67 @@ class RuntimeSafetyTests(unittest.TestCase):
             self.assertEqual(runtime.status()["system_status"], "FRESH")
             self.assertEqual(runtime.status()["last_attempt_status"], "RESTORED")
             self.assertEqual(len(runtime.latest_dict()["signals"]), 1)
+
+    def test_runtime_restores_volume_hysteresis_membership(self):
+        class RestoreScanner:
+            def __init__(self):
+                self.restored_state = "NOT_CALLED"
+
+            def restore_volume_universe(self, state):
+                self.restored_state = state
+
+        with tempfile.TemporaryDirectory() as directory:
+            saved = report()
+            saved.target_instruments = [
+                "AAA-USDT-SWAP",
+                "BBB-USDT-SWAP",
+            ]
+            saved.data_quality["universe_volume_hysteresis"] = {
+                "version": 1,
+                "entry_usdt": 2_000_000,
+                "buffer_usdt": 500_000,
+                "members": ["AAA-USDT-SWAP"],
+            }
+            save_report(saved, directory)
+            scanner = RestoreScanner()
+
+            RadarRuntime(
+                scanner,
+                AppConfig(data_dir=directory),
+                push_notifier=FakePushNotifier(),
+            )
+
+            self.assertEqual(
+                scanner.restored_state,
+                {
+                    "version": 1,
+                    "entry_usdt": 2_000_000,
+                    "buffer_usdt": 500_000,
+                    "members": ["AAA-USDT-SWAP"],
+                },
+            )
+
+    def test_runtime_does_not_restore_legacy_target_list_as_membership(self):
+        class RestoreScanner:
+            def __init__(self):
+                self.restored_state = "NOT_CALLED"
+
+            def restore_volume_universe(self, state):
+                self.restored_state = state
+
+        with tempfile.TemporaryDirectory() as directory:
+            saved = report()
+            saved.target_instruments = ["LEGACY-USDT-SWAP"]
+            save_report(saved, directory)
+            scanner = RestoreScanner()
+
+            RadarRuntime(
+                scanner,
+                AppConfig(data_dir=directory),
+                push_notifier=FakePushNotifier(),
+            )
+
+            self.assertIsNone(scanner.restored_state)
 
     def test_core_preview_is_available_while_deep_scan_continues(self):
         with tempfile.TemporaryDirectory() as directory:

@@ -169,6 +169,16 @@ _PUBLIC_REPORT_DATA_QUALITY_FIELDS = (
     "deep",
     "deep_status",
     "missing_sources",
+    # Full-market universe gate.  These scalars let the browser explain the
+    # hysteresis band and how many contracts were removed before K-line calls.
+    "universe_volume_min_usdt",
+    "universe_volume_reference_usdt",
+    "universe_volume_buffer_usdt",
+    "universe_volume_entry_usdt",
+    "universe_volume_exit_usdt",
+    "universe_volume_excluded_count",
+    "universe_volume_waiting_for_entry_count",
+    "universe_volume_retained_in_buffer_count",
     # ``deep_enriched_count`` only means that at least one optional context
     # source was available.  Publish the real completeness counters as well so
     # the UI never has to present that number as full depth coverage.

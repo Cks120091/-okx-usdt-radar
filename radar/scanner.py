@@ -34,6 +34,9 @@ from .strategy import (
 )
 
 
+_VOLUME_HYSTERESIS_STATE_VERSION = 1
+
+
 class PublicDataClient(Protocol):
     def get_usdt_swap_instruments(self) -> list[Instrument]: ...
 
@@ -74,7 +77,8 @@ class ScannerConfig:
     candle_limit_1h: int = 240
     candle_limit_15m: int = 200
     candle_limit_5m: int = 120
-    min_quote_volume_24h: float = 5_000_000.0
+    min_quote_volume_24h: float = 2_000_000.0
+    quote_volume_buffer_24h: float = 500_000.0
     max_spread_pct: float = 0.10
     universe_max_spread_pct: float = 1.00
     min_open_interest_usd: float = 3_000_000.0
@@ -139,6 +143,7 @@ class MarketScanner:
         self.client = client
         self.config = config or ScannerConfig()
         self._previous_open_interest_usd = dict(self.config.previous_open_interest_usd)
+        self._volume_eligible_ids: set[str] = set()
         self._signal_history: dict[tuple[str, str], dict[str, str]] = {}
         self._candle_cache: dict[tuple[str, str], list[Candle]] = {}
         self._retained_candle_inst_ids: list[str] = []
@@ -170,6 +175,70 @@ class MarketScanner:
             )
         )
 
+    def _volume_hysteresis_thresholds(
+        self,
+    ) -> tuple[float, float, float, float]:
+        configured_entry = _finite_number(self.config.min_quote_volume_24h)
+        entry_threshold = (
+            configured_entry
+            if configured_entry is not None and configured_entry >= 0
+            else 2_000_000.0
+        )
+        configured_buffer = _finite_number(
+            self.config.quote_volume_buffer_24h
+        )
+        buffer = (
+            0.0
+            if entry_threshold == 0
+            else min(
+                entry_threshold,
+                configured_buffer
+                if configured_buffer is not None and configured_buffer >= 0
+                else 500_000.0,
+            )
+        )
+        exit_threshold = max(0.0, entry_threshold - buffer)
+        return entry_threshold, buffer, entry_threshold, exit_threshold
+
+    def restore_volume_universe(self, state: dict[str, Any] | None) -> None:
+        """Restore only an explicit, policy-compatible hysteresis state."""
+
+        self._volume_eligible_ids = set()
+        if not isinstance(state, dict):
+            return
+        if state.get("version") != _VOLUME_HYSTERESIS_STATE_VERSION:
+            return
+        entry_threshold, buffer, _, _ = self._volume_hysteresis_thresholds()
+        stored_entry = _finite_number(state.get("entry_usdt"))
+        stored_buffer = _finite_number(state.get("buffer_usdt"))
+        if (
+            stored_entry is None
+            or stored_buffer is None
+            or not math.isclose(
+                stored_entry,
+                entry_threshold,
+                rel_tol=0.0,
+                abs_tol=1e-9,
+            )
+            or not math.isclose(
+                stored_buffer,
+                buffer,
+                rel_tol=0.0,
+                abs_tol=1e-9,
+            )
+        ):
+            return
+        members = state.get("members")
+        if not isinstance(members, list):
+            return
+        self._volume_eligible_ids = {
+            normalized
+            for item in members
+            if (normalized := str(item or "").strip().upper()).endswith(
+                "-USDT-SWAP"
+            )
+        }
+
     def scan_once(
         self,
         progress: ProgressCallback | None = None,
@@ -195,9 +264,18 @@ class MarketScanner:
             "LONG": "4H 長線",
             "FULL": "15m＋4H 全市場",
         }[normalized_mode]
+        (
+            volume_reference,
+            volume_buffer,
+            volume_entry_threshold,
+            volume_exit_threshold,
+        ) = self._volume_hysteresis_thresholds()
         scope = (
             "OKX instCategory=1 加密資產、state=live、USDT 結算、"
-            f"線性永續合約；{mode_label}掃描"
+            f"線性永續合約、24H USDT 成交額以 {volume_reference:,.0f} "
+            f"為納入線並設向下 {volume_buffer:,.0f} 緩衝（新納入 "
+            f"{volume_entry_threshold:,.0f}、移除低於 "
+            f"{volume_exit_threshold:,.0f}）；{mode_label}掃描"
         )
         self._progress(progress, "INSTRUMENTS", 0, None, "正在同步 OKX live USDT 永續 Universe")
         try:
@@ -233,14 +311,47 @@ class MarketScanner:
             )
 
         instrument_map = {item.inst_id: item for item in instruments}
-        target_ids = sorted(instrument_map)
         failures: dict[str, str] = {}
-        eligible = []
+        eligible: list[Instrument] = []
+        volume_excluded_ids: list[str] = []
+        volume_below_exit_ids: list[str] = []
+        volume_waiting_for_entry_ids: list[str] = []
+        volume_retained_in_buffer_ids: list[str] = []
+        previous_volume_members = set(self._volume_eligible_ids)
+        next_volume_members = previous_volume_members & set(instrument_map)
         for instrument in instruments:
-            if instrument.inst_id not in tickers:
+            ticker = tickers.get(instrument.inst_id)
+            if ticker is None:
                 failures[instrument.inst_id] = "bulk ticker 缺少此 live 合約"
-            else:
+                continue
+            if volume_reference == 0:
                 eligible.append(instrument)
+                next_volume_members.add(instrument.inst_id)
+                continue
+            quote_volume = _finite_number(ticker.quote_volume_24h)
+            if quote_volume is None or quote_volume < 0:
+                failures[instrument.inst_id] = (
+                    "24H USDT 成交額資料缺失，未納入本輪 Universe"
+                )
+                continue
+            was_member = instrument.inst_id in previous_volume_members
+            if was_member and quote_volume >= volume_exit_threshold:
+                eligible.append(instrument)
+                if quote_volume < volume_entry_threshold:
+                    volume_retained_in_buffer_ids.append(instrument.inst_id)
+                continue
+            if not was_member and quote_volume >= volume_entry_threshold:
+                eligible.append(instrument)
+                next_volume_members.add(instrument.inst_id)
+                continue
+            next_volume_members.discard(instrument.inst_id)
+            volume_excluded_ids.append(instrument.inst_id)
+            if quote_volume < volume_exit_threshold:
+                volume_below_exit_ids.append(instrument.inst_id)
+            else:
+                volume_waiting_for_entry_ids.append(instrument.inst_id)
+        self._volume_eligible_ids = next_volume_members
+        target_ids = sorted(item.inst_id for item in eligible)
 
         required_bars = self.short_bars if include_short else ("1D", "4H", "1H")
         self._progress(
@@ -284,32 +395,6 @@ class MarketScanner:
                     "正在取得全市場多時間框架資料",
                 )
 
-        if not bundles:
-            completed_at = datetime.now(timezone.utc).isoformat()
-            return RadarReport(
-                status="DATA_INCOMPLETE",
-                generated_at=completed_at,
-                scope=scope,
-                target_count=len(instruments),
-                fetched_count=0,
-                analyzable_count=0,
-                coverage_pct=0.0,
-                target_instruments=target_ids,
-                failed_instruments=dict(sorted(failures.items())),
-                signals=[],
-                exclusion_counts={},
-                duration_seconds=round(time.monotonic() - started, 3),
-                message="所有標的核心 K 線皆不可用，本輪無法判定。",
-                scan_id=scan_id,
-                scan_started_at=scan_started_at,
-                completed_at=completed_at,
-                runtime_status="ERROR",
-                actionable=False,
-                max_signals=min(max(self.config.max_signals, 0), 20),
-                data_quality={"core": "UNAVAILABLE", "no_fake_fallback": True},
-                scan_mode=normalized_mode,
-            )
-
         short_results: dict[str, AnalysisResult] = {}
         analysis_failures: dict[str, str] = {}
         if include_short:
@@ -342,14 +427,14 @@ class MarketScanner:
             if include_short
             else {}
         )
-        if include_short and preview is not None:
+        if include_short and preview is not None and short_results:
             preview(
                 self._core_preview_report(
                     scan_id=scan_id,
                     scan_started_at=scan_started_at,
                     scope=scope,
                     started=started,
-                    instruments=instruments,
+                    instruments=eligible,
                     target_ids=target_ids,
                     bundles=bundles,
                     failures=failures,
@@ -436,37 +521,9 @@ class MarketScanner:
                     ),
                 )
 
-        if not short_results and not long_results:
-            completed_at = datetime.now(timezone.utc).isoformat()
-            return RadarReport(
-                status="DATA_INCOMPLETE",
-                generated_at=completed_at,
-                scope=scope,
-                target_count=len(instruments),
-                fetched_count=len(bundles),
-                analyzable_count=0,
-                coverage_pct=round(len(bundles) / len(instruments) * 100.0, 3),
-                target_instruments=target_ids,
-                failed_instruments={
-                    **dict(sorted(failures.items())),
-                    **analysis_failures,
-                },
-                signals=[],
-                exclusion_counts={},
-                duration_seconds=round(time.monotonic() - started, 3),
-                message="核心資料已取得，但 Market Story Engine 無法完成任何標的。",
-                scan_id=scan_id,
-                scan_started_at=scan_started_at,
-                completed_at=completed_at,
-                runtime_status="ERROR",
-                actionable=False,
-                max_signals=min(max(self.config.max_signals, 0), 20),
-                data_quality={
-                    "core": "ANALYSIS_FAILED",
-                    "no_fake_fallback": True,
-                },
-                scan_mode=normalized_mode,
-            )
+        data_incomplete = bool(
+            eligible and not short_results and not long_results
+        )
         context_failures: dict[str, list[str]] = {}
         open_interest: dict[str, float] = {}
         oi_loader = getattr(self.client, "get_open_interest_usd", None)
@@ -777,6 +834,18 @@ class MarketScanner:
             self._previous_open_interest_usd = dict(open_interest)
 
         exclusion_counts: Counter[str] = Counter()
+        if volume_excluded_ids:
+            exclusion_counts["24H_USDT_VOLUME_BUFFER_EXCLUDED"] = len(
+                volume_excluded_ids
+            )
+        if volume_below_exit_ids:
+            exclusion_counts["24H_USDT_VOLUME_BELOW_EXIT"] = len(
+                volume_below_exit_ids
+            )
+        if volume_waiting_for_entry_ids:
+            exclusion_counts["24H_USDT_VOLUME_WAITING_FOR_ENTRY"] = len(
+                volume_waiting_for_entry_ids
+            )
         short_states, raw_short_signals = self._collect_results(short_results, exclusion_counts)
         long_states, raw_long_signals = self._collect_results(long_results, exclusion_counts)
         completed_at = datetime.now(timezone.utc).isoformat()
@@ -883,22 +952,40 @@ class MarketScanner:
             **core_failures,
             **dict(sorted(long_failures.items())),
         }
-        coverage = round(len(bundles) / len(instruments) * 100.0, 4)
+        coverage = (
+            round(len(bundles) / len(eligible) * 100.0, 4)
+            if eligible
+            else 0.0
+            if failures
+            else 100.0
+        )
         long_coverage = (
-            round(len(long_results) / len(instruments) * 100.0, 4)
-            if instruments and long_radar_enabled
+            round(len(long_results) / len(eligible) * 100.0, 4)
+            if eligible and long_radar_enabled
+            else 100.0
+            if not eligible and long_radar_enabled and not failures
             else 0.0
         )
+        fresh_signals = [
+            item
+            for item in (*short_signals, *long_signals)
+            if item.freshness != "DATA_UNAVAILABLE"
+            and item.entry_eligibility.get("status") != "DATA_UNAVAILABLE"
+        ]
         status = (
-            "PARTIAL_DATA"
+            "DATA_INCOMPLETE"
+            if data_incomplete
+            else "PARTIAL_DATA"
             if all_failures
             else "SIGNALS_FOUND"
-            if short_signals or long_signals
+            if fresh_signals
             else "NO_QUALIFIED_SIGNAL"
         )
         data_quality = {
             "core_status": (
-                "PARTIAL"
+                "UNAVAILABLE"
+                if data_incomplete and include_short
+                else "PARTIAL"
                 if core_failures
                 else "AVAILABLE"
                 if include_short
@@ -907,7 +994,9 @@ class MarketScanner:
             "core_coverage_pct": coverage if include_short else 0.0,
             "core_failed_count": len(core_failures),
             "long_status": (
-                "PARTIAL"
+                "UNAVAILABLE"
+                if data_incomplete and long_radar_enabled
+                else "PARTIAL"
                 if long_failures
                 else "AVAILABLE"
                 if long_radar_enabled
@@ -916,7 +1005,28 @@ class MarketScanner:
                 else "NOT_SUPPORTED"
             ),
             "long_coverage_pct": long_coverage,
-            "long_target_count": len(instruments) if long_radar_enabled else 0,
+            "long_target_count": len(eligible) if long_radar_enabled else 0,
+            "universe_volume_min_usdt": volume_exit_threshold,
+            "universe_volume_reference_usdt": volume_reference,
+            "universe_volume_buffer_usdt": volume_buffer,
+            "universe_volume_entry_usdt": volume_entry_threshold,
+            "universe_volume_exit_usdt": volume_exit_threshold,
+            "universe_volume_excluded_count": len(volume_excluded_ids),
+            "universe_volume_waiting_for_entry_count": len(
+                volume_waiting_for_entry_ids
+            ),
+            "universe_volume_retained_in_buffer_count": len(
+                volume_retained_in_buffer_ids
+            ),
+            # Persist the actual membership separately from target_instruments.
+            # A ticker-data gap can exclude a member from this scan without
+            # resetting its lower exit threshold on the next process start.
+            "universe_volume_hysteresis": {
+                "version": _VOLUME_HYSTERESIS_STATE_VERSION,
+                "entry_usdt": volume_entry_threshold,
+                "buffer_usdt": volume_buffer,
+                "members": sorted(next_volume_members),
+            },
             "long_analyzable_count": len(long_results),
             "long_failed_count": len(long_failures),
             "deep_candidate_limit": context_limit,
@@ -971,7 +1081,12 @@ class MarketScanner:
             item.entry_eligibility.get("status") == "MISSED_ENTRY"
             for item in short_signals
         )
-        if normalized_mode == "SHORT":
+        if data_incomplete:
+            message = (
+                "符合成交額門檻的標的核心資料皆不可用，本輪無法產生新判定；"
+                "既有交易計畫僅保留為資料不足的唯讀卡。"
+            )
+        elif normalized_mode == "SHORT":
             message = (
                 f"15m 掃描完成：早期可進 {early_short}、目前可進 {ready_short}、"
                 f"等待回踩 {wait_short}、已錯過 {missed_short}。"
@@ -999,6 +1114,12 @@ class MarketScanner:
             message += f" 另有 {len(long_failures)} 個長線資料不足標的。"
             if include_short:
                 message += "不影響其短線判定。"
+        if volume_excluded_ids:
+            message += (
+                f" 已在抓 K 線前依成交額緩衝帶排除 {len(volume_excluded_ids)} "
+                f"個合約；新標的需達 {volume_entry_threshold:,.0f} USDT，"
+                f"已納入標的跌破 {volume_exit_threshold:,.0f} USDT 才移除。"
+            )
 
         closed_signals: list[Signal] = []
         long_closed_signals: list[Signal] = []
@@ -1032,7 +1153,7 @@ class MarketScanner:
             status=status,
             generated_at=completed_at,
             scope=scope,
-            target_count=len(instruments),
+            target_count=len(eligible),
             fetched_count=len(bundles),
             analyzable_count=len({*short_results, *long_results}),
             coverage_pct=coverage,
@@ -1053,8 +1174,8 @@ class MarketScanner:
             scan_id=scan_id,
             scan_started_at=scan_started_at,
             completed_at=completed_at,
-            runtime_status="FRESH",
-            actionable=True,
+            runtime_status="ERROR" if data_incomplete else "FRESH",
+            actionable=not data_incomplete,
             max_signals=min(max(self.config.max_signals, 0), 20),
             api_metrics=api_metrics,
             closed_signals=closed_signals,
@@ -1073,7 +1194,7 @@ class MarketScanner:
             scan_started_at,
             completed_at,
             status,
-            len(instruments),
+            len(eligible),
             report.analyzable_count,
             len(short_signals) + len(long_signals),
             duration,
@@ -2019,7 +2140,13 @@ class MarketScanner:
             **dict(sorted(failures.items())),
             **dict(sorted(analysis_failures.items())),
         }
-        coverage = round(len(bundles) / len(instruments) * 100.0, 4)
+        coverage = (
+            round(len(bundles) / len(instruments) * 100.0, 4)
+            if instruments
+            else 0.0
+            if failures
+            else 100.0
+        )
         candidate_count = len(short_signals)
         return RadarReport(
             status="CORE_PREVIEW",
