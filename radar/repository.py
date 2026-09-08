@@ -1274,10 +1274,7 @@ class SignalRepository:
                 or raw.data_timestamp
                 or 0
             ),
-            "entry_ready_once": (
-                str(raw.entry_eligibility.get("status") or "").upper()
-                == "ENTRY_READY"
-            ),
+            "entry_ready_once": _new_entry_ready(raw),
         }
         if lifecycle["entry_ready_once"]:
             lifecycle["entry_ready_at"] = completed_at
@@ -1605,7 +1602,7 @@ class SignalRepository:
                 "last_evaluated_core_ts": last_evaluated_core_ts,
             }
         )
-        if str(signal.entry_eligibility.get("status") or "").upper() == "ENTRY_READY":
+        if _new_entry_ready(signal):
             lifecycle["entry_ready_once"] = True
             lifecycle.setdefault("entry_ready_at", completed_at)
         terminal = status == "CLOSED"
@@ -1805,14 +1802,8 @@ class SignalRepository:
                 event_keys.append(value)
         if event_keys:
             lifecycle["event_keys"] = event_keys
-        existing_was_ready = (
-            str(existing.entry_eligibility.get("status") or "").upper()
-            == "ENTRY_READY"
-        )
-        raw_is_ready = (
-            str(raw.entry_eligibility.get("status") or "").upper()
-            == "ENTRY_READY"
-        )
+        existing_was_ready = _new_entry_ready(existing)
+        raw_is_ready = _new_entry_ready(raw)
         if existing_was_ready or raw_is_ready:
             lifecycle["entry_ready_once"] = True
             lifecycle.setdefault(
@@ -2062,14 +2053,50 @@ class SignalRepository:
             }
         )
         entry_eligibility = dict(signal.entry_eligibility)
+        hard_blockers = list(entry_eligibility.get("hard_blockers", []) or [])
+        if "DATA_UNAVAILABLE" not in hard_blockers:
+            hard_blockers.append("DATA_UNAVAILABLE")
         entry_eligibility.update(
             {
                 "status": "DATA_UNAVAILABLE",
                 "label": "資料不足｜禁止進場",
                 "reason": "本輪沒有可驗證的最新資料，舊計畫只讀保留。",
                 "actionable": False,
+                "new_entry_allowed": False,
+                "hard_blockers": hard_blockers,
             }
         )
+        decision_context = dict(signal.decision_context)
+        hard_gate = dict(decision_context.get("hard_gate", {}) or {})
+        gate_blockers = list(hard_gate.get("blockers", []) or [])
+        if "data_unavailable" not in gate_blockers:
+            gate_blockers.append("data_unavailable")
+        hard_gate.update(
+            {
+                "status": "BLOCKED",
+                "passed": False,
+                "blocked": True,
+                "blockers": gate_blockers,
+                "reasons": [
+                    "本輪沒有可驗證的最新資料，禁止依舊計畫建立新倉。"
+                ],
+            }
+        )
+        final = dict(decision_context.get("final", {}) or {})
+        final.update(
+            {
+                "status": "DATA_UNAVAILABLE",
+                "label": "資料不足｜禁止新進場",
+                "new_entry_allowed": False,
+                "reason": "本輪沒有可驗證的最新資料，舊計畫只讀保留。",
+                "reasons": [
+                    "本輪沒有可驗證的最新資料，舊計畫只供查看。",
+                    "請先重新掃描，取得最新可執行價格與風險檢查。",
+                ],
+            }
+        )
+        decision_context["hard_gate"] = hard_gate
+        decision_context["final"] = final
         market_metrics = dict(signal.market_metrics)
         # The previous price remains part of history, but it must not be
         # reusable as a live execution input by downstream eligibility code.
@@ -2082,6 +2109,7 @@ class SignalRepository:
             actionable=False,
             data_quality=data_quality,
             entry_eligibility=entry_eligibility,
+            decision_context=decision_context,
             market_metrics=market_metrics,
         )
 
@@ -3283,6 +3311,35 @@ def _stage_rank(stage: str) -> int:
         "NO_FOLLOW_THROUGH": 1,
         "INVALIDATED": -1,
     }.get(stage, 0)
+
+
+def _new_entry_ready(signal: Signal) -> bool:
+    """Return whether this projection was truly permitted for a new entry.
+
+    ``ENTRY_READY`` by itself only describes price location.  Persisting that
+    positional label as historical readiness after a hard-gate veto made old
+    episodes look as if the user had received a valid entry opportunity.
+    Legacy rows without the newer permission fields continue to use the
+    signal's actionable flag.
+    """
+
+    eligibility = dict(signal.entry_eligibility or {})
+    if str(eligibility.get("status") or "").upper() != "ENTRY_READY":
+        return False
+    if eligibility.get("new_entry_allowed") is False:
+        return False
+    if eligibility.get("actionable") is False:
+        return False
+    final = dict((signal.decision_context or {}).get("final", {}) or {})
+    if final:
+        return bool(
+            str(final.get("status") or "").upper() == "ENTER"
+            and final.get("new_entry_allowed") is True
+            and signal.actionable
+        )
+    if "new_entry_allowed" in eligibility:
+        return bool(eligibility.get("new_entry_allowed") and signal.actionable)
+    return bool(signal.actionable)
 
 
 def _iso_from_millis(value: Any) -> str | None:

@@ -1306,6 +1306,39 @@ class SignalRepositoryTests(unittest.TestCase):
         self.assertEqual(updated.stop_loss, created.stop_loss)
         self.assertEqual(updated.take_profit_1, created.take_profit_1)
 
+    def test_positionally_ready_but_hard_blocked_is_not_recorded_as_ready(self):
+        raw = replace(
+            signal_fixture("BLOCKED-READY-USDT-SWAP"),
+            actionable=False,
+            entry_eligibility={
+                "status": "ENTRY_READY",
+                "actionable": False,
+                "new_entry_allowed": False,
+                "hard_blockers": ["spread"],
+            },
+            decision_context={
+                "hard_gate": {
+                    "status": "BLOCKED",
+                    "blocked": True,
+                    "blockers": ["spread"],
+                },
+                "final": {
+                    "status": "HARD_GATE_BLOCKED",
+                    "new_entry_allowed": False,
+                },
+            },
+        )
+
+        created = self.repository.reconcile(
+            [raw],
+            [state_fixture(raw, raw.data_timestamp)],
+            "2026-08-20T00:00:00+00:00",
+            "SHORT",
+        )[0]
+
+        self.assertFalse(created.lifecycle["entry_ready_once"])
+        self.assertNotIn("entry_ready_at", created.lifecycle)
+
     def test_same_scan_can_close_old_plan_and_create_independent_new_trigger(self):
         old_raw = replace(
             signal_fixture("ROLLOVER-USDT-SWAP"),
@@ -2233,8 +2266,26 @@ class SignalRepositoryTests(unittest.TestCase):
     def test_missing_symbol_state_keeps_read_only_non_actionable_episode(self):
         raw = replace(
             signal_fixture("MISSING-USDT-SWAP"),
-            entry_eligibility={"status": "ENTRY_READY", "actionable": True},
+            actionable=True,
+            entry_eligibility={
+                "status": "ENTRY_READY",
+                "actionable": True,
+                "new_entry_allowed": True,
+                "hard_blockers": [],
+            },
             data_quality={"status": "COMPLETE"},
+            decision_context={
+                "hard_gate": {
+                    "status": "PASSED",
+                    "passed": True,
+                    "blocked": False,
+                    "blockers": [],
+                },
+                "final": {
+                    "status": "ENTER",
+                    "new_entry_allowed": True,
+                },
+            },
         )
         created = self.repository.reconcile(
             [raw],
@@ -2262,6 +2313,27 @@ class SignalRepositoryTests(unittest.TestCase):
         self.assertEqual(output[0].data_quality["status"], "DATA_UNAVAILABLE")
         self.assertEqual(output[0].entry_eligibility["status"], "DATA_UNAVAILABLE")
         self.assertFalse(output[0].entry_eligibility["actionable"])
+        self.assertFalse(output[0].entry_eligibility["new_entry_allowed"])
+        self.assertIn(
+            "DATA_UNAVAILABLE",
+            output[0].entry_eligibility["hard_blockers"],
+        )
+        self.assertEqual(
+            output[0].decision_context["hard_gate"]["status"],
+            "BLOCKED",
+        )
+        self.assertFalse(output[0].decision_context["hard_gate"]["passed"])
+        self.assertEqual(
+            output[0].decision_context["final"]["status"],
+            "DATA_UNAVAILABLE",
+        )
+        self.assertFalse(
+            output[0].decision_context["final"]["new_entry_allowed"]
+        )
+        self.assertIn(
+            "只供查看",
+            output[0].decision_context["final"]["reasons"][0],
+        )
         self.assertIsNone(output[0].market_metrics["last_price"])
         self.assertFalse(output[0].actionable)
         self.assertEqual(row["status"], "ACTIVE")

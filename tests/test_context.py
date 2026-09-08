@@ -192,6 +192,26 @@ class AnomalyAndDriverTests(unittest.TestCase):
             {item["code"] for item in anomaly["reasons"]},
         )
 
+    def test_oi_velocity_and_funding_are_auxiliary_not_entry_blocks(self):
+        anomaly = detect_anomaly(
+            {"funding_rate": 0.01},
+            {
+                "state": "WEAKENING",
+                "oi": {
+                    "velocity_per_5m_pct": 50.0,
+                    "abnormal_speed": True,
+                },
+            },
+        )
+
+        self.assertEqual(anomaly["status"], "WATCH")
+        severities = {
+            item["code"]: item["severity"] for item in anomaly["reasons"]
+        }
+        self.assertEqual(severities["OI_VELOCITY"], "WATCH")
+        self.assertEqual(severities["FUNDING_EXTREME"], "WATCH")
+        self.assertFalse(anomaly["entry_block"])
+
     def test_market_driver_distinguishes_btc_independent_and_resonance(self):
         btc_driven = classify_market_driver(
             0.2,

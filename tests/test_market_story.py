@@ -7,6 +7,7 @@ from radar.market_story import (
     DynamicZone,
     MarketStoryEngine,
     enrich_story_context,
+    execution_quality,
     _momentum_confirmation,
     _prior_plan_invalidation,
     _price_acceptance,
@@ -206,6 +207,11 @@ class MarketStoryV34Tests(unittest.TestCase):
         self.assertEqual(story.freshness, "ACTIVE")
         self.assertTrue(story.trigger["opposite_warning_only"])
         self.assertTrue(story.trigger["active_episode_preserved"])
+        self.assertTrue(story.trigger["new_entry_suspended"])
+        self.assertIn(
+            "暫停原方向新進場",
+            story.trigger["new_entry_suspension_reason"],
+        )
         self.assertEqual(
             story.trigger["opposite_candidate"]["direction"],
             "LONG",
@@ -661,6 +667,112 @@ class MarketStoryV34Tests(unittest.TestCase):
         self.assertEqual(
             enriched.groups["participation_flow"]["stance"],
             "SUPPORT",
+        )
+
+    def test_good_execution_inputs_are_neutral_and_cannot_boost_ranking(self):
+        candles_4h, candles_1h, candles_15m = valid_breakout_frames()
+        story = self.engine.analyze_short(
+            candles_4h,
+            candles_1h,
+            candles_15m,
+        )
+        excellent_book = MarketContext(
+            inst_id="TEST-USDT-SWAP",
+            open_interest_usd=None,
+            funding_rate=None,
+            order_book_imbalance=None,
+            taker_buy_ratio=None,
+            sampled_at=1,
+            bid_depth_usd=1_000_000.0,
+            ask_depth_usd=1_000_000.0,
+            buy_slippage_pct=0.0,
+            sell_slippage_pct=0.0,
+            execution_notional_usdt=1_000.0,
+        )
+
+        excellent = execution_quality(
+            story,
+            spread_pct=0.0,
+            risk_pct=2.0,
+            risk_reward=2.0,
+            context=excellent_book,
+            estimated_taker_fee_pct=0.0,
+        )
+        neutral_spread = execution_quality(
+            story,
+            spread_pct=0.10,
+            risk_pct=2.0,
+            risk_reward=2.0,
+            context=excellent_book,
+            estimated_taker_fee_pct=0.0,
+        )
+        missing_book_baseline = execution_quality(
+            story,
+            spread_pct=0.0,
+            risk_pct=2.0,
+            risk_reward=2.0,
+            context=None,
+            estimated_taker_fee_pct=0.0,
+        )
+
+        self.assertEqual(excellent["score"], neutral_spread["score"])
+        self.assertEqual(excellent["score"], missing_book_baseline["score"])
+
+    def test_execution_cost_is_neutral_at_limit_and_penalized_above_it(self):
+        candles_4h, candles_1h, candles_15m = valid_breakout_frames()
+        story = self.engine.analyze_short(
+            candles_4h,
+            candles_1h,
+            candles_15m,
+        )
+
+        def book(slippage_pct: float) -> MarketContext:
+            return MarketContext(
+                inst_id="TEST-USDT-SWAP",
+                open_interest_usd=None,
+                funding_rate=None,
+                order_book_imbalance=None,
+                taker_buy_ratio=None,
+                sampled_at=1,
+                bid_depth_usd=1_000_000.0,
+                ask_depth_usd=1_000_000.0,
+                buy_slippage_pct=slippage_pct,
+                sell_slippage_pct=slippage_pct,
+                execution_notional_usdt=1_000.0,
+            )
+
+        strong = execution_quality(
+            story,
+            spread_pct=0.02,
+            risk_pct=2.0,
+            risk_reward=2.0,
+            context=book(0.0),
+        )
+        # 0.02 spread + 0.09 each way + 0.10 fees = 0.30%; against a
+        # 2.0% stop this is exactly the 15% cost-to-risk neutral boundary.
+        neutral = execution_quality(
+            story,
+            spread_pct=0.02,
+            risk_pct=2.0,
+            risk_reward=2.0,
+            context=book(0.09),
+        )
+        poor = execution_quality(
+            story,
+            spread_pct=0.20,
+            risk_pct=2.0,
+            risk_reward=2.0,
+            context=book(0.20),
+        )
+
+        self.assertEqual(strong["score"], neutral["score"])
+        self.assertEqual(neutral["execution_cost_to_risk_pct"], 15.0)
+        self.assertLess(poor["score"], neutral["score"])
+        self.assertIn("Spread 偏高", poor["warnings"])
+        self.assertIn("估算滑價偏高", poor["warnings"])
+        self.assertIn(
+            "交易成本占原始風險超過建議上限",
+            poor["warnings"],
         )
 
     def test_flat_noise_never_becomes_trigger_by_score_alone(self):

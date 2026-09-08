@@ -233,7 +233,7 @@ class SingleInstrumentScanner(ImmediateScanner):
         )
         return SimpleNamespace(
             inst_id=inst_id,
-            ticker=Ticker(inst_id, 100.5, 100.49, 100.51, now_ms),
+            ticker=Ticker(inst_id, 100.5, 100.49, 100.51, now_ms, 20_000_000),
             context=MarketContext(
                 inst_id=inst_id,
                 open_interest_usd=None,
@@ -421,6 +421,7 @@ class StopCrossedSingleScanner(SingleInstrumentScanner):
             96.99,
             97.01,
             int(time.time() * 1000),
+            20_000_000,
         )
         return analysis
 
@@ -512,6 +513,7 @@ class TargetReachedSingleScanner(SingleInstrumentScanner):
             self.price - 0.01,
             self.price + 0.01,
             int(time.time() * 1000),
+            20_000_000,
         )
         return analysis
 
@@ -595,6 +597,7 @@ class NewTriggerAfterTargetScanner(SingleInstrumentScanner):
             105.99,
             106.01,
             int(time.time() * 1000),
+            20_000_000,
         )
         analysis.short_result = SimpleNamespace(
             signal=self.new_signal,
@@ -616,6 +619,18 @@ class IncompleteModeScanner:
         current.status = "DATA_INCOMPLETE"
         current.message = f"fixture {scan_mode} data unavailable"
         current.scan_mode = scan_mode
+        return current
+
+
+class IncompleteVolumeStateScanner(IncompleteModeScanner):
+    def scan_once(self, progress=None, scan_id=None, scan_mode="FULL"):
+        current = super().scan_once(progress, scan_id, scan_mode)
+        current.data_quality["universe_volume_hysteresis"] = {
+            "version": 1,
+            "entry_usdt": 2_000_000,
+            "buffer_usdt": 500_000,
+            "members": [],
+        }
         return current
 
 
@@ -678,7 +693,11 @@ class RuntimeSafetyTests(unittest.TestCase):
                 },
                 "original": {"stop_loss": 98.0},
             },
-            None,
+            {
+                "status": "OPPOSITE_SIGNAL",
+                "hard_blockers": ["OPPOSITE_SIGNAL"],
+                "new_entry_allowed": False,
+            },
         )
 
         self.assertEqual(completed["final"]["status"], "COMPLETED")
@@ -716,7 +735,11 @@ class RuntimeSafetyTests(unittest.TestCase):
                 },
                 "original": {"stop_loss": 98.0},
             },
-            None,
+            {
+                "status": "OPPOSITE_SIGNAL",
+                "hard_blockers": ["OPPOSITE_SIGNAL"],
+                "new_entry_allowed": False,
+            },
         )
 
         self.assertEqual(invalidated["final"]["status"], "INVALIDATED")
@@ -818,7 +841,7 @@ class RuntimeSafetyTests(unittest.TestCase):
         self.assertEqual(confirmation["status"], "ORIGINAL_DIRECTION_STABLE")
         self.assertFalse(confirmation["new_entry_allowed"])
 
-    def test_latest_confirmation_treats_unspecified_safety_check_as_warning(self):
+    def test_latest_confirmation_blocks_unspecified_failed_safety_check(self):
         current = allow_entry(signal())
         current.safety_checks = [
             {
@@ -833,10 +856,89 @@ class RuntimeSafetyTests(unittest.TestCase):
             "LONG",
         )
 
-        self.assertEqual(confirmation["status"], "REVALIDATED")
-        self.assertEqual(confirmation["hard_blockers"], [])
+        self.assertEqual(confirmation["status"], "HARD_GATE_BLOCKED")
+        self.assertEqual(confirmation["hard_blockers"], ["spread"])
         self.assertIn("spread", confirmation["risk_warnings"])
-        self.assertTrue(confirmation["new_entry_allowed"])
+        self.assertFalse(confirmation["new_entry_allowed"])
+
+    def test_latest_confirmation_uses_gate_status_lists_and_unknown_hard_checks(self):
+        status_only = allow_entry(signal())
+        status_only.decision_context = {
+            "hard_gate": {
+                "status": "BLOCKED",
+                "blocked": False,
+                "blockers": ["spread"],
+            },
+            "final": {"status": "ENTER", "new_entry_allowed": True},
+        }
+
+        blocked = _latest_confirmation(
+            SimpleNamespace(signal=status_only, market_state=None),
+            "LONG",
+        )
+
+        self.assertEqual(blocked["status"], "HARD_GATE_BLOCKED")
+        self.assertEqual(blocked["hard_blockers"], ["spread"])
+        self.assertFalse(blocked["new_entry_allowed"])
+
+        unknown = allow_entry(signal())
+        unknown.safety_checks = [
+            {"key": "depth", "passed": None, "hard": True},
+        ]
+        unavailable = _latest_confirmation(
+            SimpleNamespace(signal=unknown, market_state=None),
+            "LONG",
+        )
+        self.assertEqual(unavailable["status"], "DATA_UNAVAILABLE")
+        self.assertEqual(unavailable["hard_blockers"], ["depth"])
+        self.assertFalse(unavailable["new_entry_allowed"])
+
+        advisory = allow_entry(signal())
+        advisory.safety_checks = [
+            {"key": "context_note", "passed": False, "hard": False},
+        ]
+        warning_only = _latest_confirmation(
+            SimpleNamespace(signal=advisory, market_state=None),
+            "LONG",
+        )
+        self.assertEqual(warning_only["status"], "REVALIDATED")
+        self.assertEqual(warning_only["hard_blockers"], [])
+        self.assertIn("context_note", warning_only["risk_warnings"])
+        self.assertTrue(warning_only["new_entry_allowed"])
+
+        passed_only = allow_entry(signal())
+        passed_only.decision_context["hard_gate"] = {"passed": False}
+        unavailable = _latest_confirmation(
+            SimpleNamespace(signal=passed_only, market_state=None),
+            "LONG",
+        )
+        self.assertEqual(unavailable["status"], "DATA_UNAVAILABLE")
+        self.assertFalse(unavailable["new_entry_allowed"])
+
+        suspended = allow_entry(signal())
+        suspended.market_story["trigger"]["new_entry_suspended"] = True
+        opposite = _latest_confirmation(
+            SimpleNamespace(signal=suspended, market_state=None),
+            "LONG",
+        )
+        self.assertEqual(opposite["status"], "OPPOSITE_SIGNAL")
+        self.assertIn("OPPOSITE_SIGNAL", opposite["hard_blockers"])
+        self.assertFalse(opposite["new_entry_allowed"])
+
+        for gate_status, expected in (
+            ("HARD_GATE_BLOCKED", "HARD_GATE_BLOCKED"),
+            ("ANOMALY", "HARD_GATE_BLOCKED"),
+            ("DATA_UNAVAILABLE", "DATA_UNAVAILABLE"),
+        ):
+            with self.subTest(gate_status=gate_status):
+                legacy = allow_entry(signal())
+                legacy.decision_context["hard_gate"] = {"status": gate_status}
+                result = _latest_confirmation(
+                    SimpleNamespace(signal=legacy, market_state=None),
+                    "LONG",
+                )
+                self.assertEqual(result["status"], expected)
+                self.assertFalse(result["new_entry_allowed"])
 
     def test_opposite_direction_is_only_original_direction_not_reconfirmed(self):
         state = MarketState(
@@ -860,7 +962,7 @@ class RuntimeSafetyTests(unittest.TestCase):
             warning["status"],
             "ORIGINAL_DIRECTION_NOT_RECONFIRMED",
         )
-        self.assertIn("不建立反向判定", warning["message"])
+        self.assertIn("禁止新進場", warning["message"])
 
         opposite_signal = signal()
         opposite_signal.direction = "SHORT"
@@ -873,12 +975,13 @@ class RuntimeSafetyTests(unittest.TestCase):
         )
         self.assertEqual(
             confirmed["status"],
-            "ORIGINAL_DIRECTION_NOT_RECONFIRMED",
+            "OPPOSITE_SIGNAL",
         )
+        self.assertIn("OPPOSITE_SIGNAL", confirmed["hard_blockers"])
         self.assertFalse(confirmed["two_step_reversal_confirmed"])
         self.assertFalse(confirmed["new_entry_allowed"])
 
-    def test_opposite_candidate_hard_failure_cannot_block_original_plan(self):
+    def test_opposite_candidate_blocks_new_entry_but_keeps_original_plan(self):
         opposite = allow_entry(signal())
         opposite.direction = "SHORT"
         opposite.safety_checks = [
@@ -904,12 +1007,13 @@ class RuntimeSafetyTests(unittest.TestCase):
 
         self.assertEqual(
             confirmation["status"],
-            "ORIGINAL_DIRECTION_NOT_RECONFIRMED",
+            "OPPOSITE_SIGNAL",
         )
-        self.assertIn("只供參考", confirmation["label"])
-        self.assertNotEqual(confirmation["status"], "HARD_GATE_BLOCKED")
+        self.assertIn("反向", confirmation["label"])
+        self.assertIn("OPPOSITE_SIGNAL", confirmation["hard_blockers"])
+        self.assertFalse(confirmation["new_entry_allowed"])
 
-    def test_opposite_candidate_shared_risks_remain_advisory(self):
+    def test_opposite_candidate_always_suspends_old_direction_new_entry(self):
         for key, label in (
             ("anomalous_market", "異常行情"),
             ("liquidity", "流動性不足"),
@@ -934,9 +1038,9 @@ class RuntimeSafetyTests(unittest.TestCase):
 
                 self.assertEqual(
                     confirmation["status"],
-                    "ORIGINAL_DIRECTION_NOT_RECONFIRMED",
+                    "OPPOSITE_SIGNAL",
                 )
-                self.assertEqual(confirmation["hard_blockers"], [])
+                self.assertEqual(confirmation["hard_blockers"], ["OPPOSITE_SIGNAL"])
                 self.assertIn(key, confirmation["risk_warnings"])
                 self.assertFalse(confirmation["new_entry_allowed"])
 
@@ -956,12 +1060,77 @@ class RuntimeSafetyTests(unittest.TestCase):
         )
         self.assertEqual(
             confirmation["status"],
-            "ORIGINAL_DIRECTION_NOT_RECONFIRMED",
+            "OPPOSITE_SIGNAL",
         )
-        self.assertEqual(confirmation["hard_blockers"], [])
+        self.assertEqual(confirmation["hard_blockers"], ["OPPOSITE_SIGNAL"])
         self.assertIn("safety_integrity", confirmation["risk_warnings"])
 
-    def test_confirmation_merge_ignores_direction_difference_without_closing_plan(self):
+    def test_soft_confirmation_suspensions_stay_wait_from_merge_to_canonical(self):
+        for state in (
+            MarketState(
+                inst_id="AAA-USDT-SWAP",
+                regime="TREND",
+                direction="SHORT",
+                preferred_strategy="反向觀察",
+                readiness_score=70.0,
+                status="NEAR_TRIGGER",
+                missing_conditions=["等待正式 Trigger"],
+                spread_pct=0.01,
+                quote_volume_24h=20_000_000,
+                closed_candle_ts=123,
+                trigger={},
+            ),
+            MarketState(
+                inst_id="AAA-USDT-SWAP",
+                regime="RANGE",
+                direction="LONG",
+                preferred_strategy="等待雜訊下降",
+                readiness_score=65.0,
+                status="NEAR_TRIGGER",
+                missing_conditions=["等待乾淨收盤"],
+                spread_pct=0.01,
+                quote_volume_24h=20_000_000,
+                closed_candle_ts=123,
+                trigger={"noise": {"high": True}},
+            ),
+        ):
+            with self.subTest(direction=state.direction, trigger=state.trigger):
+                confirmation = _latest_confirmation(
+                    SimpleNamespace(signal=None, market_state=state),
+                    "LONG",
+                )
+                merged = _merge_preflight_confirmation(
+                    {
+                        "direction": "LONG",
+                        "verdict": {
+                            "status": "ENTRY_READY",
+                            "situation": "IN_ENTRY_AREA",
+                            "actionable": True,
+                        },
+                        "signal_lifecycle": {
+                            "status": "ACTIVE",
+                            "terminal": False,
+                        },
+                        "plan_state": {
+                            "status": "ACTIVE",
+                            "old_plan_reusable_for_new_entry": True,
+                            "new_entry_allowed": True,
+                        },
+                    },
+                    confirmation,
+                )
+                decision = _canonical_single_decision(
+                    allow_entry(signal()),
+                    merged,
+                    merged["latest_confirmation"],
+                )
+
+                self.assertEqual(merged["verdict"]["status"], "WAIT_RETEST")
+                self.assertEqual(merged["verdict"]["hard_blockers"], [])
+                self.assertEqual(decision["final"]["status"], "WAIT")
+                self.assertFalse(decision["final"]["new_entry_allowed"])
+
+    def test_confirmation_merge_suspends_new_entry_without_closing_plan(self):
         payload = {
             "verdict": {"status": "ENTRY_READY", "actionable": True},
             "signal_lifecycle": {
@@ -982,14 +1151,413 @@ class RuntimeSafetyTests(unittest.TestCase):
             },
         )
 
-        self.assertEqual(merged["verdict"]["status"], "ENTRY_READY")
-        self.assertTrue(merged["verdict"]["actionable"])
+        self.assertEqual(merged["verdict"]["status"], "WAIT_RETEST")
+        self.assertFalse(merged["verdict"]["actionable"])
         self.assertTrue(merged["signal_lifecycle"]["active"])
         self.assertTrue(merged["plan_state"]["existing_position_plan_active"])
-        self.assertNotIn("direction_status", merged["plan_state"])
-        self.assertTrue(merged["latest_confirmation"]["new_entry_allowed"])
+        self.assertFalse(merged["plan_state"]["old_plan_reusable_for_new_entry"])
+        self.assertFalse(merged["latest_confirmation"]["new_entry_allowed"])
 
-    def test_confirmation_merge_turns_legacy_blocks_into_warnings(self):
+    def test_confirmation_merge_projects_binding_status_over_positional_wait(self):
+        for status, expected in (
+            ("HARD_GATE_BLOCKED", "HARD_GATE_BLOCKED"),
+            ("OPPOSITE_SIGNAL", "HARD_GATE_BLOCKED"),
+            ("DATA_UNAVAILABLE", "DATA_UNAVAILABLE"),
+        ):
+            with self.subTest(status=status):
+                merged = _merge_preflight_confirmation(
+                    {
+                        "verdict": {
+                            "status": "WAIT_RETEST",
+                            "situation": "ADVERSE_TOLERANCE",
+                            "actionable": False,
+                        },
+                        "signal_lifecycle": {
+                            "status": "ACTIVE",
+                            "active": True,
+                            "terminal": False,
+                        },
+                        "plan_state": {
+                            "status": "WAITING_RETEST",
+                            "old_plan_reusable_for_new_entry": True,
+                            "existing_position_plan_active": True,
+                            "new_entry_allowed": False,
+                        },
+                    },
+                    {
+                        "status": status,
+                        "message": "fixture binding confirmation",
+                        "hard_blockers": ["fixture_block"],
+                        "new_entry_allowed": False,
+                    },
+                )
+
+                self.assertEqual(merged["verdict"]["status"], expected)
+                self.assertFalse(merged["verdict"]["actionable"])
+                self.assertFalse(
+                    merged["plan_state"]["old_plan_reusable_for_new_entry"]
+                )
+                self.assertTrue(
+                    merged["plan_state"]["existing_position_plan_active"]
+                )
+                self.assertFalse(
+                    merged["latest_confirmation"]["new_entry_allowed"]
+                )
+
+    def test_merge_and_canonical_require_all_entry_permissions_to_agree(self):
+        ready = {
+            "direction": "LONG",
+            "verdict": {
+                "status": "ENTRY_READY",
+                "situation": "IN_ENTRY_AREA",
+                "actionable": True,
+            },
+            "signal_lifecycle": {
+                "status": "ACTIVE",
+                "active": True,
+                "terminal": False,
+            },
+            "plan_state": {
+                "status": "ACTIVE",
+                "old_plan_reusable_for_new_entry": True,
+                "existing_position_plan_active": True,
+                "new_entry_allowed": True,
+            },
+        }
+        cases = (
+            (
+                {"status": "OPPOSITE_SIGNAL", "hard_blockers": ["OPPOSITE_SIGNAL"]},
+                "HARD_GATE_BLOCKED",
+            ),
+            (
+                {"status": "HARD_GATE_BLOCKED", "hard_blockers": ["spread"]},
+                "HARD_GATE_BLOCKED",
+            ),
+            ({"status": "DATA_UNAVAILABLE"}, "DATA_UNAVAILABLE"),
+            (
+                {
+                    "status": "REVALIDATED",
+                    "new_entry_allowed": False,
+                    "hard_blockers": [],
+                },
+                "WAIT",
+            ),
+            (
+                {
+                    "status": "REVALIDATED",
+                    "new_entry_allowed": True,
+                    "hard_blockers": ["spread"],
+                },
+                "HARD_GATE_BLOCKED",
+            ),
+        )
+
+        for confirmation, expected in cases:
+            with self.subTest(confirmation=confirmation):
+                direct = _canonical_single_decision(
+                    allow_entry(signal()),
+                    ready,
+                    confirmation,
+                )
+                self.assertEqual(direct["final"]["status"], expected)
+                self.assertFalse(direct["final"]["new_entry_allowed"])
+                self.assertFalse(
+                    direct["episode_plan_state"][
+                        "old_plan_reusable_for_new_entry"
+                    ]
+                )
+
+                merged = _merge_preflight_confirmation(ready, confirmation)
+                canonical = _canonical_single_decision(
+                    allow_entry(signal()),
+                    merged,
+                    merged["latest_confirmation"],
+                )
+                self.assertEqual(canonical["final"]["status"], expected)
+                self.assertFalse(canonical["final"]["new_entry_allowed"])
+
+    def test_canonical_never_revives_plan_level_wait_or_missed_state(self):
+        confirmation = {
+            "status": "REVALIDATED",
+            "new_entry_allowed": True,
+            "hard_blockers": [],
+        }
+        for plan_status, new_entry_status in (
+            ("MISSED", "CLOSED"),
+            ("WAITING_RETEST", "WAIT"),
+            ("ACTIVE_ENTRY_BLOCKED", "WAIT"),
+        ):
+            with self.subTest(plan_status=plan_status):
+                preflight = {
+                    "direction": "LONG",
+                    "verdict": {
+                        "status": "ENTRY_READY",
+                        "situation": "IN_ENTRY_AREA",
+                        "actionable": True,
+                    },
+                    "signal_lifecycle": {"status": "ACTIVE", "terminal": False},
+                    "plan_state": {
+                        "status": plan_status,
+                        "new_entry_status": new_entry_status,
+                    },
+                }
+                decision = _canonical_single_decision(
+                    allow_entry(signal()),
+                    preflight,
+                    confirmation,
+                )
+                self.assertEqual(decision["final"]["status"], "WAIT")
+                self.assertFalse(decision["final"]["new_entry_allowed"])
+
+                merged = _merge_preflight_confirmation(preflight, confirmation)
+                self.assertFalse(merged["latest_confirmation"]["new_entry_allowed"])
+
+    def test_legacy_denial_markers_cannot_become_enter(self):
+        confirmation = {
+            "status": "REVALIDATED",
+            "new_entry_allowed": True,
+            "hard_blockers": [],
+        }
+
+        def ready_payload():
+            return {
+                "direction": "LONG",
+                "verdict": {
+                    "status": "ENTRY_READY",
+                    "situation": "IN_ENTRY_AREA",
+                    "actionable": True,
+                },
+                "signal_lifecycle": {
+                    "status": "ACTIVE",
+                    "active": True,
+                    "terminal": False,
+                },
+                "plan_state": {
+                    "status": "ACTIVE",
+                    "new_entry_status": "READY",
+                    "new_entry_allowed": True,
+                    "old_plan_reusable": True,
+                    "old_plan_reusable_for_new_entry": True,
+                },
+                "data_quality": {"status": "AVAILABLE", "missing_sources": []},
+            }
+
+        cases = (
+            ("risk-only-hard", "risk_warnings", ["SPREAD_TOO_HIGH"], "HARD_GATE_BLOCKED"),
+            (
+                "risk-only-data",
+                "risk_warnings",
+                ["EXECUTION_DATA_UNAVAILABLE"],
+                "DATA_UNAVAILABLE",
+            ),
+            ("lifecycle-hard", "lifecycle_status", "HARD_GATE_BLOCKED", "HARD_GATE_BLOCKED"),
+            ("plan-opposite", "plan_status", "OPPOSITE_SIGNAL", "HARD_GATE_BLOCKED"),
+            ("data-quality", "data_quality", "UNAVAILABLE", "DATA_UNAVAILABLE"),
+            ("missing-source", "missing_sources", ["order_book"], "DATA_UNAVAILABLE"),
+            ("old-plan-denied", "old_plan_reusable", False, "WAIT"),
+            (
+                "plan-entry-blocked",
+                "new_entry_status",
+                "BLOCKED",
+                "HARD_GATE_BLOCKED",
+            ),
+            (
+                "plan-entry-hard",
+                "new_entry_status",
+                "HARD_GATE_BLOCKED",
+                "HARD_GATE_BLOCKED",
+            ),
+            (
+                "plan-entry-data",
+                "new_entry_status",
+                "DATA_UNAVAILABLE",
+                "DATA_UNAVAILABLE",
+            ),
+            (
+                "plan-entry-opposite",
+                "new_entry_status",
+                "OPPOSITE_SIGNAL",
+                "HARD_GATE_BLOCKED",
+            ),
+            ("plan-entry-retest", "new_entry_status", "WAIT_RETEST", "WAIT"),
+            ("plan-status-blocked", "plan_status", "BLOCKED", "HARD_GATE_BLOCKED"),
+            ("plan-status-wait", "plan_status", "WAIT", "WAIT"),
+            ("plan-status-closed", "plan_status", "CLOSED", "WAIT"),
+            ("new-trigger-required", "new_trigger_required", True, "WAIT"),
+            ("direction-invalid", "direction_still_valid", False, "INVALIDATED"),
+            ("plan-terminal", "plan_terminal", True, "INVALIDATED"),
+            (
+                "lifecycle-plan-invalidated",
+                "lifecycle_status",
+                "PLAN_INVALIDATED",
+                "INVALIDATED",
+            ),
+            (
+                "plan-plan-invalidated",
+                "plan_status",
+                "PLAN_INVALIDATED",
+                "INVALIDATED",
+            ),
+            ("verdict-denied", "verdict_new_entry", False, "WAIT"),
+        )
+        for name, field, value, expected in cases:
+            with self.subTest(name=name):
+                payload = ready_payload()
+                if field == "risk_warnings":
+                    payload["verdict"][field] = value
+                elif field == "lifecycle_status":
+                    payload["signal_lifecycle"]["status"] = value
+                elif field == "plan_status":
+                    payload["plan_state"]["status"] = value
+                elif field == "data_quality":
+                    payload["data_quality"]["status"] = value
+                elif field == "missing_sources":
+                    payload["data_quality"][field] = value
+                elif field == "verdict_new_entry":
+                    payload["verdict"]["new_entry_allowed"] = value
+                elif field == "plan_terminal":
+                    payload["plan_state"]["terminal"] = value
+                else:
+                    payload["plan_state"][field] = value
+
+                merged = _merge_preflight_confirmation(payload, confirmation)
+                decision = _canonical_single_decision(
+                    allow_entry(signal()),
+                    merged,
+                    confirmation,
+                )
+
+                self.assertEqual(decision["final"]["status"], expected)
+                self.assertFalse(decision["final"]["new_entry_allowed"])
+                self.assertFalse(merged["latest_confirmation"]["new_entry_allowed"])
+
+        for risk_code, expected in (
+            ("OPPOSITE_SIGNAL", "HARD_GATE_BLOCKED"),
+            ("SPREAD_TOO_HIGH", "HARD_GATE_BLOCKED"),
+            ("EXECUTION_DATA_UNAVAILABLE", "DATA_UNAVAILABLE"),
+        ):
+            with self.subTest(confirmation_risk_code=risk_code):
+                risk_confirmation = {
+                    **confirmation,
+                    "risk_warnings": [risk_code],
+                }
+                merged = _merge_preflight_confirmation(
+                    ready_payload(),
+                    risk_confirmation,
+                )
+                decision = _canonical_single_decision(
+                    allow_entry(signal()),
+                    merged,
+                    risk_confirmation,
+                )
+                self.assertEqual(decision["final"]["status"], expected)
+                self.assertFalse(decision["final"]["new_entry_allowed"])
+                self.assertFalse(merged["latest_confirmation"]["new_entry_allowed"])
+
+    def test_canonical_outcome_fails_closed_for_legacy_denial_aliases(self):
+        def ready_payload():
+            return {
+                "direction": "LONG",
+                "verdict": {
+                    "status": "ENTRY_READY",
+                    "situation": "IN_ENTRY_AREA",
+                    "actionable": True,
+                },
+                "signal_lifecycle": {
+                    "status": "ACTIVE",
+                    "active": True,
+                    "triggered": True,
+                    "terminal": False,
+                },
+                "plan_state": {
+                    "status": "ACTIVE",
+                    "new_entry_status": "READY",
+                    "new_entry_allowed": True,
+                    "old_plan_reusable": True,
+                    "old_plan_reusable_for_new_entry": True,
+                },
+                "data_quality": {"status": "AVAILABLE", "missing_sources": []},
+            }
+
+        def same_direction_confirmation():
+            return {
+                "status": "REVALIDATED",
+                "direction": "LONG",
+                "formal_trigger": True,
+                "new_entry_allowed": True,
+                "hard_blockers": [],
+                "risk_warnings": [],
+            }
+
+        baseline = ready_payload()
+        confirmation = same_direction_confirmation()
+        merged = _merge_preflight_confirmation(baseline, confirmation)
+        decision = _canonical_single_decision(
+            allow_entry(signal()),
+            merged,
+            merged["latest_confirmation"],
+        )
+        self.assertEqual(decision["final"]["status"], "ENTER")
+        self.assertTrue(decision["final"]["new_entry_allowed"])
+
+        cases = (
+            (
+                "confirmation-opposite-warning",
+                "confirmation",
+                "risk_warnings",
+                ["OPPOSITE_WARNING"],
+                "HARD_GATE_BLOCKED",
+            ),
+            (
+                "confirmation-signal-data-unavailable",
+                "confirmation",
+                "risk_warnings",
+                ["SIGNAL_DATA_UNAVAILABLE"],
+                "DATA_UNAVAILABLE",
+            ),
+            (
+                "plan-new-entry-invalidated",
+                "plan_state",
+                "new_entry_status",
+                "INVALIDATED",
+                "INVALIDATED",
+            ),
+            (
+                "plan-wait-retest",
+                "plan_state",
+                "status",
+                "WAIT_RETEST",
+                "WAIT",
+            ),
+            (
+                "lifecycle-not-triggered",
+                "signal_lifecycle",
+                "triggered",
+                False,
+                "WAIT",
+            ),
+        )
+        for name, section, field, value, expected in cases:
+            with self.subTest(name=name):
+                payload = ready_payload()
+                confirmation = same_direction_confirmation()
+                if section == "confirmation":
+                    confirmation[field] = value
+                else:
+                    payload[section][field] = value
+
+                merged = _merge_preflight_confirmation(payload, confirmation)
+                decision = _canonical_single_decision(
+                    allow_entry(signal()),
+                    merged,
+                    merged["latest_confirmation"],
+                )
+
+                self.assertEqual(decision["final"]["status"], expected)
+                self.assertFalse(decision["final"]["new_entry_allowed"])
+                self.assertFalse(merged["latest_confirmation"]["new_entry_allowed"])
+
+    def test_confirmation_merge_keeps_legacy_blocks_binding(self):
         for status in ("HARD_GATE_BLOCKED", "DATA_UNAVAILABLE"):
             with self.subTest(status=status):
                 merged = _merge_preflight_confirmation(
@@ -1012,19 +1580,20 @@ class RuntimeSafetyTests(unittest.TestCase):
                     },
                 )
 
-                self.assertEqual(merged["verdict"]["status"], "ENTRY_READY")
-                self.assertTrue(merged["verdict"]["actionable"])
+                self.assertEqual(merged["verdict"]["status"], status)
+                self.assertFalse(merged["verdict"]["actionable"])
                 self.assertIn(
                     "fixture_hard_gate",
                     merged["latest_confirmation"]["risk_warnings"],
                 )
                 self.assertEqual(
-                    merged["latest_confirmation"]["hard_blockers"], []
+                    merged["latest_confirmation"]["hard_blockers"],
+                    ["fixture_hard_gate"],
                 )
-                self.assertTrue(merged["latest_confirmation"]["new_entry_allowed"])
+                self.assertFalse(merged["latest_confirmation"]["new_entry_allowed"])
                 self.assertTrue(merged["signal_lifecycle"]["active"])
 
-    def test_legacy_reverse_status_cannot_invalidate_episode(self):
+    def test_legacy_reverse_status_blocks_new_entry_without_invalidating_episode(self):
         payload = {
             "verdict": {"status": "ENTRY_READY", "actionable": True},
             "signal_lifecycle": {
@@ -1046,18 +1615,18 @@ class RuntimeSafetyTests(unittest.TestCase):
             },
         )
 
-        self.assertEqual(merged["verdict"]["status"], "ENTRY_READY")
-        self.assertTrue(merged["verdict"]["actionable"])
+        self.assertEqual(merged["verdict"]["status"], "HARD_GATE_BLOCKED")
+        self.assertFalse(merged["verdict"]["actionable"])
         self.assertFalse(merged["signal_lifecycle"]["terminal"])
         self.assertTrue(merged["signal_lifecycle"]["active"])
-        self.assertEqual(merged["plan_state"]["status"], "ACTIVE")
+        self.assertEqual(merged["plan_state"]["status"], "ACTIVE_ENTRY_BLOCKED")
         self.assertTrue(merged["plan_state"]["existing_position_plan_active"])
         self.assertEqual(
             merged["latest_confirmation"]["status"],
-            "ORIGINAL_DIRECTION_NOT_RECONFIRMED",
+            "OPPOSITE_SIGNAL",
         )
 
-    def test_opposite_scan_does_not_remove_original_ready_preflight(self):
+    def test_opposite_scan_keeps_plan_but_suspends_original_ready_preflight(self):
         with tempfile.TemporaryDirectory() as directory:
             scanner = OppositeSignalSingleScanner()
             runtime = RadarRuntime(scanner, AppConfig(data_dir=directory))
@@ -1071,15 +1640,23 @@ class RuntimeSafetyTests(unittest.TestCase):
             self.assertEqual(payload["item"]["direction"], "LONG")
             self.assertEqual(
                 payload["latest_confirmation"]["status"],
-                "ORIGINAL_DIRECTION_NOT_RECONFIRMED",
+                "OPPOSITE_SIGNAL",
             )
-            self.assertEqual(payload["preflight"]["verdict"]["status"], "ENTRY_READY")
-            self.assertTrue(payload["preflight"]["verdict"]["actionable"])
-            self.assertEqual(payload["decision_context"]["final"]["status"], "ENTER")
+            self.assertEqual(
+                payload["preflight"]["verdict"]["status"],
+                "HARD_GATE_BLOCKED",
+            )
+            self.assertFalse(payload["preflight"]["verdict"]["actionable"])
+            self.assertEqual(
+                payload["decision_context"]["final"]["status"],
+                "HARD_GATE_BLOCKED",
+            )
             self.assertEqual(payload["preflight"]["direction"], "LONG")
             self.assertEqual(payload["decision_context"]["final"]["direction"], "LONG")
             self.assertEqual(payload["item"]["entry_low"], "100")
-            self.assertEqual(payload["item"]["market_metrics"]["last_price"], 100.5)
+            # LONG execution uses the fresh best Ask, not the non-executable
+            # ticker Last price.
+            self.assertEqual(payload["item"]["market_metrics"]["last_price"], 100.51)
 
     def test_card_scoped_scan_never_returns_opposite_signal(self):
         with tempfile.TemporaryDirectory() as directory:
@@ -1214,11 +1791,15 @@ class RuntimeSafetyTests(unittest.TestCase):
             )
             self.assertEqual(
                 payload["short"]["preflight"]["verdict"]["status"],
-                "ENTRY_READY",
+                "HARD_GATE_BLOCKED",
             )
             self.assertEqual(
                 payload["short"]["decision_context"]["final"]["status"],
-                "ENTER",
+                "HARD_GATE_BLOCKED",
+            )
+            self.assertEqual(
+                payload["short"]["preflight"]["verdict"]["hard_blockers"],
+                ["RR_INSUFFICIENT"],
             )
             self.assertTrue(payload["short"]["preflight"]["safety"]["unified_single_scan"])
 
@@ -2402,6 +2983,33 @@ class RuntimeSafetyTests(unittest.TestCase):
             self.assertEqual(len(persisted.signals), 1)
             self.assertEqual(len(persisted.long_signals), 1)
             self.assertEqual(persisted.completed_at, previous.completed_at)
+
+    def test_failed_scan_persists_volume_exit_without_replacing_market_snapshot(self):
+        with tempfile.TemporaryDirectory() as directory:
+            previous = report()
+            previous.data_quality["universe_volume_hysteresis"] = {
+                "version": 1,
+                "entry_usdt": 2_000_000,
+                "buffer_usdt": 500_000,
+                "members": ["AAA-USDT-SWAP"],
+            }
+            save_report(previous, directory)
+            runtime = RadarRuntime(
+                IncompleteVolumeStateScanner(),
+                AppConfig(data_dir=directory),
+                push_notifier=FakePushNotifier(),
+            )
+
+            failed_attempt = runtime.scan_blocking("SHORT")
+            persisted = load_latest_report(directory)
+
+            self.assertEqual(failed_attempt.status, "DATA_INCOMPLETE")
+            self.assertEqual(persisted.completed_at, previous.completed_at)
+            self.assertEqual(len(persisted.signals), 1)
+            self.assertEqual(
+                persisted.data_quality["universe_volume_hysteresis"]["members"],
+                [],
+            )
 
     def test_opposite_success_keeps_failed_horizon_unavailable(self):
         for failed_horizon, successful_horizon in (

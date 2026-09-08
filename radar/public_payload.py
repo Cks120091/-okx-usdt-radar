@@ -104,6 +104,7 @@ _SIGNAL_FIELDS = (
     "radar_horizon",
     "trigger_type",
     "freshness",
+    "actionable",
     # Safe scalar timestamps used only to keep the browser's tie-break order
     # identical to the backend (quality -> actual data freshness -> R:R).
     "data_timestamp",
@@ -125,6 +126,13 @@ _WATCH_FIELDS = (
 _CANDIDATE_METRIC_FIELDS = frozenset(
     {
         "last_price",
+        "publication_bid_price",
+        "publication_ask_price",
+        "entry_execution_price",
+        "entry_execution_price_source",
+        "ticker_sampled_at",
+        "ticker_age_at_publish_ms",
+        "ticker_refresh_status",
         "price_change_15m_pct",
         "price_change_1h_pct",
         "price_change_24h_pct",
@@ -191,6 +199,13 @@ _PUBLIC_REPORT_DATA_QUALITY_FIELDS = (
     "source_success",
     "source_missing",
     "context_failure_count",
+    # Final quote refresh performed immediately before publication.  This is
+    # separate from the scan-start Universe ticker and is the only quote that
+    # may grant current entry permission.
+    "publication_ticker_status",
+    "publication_ticker_target_count",
+    "publication_ticker_refreshed_count",
+    "publication_ticker_failed_count",
 )
 
 
@@ -347,7 +362,17 @@ def _public_candidate(item: Any, *, signal: bool) -> dict[str, Any]:
     )
     payload["data_quality"] = _select(
         _read(item, "data_quality", {}),
-        ("core", "core_status", "deep", "deep_status", "missing_sources"),
+        (
+            "core",
+            "core_status",
+            "deep",
+            "deep_status",
+            "missing_sources",
+            "publication_ticker_status",
+            "publication_ticker_ts",
+            "publication_ticker_age_ms",
+            "publication_ticker_error",
+        ),
     )
     payload["market_story"] = _public_market_story(
         _read(item, "market_story", {})
@@ -367,11 +392,14 @@ def _public_candidate(item: Any, *, signal: bool) -> dict[str, Any]:
                 "invalidation_progress_pct",
                 "remaining_rr",
                 "remaining_rr_applicable",
+                "actionable",
                 "new_entry_allowed",
                 "direction_still_valid",
                 "hard_blockers",
                 "risk_warnings",
                 "wait_reason_code",
+                "current_price_source",
+                "publication_last_price",
             ),
         )
     return payload
@@ -418,9 +446,27 @@ def _public_market_story(story: Any) -> dict[str, Any]:
             "control_transfer",
             ("label", "push_away", "micro_defense_broken"),
         ),
-        ("trigger", ("type", "event_age_bars")),
+        (
+            "trigger",
+            (
+                "type",
+                "direction",
+                "event_age_bars",
+                "opposite_warning_only",
+                "active_episode_preserved",
+                "new_entry_suspended",
+                "new_entry_suspension_reason",
+            ),
+        ),
     ):
         section = _select(_read(story, key, {}), fields)
+        if key == "trigger":
+            opposite = _select(
+                _read(_read(story, key, {}), "opposite_candidate", {}),
+                ("direction", "type", "stage", "confirmation_level", "event_age_bars"),
+            )
+            if opposite:
+                section["opposite_candidate"] = opposite
         if section:
             payload[key] = section
     attacks: dict[str, Any] = {}

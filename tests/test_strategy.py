@@ -439,10 +439,59 @@ class StrategyTests(unittest.TestCase):
 
         self.assertEqual(ready["status"], "ENTRY_READY")
         self.assertTrue(ready["actionable"])
+        self.assertFalse(ready["reentry_confirmation_required"])
         self.assertEqual(waiting["status"], "WAIT_RETEST")
         self.assertFalse(waiting["actionable"])
         self.assertEqual(missed["status"], "MISSED_ENTRY")
         self.assertFalse(missed["actionable"])
+
+    def test_old_episode_cannot_reopen_from_live_price_without_closed_retest(self):
+        base = {
+            "direction": "LONG",
+            "current_price": 100.5,
+            "entry_low": 100.0,
+            "entry_high": 101.0,
+            "stop": 98.0,
+            "target": 110.0,
+            "atr": 2.0,
+            "stage": "CONFIRMED",
+            "minimum_rr": 1.8,
+            "ready_max_chase_atr": 0.15,
+            "missed_chase_atr": 0.50,
+        }
+
+        existing = _entry_eligibility(existing_episode=True, **base)
+        ever_ready = _entry_eligibility(entry_ready_once=True, **base)
+
+        for result in (existing, ever_ready):
+            self.assertEqual(result["status"], "WAIT_RETEST")
+            self.assertFalse(result["actionable"])
+            self.assertTrue(result["reentry_confirmation_required"])
+            self.assertFalse(result["closed_retest_confirmed"])
+            self.assertIn("禁止只憑即時價格重新放行", result["reason"])
+
+    def test_verified_closed_retest_can_reopen_old_episode(self):
+        result = _entry_eligibility(
+            direction="SHORT",
+            current_price=100.5,
+            entry_low=100.0,
+            entry_high=101.0,
+            stop=103.0,
+            target=92.0,
+            atr=2.0,
+            stage="REENTRY",
+            minimum_rr=1.8,
+            ready_max_chase_atr=0.15,
+            missed_chase_atr=0.50,
+            existing_episode=True,
+            entry_ready_once=True,
+            closed_retest_confirmed=True,
+        )
+
+        self.assertEqual(result["status"], "ENTRY_READY")
+        self.assertTrue(result["actionable"])
+        self.assertTrue(result["reentry_confirmation_required"])
+        self.assertTrue(result["closed_retest_confirmed"])
 
     def test_low_remaining_rr_warns_but_inactive_stage_is_missed(self):
         low_rr = _entry_eligibility(
@@ -668,7 +717,7 @@ class StrategyTests(unittest.TestCase):
         self.assertEqual(opposed.signal.market_participation["state"], "CONFLICT")
         self.assertTrue(opposed.signal.conflicts)
 
-    def test_v33_targets_expand_and_contract_with_oi_and_order_flow(self):
+    def test_v33_targets_ignore_auxiliary_oi_and_order_flow(self):
         candles_4h, candles_1h, candles_15m = valid_breakout_frames()
         candles_5m = story_candles(
             [98 + index * 0.03 for index in range(100)],
@@ -742,20 +791,24 @@ class StrategyTests(unittest.TestCase):
         self.assertIsNotNone(strong.signal)
         self.assertIsNotNone(weak.signal)
         self.assertEqual(strong.signal.stop_loss, weak.signal.stop_loss)
-        self.assertGreater(strong.signal.risk_reward, weak.signal.risk_reward)
-        self.assertGreater(
-            float(strong.signal.take_profit_1),
-            float(weak.signal.take_profit_1),
+        self.assertEqual(strong.signal.risk_reward, weak.signal.risk_reward)
+        self.assertEqual(
+            strong.signal.take_profit_1,
+            weak.signal.take_profit_1,
         )
         self.assertGreaterEqual(weak.signal.risk_reward, 2.00)
         self.assertTrue(strong.signal.management_plan["adaptive_market_plan"])
         self.assertTrue(strong.signal.management_plan["frozen_at_trigger"])
-        self.assertIn(
+        self.assertNotIn(
             "價格＋OI",
             strong.signal.management_plan["market_plan_sources"],
         )
-        self.assertIn(
+        self.assertNotIn(
             "Taker／CVD",
+            strong.signal.management_plan["market_plan_sources"],
+        )
+        self.assertNotIn(
+            "Funding 擁擠修正",
             strong.signal.management_plan["market_plan_sources"],
         )
 

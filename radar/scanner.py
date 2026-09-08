@@ -239,6 +239,80 @@ class MarketScanner:
             )
         }
 
+    def _candidate_volume_policy(
+        self,
+        inst_id: str,
+        quote_volume_24h: float | None,
+        *,
+        source: str,
+        volume_status: str,
+        trusted: bool = True,
+    ) -> dict[str, Any]:
+        entry_threshold, _, _, exit_threshold = (
+            self._volume_hysteresis_thresholds()
+        )
+        member = inst_id in self._volume_eligible_ids
+        volume = _finite_number(quote_volume_24h)
+        if volume is not None and volume < 0:
+            volume = None
+        return {
+            "version": _VOLUME_HYSTERESIS_STATE_VERSION,
+            "trusted": bool(trusted),
+            "member": member,
+            "entry_usdt": entry_threshold,
+            "exit_usdt": exit_threshold,
+            "effective_min_usdt": (
+                exit_threshold if member else entry_threshold
+            ),
+            "volume_usdt": volume,
+            "volume_status": str(volume_status or "UNKNOWN").upper(),
+            "source": str(source or "UNKNOWN").upper(),
+        }
+
+    def _with_candidate_volume_policy(
+        self,
+        item: Signal | MarketState,
+        quote_volume_24h: float | None,
+        *,
+        source: str,
+        volume_status: str,
+        trusted: bool = True,
+    ) -> Signal | MarketState:
+        data_quality = dict(item.data_quality)
+        data_quality["universe_volume_policy"] = self._candidate_volume_policy(
+            item.inst_id,
+            quote_volume_24h,
+            source=source,
+            volume_status=volume_status,
+            trusted=trusted,
+        )
+        return replace(item, data_quality=data_quality)
+
+    def _reconcile_publication_volume_membership(
+        self,
+        tickers: dict[str, Ticker],
+    ) -> set[str]:
+        """Revoke members that crossed the exit line before publication.
+
+        Admission remains a scan-start Universe operation.  This second pass
+        only closes the race where a member falls below the exit threshold
+        while candles and context are being analyzed.
+        """
+
+        _, _, _, exit_threshold = self._volume_hysteresis_thresholds()
+        revoked: set[str] = set()
+        for inst_id, ticker in tickers.items():
+            quote_volume = _finite_number(ticker.quote_volume_24h)
+            if (
+                inst_id in self._volume_eligible_ids
+                and quote_volume is not None
+                and quote_volume >= 0
+                and quote_volume < exit_threshold
+            ):
+                self._volume_eligible_ids.discard(inst_id)
+                revoked.add(inst_id)
+        return revoked
+
     def scan_once(
         self,
         progress: ProgressCallback | None = None,
@@ -833,6 +907,46 @@ class MarketScanner:
         if open_interest:
             self._previous_open_interest_usd = dict(open_interest)
 
+        # Analysis can take long enough for the scan-start quote to become a
+        # bad execution reference.  Take one more bulk snapshot immediately
+        # before reconciliation/publication and fail closed per candidate when
+        # that snapshot is missing, invalid, or older than the one analysis
+        # started with.  Closed-candle structure remains unchanged; only the
+        # live price/spread projection and its entry eligibility are refreshed.
+        publication_target_ids = sorted({*short_results, *long_results})
+        (
+            publication_tickers,
+            publication_ticker_failures,
+        ) = self._load_publication_tickers(
+            publication_target_ids,
+            tickers,
+        )
+        publication_volume_revoked_ids = (
+            self._reconcile_publication_volume_membership(publication_tickers)
+        )
+        for inst_id in sorted(publication_volume_revoked_ids):
+            if inst_id not in volume_excluded_ids:
+                volume_excluded_ids.append(inst_id)
+            if inst_id not in volume_below_exit_ids:
+                volume_below_exit_ids.append(inst_id)
+            if inst_id in volume_retained_in_buffer_ids:
+                volume_retained_in_buffer_ids.remove(inst_id)
+        for horizon, results in (
+            ("SHORT", short_results),
+            ("LONG", long_results),
+        ):
+            for inst_id, result in list(results.items()):
+                ticker = publication_tickers.get(inst_id)
+                failure = publication_ticker_failures.get(inst_id)
+                results[inst_id] = self._apply_publication_ticker_to_result(
+                    result,
+                    ticker=ticker,
+                    scan_start_ticker=tickers.get(inst_id),
+                    failure=failure,
+                )
+                if failure:
+                    analysis_failures[f"{inst_id}:{horizon}"] = failure
+
         exclusion_counts: Counter[str] = Counter()
         if volume_excluded_ids:
             exclusion_counts["24H_USDT_VOLUME_BUFFER_EXCLUDED"] = len(
@@ -888,14 +1002,25 @@ class MarketScanner:
                 if include_long
                 else []
             )
-        short_signals = [
-            self._attach_decision_context(self._refresh_entry_eligibility(item))
-            for item in short_signals
-        ]
-        long_signals = [
-            self._attach_decision_context(self._refresh_entry_eligibility(item))
-            for item in long_signals
-        ]
+        def final_signal_projection(item: Signal) -> Signal:
+            # Same-core repository merges deliberately keep the accepted
+            # closed-candle plan immutable, so re-apply the publication quote
+            # to the in-memory projection returned by reconciliation as well.
+            # This guarantees the final decision never falls back to the
+            # scan-start price merely because the Episode already existed.
+            if item.inst_id in publication_target_ids:
+                item = self._apply_publication_ticker_to_item(
+                    item,
+                    ticker=publication_tickers.get(item.inst_id),
+                    scan_start_ticker=tickers.get(item.inst_id),
+                    failure=publication_ticker_failures.get(item.inst_id),
+                )
+            return self._attach_decision_context(
+                self._refresh_entry_eligibility(item)
+            )
+
+        short_signals = [final_signal_projection(item) for item in short_signals]
+        long_signals = [final_signal_projection(item) for item in long_signals]
         short_states = [self._attach_decision_context(item) for item in short_states]
         long_states = [self._attach_decision_context(item) for item in long_states]
         short_signals = [_without_internal_metrics(item) for item in short_signals]
@@ -1059,6 +1184,18 @@ class MarketScanner:
             "source_success": dict(source_success),
             "source_missing": dict(source_missing),
             "context_failure_count": len(context_failures),
+            "publication_ticker_status": (
+                "PARTIAL"
+                if publication_ticker_failures
+                else "AVAILABLE"
+                if publication_target_ids
+                else "NOT_APPLICABLE"
+            ),
+            "publication_ticker_target_count": len(publication_target_ids),
+            "publication_ticker_refreshed_count": len(publication_tickers),
+            "publication_ticker_failed_count": len(
+                publication_ticker_failures
+            ),
             "scan_duration_seconds": duration,
             "api_metrics": api_metrics,
             "no_fake_fallback": True,
@@ -1644,18 +1781,27 @@ class MarketScanner:
                 else:
                     signal = persisted
             if signal is not None:
-                live_metrics = dict(signal.market_metrics)
-                live_metrics["last_price"] = ticker.last
+                signal = self._apply_publication_ticker_to_item(
+                    signal,
+                    ticker=ticker,
+                    scan_start_ticker=ticker,
+                    failure=None,
+                )
                 signal = _without_internal_metrics(
                     self._attach_decision_context(
-                        self._refresh_entry_eligibility(
-                            replace(signal, market_metrics=live_metrics)
-                        )
+                        self._refresh_entry_eligibility(signal)
                     )
                 )
             state = (
                 _without_internal_metrics(
-                    self._attach_decision_context(result.market_state)
+                    self._attach_decision_context(
+                        self._apply_publication_ticker_to_item(
+                            result.market_state,
+                            ticker=ticker,
+                            scan_start_ticker=ticker,
+                            failure=None,
+                        )
+                    )
                 )
                 if result.market_state is not None
                 else None
@@ -1960,10 +2106,14 @@ class MarketScanner:
             raw_signal = None
             reason = "new_plan_already_invalidated"
         if raw_signal is not None:
-            live_metrics = dict(raw_signal.market_metrics)
-            live_metrics["last_price"] = ticker.last
+            raw_signal = self._apply_publication_ticker_to_item(
+                raw_signal,
+                ticker=ticker,
+                scan_start_ticker=ticker,
+                failure=None,
+            )
             raw_signal = self._refresh_entry_eligibility(
-                replace(raw_signal, market_metrics=live_metrics)
+                raw_signal
             )
             if raw_signal.entry_eligibility.get("status") not in (
                 "ENTRY_READY",
@@ -2706,6 +2856,258 @@ class MarketScanner:
                 signals.append(result.signal)
         return states, signals
 
+    def _load_publication_tickers(
+        self,
+        target_ids: list[str],
+        scan_start_tickers: dict[str, Ticker],
+    ) -> tuple[dict[str, Ticker], dict[str, str]]:
+        """Load one final bulk quote snapshot and validate it per candidate.
+
+        A missing refresh must not silently fall back to the quote used at the
+        beginning of a potentially long scan.  Timestamp validation is kept
+        relative to the scan-start snapshot so deterministic fixtures and
+        quiet-but-valid markets are not rejected by an arbitrary wall-clock
+        age limit.
+        """
+
+        if not target_ids:
+            return {}, {}
+        try:
+            refreshed = self.client.get_swap_tickers()
+        except Exception as exc:
+            message = f"發布前最新 Ticker 取得失敗：{exc}"
+            return {}, {inst_id: message for inst_id in target_ids}
+
+        accepted: dict[str, Ticker] = {}
+        failures: dict[str, str] = {}
+        for inst_id in target_ids:
+            ticker = refreshed.get(inst_id)
+            if ticker is None:
+                failures[inst_id] = "發布前最新 Ticker 缺少此候選合約"
+                continue
+            last = _finite_number(ticker.last)
+            if last is None or last <= 0:
+                failures[inst_id] = "發布前最新 Ticker 價格無效"
+                continue
+            bid = _finite_number(ticker.bid)
+            ask = _finite_number(ticker.ask)
+            if (
+                bid is None
+                or ask is None
+                or bid <= 0
+                or ask <= 0
+                or ask < bid
+            ):
+                failures[inst_id] = (
+                    "發布前最新 Ticker 買賣價無效，無法計算可成交側價格"
+                )
+                continue
+            quote_volume = _finite_number(ticker.quote_volume_24h)
+            if quote_volume is None or quote_volume < 0:
+                failures[inst_id] = (
+                    "發布前最新 Ticker 缺少有效 24H USDT 成交額，禁止沿用 K 線成交量"
+                )
+                continue
+            refreshed_ts_value = _finite_number(ticker.ts)
+            refreshed_ts = (
+                int(refreshed_ts_value)
+                if refreshed_ts_value is not None
+                else 0
+            )
+            if refreshed_ts <= 0:
+                failures[inst_id] = "發布前最新 Ticker 缺少有效時間戳"
+                continue
+            initial = scan_start_tickers.get(inst_id)
+            initial_ts_value = (
+                _finite_number(initial.ts) if initial is not None else None
+            )
+            initial_ts = (
+                int(initial_ts_value)
+                if initial_ts_value is not None
+                else 0
+            )
+            if initial_ts > 0 and refreshed_ts < initial_ts:
+                failures[inst_id] = (
+                    "發布前最新 Ticker 時間戳早於掃描起始快照，禁止沿用舊價"
+                )
+                continue
+            accepted[inst_id] = ticker
+        return accepted, failures
+
+    def _apply_publication_ticker_to_item(
+        self,
+        item: Signal | MarketState,
+        *,
+        ticker: Ticker | None,
+        scan_start_ticker: Ticker | None,
+        failure: str | None,
+    ) -> Signal | MarketState:
+        metrics = dict(item.market_metrics)
+        data_quality = dict(item.data_quality)
+        missing_sources = [
+            value
+            for value in data_quality.get("missing_sources", []) or []
+            if value != "publication_ticker"
+        ]
+        scan_start_ts = (
+            _finite_number(scan_start_ticker.ts)
+            if scan_start_ticker is not None
+            else None
+        )
+        metrics["scan_start_ticker_ts"] = (
+            int(scan_start_ts) if scan_start_ts is not None else None
+        )
+        quote_volume = (
+            _finite_number(ticker.quote_volume_24h)
+            if ticker is not None
+            else None
+        )
+        if ticker is not None and (quote_volume is None or quote_volume < 0):
+            failure = failure or (
+                "發布前最新 Ticker 缺少有效 24H USDT 成交額，禁止沿用 K 線成交量"
+            )
+            ticker = None
+
+        if ticker is not None and quote_volume is not None:
+            sampled_at = int(ticker.ts or 0)
+            now_ms = int(time.time() * 1_000)
+            ticker_age_ms = (
+                max(0, now_ms - sampled_at)
+                if 946_684_800_000 <= sampled_at <= now_ms + 300_000
+                else None
+            )
+            direction = str(item.direction or "").upper()
+            execution_price = (
+                float(ticker.ask)
+                if direction == "LONG"
+                else float(ticker.bid)
+                if direction == "SHORT"
+                else float(ticker.last)
+            )
+            execution_source = (
+                "ASK"
+                if direction == "LONG"
+                else "BID"
+                if direction == "SHORT"
+                else "LAST"
+            )
+            metrics.update(
+                {
+                    "last_price": float(ticker.last),
+                    "publication_bid_price": float(ticker.bid),
+                    "publication_ask_price": float(ticker.ask),
+                    "entry_execution_price": execution_price,
+                    "entry_execution_price_source": execution_source,
+                    "ticker_sampled_at": sampled_at,
+                    "ticker_age_at_publish_ms": ticker_age_ms,
+                    "ticker_refresh_status": "REFRESHED",
+                }
+            )
+            data_quality.update(
+                {
+                    "publication_ticker_status": "AVAILABLE",
+                    "publication_ticker_ts": sampled_at,
+                    "publication_ticker_age_ms": ticker_age_ms,
+                    "missing_sources": missing_sources,
+                    "universe_volume_policy": self._candidate_volume_policy(
+                        item.inst_id,
+                        quote_volume,
+                        source="PUBLICATION_TICKER",
+                        volume_status="AVAILABLE",
+                    ),
+                }
+            )
+            data_quality.pop("publication_ticker_error", None)
+            return replace(
+                item,
+                spread_pct=round(ticker.spread_pct, 4),
+                quote_volume_24h=float(quote_volume),
+                market_metrics=metrics,
+                data_quality=data_quality,
+            )
+
+        # Explicitly erase last_price.  Keeping the scan-start value here
+        # would let the downstream eligibility and decision layers present an
+        # old quote as a current, actionable entry.
+        metrics.update(
+            {
+                "last_price": None,
+                "publication_bid_price": None,
+                "publication_ask_price": None,
+                "entry_execution_price": None,
+                "entry_execution_price_source": None,
+                "ticker_sampled_at": None,
+                "ticker_age_at_publish_ms": None,
+                "ticker_refresh_status": "UNAVAILABLE",
+            }
+        )
+        data_quality.update(
+            {
+                "publication_ticker_status": "UNAVAILABLE",
+                "publication_ticker_ts": None,
+                "publication_ticker_age_ms": None,
+                "publication_ticker_error": failure
+                or "發布前最新 Ticker 不可用",
+                "missing_sources": _unique_strings(
+                    [*missing_sources, "publication_ticker"]
+                ),
+                "universe_volume_policy": self._candidate_volume_policy(
+                    item.inst_id,
+                    None,
+                    source="PUBLICATION_TICKER",
+                    volume_status="UNAVAILABLE",
+                ),
+            }
+        )
+        return replace(
+            item,
+            quote_volume_24h=None,
+            market_metrics=metrics,
+            data_quality=data_quality,
+            actionable=False,
+        )
+
+    def _apply_publication_ticker_to_result(
+        self,
+        result: AnalysisResult,
+        *,
+        ticker: Ticker | None,
+        scan_start_ticker: Ticker | None,
+        failure: str | None,
+    ) -> AnalysisResult:
+        def refresh_signal(signal: Signal | None) -> Signal | None:
+            if signal is None:
+                return None
+            projected = self._apply_publication_ticker_to_item(
+                signal,
+                ticker=ticker,
+                scan_start_ticker=scan_start_ticker,
+                failure=failure,
+            )
+            # Persist the same binding entry contract that will be published.
+            # Otherwise a positionally in-zone but risk-blocked signal can be
+            # recorded as ``entry_ready_once`` before the final decision is
+            # attached, and later look like a genuine historical opportunity.
+            return self._attach_decision_context(
+                self._refresh_entry_eligibility(projected)
+            )
+
+        return replace(
+            result,
+            signal=refresh_signal(result.signal),
+            candidate_signal=refresh_signal(result.candidate_signal),
+            market_state=(
+                self._apply_publication_ticker_to_item(
+                    result.market_state,
+                    ticker=ticker,
+                    scan_start_ticker=scan_start_ticker,
+                    failure=failure,
+                )
+                if result.market_state is not None
+                else None
+            ),
+        )
+
     @staticmethod
     def _signal_sort_key(signal: Signal) -> tuple[Any, ...]:
         entry_priority = {
@@ -2810,7 +3212,9 @@ class MarketScanner:
             -int(signal.lifecycle.get("age_bars", 0) or 0),
             remaining_rr,
             -slippage,
-            signal.quote_volume_24h,
+            _finite_number(signal.quote_volume_24h)
+            if _finite_number(signal.quote_volume_24h) is not None
+            else -math.inf,
             stage_priority.get(signal.signal_stage, 0),
             signal.score,
         )
@@ -2819,8 +3223,60 @@ class MarketScanner:
         metrics = dict(signal.market_metrics)
         story_raw = signal.market_story.get("raw", {})
         story_trigger = signal.market_story.get("trigger", {})
+        lifecycle = dict(signal.lifecycle or {})
+        prior_eligibility = dict(signal.entry_eligibility or {})
+        transition = str(lifecycle.get("transition") or "").upper()
+        newly_created_episode = transition == "NEW"
+        lifecycle_status = str(lifecycle.get("status") or "").upper()
+        existing_episode = bool(
+            not newly_created_episode
+            and (
+                prior_eligibility.get("existing_episode") is True
+                or lifecycle.get("first_seen_at")
+                or (
+                    signal.trigger_id
+                    and lifecycle_status
+                    in {"ACTIVE", "COMPLETED", "INVALIDATED", "CLOSED_UNKNOWN"}
+                )
+            )
+        )
+        # The repository marks entry_ready_once while it creates the very
+        # first NEW projection.  That is not a *prior* opportunity yet, so do
+        # not immediately downgrade a brand-new Entry Ready card.  On every
+        # subsequent lifecycle projection the durable flag is authoritative.
+        entry_ready_once = bool(
+            not newly_created_episode
+            and (
+                lifecycle.get("entry_ready_once") is True
+                or prior_eligibility.get("entry_ready_once") is True
+            )
+        )
+        # Never infer reclaim proof from the live publication quote.  Only the
+        # strict closed-candle proof produced upstream by Market Story may
+        # reopen an existing Episode.
+        closed_retest_confirmed = bool(
+            not newly_created_episode
+            and prior_eligibility.get("closed_retest_confirmed") is True
+        )
+        execution_price = _finite_number(metrics.get("entry_execution_price"))
+        execution_price_source = str(
+            metrics.get("entry_execution_price_source") or ""
+        ).upper()
+        last_price = _finite_number(metrics.get("last_price"))
+        current_price = (
+            execution_price
+            if execution_price is not None
+            else last_price
+        )
+        current_price_source = (
+            execution_price_source
+            if execution_price is not None and execution_price_source
+            else "LAST"
+            if last_price is not None
+            else "UNAVAILABLE"
+        )
         values = {
-            "current_price": _finite_number(metrics.get("last_price")),
+            "current_price": current_price,
             "entry_low": _finite_number(signal.entry_low),
             "entry_high": _finite_number(signal.entry_high),
             "stop": _finite_number(signal.stop_loss),
@@ -2846,6 +3302,10 @@ class MarketScanner:
                 "chase_atr": None,
                 "remaining_rr": None,
                 "remaining_rr_applicable": False,
+                "current_price_source": current_price_source,
+                "publication_last_price": _finite_number(
+                    metrics.get("last_price")
+                ),
             }
             checks = [
                 item
@@ -2879,8 +3339,19 @@ class MarketScanner:
             minimum_rr=self.config.minimum_rr,
             ready_max_chase_atr=self.config.entry_ready_max_chase_atr,
             missed_chase_atr=self.config.entry_missed_chase_atr,
+            existing_episode=existing_episode,
+            entry_ready_once=entry_ready_once,
+            closed_retest_confirmed=closed_retest_confirmed,
         )
         eligibility = dict(eligibility)
+        eligibility.update(
+            {
+                "current_price_source": current_price_source,
+                "publication_last_price": _finite_number(
+                    metrics.get("last_price")
+                ),
+            }
+        )
         position_status = str(eligibility.get("status", "DATA_UNAVAILABLE"))
         direction_still_valid = not (
             position_status == "MISSED_ENTRY"
@@ -2910,11 +3381,41 @@ class MarketScanner:
                 "remaining_rr": eligibility["remaining_rr"],
             }
         )
-        checks = [
-            {**item, "hard": False}
-            for item in signal.safety_checks
-            if item.get("key") != "entry_eligibility"
-        ]
+        recomputed_safety_keys = {
+            "universe_liquidity",
+            "universe_spread",
+            "liquidity",
+            "spread",
+            "slippage",
+            "execution_depth",
+            "execution_cost",
+            "execution_cost_warning",
+            "risk_reward",
+            "stop_loss",
+            "chase",
+            "anomalous_market",
+            "deep_data_available",
+            "context_data",
+            "open_interest",
+        }
+        checks = []
+        for check in signal.safety_checks:
+            if check.get("key") == "entry_eligibility":
+                continue
+            key = str(check.get("key") or "").strip().lower()
+            checks.append(
+                {
+                    **check,
+                    # These market checks are recomputed by the canonical
+                    # decision below. Preserve independent upstream hard
+                    # checks instead of demoting every failure to a warning.
+                    "hard": (
+                        False
+                        if key in recomputed_safety_keys
+                        else bool(check.get("hard", True))
+                    ),
+                }
+            )
         checks.append(
             {
                 "key": "entry_eligibility",
@@ -2936,23 +3437,43 @@ class MarketScanner:
         self,
         item: Signal | MarketState,
     ) -> Signal | MarketState:
+        if not isinstance(
+            item.data_quality.get("universe_volume_policy"),
+            dict,
+        ):
+            candidate_volume = _finite_number(item.quote_volume_24h)
+            item = self._with_candidate_volume_policy(
+                item,
+                candidate_volume,
+                source="UNVERIFIED_CANDIDATE",
+                volume_status=(
+                    "AVAILABLE" if candidate_volume is not None else "UNAVAILABLE"
+                ),
+                trusted=False,
+            )
         decision = build_decision_context(item, self.config)
         final = decision.get("final", {})
         allowed = bool(final.get("new_entry_allowed"))
         if isinstance(item, Signal):
             eligibility = dict(item.entry_eligibility)
+            eligibility["actionable"] = allowed
             eligibility["new_entry_allowed"] = allowed
             eligibility.setdefault(
                 "direction_still_valid",
                 str(final.get("status")) != "INVALIDATED",
             )
             risk_review = decision.get("hard_gate", {})
+            gate_blockers = list(risk_review.get("blockers", []) or [])
+            gate_unknowns = list(risk_review.get("unknowns", []) or [])
             risk_warnings = [
                 *list(eligibility.get("risk_warnings", []) or []),
-                *list(risk_review.get("blockers", []) or []),
-                *list(risk_review.get("unknowns", []) or []),
+                *list(risk_review.get("warnings", []) or []),
             ]
-            eligibility["hard_blockers"] = []
+            eligibility["hard_blockers"] = _unique_strings(
+                [*gate_blockers, *gate_unknowns]
+                if not allowed
+                else []
+            )
             eligibility["risk_warnings"] = _unique_strings(risk_warnings)
             wait_reason = final.get("wait_reason")
             if isinstance(wait_reason, dict):
@@ -3030,10 +3551,18 @@ class MarketScanner:
             "buy_slippage_pct": context.buy_slippage_pct,
             "sell_slippage_pct": context.sell_slippage_pct,
             "order_book_sequence": dict(context.order_book_sequence),
-            "required_missing_sources": list(
-                state.data_quality.get("missing_sources", []) or []
+            # Deep context failures are not equivalent to missing core price
+            # or execution inputs.  Keep them visible as optional coverage;
+            # the independent spread/slippage/cost checks below still fail
+            # closed when executable book data is actually unavailable.
+            "required_missing_sources": [],
+            "optional_missing_sources": _unique_strings(
+                [
+                    *list(state.data_quality.get("missing_sources", []) or []),
+                    *list(context.failures),
+                ]
             ),
-            "api_failures": list(context.failures),
+            "api_failures": [],
         }
         anomaly = detect_anomaly(anomaly_metrics, flow)
         btc = dict(market_bias.get("btc", {}) or {})
@@ -3288,7 +3817,9 @@ class MarketScanner:
                 item.status == "NEAR_TRIGGER",
                 item.freshness == "NEW",
                 item.readiness_score,
-                item.quote_volume_24h,
+                _finite_number(item.quote_volume_24h)
+                if _finite_number(item.quote_volume_24h) is not None
+                else -math.inf,
             ),
             reverse=True,
         )

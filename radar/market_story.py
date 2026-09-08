@@ -348,6 +348,16 @@ class MarketStoryEngine:
                     "freshness": "ACTIVE",
                     "opposite_warning_only": True,
                     "active_episode_preserved": True,
+                    # Keep the original Episode and its frozen plan available
+                    # for an already-open position, but never interpret that
+                    # preservation as permission to open another position in
+                    # the stale direction.  The decision layer treats this as
+                    # a binding new-entry suspension.
+                    "new_entry_suspended": True,
+                    "new_entry_suspension_reason": (
+                        "偵測到正式反向價格訊號；原計畫只保留供既有持倉管理，"
+                        "暫停原方向新進場"
+                    ),
                     "opposite_candidate": opposite_candidate,
                 }
             )
@@ -782,10 +792,16 @@ def execution_quality(
     warnings: list[str] = []
     entry = dict(story.execution_quality.get("entry_location", {}))
     score = float(entry.get("score", 50.0)) * 0.30
-    spread_score = _clamp(
-        100.0 - spread_pct / max(max_spread_pct, 0.001) * 50.0,
-        0.0,
-        100.0,
+    # Execution data is a penalty-only ranking input.  A cheap market is the
+    # neutral baseline; it must not outrank an otherwise identical candidate
+    # merely because its spread or estimated book cost is unusually low.
+    spread_score = min(
+        50.0,
+        _clamp(
+            100.0 - spread_pct / max(max_spread_pct, 0.001) * 50.0,
+            0.0,
+            100.0,
+        ),
     )
     score += spread_score * 0.20
     rr_score = _clamp(risk_reward / max(target_rr, 0.1) * 75.0, 0.0, 100.0)
@@ -805,12 +821,19 @@ def execution_quality(
             + estimated_taker_fee_pct * 2.0
         )
         execution_to_risk = execution_cost / risk_pct * 100.0 if risk_pct > 0 else None
-        cost_score = _clamp(
-            100.0
-            - float(execution_to_risk or 100.0)
-            * (50.0 / max(max_cost_to_risk_pct, 0.1)),
-            0.0,
-            100.0,
+        cost_score = min(
+            50.0,
+            _clamp(
+                100.0
+                - float(
+                    execution_to_risk
+                    if execution_to_risk is not None
+                    else 100.0
+                )
+                * (50.0 / max(max_cost_to_risk_pct, 0.1)),
+                0.0,
+                100.0,
+            ),
         )
         score += cost_score * 0.10
         if execution_to_risk is not None:

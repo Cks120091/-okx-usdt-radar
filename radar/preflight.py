@@ -13,6 +13,8 @@ from .strategy import _entry_eligibility
 
 
 class PreflightConfig(Protocol):
+    min_quote_volume_24h: float
+    quote_volume_buffer_24h: float
     minimum_rr: float
     max_execution_cost_to_risk_pct: float
     max_spread_pct: float
@@ -39,11 +41,59 @@ def build_preflight_payload(
     target_1 = _required_number(signal.take_profit_1, "take_profit_1")
     target_2 = _required_number(signal.take_profit_2, "take_profit_2")
     original_price = _optional_number(signal.market_metrics.get("last_price"))
-    current_price = _required_number(ticker.last, "current_price")
+    market_last_price = _required_number(ticker.last, "current_price")
     atr = _signal_atr(signal)
+    stored_entry = dict(signal.entry_eligibility or {})
+    stored_lifecycle = dict(signal.lifecycle or {})
+    stored_decision = dict(signal.decision_context or {})
+    stored_hard_gate = dict(stored_decision.get("hard_gate", {}) or {})
+    stored_final = dict(stored_decision.get("final", {}) or {})
+    stored_permission_denied = bool(
+        ("new_entry_allowed" in stored_entry and stored_entry.get("new_entry_allowed") is False)
+        or ("actionable" in stored_entry and stored_entry.get("actionable") is False)
+        or stored_final.get("new_entry_allowed") is False
+    )
+    lifecycle_transition = str(
+        stored_lifecycle.get("transition") or ""
+    ).upper()
+    lifecycle_status = str(stored_lifecycle.get("status") or "").upper()
+    newly_created_episode = lifecycle_transition == "NEW"
+    lifecycle_marks_existing = bool(
+        stored_lifecycle.get("first_seen_at")
+        or lifecycle_transition
+        or (
+            signal.trigger_id
+            and lifecycle_status
+            in {"ACTIVE", "COMPLETED", "INVALIDATED", "CLOSED_UNKNOWN"}
+        )
+    )
+    # A newly created Episode can be scan-time blocked only by a dynamic
+    # execution input (for example spread or volume).  The resulting false
+    # permission flags do not make it an "old" Episode that needs a separate
+    # closed-candle reclaim.  For established/legacy rows, keep the safer
+    # fallback so a denied old plan cannot reopen from a quote alone.
+    existing_episode = bool(
+        not newly_created_episode
+        and (
+            stored_entry.get("existing_episode") is True
+            or lifecycle_marks_existing
+            or stored_permission_denied
+        )
+    )
+    entry_ready_once = bool(
+        stored_entry.get("entry_ready_once") is True
+        or stored_lifecycle.get("entry_ready_once") is True
+    )
+    closed_retest_confirmed = stored_entry.get("closed_retest_confirmed") is True
 
-    best_bid = _optional_number(context.best_bid) or _required_number(ticker.bid, "best_bid")
-    best_ask = _optional_number(context.best_ask) or _required_number(ticker.ask, "best_ask")
+    # The ticker is fetched for this exact preflight request and is the
+    # authoritative executable quote.  Context depth may be sampled on a
+    # separate request and must not replace this final bid/ask pair.
+    best_bid = _required_number(ticker.bid, "best_bid")
+    best_ask = _required_number(ticker.ask, "best_ask")
+    current_price = best_ask if signal.direction == "LONG" else best_bid
+    current_price_source = "BEST_ASK" if signal.direction == "LONG" else "BEST_BID"
+    liquidity_policy = _preflight_liquidity_policy(signal, ticker, config)
     live_spread_pct = _spread_pct(best_bid, best_ask)
     eligibility = _entry_eligibility(
         direction=signal.direction,
@@ -57,6 +107,9 @@ def build_preflight_payload(
         minimum_rr=config.minimum_rr,
         ready_max_chase_atr=config.entry_ready_max_chase_atr,
         missed_chase_atr=config.entry_missed_chase_atr,
+        existing_episode=existing_episode,
+        entry_ready_once=entry_ready_once,
+        closed_retest_confirmed=closed_retest_confirmed,
     )
 
     is_long = signal.direction == "LONG"
@@ -68,9 +121,15 @@ def build_preflight_payload(
         else 0.0
     )
     remaining_rr = eligibility.get("remaining_rr")
+    raw_remaining_rr = (
+        current_reward / current_risk
+        if current_risk > 0 and eligibility.get("remaining_rr_applicable") is True
+        else None
+    )
     quality_rr = (
-        float(remaining_rr)
-        if isinstance(remaining_rr, (int, float)) and math.isfinite(remaining_rr)
+        float(raw_remaining_rr)
+        if isinstance(raw_remaining_rr, (int, float))
+        and math.isfinite(raw_remaining_rr)
         else 0.0
     )
     invalidated = current_risk <= 0
@@ -103,31 +162,125 @@ def build_preflight_payload(
         if signal.direction == "LONG"
         else context.sell_slippage_pct
     )
-    cost_to_risk = _optional_number(quality.get("execution_cost_to_risk_pct"))
+    raw_execution_cost = None
+    raw_cost_to_risk = None
+    # Numeric depth/slippage left on a context without a matching order-book
+    # sample timestamp is not fresh enough to decide entry permission.
+    if execution_complete:
+        raw_execution_cost = (
+            live_spread_pct
+            + float(context.buy_slippage_pct or 0.0)
+            + float(context.sell_slippage_pct or 0.0)
+            + config.estimated_taker_fee_pct * 2.0
+        )
+        raw_cost_to_risk = (
+            raw_execution_cost / risk_pct * 100.0 if risk_pct > 0 else None
+        )
+    cost_to_risk = raw_cost_to_risk
     risk_warning_codes: list[str] = []
+    unavailable_warning_codes: set[str] = set()
+    live_quote_volume = liquidity_policy["volume_usdt"]
+    if live_quote_volume is None:
+        risk_warning_codes.append("QUOTE_VOLUME_DATA_UNAVAILABLE")
+        unavailable_warning_codes.add("QUOTE_VOLUME_DATA_UNAVAILABLE")
+    elif live_quote_volume < liquidity_policy["effective_min_usdt"]:
+        risk_warning_codes.append("LIQUIDITY_TOO_LOW")
     if not execution_complete or directional_slippage is None:
         risk_warning_codes.append("EXECUTION_DATA_UNAVAILABLE")
+        unavailable_warning_codes.add("EXECUTION_DATA_UNAVAILABLE")
     elif directional_slippage > config.max_slippage_pct:
         risk_warning_codes.append("SLIPPAGE_TOO_HIGH")
     if live_spread_pct > config.max_spread_pct:
         risk_warning_codes.append("SPREAD_TOO_HIGH")
     if cost_to_risk is None:
         risk_warning_codes.append("EXECUTION_DATA_UNAVAILABLE")
+        unavailable_warning_codes.add("EXECUTION_DATA_UNAVAILABLE")
     elif cost_to_risk > config.max_execution_cost_to_risk_pct:
         risk_warning_codes.append("EXECUTION_COST_TOO_HIGH")
     # On the adverse side of Entry the plan first needs a structural retest,
     # so ``remaining_rr`` is intentionally not applicable.  Do not turn that
     # positional WAIT into a fabricated zero-R:R warning; R:R is recalculated
     # as soon as a live entry becomes eligible.
-    if isinstance(remaining_rr, (int, float)) and quality_rr < config.minimum_rr:
+    if raw_remaining_rr is not None and raw_remaining_rr < config.minimum_rr:
         risk_warning_codes.append("RR_INSUFFICIENT")
+    stored_gate_status = str(stored_hard_gate.get("status") or "").upper()
+    live_rechecked_blockers = {
+        "LIQUIDITY",
+        "SPREAD",
+        "SLIPPAGE",
+        "EXECUTION_COST",
+        "RISK_REWARD",
+        "CHASE",
+        # This is the stored positional permission computed by the same
+        # _entry_eligibility contract above.  Keeping the old code after a
+        # newly confirmed closed retest would make recovery impossible.
+        "ENTRY_PERMISSION",
+    }
+    raw_stored_gate_blockers = [
+        str(value).strip().upper()
+        for value in list(stored_hard_gate.get("blockers", []) or [])
+        if str(value).strip()
+    ]
+    stored_gate_blockers = [
+        value
+        for value in raw_stored_gate_blockers
+        if value not in live_rechecked_blockers
+    ]
+    raw_stored_gate_unknowns = [
+        str(value).strip().upper()
+        for value in list(stored_hard_gate.get("unknowns", []) or [])
+        if str(value).strip()
+    ]
+    stored_gate_unknowns = [
+        value
+        for value in raw_stored_gate_unknowns
+        if value not in live_rechecked_blockers
+    ]
+    # A preflight request has just re-fetched every dynamic execution input
+    # named above.  Do not resurrect a generic upstream block merely because
+    # the old gate's status was BLOCKED/UNKNOWN when its complete reason list
+    # consisted only of inputs that were rechecked live.  Legacy gates with no
+    # reason list still fail closed because there is nothing concrete to
+    # re-evaluate.
+    stored_block_needs_fallback = bool(
+        (stored_hard_gate.get("blocked") is True or stored_gate_status == "BLOCKED")
+        and not raw_stored_gate_blockers
+    )
+    if stored_gate_blockers or stored_block_needs_fallback:
+        risk_warning_codes.extend(
+            stored_gate_blockers or ["UPSTREAM_HARD_GATE_BLOCKED"]
+        )
+    stored_unknown_needs_fallback = bool(
+        (stored_hard_gate.get("unknown") is True or stored_gate_status == "UNKNOWN")
+        and not raw_stored_gate_unknowns
+    )
+    if stored_gate_unknowns or stored_unknown_needs_fallback:
+        unknown_codes = stored_gate_unknowns or ["UPSTREAM_DATA_UNAVAILABLE"]
+        risk_warning_codes.extend(unknown_codes)
+        unavailable_warning_codes.update(unknown_codes)
+    trigger = dict(signal.market_story.get("trigger", {}) or {})
+    if trigger.get("new_entry_suspended") is True or trigger.get(
+        "opposite_warning_only"
+    ) is True:
+        # Keep the binding direction change visible even when several
+        # execution failures are present and the plain-language reason is
+        # intentionally shortened.
+        risk_warning_codes.insert(0, "OPPOSITE_SIGNAL")
     risk_warning_codes = _unique(risk_warning_codes)
     risk_labels = {
+        "QUOTE_VOLUME_DATA_UNAVAILABLE": "最新 24H USDT 成交額資料不足",
+        "LIQUIDITY_TOO_LOW": (
+            f"24H USDT 成交額低於"
+            f"{liquidity_policy['effective_min_usdt']:,.0f} 門檻"
+        ),
         "EXECUTION_DATA_UNAVAILABLE": "Order Book／Slippage 資料不足",
         "SLIPPAGE_TOO_HIGH": "Slippage（滑價）超過建議值",
         "SPREAD_TOO_HIGH": "Spread（買賣價差）超過建議值",
         "EXECUTION_COST_TOO_HIGH": "交易成本占風險偏高",
         "RR_INSUFFICIENT": "R:R（風險報酬比）低於建議值",
+        "OPPOSITE_SIGNAL": "已出現正式反向價格訊號",
+        "UPSTREAM_HARD_GATE_BLOCKED": "原掃描的風險條件尚未重新通過",
+        "UPSTREAM_DATA_UNAVAILABLE": "原掃描的安全資料尚未恢復",
     }
     risk_warning_labels = [
         risk_labels.get(item, item) for item in risk_warning_codes
@@ -191,14 +344,24 @@ def build_preflight_payload(
     elif verdict_status == "MISSED_ENTRY":
         entry_situation = "ENTRY_WINDOW_CLOSED"
 
-    # Execution and market-quality checks are advisory.  They are shown to the
-    # user but never overwrite the positional Entry verdict or hide a Trigger.
-    if verdict_status == "ENTRY_READY" and risk_warning_labels:
-        verdict_label = "目前可進｜附風險提醒"
-        verdict_reason = (
-            f"{verdict_reason} 風險提醒："
-            + "；".join(risk_warning_labels[:3])
-        )
+    # A price Trigger remains visible for lifecycle/position management, but
+    # execution failures are binding for *new* entries.  Previously these were
+    # rendered as warnings beside an actionable ENTRY_READY verdict, which
+    # allowed a wide spread, excessive slippage/cost, insufficient R:R or an
+    # opposite formal Trigger to look tradable.
+    # Keep binding reasons on the payload even while price location already
+    # says WAIT/MISSED.  Otherwise an opposite/risk block disappears from the
+    # plan contract until price happens to become ENTRY_READY, and cached
+    # consumers can incorrectly regard the old plan as reusable for entry.
+    hard_blockers: list[str] = list(risk_warning_codes)
+    if verdict_status == "ENTRY_READY" and hard_blockers:
+        if set(hard_blockers).issubset(unavailable_warning_codes):
+            verdict_status = "DATA_UNAVAILABLE"
+            verdict_label = "執行資料不足｜禁止新進場"
+        else:
+            verdict_status = "HARD_GATE_BLOCKED"
+            verdict_label = "風險條件未通過｜禁止新進場"
+        verdict_reason = "；".join(risk_warning_labels[:3])
 
     if invalidated:
         lifecycle_status = "INVALIDATED"
@@ -227,6 +390,10 @@ def build_preflight_payload(
         }
 
     new_plan_required = invalidated or target_reached or verdict_status == "MISSED_ENTRY"
+    closed_retest_pending = bool(
+        eligibility.get("reentry_confirmation_required") is True
+        and eligibility.get("closed_retest_confirmed") is not True
+    )
     if invalidated:
         plan_status = "INVALIDATED"
     elif target_reached:
@@ -235,6 +402,8 @@ def build_preflight_payload(
         plan_status = "MISSED"
     elif verdict_status == "WAIT_RETEST":
         plan_status = "WAITING_RETEST"
+    elif verdict_status in {"HARD_GATE_BLOCKED", "DATA_UNAVAILABLE"}:
+        plan_status = "ACTIVE_ENTRY_BLOCKED"
     else:
         plan_status = "ACTIVE"
 
@@ -263,7 +432,7 @@ def build_preflight_payload(
             "label": verdict_label,
             "reason": verdict_reason,
             "actionable": verdict_status == "ENTRY_READY",
-            "hard_blockers": [],
+            "hard_blockers": hard_blockers,
             "risk_warnings": risk_warning_codes,
         },
         "signal_lifecycle": {
@@ -277,16 +446,21 @@ def build_preflight_payload(
         "plan_state": {
             "status": plan_status,
             "old_plan_reusable": not new_plan_required,
-            "old_plan_reusable_for_new_entry": not new_plan_required,
+            "old_plan_reusable_for_new_entry": (
+                not new_plan_required
+                and not hard_blockers
+                and not closed_retest_pending
+            ),
             "existing_position_plan_active": lifecycle_status == "ACTIVE",
             "new_entry_status": (
                 "READY"
                 if verdict_status == "ENTRY_READY"
                 else "WAIT"
-                if verdict_status == "WAIT_RETEST"
+                if verdict_status
+                in {"WAIT_RETEST", "HARD_GATE_BLOCKED", "DATA_UNAVAILABLE"}
                 else "CLOSED"
             ),
-            "new_entry_allowed": verdict_status == "ENTRY_READY",
+            "new_entry_allowed": verdict_status == "ENTRY_READY" and not hard_blockers,
             "direction_still_valid": not invalidated,
             "direction_status": (
                 "PENDING_REASSESSMENT"
@@ -300,6 +474,9 @@ def build_preflight_payload(
                 if invalidated
                 else "原始 TP1 已到達；本次機會已完成，任何新進場都必須等待新的 Trigger。"
                 if target_reached
+                else "已出現正式反向價格訊號；舊計畫只保留供既有持倉依原始 SL／TP 管理，"
+                "原方向禁止建立新倉。"
+                if "OPPOSITE_SIGNAL" in hard_blockers
                 else "原 Trigger 仍保留作生命週期追蹤，但已不再提供新進場；"
                 "若已持倉，仍依原始 SL／TP 管理。"
                 if verdict_status == "MISSED_ENTRY"
@@ -326,6 +503,9 @@ def build_preflight_payload(
         "live": {
             "sampled_at": _iso_from_ms(sampled_at),
             "price": round(current_price, 12),
+            "price_source": current_price_source,
+            "ticker_last_price": round(market_last_price, 12),
+            "quote_volume_24h_usdt": _round_or_none(live_quote_volume, 2),
             "price_change_from_scan_pct": _round_or_none(price_change_from_scan, 3),
             "trigger_age_bars": trigger_age_bars,
             "chase_atr": eligibility["chase_atr"],
@@ -338,6 +518,14 @@ def build_preflight_payload(
             "invalidation_progress_pct": eligibility.get(
                 "invalidation_progress_pct",
                 0.0,
+            ),
+            "reentry_confirmation_required": eligibility.get(
+                "reentry_confirmation_required",
+                False,
+            ),
+            "closed_retest_confirmed": eligibility.get(
+                "closed_retest_confirmed",
+                False,
             ),
             "risk_pct": round(risk_pct, 4),
             "quality_score": quality["score"],
@@ -361,23 +549,35 @@ def build_preflight_payload(
                 1,
             ),
             "execution_notional_usdt": context.execution_notional_usdt,
+            "liquidity_policy": liquidity_policy,
         },
         "warnings": _unique(
             [*list(quality.get("warnings", [])), *risk_warning_labels]
         ),
         "data_quality": {
-            "status": "AVAILABLE" if execution_complete else "PARTIAL",
+            "status": (
+                "AVAILABLE"
+                if execution_complete and live_quote_volume is not None
+                else "PARTIAL"
+            ),
             "ticker_available": True,
+            "quote_volume_available": live_quote_volume is not None,
             "order_book_available": book_available,
             "execution_depth_complete": context.execution_quality_complete,
-            "missing_sources": [] if execution_complete else ["order_book_depth"],
+            "missing_sources": [
+                *([] if execution_complete else ["order_book_depth"]),
+                *([] if live_quote_volume is not None else ["ticker_quote_volume_24h"]),
+            ],
         },
         "safety": {
             "analysis_only": True,
             "auto_ordering": False,
             "stored_trigger_unchanged": True,
-            "entry_veto_enabled": False,
-            "note": "即時檢查只提供風險提醒，不產生、刪除、改寫或隱藏核心 Trigger。",
+            "entry_veto_enabled": True,
+            "note": (
+                "即時檢查不產生、刪除、改寫或隱藏核心 Trigger；"
+                "失敗或未知的硬性條件會禁止新進場，舊計畫仍保留供既有持倉管理。"
+            ),
         },
     }
 
@@ -459,6 +659,78 @@ def _trigger_age_bars(signal: Signal, reference_ms: int | None) -> int | None:
     current_ms = int(reference_ms or time.time() * 1000)
     interval_ms = 14_400_000 if signal.radar_horizon == "LONG" else 900_000
     return max(0, int((current_ms - int(event_ts)) // interval_ms))
+
+
+def _preflight_liquidity_policy(
+    signal: Signal,
+    ticker: Ticker,
+    config: PreflightConfig,
+) -> dict[str, Any]:
+    """Use the live ticker volume with only a trusted stored member state.
+
+    A previous Universe member may use the 150 萬 exit line.  Missing,
+    malformed, or policy-incompatible metadata is treated as a non-member and
+    therefore needs the normal 200 萬 admission line.
+    """
+
+    configured_entry = _optional_number(
+        getattr(config, "min_quote_volume_24h", 2_000_000.0)
+    )
+    entry_threshold = (
+        configured_entry
+        if configured_entry is not None and configured_entry >= 0
+        else 2_000_000.0
+    )
+    configured_buffer = _optional_number(
+        getattr(config, "quote_volume_buffer_24h", 500_000.0)
+    )
+    buffer = (
+        0.0
+        if entry_threshold == 0
+        else min(
+            entry_threshold,
+            configured_buffer
+            if configured_buffer is not None and configured_buffer >= 0
+            else 500_000.0,
+        )
+    )
+    exit_threshold = max(0.0, entry_threshold - buffer)
+    raw = signal.data_quality.get("universe_volume_policy", {})
+    raw = raw if isinstance(raw, dict) else {}
+    stored_entry = _optional_number(raw.get("entry_usdt"))
+    stored_exit = _optional_number(raw.get("exit_usdt"))
+    stored_effective = _optional_number(raw.get("effective_min_usdt"))
+    stored_member = raw.get("member") is True
+    trusted = bool(
+        raw.get("version") == 1
+        and raw.get("trusted") is True
+        and stored_entry is not None
+        and stored_exit is not None
+        and stored_effective is not None
+        and math.isclose(stored_entry, entry_threshold, rel_tol=0.0, abs_tol=1e-9)
+        and math.isclose(stored_exit, exit_threshold, rel_tol=0.0, abs_tol=1e-9)
+        and math.isclose(
+            stored_effective,
+            exit_threshold if stored_member else entry_threshold,
+            rel_tol=0.0,
+            abs_tol=1e-9,
+        )
+    )
+    member = bool(trusted and stored_member)
+    volume = _optional_number(ticker.quote_volume_24h)
+    if volume is not None and volume < 0:
+        volume = None
+    return {
+        "version": 1,
+        "trusted": trusted,
+        "member": member,
+        "entry_usdt": entry_threshold,
+        "exit_usdt": exit_threshold,
+        "effective_min_usdt": exit_threshold if member else entry_threshold,
+        "volume_usdt": volume,
+        "volume_status": "AVAILABLE" if volume is not None else "UNAVAILABLE",
+        "source": "PREFLIGHT_TICKER",
+    }
 
 
 def _spread_pct(bid: float, ask: float) -> float:

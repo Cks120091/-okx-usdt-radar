@@ -150,8 +150,13 @@ def make_capital_flow(as_of_close_ms: int = 1_700_000_000_000) -> dict:
 
 
 class PreflightClient:
-    def __init__(self, price: float = 100.1):
+    def __init__(
+        self,
+        price: float = 100.1,
+        quote_volume_24h: float | None = 20_000_000.0,
+    ):
         self.price = price
+        self.quote_volume_24h = quote_volume_24h
         self.ticker_calls = 0
         self.context_calls = 0
 
@@ -164,6 +169,7 @@ class PreflightClient:
             bid=self.price - 0.01,
             ask=self.price + 0.01,
             ts=now_ms,
+            quote_volume_24h=self.quote_volume_24h,
         )
 
     def get_execution_context(self, inst_id: str) -> MarketContext:
@@ -446,6 +452,121 @@ class PreflightTests(unittest.TestCase):
         self.assertEqual(legacy_payload["tp1_r"], 2.0)
         self.assertIsNone(legacy_payload["tp2_r"])
 
+    def test_live_quote_volume_uses_200m_entry_and_150m_member_exit_lines(self):
+        def with_policy(signal: Signal, *, member: bool) -> Signal:
+            return replace(
+                signal,
+                data_quality={
+                    **signal.data_quality,
+                    "universe_volume_policy": {
+                        "version": 1,
+                        "trusted": True,
+                        "member": member,
+                        "entry_usdt": 2_000_000.0,
+                        "exit_usdt": 1_500_000.0,
+                        "effective_min_usdt": (
+                            1_500_000.0 if member else 2_000_000.0
+                        ),
+                        "volume_usdt": 20_000_000.0,
+                        "volume_status": "AVAILABLE",
+                        "source": "PUBLICATION_TICKER",
+                    },
+                },
+            )
+
+        cases = (
+            (False, 1_999_999.0, "HARD_GATE_BLOCKED"),
+            (False, 2_000_000.0, "ENTRY_READY"),
+            (True, 1_499_999.0, "HARD_GATE_BLOCKED"),
+            (True, 1_500_000.0, "ENTRY_READY"),
+            (True, 1_750_000.0, "ENTRY_READY"),
+        )
+        for member, volume, expected in cases:
+            with self.subTest(member=member, volume=volume):
+                signal = with_policy(make_signal(), member=member)
+                client = PreflightClient(price=100.0, quote_volume_24h=volume)
+                payload = build_preflight_payload(
+                    signal,
+                    client.get_ticker(signal.inst_id),
+                    client.get_execution_context(signal.inst_id),
+                    AppConfig(),
+                    report_generated_at=datetime.now(timezone.utc).isoformat(),
+                )
+                self.assertEqual(payload["verdict"]["status"], expected)
+                policy = payload["execution"]["liquidity_policy"]
+                self.assertEqual(policy["member"], member)
+                self.assertEqual(
+                    policy["effective_min_usdt"],
+                    1_500_000.0 if member else 2_000_000.0,
+                )
+                self.assertEqual(payload["live"]["quote_volume_24h_usdt"], volume)
+                if expected == "ENTRY_READY":
+                    self.assertNotIn(
+                        "LIQUIDITY_TOO_LOW", payload["verdict"]["hard_blockers"]
+                    )
+                else:
+                    self.assertIn(
+                        "LIQUIDITY_TOO_LOW", payload["verdict"]["hard_blockers"]
+                    )
+
+    def test_missing_or_untrusted_live_quote_volume_fails_closed(self):
+        signal = make_signal()
+        signal.data_quality = {
+            "universe_volume_policy": {
+                "version": 1,
+                "trusted": True,
+                "member": True,
+                "entry_usdt": 2_000_000.0,
+                "exit_usdt": 1_400_000.0,
+                "effective_min_usdt": 1_400_000.0,
+            }
+        }
+        for volume, expected_code in (
+            (None, "QUOTE_VOLUME_DATA_UNAVAILABLE"),
+            (-1.0, "QUOTE_VOLUME_DATA_UNAVAILABLE"),
+            (1_750_000.0, "LIQUIDITY_TOO_LOW"),
+        ):
+            with self.subTest(volume=volume):
+                client = PreflightClient(price=100.0, quote_volume_24h=volume)
+                payload = build_preflight_payload(
+                    signal,
+                    client.get_ticker(signal.inst_id),
+                    client.get_execution_context(signal.inst_id),
+                    AppConfig(),
+                    report_generated_at=datetime.now(timezone.utc).isoformat(),
+                )
+                self.assertFalse(payload["verdict"]["actionable"])
+                self.assertIn(expected_code, payload["verdict"]["hard_blockers"])
+                self.assertFalse(payload["execution"]["liquidity_policy"]["member"])
+        self.assertEqual(payload["execution"]["liquidity_policy"]["source"], "PREFLIGHT_TICKER")
+
+    def test_preflight_entry_geometry_uses_executable_side_not_last_price(self):
+        long_signal = make_signal()
+        long_client = PreflightClient(price=100.0)
+        long_payload = build_preflight_payload(
+            long_signal,
+            long_client.get_ticker(long_signal.inst_id),
+            long_client.get_execution_context(long_signal.inst_id),
+            AppConfig(),
+            report_generated_at=datetime.now(timezone.utc).isoformat(),
+        )
+        self.assertEqual(long_payload["live"]["price"], 100.01)
+        self.assertEqual(long_payload["live"]["price_source"], "BEST_ASK")
+        self.assertEqual(long_payload["live"]["ticker_last_price"], 100.0)
+
+        short_signal = make_new_short_signal()
+        short_client = PreflightClient(price=98.0)
+        short_payload = build_preflight_payload(
+            short_signal,
+            short_client.get_ticker(short_signal.inst_id),
+            short_client.get_execution_context(short_signal.inst_id),
+            AppConfig(),
+            report_generated_at=datetime.now(timezone.utc).isoformat(),
+        )
+        self.assertEqual(short_payload["live"]["price"], 97.99)
+        self.assertEqual(short_payload["live"]["price_source"], "BEST_BID")
+        self.assertEqual(short_payload["live"]["ticker_last_price"], 98.0)
+
     def test_tick_size_precision_handles_okx_increment_shapes(self):
         self.assertEqual(display_precision_from_tick_size(1), 0)
         self.assertEqual(display_precision_from_tick_size(0.1), 1)
@@ -455,7 +576,7 @@ class PreflightTests(unittest.TestCase):
         self.assertIsNone(display_precision_from_tick_size("bad"))
         self.assertIsNone(display_precision_from_tick_size(10**10000))
 
-    def test_execution_cost_warning_band_is_not_a_hard_block(self):
+    def test_execution_cost_warning_band_only_allows_values_below_hard_limit(self):
         signal = make_signal()
         client = PreflightClient(price=100.0)
         ticker = client.get_ticker(signal.inst_id)
@@ -503,13 +624,343 @@ class PreflightTests(unittest.TestCase):
             blocked["execution"]["execution_cost_to_risk_pct"],
             15.0,
         )
-        self.assertEqual(blocked["verdict"]["status"], "ENTRY_READY")
-        self.assertTrue(blocked["verdict"]["actionable"])
+        self.assertEqual(blocked["verdict"]["status"], "HARD_GATE_BLOCKED")
+        self.assertFalse(blocked["verdict"]["actionable"])
         self.assertIn(
             "EXECUTION_COST_TOO_HIGH",
             blocked["verdict"]["risk_warnings"],
         )
-        self.assertEqual(blocked["verdict"]["hard_blockers"], [])
+        self.assertIn(
+            "EXECUTION_COST_TOO_HIGH",
+            blocked["verdict"]["hard_blockers"],
+        )
+        self.assertFalse(blocked["plan_state"]["new_entry_allowed"])
+        self.assertTrue(blocked["plan_state"]["existing_position_plan_active"])
+        self.assertEqual(blocked["plan_state"]["new_entry_status"], "WAIT")
+        self.assertTrue(blocked["safety"]["entry_veto_enabled"])
+
+    def test_preflight_uses_raw_cost_and_rr_at_hard_boundaries(self):
+        signal = make_signal()
+        # LONG entry geometry uses the executable ask; choose a ticker last
+        # one cent lower so the ask under test is exactly 100.0.
+        client = PreflightClient(price=99.99)
+        ticker = client.get_ticker(signal.inst_id)
+        context = client.get_execution_context(signal.inst_id)
+        config = AppConfig(max_execution_cost_to_risk_pct=15.0, minimum_rr=1.8)
+
+        # Spread 0.02% + 0.0901% slippage each side + 0.10% fees =
+        # 0.3002%, or 15.01% of the exact 2% stop distance.  The public
+        # quality field rounds this to 15.0, but permission must use 15.01.
+        cost = build_preflight_payload(
+            signal,
+            ticker,
+            replace(
+                context,
+                buy_slippage_pct=0.0901,
+                sell_slippage_pct=0.0901,
+            ),
+            config,
+            report_generated_at=datetime.now(timezone.utc).isoformat(),
+        )
+        self.assertEqual(cost["execution"]["execution_cost_to_risk_pct"], 15.0)
+        self.assertEqual(cost["verdict"]["status"], "HARD_GATE_BLOCKED")
+        self.assertIn(
+            "EXECUTION_COST_TOO_HIGH",
+            cost["verdict"]["hard_blockers"],
+        )
+
+        # Choose a price whose exact remaining R:R is 1.7999; the displayed
+        # field is 1.800, so this also guards against thresholding rounded UI
+        # values.
+        rr_price = (104.2 + 1.7999 * 98.0) / (1.0 + 1.7999)
+        rr_client = PreflightClient(price=rr_price - 0.01)
+        rr = build_preflight_payload(
+            signal,
+            rr_client.get_ticker(signal.inst_id),
+            rr_client.get_execution_context(signal.inst_id),
+            config,
+            report_generated_at=datetime.now(timezone.utc).isoformat(),
+        )
+        self.assertEqual(rr["live"]["remaining_rr"], 1.8)
+        self.assertEqual(rr["verdict"]["status"], "HARD_GATE_BLOCKED")
+        self.assertIn("RR_INSUFFICIENT", rr["verdict"]["hard_blockers"])
+
+    def test_missing_book_timestamp_cannot_reuse_numeric_cost_for_permission(self):
+        signal = make_signal()
+        client = PreflightClient(price=100.0)
+        context = replace(
+            client.get_execution_context(signal.inst_id),
+            source_timestamps={},
+            buy_slippage_pct=1.0,
+            sell_slippage_pct=1.0,
+        )
+
+        payload = build_preflight_payload(
+            signal,
+            client.get_ticker(signal.inst_id),
+            context,
+            AppConfig(),
+            report_generated_at=datetime.now(timezone.utc).isoformat(),
+        )
+
+        self.assertEqual(payload["verdict"]["status"], "DATA_UNAVAILABLE")
+        self.assertEqual(
+            payload["verdict"]["hard_blockers"],
+            ["EXECUTION_DATA_UNAVAILABLE"],
+        )
+        self.assertFalse(payload["verdict"]["actionable"])
+        self.assertFalse(payload["plan_state"]["new_entry_allowed"])
+
+    def test_existing_episode_needs_closed_retest_before_live_price_can_reopen_it(self):
+        signal = make_signal()
+        signal.entry_eligibility = {
+            **signal.entry_eligibility,
+            "status": "WAIT_RETEST",
+            "actionable": False,
+            "new_entry_allowed": False,
+            "existing_episode": True,
+            "entry_ready_once": True,
+            "closed_retest_confirmed": False,
+        }
+        signal.lifecycle = {**signal.lifecycle, "entry_ready_once": True}
+        signal.decision_context = {
+            "hard_gate": {
+                "status": "BLOCKED",
+                "blocked": True,
+                "blockers": ["entry_permission"],
+            },
+            "final": {
+                "status": "HARD_GATE_BLOCKED",
+                "new_entry_allowed": False,
+            },
+        }
+        client = PreflightClient(price=100.0)
+
+        waiting = build_preflight_payload(
+            signal,
+            client.get_ticker(signal.inst_id),
+            client.get_execution_context(signal.inst_id),
+            AppConfig(),
+            report_generated_at=datetime.now(timezone.utc).isoformat(),
+        )
+
+        self.assertEqual(waiting["verdict"]["status"], "WAIT_RETEST")
+        self.assertFalse(waiting["verdict"]["actionable"])
+        self.assertNotIn(
+            "ENTRY_PERMISSION",
+            waiting["verdict"]["hard_blockers"],
+        )
+        self.assertTrue(waiting["live"]["reentry_confirmation_required"])
+        self.assertFalse(waiting["live"]["closed_retest_confirmed"])
+        self.assertFalse(
+            waiting["plan_state"]["old_plan_reusable_for_new_entry"]
+        )
+        self.assertTrue(waiting["plan_state"]["existing_position_plan_active"])
+
+        signal.entry_eligibility["closed_retest_confirmed"] = True
+        confirmed = build_preflight_payload(
+            signal,
+            client.get_ticker(signal.inst_id),
+            client.get_execution_context(signal.inst_id),
+            AppConfig(),
+            report_generated_at=datetime.now(timezone.utc).isoformat(),
+        )
+        self.assertEqual(confirmed["verdict"]["status"], "ENTRY_READY")
+        self.assertTrue(confirmed["verdict"]["actionable"])
+
+    def test_stored_hard_gate_cannot_be_cleared_by_ticker_only_preflight(self):
+        for gate, expected in (
+            (
+                {
+                    "status": "BLOCKED",
+                    "blocked": False,
+                    "blockers": ["anomaly"],
+                },
+                "HARD_GATE_BLOCKED",
+            ),
+            (
+                {
+                    "status": "UNKNOWN",
+                    "unknown": False,
+                    "unknowns": ["data_quality"],
+                },
+                "DATA_UNAVAILABLE",
+            ),
+        ):
+            with self.subTest(gate=gate["status"]):
+                signal = make_signal()
+                signal.entry_eligibility["closed_retest_confirmed"] = True
+                signal.decision_context = {
+                    "hard_gate": gate,
+                    "final": {
+                        "status": "ENTER",
+                        "new_entry_allowed": False,
+                    },
+                }
+                client = PreflightClient(price=100.0)
+
+                payload = build_preflight_payload(
+                    signal,
+                    client.get_ticker(signal.inst_id),
+                    client.get_execution_context(signal.inst_id),
+                    AppConfig(),
+                    report_generated_at=datetime.now(timezone.utc).isoformat(),
+                )
+
+                self.assertEqual(payload["verdict"]["status"], expected)
+                self.assertFalse(payload["verdict"]["actionable"])
+                self.assertFalse(payload["plan_state"]["new_entry_allowed"])
+                self.assertTrue(payload["plan_state"]["existing_position_plan_active"])
+
+    def test_live_preflight_rechecks_dynamic_stored_gate_without_stale_fallback(self):
+        signal = make_signal()
+        signal.entry_eligibility = {
+            **signal.entry_eligibility,
+            "actionable": False,
+            "new_entry_allowed": False,
+        }
+        signal.lifecycle = {
+            **signal.lifecycle,
+            "status": "ACTIVE",
+            "transition": "NEW",
+            "first_seen_at": datetime.now(timezone.utc).isoformat(),
+        }
+        signal.decision_context = {
+            "hard_gate": {
+                "status": "BLOCKED",
+                "blocked": True,
+                "blockers": ["liquidity", "spread"],
+            },
+            "final": {
+                "status": "HARD_GATE_BLOCKED",
+                "new_entry_allowed": False,
+            },
+        }
+        client = PreflightClient(price=100.0, quote_volume_24h=20_000_000.0)
+
+        payload = build_preflight_payload(
+            signal,
+            client.get_ticker(signal.inst_id),
+            client.get_execution_context(signal.inst_id),
+            AppConfig(),
+            report_generated_at=datetime.now(timezone.utc).isoformat(),
+        )
+
+        self.assertEqual(payload["verdict"]["status"], "ENTRY_READY")
+        self.assertTrue(payload["verdict"]["actionable"])
+        self.assertNotIn(
+            "UPSTREAM_HARD_GATE_BLOCKED",
+            payload["verdict"]["hard_blockers"],
+        )
+
+    def test_formal_opposite_signal_keeps_plan_but_blocks_new_entry(self):
+        signal = make_signal()
+        signal.market_story = {
+            **signal.market_story,
+            "trigger": {
+                **signal.market_story["trigger"],
+                "opposite_warning_only": True,
+                "new_entry_suspended": True,
+                "opposite_candidate": {
+                    "direction": "SHORT",
+                    "type": "REVERSAL",
+                },
+            },
+        }
+        client = PreflightClient(price=100.0)
+
+        payload = build_preflight_payload(
+            signal,
+            client.get_ticker(signal.inst_id),
+            client.get_execution_context(signal.inst_id),
+            AppConfig(),
+            report_generated_at=datetime.now(timezone.utc).isoformat(),
+        )
+
+        self.assertEqual(payload["verdict"]["status"], "HARD_GATE_BLOCKED")
+        self.assertFalse(payload["verdict"]["actionable"])
+        self.assertIn("OPPOSITE_SIGNAL", payload["verdict"]["hard_blockers"])
+        self.assertIn("正式反向", payload["verdict"]["reason"])
+        self.assertFalse(payload["plan_state"]["new_entry_allowed"])
+        self.assertTrue(payload["plan_state"]["existing_position_plan_active"])
+        self.assertTrue(payload["safety"]["entry_veto_enabled"])
+
+    def test_either_opposite_flag_remains_binding_while_price_already_waits(self):
+        for flag in ("new_entry_suspended", "opposite_warning_only"):
+            with self.subTest(flag=flag):
+                signal = make_signal()
+                signal.market_story = {
+                    **signal.market_story,
+                    "trigger": {
+                        **signal.market_story["trigger"],
+                        flag: True,
+                    },
+                }
+                client = PreflightClient(price=99.4)
+
+                payload = build_preflight_payload(
+                    signal,
+                    client.get_ticker(signal.inst_id),
+                    client.get_execution_context(signal.inst_id),
+                    AppConfig(),
+                    report_generated_at=datetime.now(timezone.utc).isoformat(),
+                )
+
+                self.assertEqual(payload["verdict"]["status"], "WAIT_RETEST")
+                self.assertIn("OPPOSITE_SIGNAL", payload["verdict"]["hard_blockers"])
+                self.assertFalse(
+                    payload["plan_state"]["old_plan_reusable_for_new_entry"]
+                )
+                self.assertFalse(payload["plan_state"]["new_entry_allowed"])
+                self.assertTrue(
+                    payload["plan_state"]["existing_position_plan_active"]
+                )
+
+    def test_terminal_price_state_outranks_opposite_veto_for_both_directions(self):
+        long_signal = make_signal()
+        short_signal = replace(
+            make_signal(),
+            direction="SHORT",
+            stop_loss="102",
+            take_profit_1="96",
+            take_profit_2="94",
+        )
+        cases = (
+            (long_signal, 97.9, "PLAN_INVALIDATED", "INVALIDATED"),
+            (long_signal, 104.3, "MISSED_ENTRY", "TARGET_REACHED"),
+            (short_signal, 102.1, "PLAN_INVALIDATED", "INVALIDATED"),
+            (short_signal, 95.9, "MISSED_ENTRY", "TARGET_REACHED"),
+        )
+        for signal, price, verdict_status, lifecycle_status in cases:
+            with self.subTest(direction=signal.direction, price=price):
+                signal.market_story = {
+                    **signal.market_story,
+                    "trigger": {
+                        **signal.market_story["trigger"],
+                        "new_entry_suspended": True,
+                    },
+                }
+                client = PreflightClient(price=price)
+
+                payload = build_preflight_payload(
+                    signal,
+                    client.get_ticker(signal.inst_id),
+                    client.get_execution_context(signal.inst_id),
+                    AppConfig(),
+                    report_generated_at=datetime.now(timezone.utc).isoformat(),
+                )
+
+                self.assertEqual(payload["verdict"]["status"], verdict_status)
+                self.assertEqual(
+                    payload["signal_lifecycle"]["status"],
+                    lifecycle_status,
+                )
+                self.assertIn("OPPOSITE_SIGNAL", payload["verdict"]["hard_blockers"])
+                self.assertFalse(payload["verdict"]["actionable"])
+                self.assertFalse(payload["plan_state"]["new_entry_allowed"])
+                self.assertFalse(
+                    payload["plan_state"]["existing_position_plan_active"]
+                )
 
     def test_refreshes_one_signal_and_keeps_stored_trigger_unchanged(self):
         with tempfile.TemporaryDirectory() as directory:
@@ -527,7 +978,7 @@ class PreflightTests(unittest.TestCase):
 
             self.assertEqual(payload["verdict"]["status"], "ENTRY_READY")
             self.assertTrue(payload["verdict"]["actionable"])
-            self.assertEqual(payload["live"]["price"], 100.1)
+            self.assertEqual(payload["live"]["price"], 100.11)
             self.assertEqual(payload["original"]["quality_score"], 87.0)
             self.assertTrue(payload["data_quality"]["execution_depth_complete"])
             self.assertTrue(payload["safety"]["stored_trigger_unchanged"])
@@ -1176,8 +1627,9 @@ class PreflightTests(unittest.TestCase):
 
             payload = runtime.preflight_dict(item.inst_id, "SHORT")
 
-            # The original episode remains active. Position still requires a
-            # retest, while execution cost is shown only as a warning.
+            # The original episode remains active and the positional WAIT keeps
+            # priority.  The execution blocker is retained so no downstream
+            # consumer can later treat the old plan as reusable for entry.
             self.assertEqual(payload["verdict"]["status"], "WAIT_RETEST")
             self.assertFalse(payload["verdict"]["actionable"])
             self.assertIn("接近失效", payload["verdict"]["label"])
@@ -1186,7 +1638,11 @@ class PreflightTests(unittest.TestCase):
                 "EXECUTION_COST_TOO_HIGH",
                 payload["verdict"]["risk_warnings"],
             )
-            self.assertEqual(payload["verdict"]["hard_blockers"], [])
+            self.assertIn(
+                "EXECUTION_COST_TOO_HIGH",
+                payload["verdict"]["hard_blockers"],
+            )
+            self.assertFalse(payload["plan_state"]["old_plan_reusable_for_new_entry"])
             self.assertEqual(payload["signal_lifecycle"]["status"], "ACTIVE")
             self.assertIsNone(payload["live"]["remaining_rr"])
             self.assertFalse(payload["live"]["remaining_rr_applicable"])

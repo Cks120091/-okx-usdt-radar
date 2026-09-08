@@ -302,6 +302,10 @@ def _latest_confirmation(result: Any, original_direction: str) -> dict[str, Any]
             trigger = dict(signal_story.get("trigger", {}) or trigger)
     noise = dict(trigger.get("noise", {}) or {})
     opposite = direction in ("LONG", "SHORT") and direction != original_direction
+    trigger_suspends_entry = bool(
+        trigger.get("new_entry_suspended") is True
+        or trigger.get("opposite_warning_only") is True
+    )
     formal = signal is not None and stage in ("EARLY_SIGNAL", "CONFIRMED", "REENTRY")
     item = signal or state
     decision = dict(getattr(item, "decision_context", {}) or {}) if item else {}
@@ -312,6 +316,17 @@ def _latest_confirmation(result: Any, original_direction: str) -> dict[str, Any]
         for check in list(getattr(item, "safety_checks", []) or [])
         if check.get("passed") is False
     ] if item is not None else []
+    failed_hard_checks = [
+        str(check.get("key") or check.get("label") or "risk_block")
+        for check in list(getattr(item, "safety_checks", []) or [])
+        if check.get("passed") is False and bool(check.get("hard", True))
+    ] if item is not None else []
+    unknown_hard_checks = [
+        str(check.get("key") or check.get("label") or "risk_unknown")
+        for check in list(getattr(item, "safety_checks", []) or [])
+        if check.get("passed") is None and bool(check.get("hard", True))
+    ] if item is not None else []
+    hard_gate_status = str(hard_gate.get("status") or "").upper()
     hard_gate_blockers = [
         str(value) for value in list(hard_gate.get("blockers", []) or [])
     ]
@@ -324,25 +339,67 @@ def _latest_confirmation(result: Any, original_direction: str) -> dict[str, Any]
                 *hard_gate_blockers,
                 *hard_gate_unknowns,
                 *failed_risk_checks,
+                *unknown_hard_checks,
             ]
         )
     )
 
-    if opposite:
-        # The fresh opposite candidate is not the stored plan.  Its
-        # direction-dependent R:R, SL or entry checks must never veto an
-        # otherwise valid original Episode. Risk review is advisory, so this
-        # direction comparison remains informational only.
-        status = "ORIGINAL_DIRECTION_NOT_RECONFIRMED"
-        label = "方向比較只供參考"
+    confirmation_blockers: list[str] = []
+    if opposite or trigger_suspends_entry:
+        # Do not replace or terminate the old Episode: it can still manage an
+        # existing position.  A fresh opposite direction does, however,
+        # suspend opening another position in the stale direction.
+        formal_opposite = formal or trigger_suspends_entry
+        status = (
+            "OPPOSITE_SIGNAL"
+            if formal_opposite
+            else "ORIGINAL_DIRECTION_NOT_RECONFIRMED"
+        )
+        label = "偵測到正式反向訊號" if formal_opposite else "原方向未獲最新確認"
         message = (
-            "最新掃描沒有延續原方向；這項方向比較只供參考，不建立反向判定、"
-            "不改寫進場資格，也不終止舊 Episode。"
+            "最新已收盤資料形成正式反向訊號；舊 Episode 不翻向且仍可管理既有持倉，"
+            "但原方向暫停新進場。"
+            if formal_opposite
+            else "最新掃描沒有延續原方向；舊 Episode 保留，但重新確認前禁止新進場。"
+        )
+        confirmation_blockers.append(
+            "OPPOSITE_SIGNAL"
+            if formal_opposite
+            else "DIRECTION_NOT_RECONFIRMED"
+        )
+    elif (
+        hard_gate.get("blocked") is True
+        or hard_gate_status
+        in {"ANOMALY", "BLOCKED", "HARD_GATE_BLOCKED", "OPPOSITE_SIGNAL"}
+        or hard_gate_blockers
+        or failed_hard_checks
+    ):
+        status = "HARD_GATE_BLOCKED"
+        label = "風險條件未通過"
+        message = "最新掃描的風險條件未通過；舊計畫保留，但禁止新進場。"
+        confirmation_blockers.extend(
+            hard_gate_blockers or failed_hard_checks or ["HARD_GATE_BLOCKED"]
+        )
+    elif (
+        hard_gate.get("unknown") is True
+        or hard_gate_status
+        in {"DATA_UNAVAILABLE", "PARTIAL", "UNAVAILABLE", "UNKNOWN"}
+        or hard_gate_unknowns
+        or unknown_hard_checks
+        or hard_gate.get("passed") is False
+        or hard_gate.get("new_entry_allowed") is False
+    ):
+        status = "DATA_UNAVAILABLE"
+        label = "最新安全資料不足"
+        message = "最新掃描無法完整核對風險條件；資料恢復前禁止新進場。"
+        confirmation_blockers.extend(
+            hard_gate_unknowns or unknown_hard_checks or ["DATA_UNAVAILABLE"]
         )
     elif noise.get("high"):
         status = "HIGH_NOISE"
-        label = "疑似假突破・雜訊提醒"
-        message = "最新核心週期來回交叉、雜訊偏高；只顯示提醒，不改寫進場資格。"
+        label = "疑似假突破・暫停新進"
+        message = "最新核心週期來回交叉、雜訊偏高；等待重新確認前禁止新進場。"
+        confirmation_blockers.append("HIGH_NOISE")
     elif (
         formal
         and direction == original_direction
@@ -379,15 +436,17 @@ def _latest_confirmation(result: Any, original_direction: str) -> dict[str, Any]
         "stage": stage,
         "formal_trigger": formal,
         "two_step_reversal_confirmed": False,
-        "hard_blockers": [],
-        "risk_warnings": risk_warning_codes,
+        "hard_blockers": list(dict.fromkeys(confirmation_blockers)),
+        "risk_warnings": list(
+            dict.fromkeys([*risk_warning_codes, *confirmation_blockers])
+        ),
         "closed_candle_ts": getattr(state, "closed_candle_ts", None),
         "group_stances": {
             key: str((value or {}).get("stance", "NEUTRAL"))
             for key, value in groups.items()
             if isinstance(value, dict)
         },
-        "new_entry_allowed": status == "REVALIDATED",
+        "new_entry_allowed": status == "REVALIDATED" and not confirmation_blockers,
     }
 
 
@@ -400,59 +459,271 @@ def _merge_preflight_confirmation(
     merged["latest_confirmation"] = deepcopy(confirmation)
     verdict = merged.setdefault("verdict", {})
     lifecycle = merged.setdefault("signal_lifecycle", {})
-    merged.setdefault("plan_state", {})
+    plan = merged.setdefault("plan_state", {})
     status = str(confirmation.get("status") or "UNKNOWN").upper()
+    if status in {"OPPOSITE_WARNING", "CONFIRMED_REVERSAL"}:
+        # Backward compatibility for cached V3.4 responses.  The old Episode
+        # remains active for position management, but a reversal warning is a
+        # binding suspension for opening a new position in the old direction.
+        status = "OPPOSITE_SIGNAL"
+        confirmation.update(
+            {
+                "status": status,
+                "label": "偵測到正式反向訊號",
+                "message": "舊 Episode 不翻向且仍可管理既有持倉，但原方向禁止新進場。",
+                "two_step_reversal_confirmed": False,
+                "hard_blockers": ["OPPOSITE_SIGNAL"],
+            }
+        )
+
+    confirmation_blockers = list(
+        dict.fromkeys(list(confirmation.get("hard_blockers", []) or []))
+    )
+    soft_confirmation_blockers = {"DIRECTION_NOT_RECONFIRMED", "HIGH_NOISE"}
+    confirmation_hard_blockers = [
+        value
+        for value in confirmation_blockers
+        if value not in soft_confirmation_blockers
+    ]
     legacy_risk_codes = list(
         dict.fromkeys(
             [
                 *list(confirmation.get("risk_warnings", []) or []),
-                *list(confirmation.get("hard_blockers", []) or []),
+                *confirmation_blockers,
             ]
         )
     )
-    if status in {
-        "OPPOSITE_WARNING",
-        "CONFIRMED_REVERSAL",
-        "HARD_GATE_BLOCKED",
-    }:
-        # Backward compatibility for an in-memory/cached V3.4 response.  A
-        # direction comparison is no longer allowed to create a reversal
-        # verdict or terminate a Signal Episode; only the original SL/TP
-        # terminal checks own that transition.
-        status = (
-            "ORIGINAL_DIRECTION_NOT_RECONFIRMED"
-            if status in {"OPPOSITE_WARNING", "CONFIRMED_REVERSAL"}
-            else "RISK_WARNING"
-        )
-        confirmation.update(
-            {
-                "status": status,
-                "label": (
-                    "方向比較只供參考"
-                    if status == "ORIGINAL_DIRECTION_NOT_RECONFIRMED"
-                    else "風險條件只供提醒"
-                ),
-                "message": (
-                    "最新掃描沒有延續原方向；這項方向比較只供參考，不建立"
-                    "反向判定、不改寫進場資格，也不終止舊 Episode。"
-                    if status == "ORIGINAL_DIRECTION_NOT_RECONFIRMED"
-                    else "流動性、Spread、Slippage、R:R 與成交成本只作風險提醒，"
-                    "不再改寫目前進場資格或隱藏卡片。"
-                ),
-                "two_step_reversal_confirmed": False,
-                "hard_blockers": [],
-                "risk_warnings": legacy_risk_codes,
-            }
-        )
-
-    confirmation["hard_blockers"] = []
+    confirmation["hard_blockers"] = confirmation_blockers
     confirmation["risk_warnings"] = legacy_risk_codes
 
-    # Direction/noise/formal-Trigger comparisons are context only. They do
-    # not overwrite the current Entry/SL/TP preflight verdict.  Risk reviews
-    # are advisory as well; only the positional/lifecycle verdict decides.
+    verdict_status = str(verdict.get("status") or "DATA_UNAVAILABLE").upper()
+    verdict_situation = str(verdict.get("situation") or "").upper()
+    plan_status = str(plan.get("status") or "").upper()
+    plan_new_entry_status = str(plan.get("new_entry_status") or "").upper()
+    lifecycle_status = str(lifecycle.get("status") or "").upper()
+    terminal_values = {
+        verdict_status,
+        verdict_situation,
+        plan_status,
+        plan_new_entry_status,
+        lifecycle_status,
+    }
+    terminal = bool(
+        terminal_values
+        & {
+            "PLAN_INVALIDATED",
+            "INVALIDATED",
+            "TARGET_REACHED",
+            "COMPLETED",
+            "CLOSED_UNKNOWN",
+        }
+    ) or bool(lifecycle.get("terminal") or plan.get("terminal"))
+    positional_entry_closed = (
+        verdict_status == "MISSED_ENTRY" or plan_status == "MISSED"
+    )
+    verdict_blockers = list(
+        dict.fromkeys(list(verdict.get("hard_blockers", []) or []))
+    )
+    verdict_risk_codes = {
+        str(value).strip().upper()
+        for value in list(verdict.get("risk_warnings", []) or [])
+        if str(value).strip()
+    }
+    data_warning_codes = {
+        "DATA_UNAVAILABLE",
+        "EXECUTION_DATA_UNAVAILABLE",
+        "SIGNAL_DATA_UNAVAILABLE",
+        "STORED_PLAN_DATA_UNAVAILABLE",
+        "UPSTREAM_DATA_UNAVAILABLE",
+    }
+    hard_warning_codes = {
+        "ANOMALY",
+        "EXECUTION_COST_TOO_HIGH",
+        "OPPOSITE_WARNING",
+        "OPPOSITE_SIGNAL",
+        "RR_INSUFFICIENT",
+        "SLIPPAGE_TOO_HIGH",
+        "SPREAD_TOO_HIGH",
+        "UPSTREAM_HARD_GATE_BLOCKED",
+    }
+    confirmation_risk_codes = {
+        str(value).strip().upper()
+        for value in legacy_risk_codes
+        if str(value).strip()
+    }
+    data_quality = dict(merged.get("data_quality", {}) or {})
+    data_quality_status = str(data_quality.get("status") or "").upper()
+    data_quality_unavailable = bool(
+        data_quality_status in {"DATA_UNAVAILABLE", "PARTIAL", "UNAVAILABLE", "UNKNOWN"}
+        or list(data_quality.get("missing_sources", []) or [])
+    )
+    verdict_data_unavailable = bool(
+        verdict_status == "DATA_UNAVAILABLE"
+        or verdict_situation == "DATA_UNAVAILABLE"
+        or lifecycle_status == "DATA_UNAVAILABLE"
+        or plan_status == "DATA_UNAVAILABLE"
+        or plan_new_entry_status in {"DATA_UNAVAILABLE", "UNAVAILABLE", "UNKNOWN"}
+        or data_quality_unavailable
+        or bool(verdict_risk_codes & data_warning_codes)
+        or bool(confirmation_risk_codes & data_warning_codes)
+    )
+    known_hard_block = bool(
+        status in {"ANOMALY", "HARD_GATE_BLOCKED", "OPPOSITE_SIGNAL"}
+        or verdict_status in {"ANOMALY", "HARD_GATE_BLOCKED", "OPPOSITE_SIGNAL"}
+        or verdict_situation
+        in {"ANOMALY", "HARD_GATE_BLOCKED", "OPPOSITE_SIGNAL"}
+        or lifecycle_status
+        in {"ANOMALY", "BLOCKED", "HARD_GATE_BLOCKED", "OPPOSITE_SIGNAL"}
+        or plan_status
+        in {"ANOMALY", "BLOCKED", "HARD_GATE_BLOCKED", "OPPOSITE_SIGNAL"}
+        or plan_new_entry_status
+        in {"ANOMALY", "BLOCKED", "HARD_GATE_BLOCKED", "OPPOSITE_SIGNAL"}
+        or (verdict_blockers and not verdict_data_unavailable)
+        or bool(verdict_risk_codes & hard_warning_codes)
+        or bool(confirmation_risk_codes & hard_warning_codes)
+        or (confirmation_hard_blockers and status != "DATA_UNAVAILABLE")
+    )
+    confirmation_allows_entry = bool(
+        status == "REVALIDATED"
+        and confirmation.get("new_entry_allowed") is True
+        and not confirmation_blockers
+    )
+    preflight_claims_entry = bool(
+        verdict_status == "ENTRY_READY" and verdict.get("actionable") is True
+    )
+    preflight_explicitly_denies_entry = bool(
+        verdict_blockers
+        or verdict.get("new_entry_allowed") is False
+        or plan_status
+        in {
+            "ACTIVE_ENTRY_BLOCKED",
+            "BLOCKED",
+            "CLOSED",
+            "MISSED",
+            "WAIT",
+            "WAITING_RETEST",
+            "WAIT_RETEST",
+        }
+        or plan_new_entry_status
+        in {
+            "BLOCKED",
+            "CLOSED",
+            "DATA_UNAVAILABLE",
+            "HARD_GATE_BLOCKED",
+            "INVALIDATED",
+            "OPPOSITE_SIGNAL",
+            "UNAVAILABLE",
+            "UNKNOWN",
+            "WAIT",
+            "WAIT_RETEST",
+        }
+        or plan.get("new_entry_allowed") is False
+        or plan.get("old_plan_reusable_for_new_entry") is False
+        or plan.get("old_plan_reusable") is False
+        or plan.get("new_trigger_required") is True
+        or plan.get("direction_still_valid") is False
+        or plan.get("terminal") is True
+        or lifecycle.get("active") is False
+        or lifecycle.get("triggered") is False
+        or verdict_data_unavailable
+    )
+    binding_confirmation = status in {
+        "ANOMALY",
+        "DATA_UNAVAILABLE",
+        "HARD_GATE_BLOCKED",
+        "OPPOSITE_SIGNAL",
+    }
+    should_project_block = bool(
+        not terminal
+        and not positional_entry_closed
+        and (
+            binding_confirmation
+            or known_hard_block
+            or (preflight_claims_entry and not confirmation_allows_entry)
+            or (preflight_claims_entry and preflight_explicitly_denies_entry)
+        )
+    )
+    if should_project_block:
+        binding_risk = bool(
+            not verdict_data_unavailable
+            and (
+                known_hard_block
+                or status in {"ANOMALY", "HARD_GATE_BLOCKED", "OPPOSITE_SIGNAL"}
+            )
+        )
+        verdict.update(
+            {
+                "status": "DATA_UNAVAILABLE"
+                if verdict_data_unavailable or status == "DATA_UNAVAILABLE"
+                else "HARD_GATE_BLOCKED"
+                if binding_risk
+                else "WAIT_RETEST",
+                "situation": status,
+                "label": str(confirmation.get("label") or "等待最新收盤重新確認"),
+                "reason": str(confirmation.get("message") or "目前禁止新進場"),
+                "actionable": False,
+                "hard_blockers": list(
+                    dict.fromkeys([*verdict_blockers, *confirmation_hard_blockers])
+                ),
+            }
+        )
+        plan.update(
+            {
+                "status": "ACTIVE_ENTRY_BLOCKED",
+                "old_plan_reusable_for_new_entry": False,
+                "existing_position_plan_active": not bool(lifecycle.get("terminal")),
+                "new_entry_status": "WAIT",
+                "new_entry_allowed": False,
+            }
+        )
+    elif not terminal and not positional_entry_closed and not confirmation_allows_entry:
+        # Even when price location already says WAIT, do not leave a
+        # contradictory reusable/allowed flag behind for another consumer.
+        plan["old_plan_reusable_for_new_entry"] = False
+        plan["new_entry_allowed"] = False
 
-    confirmation["new_entry_allowed"] = bool(verdict.get("actionable"))
+    confirmation["new_entry_allowed"] = bool(
+        not terminal
+        and not positional_entry_closed
+        and confirmation_allows_entry
+        and str(verdict.get("status") or "").upper() == "ENTRY_READY"
+        and verdict.get("actionable") is True
+        and verdict.get("new_entry_allowed") is not False
+        and not list(verdict.get("hard_blockers", []) or [])
+        and not known_hard_block
+        and not verdict_data_unavailable
+        and str(plan.get("status") or "").upper()
+        not in {
+            "ACTIVE_ENTRY_BLOCKED",
+            "BLOCKED",
+            "CLOSED",
+            "MISSED",
+            "WAIT",
+            "WAITING_RETEST",
+            "WAIT_RETEST",
+        }
+        and plan_new_entry_status
+        not in {
+            "BLOCKED",
+            "CLOSED",
+            "DATA_UNAVAILABLE",
+            "HARD_GATE_BLOCKED",
+            "INVALIDATED",
+            "OPPOSITE_SIGNAL",
+            "UNAVAILABLE",
+            "UNKNOWN",
+            "WAIT",
+            "WAIT_RETEST",
+        }
+        and plan.get("new_entry_allowed") is not False
+        and plan.get("old_plan_reusable_for_new_entry") is not False
+        and plan.get("old_plan_reusable") is not False
+        and plan.get("new_trigger_required") is not True
+        and plan.get("direction_still_valid") is not False
+        and plan.get("terminal") is not True
+        and lifecycle.get("active") is not False
+        and lifecycle.get("triggered") is not False
+    )
     merged["latest_confirmation"] = deepcopy(confirmation)
     merged.setdefault("safety", {})["unified_single_scan"] = True
     merged["safety"]["note"] = (
@@ -481,31 +752,68 @@ def _canonical_single_decision(
     plan = dict(preflight.get("plan_state", {}) or {})
     status = str(verdict.get("status", "DATA_UNAVAILABLE")).upper()
     situation = str(verdict.get("situation", "")).upper()
-    if status in {"HARD_GATE_BLOCKED", "ANOMALY"}:
-        # Normalize cached responses produced before risk checks became
-        # advisory. The positional status now owns entry permission; if the
-        # old payload did not preserve it, keep the card visible in WAIT
-        # instead of fabricating an actionable Entry.
-        item_entry = dict(getattr(item, "entry_eligibility", {}) or {})
-        status = str(
-            verdict.get("position_status")
-            or item_entry.get("position_status")
-            or item_entry.get("status")
-            or "WAIT_RETEST"
-        ).upper()
-        if status in {"HARD_GATE_BLOCKED", "ANOMALY"}:
-            status = "WAIT_RETEST"
-        situation = status
-        verdict["actionable"] = status == "ENTRY_READY"
-        verdict["hard_blockers"] = []
     lifecycle_status = str(lifecycle.get("status", "")).upper()
     plan_status = str(plan.get("status", "")).upper()
+    plan_new_entry_status = str(plan.get("new_entry_status") or "").upper()
     direction = str(preflight.get("direction") or final.get("direction") or "NEUTRAL")
+    verdict_blockers = list(
+        dict.fromkeys(list(verdict.get("hard_blockers", []) or []))
+    )
+    verdict_risk_codes = {
+        str(value).strip().upper()
+        for value in list(verdict.get("risk_warnings", []) or [])
+        if str(value).strip()
+    }
+    data_warning_codes = {
+        "DATA_UNAVAILABLE",
+        "EXECUTION_DATA_UNAVAILABLE",
+        "SIGNAL_DATA_UNAVAILABLE",
+        "STORED_PLAN_DATA_UNAVAILABLE",
+        "UPSTREAM_DATA_UNAVAILABLE",
+    }
+    hard_warning_codes = {
+        "ANOMALY",
+        "EXECUTION_COST_TOO_HIGH",
+        "OPPOSITE_WARNING",
+        "OPPOSITE_SIGNAL",
+        "RR_INSUFFICIENT",
+        "SLIPPAGE_TOO_HIGH",
+        "SPREAD_TOO_HIGH",
+        "UPSTREAM_HARD_GATE_BLOCKED",
+    }
+    confirmation_payload = dict(confirmation or {})
+    confirmation_status = str(
+        confirmation_payload.get("status") or ""
+    ).upper()
+    if confirmation_status in {"OPPOSITE_WARNING", "CONFIRMED_REVERSAL"}:
+        confirmation_status = "OPPOSITE_SIGNAL"
+    confirmation_blockers = list(
+        dict.fromkeys(
+            list(confirmation_payload.get("hard_blockers", []) or [])
+        )
+    )
+    confirmation_hard_blockers = [
+        value
+        for value in confirmation_blockers
+        if value not in {"DIRECTION_NOT_RECONFIRMED", "HIGH_NOISE"}
+    ]
+    confirmation_risk_codes = {
+        str(value).strip().upper()
+        for value in list(confirmation_payload.get("risk_warnings", []) or [])
+        if str(value).strip()
+    }
+    confirmation_present = bool(confirmation_payload)
+    confirmation_allows_entry = bool(
+        confirmation_status == "REVALIDATED"
+        and confirmation_payload.get("new_entry_allowed") is True
+        and not confirmation_blockers
+    )
     explicitly_invalidated = (
         status in {"PLAN_INVALIDATED", "INVALIDATED"}
         or situation in {"PLAN_INVALIDATED", "INVALIDATED"}
-        or lifecycle_status == "INVALIDATED"
-        or plan_status == "INVALIDATED"
+        or lifecycle_status in {"PLAN_INVALIDATED", "INVALIDATED"}
+        or plan_status in {"PLAN_INVALIDATED", "INVALIDATED"}
+        or plan_new_entry_status in {"PLAN_INVALIDATED", "INVALIDATED"}
     )
     target_completed = not explicitly_invalidated and (
         status in {"TARGET_REACHED", "COMPLETED"}
@@ -523,9 +831,96 @@ def _canonical_single_decision(
     # explicitly says the TP/SL order is unknown. Reaching TP is completion,
     # while unknown closure is data-unavailable; neither can reuse the plan.
     terminal_invalidation = explicitly_invalidated or (
-        bool(lifecycle.get("terminal"))
+        bool(
+            lifecycle.get("terminal")
+            or plan.get("terminal")
+            or plan.get("direction_still_valid") is False
+        )
         and not target_completed
         and not closed_unknown
+    )
+    positional_no_chase = bool(
+        status == "MISSED_ENTRY"
+        and situation in {"FAVORABLE_MISSED", "PRICE_TOO_FAR"}
+    )
+    positional_entry_closed = bool(
+        (status == "MISSED_ENTRY" and not positional_no_chase)
+        or plan_status == "MISSED"
+    )
+    data_quality = dict(preflight.get("data_quality", {}) or {})
+    data_quality_status = str(data_quality.get("status") or "").upper()
+    data_quality_unavailable = bool(
+        data_quality_status in {"DATA_UNAVAILABLE", "PARTIAL", "UNAVAILABLE", "UNKNOWN"}
+        or list(data_quality.get("missing_sources", []) or [])
+    )
+    preflight_data_unavailable = bool(
+        status == "DATA_UNAVAILABLE"
+        or situation == "DATA_UNAVAILABLE"
+        or lifecycle_status == "DATA_UNAVAILABLE"
+        or plan_status == "DATA_UNAVAILABLE"
+        or plan_new_entry_status in {"DATA_UNAVAILABLE", "UNAVAILABLE", "UNKNOWN"}
+        or data_quality_unavailable
+        or bool(verdict_risk_codes & data_warning_codes)
+    )
+    data_unavailable = bool(
+        preflight_data_unavailable
+        or confirmation_status
+        in {"DATA_UNAVAILABLE", "PARTIAL", "UNAVAILABLE", "UNKNOWN"}
+        or bool(confirmation_risk_codes & data_warning_codes)
+    )
+    hard_gate_blocked = bool(
+        status in {"ANOMALY", "HARD_GATE_BLOCKED", "OPPOSITE_SIGNAL"}
+        or situation in {"ANOMALY", "HARD_GATE_BLOCKED", "OPPOSITE_SIGNAL"}
+        or lifecycle_status
+        in {"ANOMALY", "BLOCKED", "HARD_GATE_BLOCKED", "OPPOSITE_SIGNAL"}
+        or plan_status
+        in {"ANOMALY", "BLOCKED", "HARD_GATE_BLOCKED", "OPPOSITE_SIGNAL"}
+        or plan_new_entry_status
+        in {"ANOMALY", "BLOCKED", "HARD_GATE_BLOCKED", "OPPOSITE_SIGNAL"}
+        or (verdict_blockers and not data_unavailable)
+        or bool(verdict_risk_codes & hard_warning_codes)
+        or confirmation_status
+        in {"ANOMALY", "BLOCKED", "HARD_GATE_BLOCKED", "OPPOSITE_SIGNAL"}
+        or bool(confirmation_risk_codes & hard_warning_codes)
+        or (confirmation_hard_blockers and not data_unavailable)
+    )
+    entry_contract_allows = bool(
+        status == "ENTRY_READY"
+        and verdict.get("actionable") is True
+        and verdict.get("new_entry_allowed") is not False
+        and not verdict_blockers
+        and plan_status
+        not in {
+            "ACTIVE_ENTRY_BLOCKED",
+            "BLOCKED",
+            "CLOSED",
+            "MISSED",
+            "WAIT",
+            "WAITING_RETEST",
+            "WAIT_RETEST",
+        }
+        and plan_new_entry_status
+        not in {
+            "BLOCKED",
+            "CLOSED",
+            "DATA_UNAVAILABLE",
+            "HARD_GATE_BLOCKED",
+            "INVALIDATED",
+            "OPPOSITE_SIGNAL",
+            "UNAVAILABLE",
+            "UNKNOWN",
+            "WAIT",
+            "WAIT_RETEST",
+        }
+        and plan.get("new_entry_allowed") is not False
+        and plan.get("old_plan_reusable_for_new_entry") is not False
+        and plan.get("old_plan_reusable") is not False
+        and plan.get("new_trigger_required") is not True
+        and plan.get("direction_still_valid") is not False
+        and plan.get("terminal") is not True
+        and lifecycle.get("active") is not False
+        and lifecycle.get("triggered") is not False
+        and (not confirmation_present or confirmation_allows_entry)
     )
     mapped_status = (
         "INVALIDATED"
@@ -534,19 +929,25 @@ def _canonical_single_decision(
         if target_completed
         else "DATA_UNAVAILABLE"
         if closed_unknown
-        else "ENTER"
-        if status == "ENTRY_READY" and verdict.get("actionable") is True
-        else "DATA_UNAVAILABLE"
-        if status == "DATA_UNAVAILABLE" or situation == "DATA_UNAVAILABLE"
         else "NO_CHASE"
-    if status == "MISSED_ENTRY"
-        and situation in {"FAVORABLE_MISSED", "PRICE_TOO_FAR"}
+        if positional_no_chase
+        else "WAIT"
+        if positional_entry_closed
+        else "DATA_UNAVAILABLE"
+        if preflight_data_unavailable
+        else "HARD_GATE_BLOCKED"
+        if hard_gate_blocked
+        else "DATA_UNAVAILABLE"
+        if data_unavailable
+        else "ENTER"
+        if entry_contract_allows
         else "WAIT"
     )
     labels = {
         "INVALIDATED": "交易計畫已失效｜等待全新 Trigger",
         "COMPLETED": "目標已達｜本次交易計畫完成",
         "ENTER": "目前可進｜附風險提醒",
+        "HARD_GATE_BLOCKED": "風險條件未通過｜禁止新進場",
         "DATA_UNAVAILABLE": "資料不足｜禁止新進場",
         "NO_CHASE": "方向仍可追蹤｜禁止追價",
         "NO_EDGE": "風險報酬不值得",
@@ -563,6 +964,7 @@ def _canonical_single_decision(
         "INVALIDATED": ("NEW_TRIGGER_REQUIRED", "等待新的 Trigger／REENTRY"),
         "COMPLETED": ("TARGET_REACHED", "本次機會已完成｜等待全新 Trigger"),
         "DATA_UNAVAILABLE": ("DATA_MISSING", "等待最新完整資料"),
+        "HARD_GATE_BLOCKED": ("HARD_GATE_BLOCKED", "等待風險條件恢復或重新確認"),
         "NO_CHASE": ("PRICE_TOO_FAR", "等待回到合理進場區或新事件"),
         "NO_EDGE": ("RISK_REWARD", "等待新的合理交易計畫"),
         "WAIT": (str(situation or "ENTRY_CONFIRMATION"), labels["WAIT"]),
@@ -613,6 +1015,9 @@ def _canonical_single_decision(
             and not terminal_invalidation
             and not target_completed
             and not closed_unknown
+            and not hard_gate_blocked
+            and not data_unavailable
+            and not (confirmation_present and not confirmation_allows_entry)
         ),
     }
     return decision
@@ -3326,6 +3731,28 @@ class RadarRuntime:
                     # in memory; the requested slot is disabled by latest_dict(),
                     # while an untouched slot remains available at its own age.
                     with self._state_lock:
+                        # Universe membership is independent of candle-analysis
+                        # success.  In particular, a member observed below the
+                        # 150 萬 exit line must stay revoked across a restart even
+                        # when every subsequent core-candle request fails.  Copy
+                        # only this internal state onto the latest completed
+                        # market snapshot; do not publish the failed report's
+                        # signals, timestamps, or partial market data.
+                        volume_state = (report.data_quality or {}).get(
+                            "universe_volume_hysteresis"
+                        )
+                        if isinstance(volume_state, dict):
+                            retained = self._latest or previous_report
+                            retained_quality = dict(retained.data_quality or {})
+                            retained_quality["universe_volume_hysteresis"] = dict(
+                                volume_state
+                            )
+                            retained = replace(
+                                retained,
+                                data_quality=retained_quality,
+                            )
+                            save_report(retained, self.config.data_dir)
+                            self._latest = retained
                         self._preview = None
                         self._mark_horizon_attempts_locked(
                             scan_mode,

@@ -282,11 +282,11 @@ def detect_anomaly(
     if oi_velocity is not None:
         absolute_oi_velocity = abs(oi_velocity)
         if absolute_oi_velocity >= limits["oi_velocity_block_pct_per_5m"]:
-            add("OI_VELOCITY", "OI 變化速度異常", "BLOCK")
+            add("OI_VELOCITY", "OI 變化速度異常（輔助觀察）", "WATCH")
         elif absolute_oi_velocity >= limits["oi_velocity_watch_pct_per_5m"]:
             add("OI_VELOCITY", "OI 變化速度偏快", "WATCH")
     elif oi_section.get("abnormal_speed") is True:
-        add("OI_VELOCITY", "OI 變化速度異常", "BLOCK")
+        add("OI_VELOCITY", "OI 變化速度異常（輔助觀察）", "WATCH")
 
     funding_rate = _first_number(source, "funding_rate")
     if funding_rate is None:
@@ -294,7 +294,11 @@ def detect_anomaly(
         funding_rate = funding_pct / 100.0 if funding_pct is not None else None
     if funding_rate is not None:
         if abs(funding_rate) >= limits["funding_rate_block"]:
-            add("FUNDING_EXTREME", "Funding（資金費率）極端擁擠", "BLOCK")
+            add(
+                "FUNDING_EXTREME",
+                "Funding（資金費率）極端擁擠（輔助觀察）",
+                "WATCH",
+            )
         elif abs(funding_rate) >= limits["funding_rate_watch"]:
             add("FUNDING_CROWDED", "Funding（資金費率）偏擁擠", "WATCH")
 

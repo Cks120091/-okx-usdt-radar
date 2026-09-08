@@ -354,6 +354,53 @@ def qualified_state(signal):
 
 
 class ScannerTests(unittest.TestCase):
+    def test_candidate_volume_policy_uses_exact_hysteresis_boundaries(self):
+        scanner = MarketScanner(
+            FakeClient(),
+            ScannerConfig(
+                min_quote_volume_24h=2_000_000,
+                quote_volume_buffer_24h=500_000,
+            ),
+        )
+        cases = (
+            (False, 1_999_999.0, False, 2_000_000.0),
+            (False, 2_000_000.0, True, 2_000_000.0),
+            (True, 1_499_999.0, False, 1_500_000.0),
+            (True, 1_500_000.0, True, 1_500_000.0),
+        )
+        for member, volume, allowed, effective_min in cases:
+            with self.subTest(member=member, volume=volume):
+                scanner._volume_eligible_ids = (
+                    {"AAA-USDT-SWAP"} if member else set()
+                )
+                ticker = Ticker(
+                    "AAA-USDT-SWAP",
+                    100.0,
+                    99.99,
+                    100.01,
+                    int(time.time() * 1_000),
+                    volume,
+                )
+                projected = scanner._apply_publication_ticker_to_item(
+                    qualified_signal(),
+                    ticker=ticker,
+                    scan_start_ticker=ticker,
+                    failure=None,
+                )
+                decided = scanner._attach_decision_context(projected)
+                policy = decided.data_quality["universe_volume_policy"]
+
+                self.assertEqual(policy["member"], member)
+                self.assertEqual(policy["entry_usdt"], 2_000_000.0)
+                self.assertEqual(policy["exit_usdt"], 1_500_000.0)
+                self.assertEqual(policy["effective_min_usdt"], effective_min)
+                self.assertEqual(decided.actionable, allowed)
+                self.assertEqual(
+                    "liquidity"
+                    in decided.decision_context["hard_gate"]["blockers"],
+                    not allowed,
+                )
+
     def test_full_scan_applies_24h_volume_hysteresis_before_candles(self):
         client = VolumeFilterClient(
             {
@@ -441,6 +488,157 @@ class ScannerTests(unittest.TestCase):
             1,
         )
 
+    def test_publication_drop_below_exit_revokes_member_until_two_million(self):
+        class CrossingClient(VolumeFilterClient):
+            def __init__(self):
+                super().__init__({"AAA-USDT-SWAP": 2_100_000.0})
+                self.snapshots = [2_100_000.0, 1_499_999.0, 1_750_000.0]
+                self.ticker_calls = 0
+
+            def get_swap_tickers(self):
+                volume = self.snapshots[self.ticker_calls]
+                self.ticker_calls += 1
+                return {
+                    "AAA-USDT-SWAP": Ticker(
+                        "AAA-USDT-SWAP",
+                        110.0,
+                        109.99,
+                        110.01,
+                        self.ticker_calls,
+                        volume,
+                    )
+                }
+
+        client = CrossingClient()
+        scanner = MarketScanner(
+            client,
+            ScannerConfig(
+                workers=1,
+                min_quote_volume_24h=2_000_000,
+                quote_volume_buffer_24h=500_000,
+            ),
+        )
+
+        first = scanner.scan_once(scan_mode="SHORT")
+
+        self.assertEqual(first.target_instruments, ["AAA-USDT-SWAP"])
+        self.assertEqual(
+            first.data_quality["universe_volume_hysteresis"]["members"],
+            [],
+        )
+        self.assertEqual(
+            first.exclusion_counts["24H_USDT_VOLUME_BELOW_EXIT"],
+            1,
+        )
+
+        client.candle_requests.clear()
+        second = scanner.scan_once(scan_mode="SHORT")
+
+        self.assertEqual(client.ticker_calls, 3)
+        self.assertEqual(second.target_instruments, [])
+        self.assertEqual(client.candle_requests, [])
+        self.assertEqual(
+            second.exclusion_counts["24H_USDT_VOLUME_WAITING_FOR_ENTRY"],
+            1,
+        )
+
+    def test_missing_publication_volume_fails_closed_without_candle_fallback(self):
+        class MissingPublicationVolumeClient(VolumeFilterClient):
+            def __init__(self):
+                super().__init__({"AAA-USDT-SWAP": 2_100_000.0})
+                self.ticker_calls = 0
+
+            def get_swap_tickers(self):
+                self.ticker_calls += 1
+                volume = 2_100_000.0 if self.ticker_calls == 1 else None
+                return {
+                    "AAA-USDT-SWAP": Ticker(
+                        "AAA-USDT-SWAP",
+                        100.0,
+                        99.99,
+                        100.01,
+                        self.ticker_calls,
+                        volume,
+                    )
+                }
+
+        client = MissingPublicationVolumeClient()
+        scanner = MarketScanner(
+            client,
+            ScannerConfig(
+                workers=1,
+                min_quote_volume_24h=2_000_000,
+                quote_volume_buffer_24h=500_000,
+            ),
+        )
+        scanner.engine = AlwaysSignalEngine()
+
+        report = scanner.scan_once(scan_mode="SHORT")
+
+        self.assertEqual(report.data_quality["publication_ticker_status"], "PARTIAL")
+        self.assertEqual(len(report.signals), 1)
+        signal = report.signals[0]
+        self.assertIsNone(signal.quote_volume_24h)
+        self.assertFalse(signal.actionable)
+        self.assertEqual(
+            signal.data_quality["universe_volume_policy"]["volume_status"],
+            "UNAVAILABLE",
+        )
+        self.assertIn(
+            "liquidity",
+            signal.decision_context["hard_gate"]["unknowns"],
+        )
+
+    def test_publication_volume_must_be_finite_and_nonnegative(self):
+        class PublicationClient(FakeClient):
+            def __init__(self):
+                super().__init__()
+                self.instruments = self.instruments[:1]
+                self.volume = 0.0
+
+            def get_swap_tickers(self):
+                return {
+                    "AAA-USDT-SWAP": Ticker(
+                        "AAA-USDT-SWAP",
+                        100.0,
+                        99.99,
+                        100.01,
+                        2,
+                        self.volume,
+                    )
+                }
+
+        client = PublicationClient()
+        scanner = MarketScanner(client)
+        scan_start = {
+            "AAA-USDT-SWAP": Ticker(
+                "AAA-USDT-SWAP",
+                100.0,
+                99.99,
+                100.01,
+                1,
+                2_000_000.0,
+            )
+        }
+
+        for invalid in (None, -1.0, float("nan"), float("inf")):
+            with self.subTest(volume=invalid):
+                client.volume = invalid
+                accepted, failures = scanner._load_publication_tickers(
+                    ["AAA-USDT-SWAP"],
+                    scan_start,
+                )
+                self.assertEqual(accepted, {})
+                self.assertIn("24H USDT 成交額", failures["AAA-USDT-SWAP"])
+
+        client.volume = 0.0
+        accepted, failures = scanner._load_publication_tickers(
+            ["AAA-USDT-SWAP"],
+            scan_start,
+        )
+        self.assertIn("AAA-USDT-SWAP", accepted)
+        self.assertEqual(failures, {})
+
     def test_all_below_volume_threshold_is_valid_empty_universe(self):
         client = VolumeFilterClient(
             {
@@ -505,6 +703,87 @@ class ScannerTests(unittest.TestCase):
         self.assertEqual(
             report.data_quality["universe_volume_waiting_for_entry_count"],
             1,
+        )
+
+    def test_single_instrument_projection_uses_restored_member_exit_line(self):
+        class SingleVolumeClient(FakeClient):
+            def __init__(self):
+                super().__init__()
+                self.instruments = self.instruments[:1]
+
+            def get_usdt_swap_instrument(self, inst_id):
+                return self.instruments[0] if inst_id == "AAA-USDT-SWAP" else None
+
+            def get_ticker(self, inst_id):
+                return Ticker(
+                    inst_id,
+                    100.0,
+                    99.99,
+                    100.01,
+                    int(time.time() * 1_000),
+                    1_500_000.0,
+                )
+
+            def get_open_interest_for(self, inst_id):
+                return None
+
+        class SingleSignalEngine:
+            def analyze(self, instrument, ticker, *args, **kwargs):
+                raw = replace(
+                    qualified_signal(instrument.inst_id),
+                    trigger_id="",
+                    lifecycle={
+                        "current_stage": "CONFIRMED",
+                        "transition": "TECHNICAL_EVENT",
+                    },
+                )
+                return AnalysisResult(
+                    raw,
+                    "qualified",
+                    replace(
+                        qualified_state(raw),
+                        lifecycle={
+                            "current_stage": "CONFIRMED",
+                            "transition": "TECHNICAL_SNAPSHOT",
+                        },
+                    ),
+                )
+
+        scanner = MarketScanner(
+            SingleVolumeClient(),
+            ScannerConfig(
+                workers=1,
+                min_quote_volume_24h=2_000_000,
+                quote_volume_buffer_24h=500_000,
+            ),
+        )
+        scanner.engine = SingleSignalEngine()
+        scanner.restore_volume_universe(
+            {
+                "version": 1,
+                "entry_usdt": 2_000_000.0,
+                "buffer_usdt": 500_000.0,
+                "members": ["AAA-USDT-SWAP"],
+            }
+        )
+
+        analysis = scanner.scan_instrument(
+            "AAA-USDT-SWAP",
+            requested_horizon="SHORT",
+        )
+
+        self.assertIsNotNone(analysis.short_result.signal)
+        signal = analysis.short_result.signal
+        self.assertTrue(signal.data_quality["universe_volume_policy"]["member"])
+        self.assertEqual(
+            signal.decision_context["hard_gate"]["thresholds"][
+                "min_quote_volume_24h"
+            ],
+            1_500_000.0,
+        )
+        self.assertNotIn(
+            "liquidity",
+            signal.decision_context["hard_gate"]["blockers"],
         )
 
     def test_missing_24h_usdt_volume_is_an_explicit_data_failure(self):
@@ -746,6 +1025,318 @@ class ScannerTests(unittest.TestCase):
             "ENTER",
         )
 
+    def test_market_scan_rechecks_entry_with_publication_ticker(self):
+        class MovingTickerClient(ContextFakeClient):
+            def __init__(self):
+                super().__init__()
+                self.instruments = self.instruments[:1]
+                self.last = 100.0
+                self.quote_volume = 20_000_000.0
+                self.base_ts = int(time.time() * 1_000) - 100
+                self.bulk_prices = []
+
+            def get_swap_tickers(self):
+                self.bulk_prices.append(self.last)
+                return {
+                    item.inst_id: Ticker(
+                        item.inst_id,
+                        self.last,
+                        self.last - 0.01,
+                        self.last + 0.01,
+                        self.base_ts + len(self.bulk_prices),
+                        self.quote_volume,
+                    )
+                    for item in self.instruments
+                }
+
+        class FreshEntryEngine:
+            def __init__(self):
+                self.analysis_prices = []
+
+            def analyze(self, instrument, ticker, *args, **kwargs):
+                self.analysis_prices.append(ticker.last)
+                signal = replace(
+                    qualified_signal(instrument.inst_id),
+                    trigger_id="",
+                    lifecycle={
+                        "current_stage": "CONFIRMED",
+                        "transition": "TECHNICAL_EVENT",
+                    },
+                    market_metrics={
+                        **qualified_signal(instrument.inst_id).market_metrics,
+                        "last_price": ticker.last,
+                    },
+                )
+                state = replace(
+                    qualified_state(signal),
+                    lifecycle={
+                        "current_stage": "CONFIRMED",
+                        "transition": "TECHNICAL_SNAPSHOT",
+                    },
+                )
+                return AnalysisResult(signal, "qualified", state)
+
+        client = MovingTickerClient()
+        engine = FreshEntryEngine()
+        scanner = MarketScanner(
+            client,
+            ScannerConfig(
+                workers=1,
+                min_quote_volume_24h=0,
+                minimum_rr=1.5,
+            ),
+        )
+        scanner.engine = engine
+
+        def move_price_after_preview(preview):
+            self.assertEqual(
+                preview.signals[0].market_metrics["last_price"],
+                100.0,
+            )
+            client.last = 104.0
+            client.quote_volume = 21_000_000.0
+
+        report = scanner.scan_once(
+            scan_mode="SHORT",
+            preview=move_price_after_preview,
+        )
+
+        self.assertEqual(engine.analysis_prices, [100.0])
+        self.assertEqual(client.bulk_prices, [100.0, 104.0])
+        signal = report.signals[0]
+        self.assertEqual(signal.market_metrics["last_price"], 104.0)
+        self.assertEqual(signal.quote_volume_24h, 21_000_000.0)
+        self.assertEqual(
+            signal.market_metrics["scan_start_ticker_ts"],
+            client.base_ts + 1,
+        )
+        self.assertEqual(
+            signal.market_metrics["ticker_sampled_at"],
+            client.base_ts + 2,
+        )
+        self.assertGreaterEqual(
+            signal.market_metrics["ticker_age_at_publish_ms"],
+            0,
+        )
+        self.assertLess(
+            signal.market_metrics["ticker_age_at_publish_ms"],
+            5_000,
+        )
+        self.assertEqual(signal.market_metrics["entry_execution_price"], 104.01)
+        self.assertEqual(
+            signal.market_metrics["entry_execution_price_source"],
+            "ASK",
+        )
+        self.assertEqual(signal.entry_eligibility["current_price"], 104.01)
+        self.assertEqual(
+            signal.entry_eligibility["current_price_source"],
+            "ASK",
+        )
+        self.assertEqual(signal.entry_eligibility["status"], "MISSED_ENTRY")
+        self.assertFalse(signal.entry_eligibility["new_entry_allowed"])
+        self.assertFalse(signal.actionable)
+        self.assertEqual(
+            signal.decision_context["final"]["status"],
+            "NO_CHASE",
+        )
+        liquidity_check = next(
+            item
+            for item in signal.decision_context["hard_gate"]["checks"]
+            if item["key"] == "liquidity"
+        )
+        self.assertEqual(liquidity_check["value"], 21_000_000.0)
+        self.assertEqual(
+            report.data_quality["publication_ticker_status"],
+            "AVAILABLE",
+        )
+        self.assertEqual(
+            report.data_quality["publication_ticker_refreshed_count"],
+            1,
+        )
+
+    def test_publication_spread_block_is_persisted_as_not_entry_ready(self):
+        class SpreadBlockedClient(FakeClient):
+            def __init__(self):
+                super().__init__()
+                self.instruments = self.instruments[:1]
+                self.ticker_calls = 0
+
+            def get_swap_tickers(self):
+                self.ticker_calls += 1
+                item = self.instruments[0]
+                return {
+                    item.inst_id: Ticker(
+                        item.inst_id,
+                        100.0,
+                        99.99,
+                        100.01,
+                        int(time.time() * 1_000) + self.ticker_calls,
+                        20_000_000.0,
+                    )
+                }
+
+        class EntryReadyEngine:
+            def analyze(self, instrument, ticker, *args, **kwargs):
+                raw = replace(
+                    qualified_signal(instrument.inst_id),
+                    trigger_id="",
+                    lifecycle={
+                        "current_stage": "CONFIRMED",
+                        "transition": "TECHNICAL_EVENT",
+                    },
+                    market_metrics={
+                        **qualified_signal(instrument.inst_id).market_metrics,
+                        "last_price": ticker.last,
+                    },
+                )
+                return AnalysisResult(
+                    raw,
+                    "qualified",
+                    replace(
+                        qualified_state(raw),
+                        lifecycle={
+                            "current_stage": "CONFIRMED",
+                            "transition": "TECHNICAL_SNAPSHOT",
+                        },
+                    ),
+                )
+
+        client = SpreadBlockedClient()
+        scanner = MarketScanner(
+            client,
+            ScannerConfig(
+                workers=1,
+                min_quote_volume_24h=0,
+                minimum_rr=1.0,
+                max_spread_pct=0.01,
+            ),
+        )
+        scanner.engine = EntryReadyEngine()
+
+        report = scanner.scan_once(scan_mode="SHORT")
+
+        self.assertEqual(client.ticker_calls, 2)
+        published = report.signals[0]
+        self.assertEqual(published.entry_eligibility["status"], "ENTRY_READY")
+        self.assertEqual(
+            published.decision_context["final"]["status"],
+            "HARD_GATE_BLOCKED",
+        )
+        self.assertIn(
+            "spread",
+            published.decision_context["hard_gate"]["blockers"],
+        )
+        persisted = scanner.repository.load_active_signal(
+            published.inst_id,
+            "SHORT",
+        )
+        self.assertIsNotNone(persisted)
+        self.assertEqual(
+            {
+                "actionable": persisted.actionable,
+                "eligibility_actionable": persisted.entry_eligibility.get(
+                    "actionable"
+                ),
+                "new_entry_allowed": persisted.entry_eligibility.get(
+                    "new_entry_allowed"
+                ),
+                "entry_ready_once": persisted.lifecycle.get("entry_ready_once"),
+                "decision_context_present": bool(persisted.decision_context),
+                "final_status": persisted.decision_context.get("final", {}).get(
+                    "status"
+                ),
+            },
+            {
+                "actionable": False,
+                "eligibility_actionable": False,
+                "new_entry_allowed": False,
+                "entry_ready_once": False,
+                "decision_context_present": True,
+                "final_status": "HARD_GATE_BLOCKED",
+            },
+        )
+
+    def test_publication_ticker_failure_never_falls_back_to_scan_start_price(self):
+        class FailingRefreshClient(ContextFakeClient):
+            def __init__(self):
+                super().__init__()
+                self.instruments = self.instruments[:1]
+                self.bulk_calls = 0
+
+            def get_swap_tickers(self):
+                self.bulk_calls += 1
+                if self.bulk_calls > 1:
+                    raise RuntimeError("fixture publication quote outage")
+                item = self.instruments[0]
+                return {
+                    item.inst_id: Ticker(
+                        item.inst_id,
+                        100.0,
+                        99.99,
+                        100.01,
+                        1_000,
+                        20_000_000,
+                    )
+                }
+
+        class FreshEntryEngine:
+            def analyze(self, instrument, ticker, *args, **kwargs):
+                signal = replace(
+                    qualified_signal(instrument.inst_id),
+                    trigger_id="",
+                    lifecycle={
+                        "current_stage": "CONFIRMED",
+                        "transition": "TECHNICAL_EVENT",
+                    },
+                    market_metrics={
+                        **qualified_signal(instrument.inst_id).market_metrics,
+                        "last_price": ticker.last,
+                    },
+                )
+                return AnalysisResult(
+                    signal,
+                    "qualified",
+                    replace(
+                        qualified_state(signal),
+                        lifecycle={
+                            "current_stage": "CONFIRMED",
+                            "transition": "TECHNICAL_SNAPSHOT",
+                        },
+                    ),
+                )
+
+        client = FailingRefreshClient()
+        scanner = MarketScanner(
+            client,
+            ScannerConfig(workers=1, min_quote_volume_24h=0),
+        )
+        scanner.engine = FreshEntryEngine()
+
+        report = scanner.scan_once(scan_mode="SHORT")
+
+        self.assertEqual(client.bulk_calls, 2)
+        self.assertEqual(report.status, "PARTIAL_DATA")
+        self.assertEqual(
+            report.data_quality["publication_ticker_status"],
+            "PARTIAL",
+        )
+        self.assertEqual(
+            report.data_quality["publication_ticker_failed_count"],
+            1,
+        )
+        self.assertIn("AAA-USDT-SWAP:SHORT", report.failed_instruments)
+        signal = report.signals[0]
+        self.assertIsNone(signal.market_metrics["last_price"])
+        self.assertEqual(
+            signal.entry_eligibility["status"],
+            "DATA_UNAVAILABLE",
+        )
+        self.assertEqual(
+            signal.entry_eligibility["current_price_source"],
+            "UNAVAILABLE",
+        )
+        self.assertFalse(signal.actionable)
+
     def test_missing_deep_data_warns_without_removing_formal_signal(self):
         signal = qualified_signal()
         result = AnalysisResult(signal, "qualified", qualified_state(signal))
@@ -803,6 +1394,118 @@ class ScannerTests(unittest.TestCase):
                     missing,
                     refreshed.entry_eligibility["reason"],
                 )
+
+    def test_existing_entry_ready_episode_needs_closed_retest_to_reopen(self):
+        scanner = MarketScanner(FakeClient(), ScannerConfig(min_quote_volume_24h=0))
+        old_episode = replace(
+            qualified_signal(),
+            lifecycle={
+                "first_seen_at": "2026-09-08T00:00:00+00:00",
+                "status": "ACTIVE",
+                "transition": "UNCHANGED",
+                "entry_ready_once": True,
+            },
+            entry_eligibility={
+                **qualified_signal().entry_eligibility,
+                "closed_retest_confirmed": False,
+            },
+        )
+
+        refreshed = scanner._refresh_entry_eligibility(old_episode)
+
+        self.assertEqual(refreshed.entry_eligibility["status"], "WAIT_RETEST")
+        self.assertTrue(
+            refreshed.entry_eligibility["reentry_confirmation_required"]
+        )
+        self.assertFalse(
+            refreshed.entry_eligibility["closed_retest_confirmed"]
+        )
+        self.assertFalse(refreshed.actionable)
+
+    def test_new_episode_is_not_mistaken_for_a_prior_ready_opportunity(self):
+        scanner = MarketScanner(FakeClient(), ScannerConfig(min_quote_volume_24h=0))
+        newly_created = replace(
+            qualified_signal(),
+            lifecycle={
+                "first_seen_at": "2026-09-08T00:00:00+00:00",
+                "status": "ACTIVE",
+                "transition": "NEW",
+                # Repository sets this while inserting the first projection.
+                "entry_ready_once": True,
+            },
+        )
+
+        refreshed = scanner._refresh_entry_eligibility(newly_created)
+
+        self.assertEqual(refreshed.entry_eligibility["status"], "ENTRY_READY")
+        self.assertFalse(
+            refreshed.entry_eligibility["reentry_confirmation_required"]
+        )
+        self.assertTrue(refreshed.actionable)
+
+    def test_publication_entry_geometry_uses_bid_for_short(self):
+        scanner = MarketScanner(FakeClient(), ScannerConfig(min_quote_volume_24h=0))
+        signal = replace(
+            qualified_signal(),
+            direction="SHORT",
+            stop_loss="103",
+            take_profit_1="95",
+            take_profit_2="91",
+            lifecycle={
+                "current_stage": "CONFIRMED",
+                "transition": "TECHNICAL_EVENT",
+            },
+        )
+        ticker = Ticker(
+            signal.inst_id,
+            100.0,
+            99.9,
+            100.1,
+            int(time.time() * 1_000),
+            22_000_000,
+        )
+
+        projected = scanner._apply_publication_ticker_to_item(
+            signal,
+            ticker=ticker,
+            scan_start_ticker=ticker,
+            failure=None,
+        )
+        refreshed = scanner._refresh_entry_eligibility(projected)
+
+        self.assertEqual(projected.market_metrics["last_price"], 100.0)
+        self.assertEqual(projected.market_metrics["entry_execution_price"], 99.9)
+        self.assertEqual(
+            projected.market_metrics["entry_execution_price_source"],
+            "BID",
+        )
+        self.assertEqual(refreshed.entry_eligibility["current_price"], 99.9)
+        self.assertEqual(
+            refreshed.entry_eligibility["current_price_source"],
+            "BID",
+        )
+
+    def test_publication_ticker_older_than_scan_start_is_rejected(self):
+        scanner = MarketScanner(FakeClient(), ScannerConfig(min_quote_volume_24h=0))
+        initial = {
+            "AAA-USDT-SWAP": Ticker(
+                "AAA-USDT-SWAP",
+                100.0,
+                99.99,
+                100.01,
+                2_000,
+                20_000_000,
+            )
+        }
+
+        accepted, failures = scanner._load_publication_tickers(
+            ["AAA-USDT-SWAP"],
+            initial,
+        )
+
+        self.assertEqual(accepted, {})
+        self.assertIn("AAA-USDT-SWAP", failures)
+        self.assertIn("時間戳早於掃描起始", failures["AAA-USDT-SWAP"])
 
     def test_execution_risks_warn_and_reopen_when_price_returns_to_entry(self):
         scanner = MarketScanner(
@@ -1458,7 +2161,14 @@ class ScannerTests(unittest.TestCase):
                 self.history_calls = []
 
             def get_ticker(self, inst_id):
-                return Ticker(inst_id, self.price, self.price - 0.01, self.price + 0.01, 2_000)
+                return Ticker(
+                    inst_id,
+                    self.price,
+                    self.price - 0.01,
+                    self.price + 0.01,
+                    2_000,
+                    20_000_000,
+                )
 
             def get_candles(self, inst_id, bar, limit=100):
                 self.candle_requests.append((inst_id, bar, limit))
@@ -2008,7 +2718,7 @@ class ScannerTests(unittest.TestCase):
         self.assertIn(permitted, top_twenty)
         self.assertEqual(sum(not item.actionable for item in top_twenty), 19)
 
-    def test_attach_decision_does_not_apply_a_second_chase_veto(self):
+    def test_attach_decision_applies_canonical_chase_hard_gate(self):
         scanner = MarketScanner(
             FakeClient(),
             ScannerConfig(min_quote_volume_24h=0),
@@ -2028,13 +2738,50 @@ class ScannerTests(unittest.TestCase):
 
         self.assertEqual(
             attached.decision_context["final"]["status"],
-            "ENTER",
+            "NO_CHASE",
         )
-        self.assertTrue(attached.actionable)
+        self.assertFalse(attached.actionable)
         self.assertEqual(attached.entry_eligibility["status"], "ENTRY_READY")
+        self.assertFalse(attached.entry_eligibility["new_entry_allowed"])
         self.assertEqual(attached.entry_eligibility["chase_atr"], 2.1)
-        self.assertEqual(attached.entry_eligibility["hard_blockers"], [])
-        self.assertIn("chase", attached.entry_eligibility["risk_warnings"])
+        self.assertIn("chase", attached.entry_eligibility["hard_blockers"])
+        self.assertTrue(attached.entry_eligibility["risk_warnings"])
+
+    def test_refresh_preserves_independent_upstream_hard_check(self):
+        scanner = MarketScanner(
+            FakeClient(),
+            ScannerConfig(min_quote_volume_24h=0),
+        )
+        signal = replace(
+            qualified_signal(),
+            safety_checks=[
+                {
+                    "key": "exchange_integrity",
+                    "label": "交易所資料完整性",
+                    "passed": False,
+                    "hard": True,
+                }
+            ],
+        )
+
+        refreshed = scanner._refresh_entry_eligibility(signal)
+        attached = scanner._attach_decision_context(refreshed)
+
+        check = next(
+            item
+            for item in refreshed.safety_checks
+            if item["key"] == "exchange_integrity"
+        )
+        self.assertTrue(check["hard"])
+        self.assertFalse(attached.actionable)
+        self.assertIn(
+            "safety_checks",
+            attached.decision_context["hard_gate"]["blockers"],
+        )
+        self.assertIn(
+            "safety_checks",
+            attached.entry_eligibility["hard_blockers"],
+        )
 
     def test_one_symbol_failure_is_isolated_and_surviving_signal_remains(self):
         scanner = MarketScanner(
@@ -2245,7 +2992,14 @@ class ScannerTests(unittest.TestCase):
                 return self.instruments[0] if inst_id == self.instruments[0].inst_id else None
 
             def get_ticker(self, inst_id):
-                return Ticker(inst_id, 100.0, 99.99, 100.01, 1_700_036_100_000)
+                return Ticker(
+                    inst_id,
+                    100.0,
+                    99.99,
+                    100.01,
+                    1_700_036_100_000,
+                    20_000_000,
+                )
 
             def get_open_interest_for(self, inst_id):
                 return 5_000_000.0
@@ -2400,7 +3154,14 @@ class ScannerTests(unittest.TestCase):
         )
         self.assertEqual(degraded.short_result.signal.entry_low, "99")
         self.assertEqual(degraded.short_result.signal.stop_loss, "97")
-        self.assertTrue(degraded.short_result.signal.actionable)
+        # This is the already-published Episode from the earlier FULL scan.
+        # Missing 1H history provides no new closed retest proof, so a live
+        # quote back inside Entry must not reopen it.
+        self.assertFalse(degraded.short_result.signal.actionable)
+        self.assertEqual(
+            degraded.short_result.signal.entry_eligibility["status"],
+            "WAIT_RETEST",
+        )
         self.assertFalse(
             any("歷史 OI 持倉資料" in message for message in degraded.context.failures)
         )

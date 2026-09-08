@@ -39,9 +39,9 @@ def build_decision_context(
     """Build one price-first trading decision from a radar item.
 
     The function is deliberately pure: it does not mutate ``item``, persist a
-    Signal Episode, fetch market data, or create/cancel a Trigger.  Execution
-    and market-risk checks are advisory; they never cancel or hide a formal
-    price Trigger.
+    Signal Episode, fetch market data, or create/cancel a Trigger.  A formal
+    price Trigger remains visible, but failed or unknown hard-gate checks veto
+    permission for a new entry.
     """
 
     limits = {
@@ -186,6 +186,23 @@ def _hard_gate(
         if terminal_invalidation
         else "原交易計畫未被判定失效。",
     )
+    opposite_warning_only = trigger.get("opposite_warning_only") is True
+    new_entry_suspended = trigger.get("new_entry_suspended") is True
+    opposite_entry_blocked = opposite_warning_only or new_entry_suspended
+    opposite_candidate = _mapping(trigger.get("opposite_candidate", {}))
+    _add_check(
+        checks,
+        "opposite_signal",
+        "原方向未出現正式反向訊號",
+        "BLOCKED" if opposite_entry_blocked else "PASSED",
+        opposite_candidate if opposite_entry_blocked else None,
+        (
+            "已出現正式反向訊號；舊計畫仍保留供既有持倉管理，"
+            "但禁止依原方向建立新倉。"
+            if opposite_entry_blocked
+            else "未標記正式反向訊號。"
+        ),
+    )
     _add_check(
         checks,
         "anomaly",
@@ -196,11 +213,31 @@ def _hard_gate(
     )
 
     core_status, deep_status, missing_sources = _data_states(data_quality)
-    data_unknown = (
-        core_status not in _AVAILABLE
-        or deep_status not in _AVAILABLE
-        or bool(missing_sources)
+    required_missing_sources = _strings(
+        data_quality.get("required_missing_sources", [])
     )
+    publication_status = str(
+        data_quality.get("publication_ticker_status") or ""
+    ).upper()
+    publication_unknown = bool(
+        publication_status and publication_status not in _AVAILABLE
+    )
+    data_unknown = bool(
+        core_status not in _AVAILABLE
+        or required_missing_sources
+        or publication_unknown
+    )
+    optional_missing_sources = [
+        source
+        for source in missing_sources
+        if source not in set(required_missing_sources)
+        and source != "publication_ticker"
+    ]
+    if deep_status not in _AVAILABLE or optional_missing_sources:
+        warnings.append(
+            "OI／Taker／Funding／Order Book 等輔助資料不完整；"
+            "顯示資料不足，但不拿輔助資料決定新進場。"
+        )
     _add_check(
         checks,
         "data_quality",
@@ -210,10 +247,16 @@ def _hard_gate(
             "core": core_status,
             "deep": deep_status,
             "missing_sources": missing_sources,
+            "required_missing_sources": required_missing_sources,
+            "publication_ticker_status": publication_status or None,
         },
-        "資料缺失／部分／待更新，不能假裝成最新資料。"
+        "核心或發布前即時資料缺失／部分／待更新，不能假裝成最新資料。"
         if data_unknown
-        else "核心與執行資料可用。",
+        else (
+            "核心與必要執行資料可用；輔助 Context 缺失不影響進場門檻。"
+            if deep_status not in _AVAILABLE or optional_missing_sources
+            else "核心與必要執行資料可用。"
+        ),
     )
 
     if not safety_checks:
@@ -223,7 +266,7 @@ def _hard_gate(
             "風險提醒資料可核對",
             "UNKNOWN",
             None,
-            "缺少風險提醒資料；標記為未知，但不取消正式價格 Trigger。",
+            "缺少風險檢查資料；無法確認新進場安全性。",
         )
     else:
         hard = [row for row in safety_checks if bool(row.get("hard", True))]
@@ -237,7 +280,7 @@ def _hard_gate(
                 "BLOCKED"
                 if failed_safety
                 else "UNKNOWN"
-                if unknown_safety or not hard
+                if unknown_safety
                 else "PASSED"
             ),
             [str(row.get("key") or row.get("label") or "unknown") for row in failed_safety],
@@ -245,7 +288,9 @@ def _hard_gate(
                 "既有風險檢查出現提醒。"
                 if failed_safety
                 else "風險檢查資料不完整。"
-                if unknown_safety or not hard
+                if unknown_safety
+                else "上游僅提供 advisory 檢查；由本層直接風險檢查決定。"
+                if not hard
                 else "既有風險檢查未發現提醒。"
             ),
         )
@@ -260,7 +305,7 @@ def _hard_gate(
             f"上游風險提醒：{blocker}",
             "BLOCKED",
             False,
-            f"相容舊資料的上游風險標記：{blocker}；只作提醒。",
+            f"上游已標記新進場阻擋條件：{blocker}。",
         )
 
     explicit_entry_permission = (
@@ -275,19 +320,34 @@ def _hard_gate(
             "上游目前位置允許新進場",
             "BLOCKED",
             False,
-            "上游目前位置判定為不可進；保留作位置狀態，不視為風險一票否決。",
+            "上游目前位置判定為不可進；原 Trigger 保留，但禁止建立新倉。",
         )
 
     quote_volume = _number(_read(item, "quote_volume_24h", None))
+    liquidity_policy = _resolved_liquidity_policy(
+        data_quality,
+        configured_entry=limits["min_quote_volume_24h"],
+        fallback_volume=quote_volume,
+    )
+    quote_volume = liquidity_policy["volume_usdt"]
+    liquidity_limit = liquidity_policy["effective_min_usdt"]
+    liquidity_label = (
+        "24H 成交額符合既有會員保留線"
+        if liquidity_policy["member"]
+        else "24H 成交額符合新標的納入線"
+    )
     _numeric_limit_check(
         checks,
         key="liquidity",
-        label="24H 成交額符合流動性建議值",
+        label=liquidity_label,
         value=quote_volume,
-        limit=limits["min_quote_volume_24h"],
+        limit=liquidity_limit,
         comparison="MIN",
         missing_reason="缺少 24H 成交額，流動性未知。",
-        blocked_reason="24H 成交額低於流動性建議值。",
+        blocked_reason=(
+            f"24H 成交額低於 {liquidity_limit:,.0f} USDT "
+            f"{'會員保留線' if liquidity_policy['member'] else '新標的納入線'}。"
+        ),
     )
     spread = _number(
         _read(item, "spread_pct", None)
@@ -481,6 +541,14 @@ def _hard_gate(
     blocked = [row for row in checks if row["status"] == "BLOCKED"]
     unknown = [row for row in checks if row["status"] == "UNKNOWN"]
     status = "BLOCKED" if blocked else "UNKNOWN" if unknown else "PASSED"
+    published_thresholds = dict(limits)
+    published_thresholds["min_quote_volume_24h"] = liquidity_limit
+    published_thresholds["quote_volume_entry_24h"] = liquidity_policy[
+        "entry_usdt"
+    ]
+    published_thresholds["quote_volume_exit_24h"] = liquidity_policy[
+        "exit_usdt"
+    ]
     return {
         "status": status,
         "passed": status == "PASSED",
@@ -493,10 +561,11 @@ def _hard_gate(
         "warnings": _unique(
             [*warnings, *[row["reason"] for row in [*blocked, *unknown]]]
         )[:8],
-        "thresholds": dict(limits),
+        "thresholds": published_thresholds,
+        "liquidity_policy": liquidity_policy,
         "trigger_preserved": True,
-        "advisory_only": True,
-        "entry_veto_enabled": False,
+        "advisory_only": False,
+        "entry_veto_enabled": True,
     }
 
 
@@ -728,6 +797,10 @@ def _conflict_layer(
         "DERIVATIVES",
         "PARTICIPATION_VOLUME",
     }
+    core_price_domains = immediate_domains & {
+        "POSITION_STRUCTURE",
+        "TREND_MOMENTUM",
+    }
     context_countertrend = "CONTEXT_COUNTERTREND" in domains
     multiple_conflict_domains = len(immediate_domains) >= 2 or (
         context_countertrend and bool(immediate_domains)
@@ -751,6 +824,18 @@ def _conflict_layer(
         level = "HIGH" if explicit_severity >= 70 else "MEDIUM" if explicit_severity >= 40 else "LOW"
     else:
         level = "LOW"
+    strong_countertrend = context_countertrend and any(
+        _conflict_domain(text) == "CONTEXT_COUNTERTREND"
+        and any(marker in text for marker in ("明顯反向", "強勢反向", "強烈反向"))
+        for text in items
+    )
+    core_price_block = len(core_price_domains) >= 2 or (
+        context_countertrend and bool(core_price_domains)
+    )
+    blocks_entry = bool(strong_countertrend or core_price_block)
+    blocking_domains = set(core_price_domains if core_price_block else ())
+    if strong_countertrend:
+        blocking_domains.add("CONTEXT_COUNTERTREND")
     return {
         "main_direction": direction,
         "level": level,
@@ -765,12 +850,13 @@ def _conflict_layer(
             {"key": key, "items": values[:3]}
             for key, values in sorted(domain_items.items())
         ],
-        # Conflict is explanatory telemetry only.  A core price Trigger that
-        # has a valid price Trigger must not disappear because a
-        # second interpretation layer counted contrary evidence.  The same
-        # domains still lower confidence and remain visible in the details.
-        "blocking_domains": [],
-        "blocks_entry": False,
+        # Only closed-price structure/trend conflicts or an explicitly strong
+        # higher-timeframe opposition can veto a new entry.  OI, Taker/CVD,
+        # funding, volume participation and book context stay auxiliary: even
+        # several auxiliary conflicts may lower confidence, but cannot become
+        # a hidden trading switch.
+        "blocking_domains": sorted(blocking_domains),
+        "blocks_entry": blocks_entry,
         "severity_score": explicit_severity,
         "countertrend": context_countertrend,
         "opposite_signal_created": False,
@@ -1561,8 +1647,8 @@ def _final_layer(
     stage = episode["source_stage"]
     active_trigger = plan_present and stage in _FORMAL_STAGES and not target_completed
     has_risk_warnings = bool(
-        hard_gate["blocked"]
-        or hard_gate["unknown"]
+        hard_gate.get("warnings")
+        or anomaly_warnings
         or market_context["anomalies"]
     )
 
@@ -1588,6 +1674,29 @@ def _final_layer(
         else:
             status, label = "NO_EDGE", "目前無明確交易優勢"
             wait_code, wait_label = "NO_EDGE", "等待正式方向與交易計畫"
+    elif hard_gate["blocked"]:
+        if "anomaly" in blockers:
+            status, label = "ANOMALY", "異常行情｜禁止新進場"
+            wait_code, wait_label = "MARKET_ANOMALY", "等待市場恢復穩定"
+        elif "chase" in blockers:
+            status, label = "NO_CHASE", "已離開合理進場區｜禁止追價"
+            wait_code, wait_label = "PRICE_TOO_FAR", "等待新的進場機會"
+        elif blockers == {"risk_reward"}:
+            status, label = "NO_EDGE", "風險報酬不足｜禁止新進場"
+            wait_code, wait_label = "RISK_REWARD", "等待風險報酬改善"
+        else:
+            status, label = "HARD_GATE_BLOCKED", "風險條件未通過｜禁止新進場"
+            wait_code, wait_label = "HARD_GATE_BLOCKED", "等待風險條件恢復"
+    elif hard_gate["unknown"]:
+        status, label = "DATA_UNAVAILABLE", "資料不足｜禁止新進場"
+        wait_code, wait_label = "DATA_MISSING", "等待最新完整資料"
+    elif (
+        entry_status == "ENTRY_READY"
+        and active_trigger
+        and conflict["blocks_entry"]
+    ):
+        status, label = "WAIT", "方向證據高度衝突｜暫不進場"
+        wait_code, wait_label = "EVIDENCE_CONFLICT", "等待方向衝突降級"
     elif entry_status == "ENTRY_READY" and active_trigger:
         status, label = (
             "ENTER",
@@ -1684,7 +1793,7 @@ def _final_layer(
         "label": label,
         "direction": direction,
         "direction_label": _direction_label(direction),
-        "new_entry_allowed": status == "ENTER",
+        "new_entry_allowed": status == "ENTER" and hard_gate["passed"],
         "trigger_preserved": not terminal_invalidation,
         "reasons": reasons[:3],
         "wait_reason": (
@@ -1784,6 +1893,89 @@ def _numeric_limit_check(
         round(value, 6),
         f"{label}。" if passed else blocked_reason,
     )
+
+
+def _resolved_liquidity_policy(
+    data_quality: Mapping[str, Any],
+    *,
+    configured_entry: float,
+    fallback_volume: float | None,
+) -> dict[str, Any]:
+    """Resolve the candidate-specific 24H volume hysteresis contract.
+
+    Only a policy produced by the scanner for the current membership version
+    may lower the entry gate to the retention threshold.  Old payloads,
+    hand-built callers and malformed policy objects fail closed to the normal
+    new-symbol entry threshold.
+    """
+
+    raw = _mapping(data_quality.get("universe_volume_policy"))
+    policy_entry = _number(raw.get("entry_usdt"))
+    policy_exit = _number(raw.get("exit_usdt"))
+    policy_effective = _number(raw.get("effective_min_usdt"))
+    member = raw.get("member") is True
+    trusted = bool(
+        raw.get("version") == 1
+        and raw.get("trusted") is True
+        and policy_entry is not None
+        and policy_exit is not None
+        and policy_effective is not None
+        and math.isclose(
+            policy_entry,
+            configured_entry,
+            rel_tol=0.0,
+            abs_tol=1e-9,
+        )
+        and 0.0 <= policy_exit <= policy_entry
+        and math.isclose(
+            policy_effective,
+            policy_exit if member else policy_entry,
+            rel_tol=0.0,
+            abs_tol=1e-9,
+        )
+    )
+    trusted_member = bool(trusted and member)
+    effective_min = (
+        float(policy_exit)
+        if trusted_member and policy_exit is not None
+        else float(configured_entry)
+    )
+
+    volume_status = str(raw.get("volume_status") or "").strip().upper()
+    policy_volume = _number(raw.get("volume_usdt"))
+    if trusted and volume_status == "AVAILABLE":
+        volume = (
+            policy_volume
+            if policy_volume is not None and policy_volume >= 0
+            else None
+        )
+    elif trusted and volume_status in {"UNAVAILABLE", "INVALID"}:
+        # Never substitute a closed-candle volume when the publication ticker
+        # explicitly said that rolling 24H quote volume was unavailable.
+        volume = None
+    else:
+        volume = fallback_volume
+
+    return {
+        "version": 1,
+        "trusted": trusted,
+        "member": trusted_member,
+        "entry_usdt": (
+            float(policy_entry)
+            if trusted and policy_entry is not None
+            else float(configured_entry)
+        ),
+        "exit_usdt": (
+            float(policy_exit)
+            if trusted and policy_exit is not None
+            else float(configured_entry)
+        ),
+        "effective_min_usdt": effective_min,
+        "volume_usdt": volume,
+        "volume_status": volume_status
+        or ("AVAILABLE" if volume is not None else "UNAVAILABLE"),
+        "source": str(raw.get("source") or "CANDIDATE_FIELD"),
+    }
 
 
 def _add_check(

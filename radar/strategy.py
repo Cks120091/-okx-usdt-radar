@@ -328,6 +328,25 @@ class AdaptiveStrategyEngine:
                     "reason": "profile_unavailable",
                 }
         plan = self._v33_plan(story, tf_core, excursion_profile)
+        existing_episode = bool(
+            previous_story
+            and (
+                str(previous_story.get("active_signal_id") or "").strip()
+                or str(previous_story.get("active_trigger_direction") or "").upper()
+                in {"LONG", "SHORT"}
+            )
+            and not bool(previous_story.get("invalidated", False))
+        )
+        # Market Story assigns REENTRY only after a distinct continuation event
+        # and its confirmation both advance beyond the prior Episode watermark.
+        # Carry that closed-price proof into positional eligibility; a live quote
+        # returning to an old Entry Zone is not equivalent evidence.
+        closed_retest_confirmed = bool(
+            existing_episode
+            and story.stage == "REENTRY"
+            and story.freshness == "REACTIVATED"
+            and story.trigger.get("same_episode_update") is True
+        )
         risk_pct = abs(plan.entry - plan.stop) / max(abs(plan.entry), 1e-9) * 100.0
         market_state = self._set_safety(
             market_state,
@@ -361,6 +380,8 @@ class AdaptiveStrategyEngine:
             story,
             market_state,
             plan,
+            existing_episode=existing_episode,
+            closed_retest_confirmed=closed_retest_confirmed,
         )
         market_state = replace(
             market_state,
@@ -711,10 +732,15 @@ class AdaptiveStrategyEngine:
         context: MarketContext | None = None,
         timing: TimeframeFeatures | None = None,
     ) -> dict[str, object]:
-        """Build one target profile from price, volatility and live participation."""
+        """Build targets from closed-price facts, never auxiliary capital flow.
+
+        OI, Taker/CVD, funding and the order book remain visible in the context
+        card and in execution-risk checks.  They must not stretch TP/R:R or
+        improve a signal's ranking: one OI contract always has both a long and
+        a short side, so treating it as directional target fuel is misleading.
+        """
 
         direction = getattr(story, "trigger_direction", "NEUTRAL")
-        sign = 1.0 if direction == "LONG" else -1.0
         trigger = getattr(story, "trigger", {})
         trigger = trigger if isinstance(trigger, dict) else {}
         groups = getattr(story, "groups", {})
@@ -767,69 +793,12 @@ class AdaptiveStrategyEngine:
             )
             sources.append("Timing 力度")
 
-        taker_score = 50.0
-        oi_score = 50.0
-        order_book_score = 50.0
-        if context is not None:
-            if context.taker_buy_ratio is not None:
-                directional_taker = (
-                    context.taker_buy_ratio
-                    if direction == "LONG"
-                    else 1.0 - context.taker_buy_ratio
-                )
-                taker_score = _clamp(directional_taker * 100.0, 20.0, 80.0)
-                sources.append("Taker／CVD")
-            elif context.cvd is not None:
-                taker_score = 65.0 if context.cvd * sign > 0 else 35.0
-                sources.append("CVD")
-
-            signed_move = _safe_float(raw.get("core_return_pct"), 0.0) * sign
-            if context.open_interest_change_pct is not None:
-                oi_change = float(context.open_interest_change_pct)
-                if oi_change >= 0.50 and signed_move > 0.0:
-                    oi_score = _clamp(72.0 + oi_change * 4.0, 72.0, 90.0)
-                elif oi_change >= 0.50 and signed_move <= 0.0:
-                    oi_score = 30.0
-                elif oi_change <= -0.80 and signed_move > 0.0:
-                    oi_score = 38.0
-                elif oi_change <= -0.80 and signed_move < 0.0:
-                    oi_score = 45.0
-                sources.append("價格＋OI")
-
-            sequence_state = str(context.order_book_sequence.get("state", ""))
-            if sequence_state in ("PERSISTENT_SUPPORT", "REFILL_ABSORPTION"):
-                order_book_score = 68.0
-                sources.append("委託簿序列")
-            elif sequence_state in (
-                "LIQUIDITY_WITHDRAWAL",
-                "PERSISTENT_OPPOSITION",
-            ):
-                order_book_score = 32.0
-                sources.append("委託簿序列")
-            elif context.order_book_imbalance is not None:
-                order_book_score = _clamp(
-                    50.0 + context.order_book_imbalance * sign * 100.0,
-                    25.0,
-                    75.0,
-                )
-                sources.append("委託簿快照")
-
         strength_score = (
-            trigger_score * 0.22
-            + trend_score * 0.20
-            + volume_score * 0.13
-            + timing_score * 0.10
-            + taker_score * 0.15
-            + oi_score * 0.14
-            + order_book_score * 0.06
+            trigger_score * 0.35
+            + trend_score * 0.30
+            + volume_score * 0.20
+            + timing_score * 0.15
         )
-        if context is not None and context.funding_rate is not None:
-            directional_funding = context.funding_rate * sign
-            if directional_funding > 0.0008:
-                strength_score -= 7.0
-                sources.append("Funding 擁擠修正")
-            elif directional_funding > 0.0005:
-                strength_score -= 3.0
 
         noise = trigger.get("noise", raw.get("noise", {}))
         if isinstance(noise, dict) and noise.get("high"):
@@ -994,6 +963,9 @@ class AdaptiveStrategyEngine:
         story: StoryAssessment,
         state: MarketState,
         plan: _Plan,
+        *,
+        existing_episode: bool = False,
+        closed_retest_confirmed: bool = False,
     ) -> Signal:
         tf_atr = float(story.raw.get("core_atr", 0.0) or 0.0)
         zone_offset = max(tf_atr * 0.12, abs(plan.entry) * 0.0003)
@@ -1026,6 +998,8 @@ class AdaptiveStrategyEngine:
             minimum_rr=self.config.minimum_rr,
             ready_max_chase_atr=self.config.entry_ready_max_chase_atr,
             missed_chase_atr=self.config.entry_missed_chase_atr,
+            existing_episode=existing_episode,
+            closed_retest_confirmed=closed_retest_confirmed,
         )
         metrics = dict(state.market_metrics)
         metrics.update(
@@ -1497,6 +1471,16 @@ class AdaptiveStrategyEngine:
             minimum_rr=self.config.minimum_rr,
             ready_max_chase_atr=self.config.entry_ready_max_chase_atr,
             missed_chase_atr=self.config.entry_missed_chase_atr,
+            existing_episode=(
+                result.signal.entry_eligibility.get("existing_episode") is True
+            ),
+            entry_ready_once=(
+                result.signal.entry_eligibility.get("entry_ready_once") is True
+            ),
+            closed_retest_confirmed=(
+                result.signal.entry_eligibility.get("closed_retest_confirmed")
+                is True
+            ),
         )
         checks.extend(
             [
@@ -3627,6 +3611,9 @@ def _entry_eligibility(
     minimum_rr: float,
     ready_max_chase_atr: float,
     missed_chase_atr: float,
+    existing_episode: bool = False,
+    entry_ready_once: bool = False,
+    closed_retest_confirmed: bool = False,
 ) -> dict[str, Any]:
     is_long = direction == "LONG"
     safe_atr = max(abs(atr), 1e-9)
@@ -3657,6 +3644,10 @@ def _entry_eligibility(
     current_reward = target - current_price if is_long else current_price - target
     remaining_rr = current_reward / current_risk if current_risk > 0 else -1.0
     active_stage = stage in ("EARLY_SIGNAL", "CONFIRMED", "REENTRY")
+    reentry_confirmation_required = (
+        existing_episode is True or entry_ready_once is True
+    )
+    verified_closed_retest = closed_retest_confirmed is True
 
     if not active_stage:
         status = "MISSED_ENTRY"
@@ -3691,6 +3682,14 @@ def _entry_eligibility(
         reason = (
             f"目前偏離理想進場區 {chase_atr:.2f} ATR；"
             "等待價格回到 Entry Zone，不追價。"
+        )
+    elif reentry_confirmation_required and not verified_closed_retest:
+        status = "WAIT_RETEST"
+        label = "已回到進場區｜等待收線重新確認"
+        reason = (
+            "價格雖回到原 Entry Zone，但這是既有或曾可進的 Signal Episode；"
+            "尚未取得較舊判定更新的已收盤 retest／reclaim 證據，"
+            "禁止只憑即時價格重新放行。"
         )
     else:
         status = "ENTRY_READY"
@@ -3735,6 +3734,10 @@ def _entry_eligibility(
             if current_risk > 0 and remaining_rr < minimum_rr
             else []
         ),
+        "existing_episode": existing_episode is True,
+        "entry_ready_once": entry_ready_once is True,
+        "reentry_confirmation_required": reentry_confirmation_required,
+        "closed_retest_confirmed": verified_closed_retest,
         "time_alone_never_invalidates": True,
     }
 

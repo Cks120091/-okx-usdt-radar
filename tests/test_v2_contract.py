@@ -85,7 +85,7 @@ class V33ContractTests(unittest.TestCase):
         self.assertIn("已錯過", html)
         self.assertIn("entry_eligibility", html)
         self.assertIn("長線訊號", html)
-        self.assertIn("長線已觸發・持續保留", html)
+        self.assertIn("4H 長線目前可進", html)
         self.assertIn("longEarlySignals", html)
         self.assertIn("longReadySignals", html)
         self.assertIn("longWaitRetest", html)
@@ -168,7 +168,7 @@ class V33ContractTests(unittest.TestCase):
         self.assertNotIn('id="pendingSignalsBox"', html)
         self.assertNotIn('id="longPendingSignalsBox"', html)
         self.assertNotIn("function isPendingConfirmationSignal(item)", html)
-        self.assertNotIn("function itemDecisionContext", html)
+        self.assertIn("function itemDecisionContext", html)
         self.assertNotIn("function decisionContextStatus", html)
         self.assertNotIn("function finalDecisionPanel", html)
         self.assertNotIn("唯一 Final Decision", html)
@@ -228,7 +228,7 @@ class V33ContractTests(unittest.TestCase):
         self.assertIn("訊號準備度", html)
         self.assertIn("尚未觸發", html)
         self.assertIn("可進 · ${watchCount} 觀察", html)
-        self.assertIn("itemEntryStatus(x)==='ENTRY_READY'", html)
+        self.assertIn("function itemCurrentEntryReady(item)", html)
         self.assertIn("function itemWasEntryReady(item)", html)
         self.assertIn("OI（未平倉量）異動雷達", html)
         self.assertIn("市場方向分布", html)
@@ -367,12 +367,16 @@ class V33ContractTests(unittest.TestCase):
         comparator = html[comparator_start:comparator_end]
         self.assertNotIn("continuationDiff", comparator)
         self.assertLess(
-            comparator.index("const qualityDiff="),
-            comparator.index("const statusDiff="),
+            comparator.index("readyDiff="),
+            comparator.index("qualityDiff="),
         )
         self.assertLess(
-            comparator.index("const statusDiff="),
-            comparator.index("const freshDiff="),
+            comparator.index("qualityDiff="),
+            comparator.index("statusDiff="),
+        )
+        self.assertLess(
+            comparator.index("statusDiff="),
+            comparator.index("freshDiff="),
         )
         self.assertIn("Europe/London", html)
         self.assertIn("America/New_York", html)
@@ -440,7 +444,7 @@ class V33ContractTests(unittest.TestCase):
         self.assertIn("function setHomeReportEmpty", html)
         self.assertIn('body.home-report-empty[data-active-tab="overview"] #overview', html)
         self.assertIn('body[data-active-tab="manual"] .search-tools', html)
-        self.assertIn("同幣不同觸發分開保留", html)
+        self.assertIn("目前可進優先 · 同狀態品質高 → 低", html)
         self.assertIn("NEW:'新訊號週期'", html)
         self.assertIn("calc((100vw - var(--layout-max) + 28px)/2)", html)
         self.assertIn("function preflightPositionMetric(data)", html)
@@ -474,9 +478,13 @@ class V33ContractTests(unittest.TestCase):
         rankings = html.split("function renderRankings(signals,watchlist)", 1)[1].split(
             "function renderFavorites", 1
         )[0]
-        self.assertIn("itemEntryStatus(item)==='ENTRY_READY'", rankings)
+        self.assertIn("itemCurrentEntryReady(item)", rankings)
         self.assertIn("&&!isExpiredSnapshot(item)&&!itemReadOnlyReason(item)", rankings)
         self.assertIn("readyCount=rows.filter(isReady).length", rankings)
+        self.assertIn("entryStatus=itemEntryStatus(item)", rankings)
+        self.assertIn("?'先不要進'", rankings)
+        self.assertIn("?'等回踩／確認'", rankings)
+        self.assertIn("?'已錯過｜勿追價'", rankings)
 
         continuation = html.split("function preflightContinuation(data)", 1)[1].split(
             "function preflightCapitalFlow", 1
@@ -494,10 +502,28 @@ class V33ContractTests(unittest.TestCase):
         self.assertNotIn("continuation.original", preflight_capital)
         self.assertIn("source:'PREFLIGHT'", preflight_capital)
         self.assertIn("referenceTime:data?.live?.sampled_at", preflight_capital)
+        preflight_auxiliary = html.split("function preflightAuxiliary(data)", 1)[
+            1
+        ].split("function preflightPositionMetric", 1)[0]
+        self.assertIn("${preflightContinuation(data)}", preflight_auxiliary)
+        self.assertIn("${preflightCapitalFlow(data)}", preflight_auxiliary)
+        self.assertIn("capitalFlowDetectionLabel", preflight_auxiliary)
+        self.assertIn(
+            'class="decision-auxiliary preflight-auxiliary"',
+            preflight_auxiliary,
+        )
+        self.assertNotIn(
+            'class="decision-auxiliary preflight-auxiliary" open',
+            preflight_auxiliary,
+        )
+        self.assertIn("僅供參考，不改變現在能否進場", preflight_auxiliary)
         self.assertIn("function preflightTerminalKind(data)", html)
         self.assertIn("statuses.includes('CLOSED_UNKNOWN')", html)
         self.assertIn("return Boolean(preflightTerminalKind(data))", html)
         self.assertIn("OI／成交流只作續走力道輔助", html)
+        self.assertIn("此頁僅供輔助，不改變正式方向", html)
+        self.assertIn("不能繞過成交額門檻", html)
+        self.assertNotIn("不受全市場成交額緩衝帶限制", html)
 
         preflight = html.split("function renderPreflight(data){", 1)[1].split(
             "function preflightResponseTerminal", 1
@@ -508,14 +534,10 @@ class V33ContractTests(unittest.TestCase):
         )
         self.assertLess(
             preflight.index("現在位置與進場資格"),
-            preflight.index("${preflightContinuation(data)}"),
+            preflight.index("${preflightAuxiliary(data)}"),
         )
         self.assertLess(
-            preflight.index("${preflightContinuation(data)}"),
-            preflight.index("${preflightCapitalFlow(data)}"),
-        )
-        self.assertLess(
-            preflight.index("${preflightCapitalFlow(data)}"),
+            preflight.index("${preflightAuxiliary(data)}"),
             preflight.index('class="preflight-disclosure"'),
         )
 
@@ -621,10 +643,10 @@ class V33ContractTests(unittest.TestCase):
             "function renderContextCoverage(report,transient=null,preview=false){", 1
         )[1].split("function reportRenderFingerprint", 1)[0]
         self.assertIn("transient==='ERROR'?'更新失敗':'掃描中'", coverage)
-        self.assertIn("itemEntryStatus(x)==='ENTRY_READY'", report)
-        self.assertIn("itemWasEntryReady(item)", report)
+        self.assertIn("liveReady=activeShort.filter(itemCurrentEntryReady)", report)
+        self.assertNotIn("itemWasEntryReady", report)
         self.assertIn(
-            "'目前沒有已觸發並持續保留的訊號。',shortReadOnlyReason",
+            "'目前沒有允許新進場的 15m 訊號。',shortReadOnlyReason",
             report,
         )
         self.assertIn("'目前沒有長線訊號。',longReadOnlyReason", report)
@@ -632,31 +654,32 @@ class V33ContractTests(unittest.TestCase):
             "renderContextCoverage(report,shortTransient||longTransient,preview)", report
         )
         self.assertIn(
-            "early=stickyShort.filter(x=>x.signal_stage==='EARLY_SIGNAL').sort(signalSortComparator)",
+            "early=liveReady.filter(x=>x.signal_stage==='EARLY_SIGNAL').sort(signalSortComparator)",
             report,
         )
         self.assertIn("allShort=[...activeShort].sort(signalSortComparator)", report)
-        self.assertIn("ready=[...stickyShort].sort(signalSortComparator)", report)
+        self.assertIn("ready=[...liveReady].sort(signalSortComparator)", report)
         self.assertIn(
-            "waiting=activeShort.filter(x=>!isPreviewItem(x)&&!itemWasEntryReady(x)&&itemEntryStatus(x)==='WAIT_RETEST').sort(signalSortComparator)",
+            "waiting=activeShort.filter(x=>!isPreviewItem(x)&&itemWaitingForEntry(x)).sort(signalSortComparator)",
             report,
         )
         self.assertIn(
-            "missed=activeShort.filter(x=>!isPreviewItem(x)&&!itemWasEntryReady(x)&&itemEntryStatus(x)==='MISSED_ENTRY').sort(signalSortComparator)",
+            "missed=activeShort.filter(x=>!isPreviewItem(x)&&itemEntryStatus(x)==='MISSED_ENTRY').sort(signalSortComparator)",
             report,
         )
         self.assertIn("allLong=[...activeLong].sort(signalSortComparator)", report)
-        self.assertIn("longReady=[...stickyLong].sort(signalSortComparator)", report)
+        self.assertIn("liveLongReady=activeLong.filter(itemCurrentEntryReady)", report)
+        self.assertIn("longReady=[...liveLongReady].sort(signalSortComparator)", report)
         self.assertIn(
-            "longEarly=stickyLong.filter(x=>x.signal_stage==='EARLY_SIGNAL').sort(signalSortComparator)",
+            "longEarly=liveLongReady.filter(x=>x.signal_stage==='EARLY_SIGNAL').sort(signalSortComparator)",
             report,
         )
         self.assertIn(
-            "longWaiting=activeLong.filter(x=>!isPreviewItem(x)&&!itemWasEntryReady(x)&&itemEntryStatus(x)==='WAIT_RETEST').sort(signalSortComparator)",
+            "longWaiting=activeLong.filter(x=>!isPreviewItem(x)&&itemWaitingForEntry(x)).sort(signalSortComparator)",
             report,
         )
         self.assertIn(
-            "longMissed=activeLong.filter(x=>!isPreviewItem(x)&&!itemWasEntryReady(x)&&itemEntryStatus(x)==='MISSED_ENTRY').sort(signalSortComparator)",
+            "longMissed=activeLong.filter(x=>!isPreviewItem(x)&&itemEntryStatus(x)==='MISSED_ENTRY').sort(signalSortComparator)",
             report,
         )
         self.assertGreaterEqual(html.count("品質高 → 低"), 10)
@@ -671,6 +694,8 @@ class V33ContractTests(unittest.TestCase):
             comparator,
         )
         self.assertNotIn("continuationRank", comparator)
+        self.assertIn("readyDiff=Number(itemCurrentEntryReady(b))", comparator)
+        self.assertLess(comparator.index("readyDiff"), comparator.index("qualityDiff"))
         self.assertLess(comparator.index("qualityDiff"), comparator.index("statusDiff"))
         self.assertLess(comparator.index("statusDiff"), comparator.index("dataTimeDiff"))
         self.assertLess(comparator.index("dataTimeDiff"), comparator.index("freshDiff"))
@@ -681,28 +706,37 @@ class V33ContractTests(unittest.TestCase):
         )[0]
         self.assertIn("eligibility.status", entry_status)
         self.assertIn("eligibility.wait_reason_code", entry_status)
-        self.assertNotIn("eligibility.hard_blockers", entry_status)
-        self.assertNotIn("check?.hard!==false&&check?.passed===false", entry_status)
-        self.assertIn("eligibility.position_status||'ENTRY_READY'", entry_status)
-        self.assertNotIn("new_entry_allowed", entry_status)
-        self.assertNotIn("item?.actionable", entry_status)
-        self.assertNotIn("decision_context", entry_status)
-        self.assertNotIn("decisionContext", entry_status)
+        self.assertIn("itemHardGateBlocked(item)", entry_status)
+        self.assertIn("final.new_entry_allowed===true", entry_status)
+        self.assertIn("gateStatus!=='PASSED'", entry_status)
+        self.assertIn("gate.passed!==true", entry_status)
+        self.assertIn("eligibility.new_entry_allowed===true", entry_status)
+        self.assertIn("eligibility.actionable===true", entry_status)
+        self.assertIn("eligibility.new_entry_allowed===false", entry_status)
+        self.assertIn("item?.actionable===false", entry_status)
+        self.assertIn("itemFinalDecision(item)", entry_status)
+        self.assertNotIn("eligibility.position_status||'ENTRY_READY'", entry_status)
         decision_panel = html.split("function decisionPanel(item", 1)[1].split(
             "function timeframeGrid", 1
         )[0]
         self.assertIn("const entry=item.entry_eligibility||{}", decision_panel)
+        self.assertIn("decisionContext=itemDecisionContext(item)", decision_panel)
+        self.assertIn("finalDecision=isRecord(decisionContext.final)", decision_panel)
+        self.assertIn("hardGate=isRecord(decisionContext.hard_gate)", decision_panel)
+        self.assertIn("decisionAlertHtml(item,status)", decision_panel)
+        self.assertIn("先不要進場｜風險條件未通過", decision_panel)
         self.assertIn("preflightActions(item.inst_id,horizon,item,false)", decision_panel)
         self.assertIn("signalTradeGrid(item", decision_panel)
         self.assertIn("preview:true", decision_panel)
         self.assertNotIn("finalDecisionPanel", decision_panel)
-        self.assertNotIn("decisionContext", decision_panel)
         self.assertIn(
             "copyAction=item.entry_low&&item.stop_loss&&item.take_profit_1?",
             decision_panel,
         )
         self.assertNotIn("instrumentButton", decision_panel)
-        self.assertNotIn("status==='HARD_GATE_BLOCKED'", decision_panel)
+        self.assertIn("status==='HARD_GATE_BLOCKED'", decision_panel)
+        self.assertIn("function decisionAlertItems(item)", html)
+        self.assertIn("高週期方向與本卡相反，這是逆勢訊號", html)
         self.assertNotIn("function entryBadge(item)", html)
         self.assertIn("function reportRenderFingerprint(report)", html)
         fingerprint = html.split("function reportRenderFingerprint(report)", 1)[1].split(
@@ -711,7 +745,10 @@ class V33ContractTests(unittest.TestCase):
         self.assertIn("item.entry_eligibility?.status", fingerprint)
         self.assertIn("item.entry_eligibility?.original_status", fingerprint)
         self.assertIn("item.lifecycle?.status", fingerprint)
-        self.assertIn("item.decision_context?.continuation_confirmation||{}", fingerprint)
+        self.assertIn("decision.continuation_confirmation||{}", fingerprint)
+        self.assertIn("final.new_entry_allowed", fingerprint)
+        self.assertIn("hardGate.blocked", fingerprint)
+        self.assertIn("conflict.countertrend", fingerprint)
         self.assertIn("continuation.key", fingerprint)
         self.assertIn("votes.OI?.state", fingerprint)
         self.assertIn("votes.TAKER_CVD?.state", fingerprint)
@@ -764,19 +801,32 @@ class V33ContractTests(unittest.TestCase):
         self.assertNotIn("${continuationBadge(item)}", render_signals)
         self.assertNotIn("${entryBadge(item)}", render_signals)
         self.assertNotIn("${continuationStrip(item)}", render_signals)
-        self.assertIn("${continuationStrip(item)}", decision_panel)
-        self.assertIn("${capitalFlowStrip(item)}", decision_panel)
+        self.assertIn("${currentEntryBadge(item)}", render_signals)
+        self.assertIn("${decisionAuxiliary(item)}", decision_panel)
+        decision_auxiliary = html.split("function decisionAuxiliary(item)", 1)[1].split(
+            "function horizonBadge", 1
+        )[0]
+        self.assertIn("${continuationStrip(item)}", decision_auxiliary)
+        self.assertIn("${capitalFlowStrip(item)}", decision_auxiliary)
+        self.assertIn('class="decision-auxiliary"', decision_auxiliary)
+        self.assertIn("capitalFlowDetectionLabel", decision_auxiliary)
+        self.assertIn("掃描當下：${event}", decision_auxiliary)
+        self.assertIn("僅供參考，不改變方向、進場資格", decision_auxiliary)
         active_decision = decision_panel.split("const entry=item.entry_eligibility||{}", 1)[1]
         self.assertLess(
-            active_decision.index("${continuationStrip(item)}"),
-            active_decision.index("${capitalFlowStrip(item)}"),
+            active_decision.index("${signalTradeGrid(item)}"),
+            active_decision.index("${decisionAuxiliary(item)}"),
         )
         self.assertLess(
-            active_decision.index("${capitalFlowStrip(item)}"),
+            active_decision.index("${decisionAlertHtml(item,status)}")
+            if "${decisionAlertHtml(item,status)}" in active_decision
+            else active_decision.index("alertHtml=decisionAlertHtml(item,status)"),
             active_decision.index("${signalTradeGrid(item)}"),
         )
         self.assertIn("signal-status-line", render_signals)
         self.assertIn("現在能否進場", decision_panel)
+        self.assertIn("目前可買價（Ask）", decision_panel)
+        self.assertIn("目前可賣價（Bid）", decision_panel)
         self.assertIn("續走力道", continuation)
         self.assertNotIn("最高等級門檻", continuation)
         self.assertNotIn("加成", continuation)
@@ -1049,16 +1099,19 @@ class V33ContractTests(unittest.TestCase):
         self.assertIn('"name": "OKX Radar V3.4"', manifest)
         self.assertNotIn("V3.4 Context", manifest)
 
-    def test_signal_episode_cards_are_sticky_terminal_and_independently_keyed(self):
+    def test_signal_episode_cards_use_current_entry_state_and_are_independently_keyed(self):
         root = Path(__file__).parents[1] / "radar" / "static"
         html = (root / "pages.html").read_text(encoding="utf-8")
         worker = (root / "service-worker.js").read_text(encoding="utf-8")
 
         self.assertIn("function itemWasEntryReady(item)", html)
-        self.assertIn(
-            "if(itemWasEntryReady(item))return 'ENTRY_READY'",
-            html,
-        )
+        display_status = html.split("function itemDisplayEntryStatus(item)", 1)[1].split(
+            "function isCorePreview", 1
+        )[0]
+        self.assertNotIn("itemWasEntryReady", display_status)
+        self.assertIn("itemEntryStatus(item)", display_status)
+        self.assertIn("liveReady=activeShort.filter(itemCurrentEntryReady)", html)
+        self.assertIn("liveLongReady=activeLong.filter(itemCurrentEntryReady)", html)
         self.assertIn("closed_signals", html)
         self.assertIn("long_closed_signals", html)
         self.assertIn('data-group="closed"', html)
