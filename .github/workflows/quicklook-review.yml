@@ -1,0 +1,43 @@
+name: Quick-look card review
+on:
+  push:
+    branches: [fix/quicklook-card-20260910]
+  workflow_dispatch:
+permissions:
+  contents: read
+concurrency:
+  group: quicklook-review-${{ github.ref }}
+  cancel-in-progress: true
+jobs:
+  verify:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v6
+      - uses: actions/setup-python@v6
+        with:
+          python-version: '3.12'
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+      - name: Export exact review source
+        run: git archive --format=zip HEAD -o /tmp/quicklook-source.zip
+      - uses: actions/upload-artifact@v4
+        with:
+          name: quicklook-review-source
+          path: /tmp/quicklook-source.zip
+          retention-days: 3
+      - name: Runtime dependencies
+        run: python -m pip install -r requirements.txt
+      - name: Compile and offline tests
+        run: |
+          python -m compileall -q radar run.py scripts tests
+          python -m unittest discover -s tests -v
+          git diff --check
+      - name: Quick-look browser regression when implemented
+        run: |
+          if [ -f scripts/check_quicklook_ui.py ]; then
+            python -m pip install playwright
+            python -m playwright install --with-deps chromium
+            python scripts/check_quicklook_ui.py
+          fi
