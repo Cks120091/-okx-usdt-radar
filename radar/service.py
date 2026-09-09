@@ -20,6 +20,7 @@ from urllib.parse import parse_qs, urlparse
 
 from .api import OKXAPIError
 from .config import AppConfig
+from .exit_review import review_exit_plan
 from .continuation import ALGORITHM_VERSION, observer_schedule
 from .models import RadarReport
 from .price_display import signal_plan_display_fields
@@ -2968,6 +2969,10 @@ class RadarRuntime:
                 "horizon": horizon,
                 "horizon_label": "4H 長線" if horizon == "LONG" else "15m 短線",
                 "kind": kind,
+                "exit_review": review_exit_plan(
+                    item, getattr(analysis, "cross_timeframe", {}),
+                    current_price=analysis.ticker.last, now_ms=int(time.time() * 1000),
+                ),
                 "reason_code": result.reason,
                 "message": message,
                 "item": (
@@ -3428,6 +3433,11 @@ class RadarRuntime:
                     captured_trigger_id=trigger_id,
                     expected_trigger_id=normalized_expected_trigger,
                 )
+            payload["exit_review"] = review_exit_plan(
+                signal, payload.get("continuation", {}).get("current", {}).get("cross_timeframe", {}),
+                current_price=payload.get("live", {}).get("price"), now_ms=int(time.time() * 1000),
+                terminal=terminal_kind is not None,
+            )
             cached_payload = deepcopy(payload)
             cached_payload["cached"] = False
             cached_payload["cache_age_seconds"] = 0.0

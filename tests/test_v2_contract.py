@@ -146,7 +146,7 @@ class V33ContractTests(unittest.TestCase):
         self.assertIn('<body data-active-group="home">', html)
         self.assertIn('body:not([data-active-group="home"]) .command-deck', html)
         self.assertIn("document.body.dataset.activeGroup=group", html)
-        self.assertIn("okx-radar-shell-v4.3-intraday-flow-1", service_worker)
+        self.assertIn("okx-radar-shell-v4.4-clarity-1", service_worker)
         self.assertIn("市場方向 · 24H 全市場平均 RSI", html)
         self.assertIn("bias.market_average_rsi", html)
         self.assertIn("rsi24.market_rsi_24h_label", html)
@@ -274,7 +274,7 @@ class V33ContractTests(unittest.TestCase):
         self.assertIn("function signalTriggerTime(item)", html)
         self.assertIn("訊號觸發時間（台灣 UTC+8）", html)
         self.assertNotIn("status!=='ENTRY_READY'&&status!=='MISSED_ENTRY'", html)
-        self.assertIn("okx-radar-shell-v4.3-intraday-flow-1", service_worker)
+        self.assertIn("okx-radar-shell-v4.4-clarity-1", service_worker)
         self.assertIn("$('#preflightRefresh').addEventListener('click',loadPreflight)", html)
         self.assertIn("${decisionPanel(item)}", html)
         self.assertNotIn("showPreflight", html)
@@ -511,16 +511,10 @@ class V33ContractTests(unittest.TestCase):
         ].split("function preflightPositionMetric", 1)[0]
         self.assertIn("${preflightContinuation(data)}", preflight_auxiliary)
         self.assertIn("${preflightCapitalFlow(data)}", preflight_auxiliary)
-        self.assertIn("capitalFlowDetectionLabel", preflight_auxiliary)
-        self.assertIn(
-            'class="decision-auxiliary preflight-auxiliary"',
-            preflight_auxiliary,
-        )
-        self.assertNotIn(
-            'class="decision-auxiliary preflight-auxiliary" open',
-            preflight_auxiliary,
-        )
-        self.assertIn("僅供參考，不改變現在能否進場", preflight_auxiliary)
+        self.assertIn("dataPageButton", preflight_auxiliary)
+        self.assertIn("intradayFlowPanel(flow)", preflight_auxiliary)
+        self.assertIn("exitReviewPanel(data.exit_review", preflight_auxiliary)
+        self.assertIn('id="dataDetailDialog"', html)
         self.assertIn("function preflightTerminalKind(data)", html)
         self.assertIn("statuses.includes('CLOSED_UNKNOWN')", html)
         self.assertIn("return Boolean(preflightTerminalKind(data))", html)
@@ -834,12 +828,12 @@ class V33ContractTests(unittest.TestCase):
         decision_auxiliary = html.split("function decisionAuxiliary(item)", 1)[1].split(
             "function horizonBadge", 1
         )[0]
-        self.assertIn("${continuationStrip(item)}", decision_auxiliary)
-        self.assertIn("${capitalFlowStrip(item)}", decision_auxiliary)
-        self.assertIn('class="decision-auxiliary"', decision_auxiliary)
-        self.assertIn("capitalFlowDetectionLabel", decision_auxiliary)
-        self.assertIn("掃描當下：${event}", decision_auxiliary)
-        self.assertIn("僅供參考，不改變方向、進場資格", decision_auxiliary)
+        self.assertNotIn("${continuationStrip(item)}", decision_auxiliary)
+        self.assertIn('class="compact-context"', decision_auxiliary)
+        self.assertIn("OI 只看增減倉，不單獨判多空", decision_auxiliary)
+        full_auxiliary = html.split("function decisionAuxiliaryFull(item)", 1)[1].split("function intradayFlowPanel", 1)[0]
+        self.assertIn("${continuationStrip(item)}", full_auxiliary)
+        self.assertIn("${capitalFlowStrip(item)}", full_auxiliary)
         active_decision = decision_panel.split("const entry=item.entry_eligibility||{}", 1)[1]
         self.assertLess(
             active_decision.index("${signalTradeGrid(item)}"),
@@ -859,8 +853,8 @@ class V33ContractTests(unittest.TestCase):
         self.assertNotIn("最高等級門檻", continuation)
         self.assertNotIn("加成", continuation)
         self.assertNotIn('role="progressbar"', continuation)
-        self.assertIn("完整判定資料", render_signals)
-        self.assertIn("details(item,true)", render_signals)
+        self.assertIn("itemDataPage(item", render_signals)
+        self.assertIn("details(item,true)", html.split("function itemDataPage(item",1)[1].split("function decisionAuxiliaryFull",1)[0])
         self.assertIn("function signalTradeGrid(item,options={})", html)
         self.assertIn("signal-plan-grid", html)
         self.assertIn("R:R｜${esc(rrLabel)}", html)
@@ -1162,7 +1156,7 @@ class V33ContractTests(unittest.TestCase):
         self.assertIn("舊 Entry／SL／TP 不會復活", html)
         self.assertIn("舊交易計畫已結束", html)
         self.assertIn("signalTradeGrid(item,{prefix:'原始 ',original:true})", html)
-        self.assertIn("okx-radar-shell-v4.3-intraday-flow-1", worker)
+        self.assertIn("okx-radar-shell-v4.4-clarity-1", worker)
 
     def test_market_scan_has_no_github_schedule(self):
         root = Path(__file__).parents[1]

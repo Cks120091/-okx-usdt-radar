@@ -53,17 +53,26 @@ def main():
                 page.evaluate("activateTab('fifteenAll',false)")
                 page.locator('#globalSearch').fill('AAA')
                 page.locator('#singleSearch').click()
-                page.locator('#singleScanDialog .intraday-flow-cell').first.wait_for()
-                assert page.locator('#singleScanDialog .intraday-flow-cell').count() == 3
+                page.locator('#singleScanDialog .flow-mini').first.wait_for()
+                assert page.locator('#singleScanDialog .flow-mini').count() == 3
                 assert page.locator('#singleScanDialog').evaluate('(x)=>x.scrollWidth<=x.clientWidth+1')
                 assert requests[-1]['horizon'] == 'SHORT'
                 assert requests[-1]['direction_lock'] is None
-                assert page.locator('#singleScanDialog').inner_text().find('OI') >= 0
+                assert '持倉' in page.locator('#singleScanDialog').inner_text()
+                page.locator('#singleScanDialog [data-detail-key^="flow:"]').click()
+                page.locator('#dataDetailDialog').wait_for()
+                assert page.locator('#dataDetailDialog [data-flow-window]').count() == 3
+                page.locator('[data-flow-window="4H"]').click()
+                assert page.locator('[data-flow-window="4H"]').get_attribute('aria-pressed') == 'true'
+                assert 'USDT' in page.locator('#dataDetailContent').inner_text()
+                page.keyboard.press('Escape')
+                assert page.locator('#singleScanDialog').is_visible()
+                assert not page.locator('#dataDetailDialog').is_visible()
                 page.locator('#singleScanClose').click()
                 # The real card button must pass its original direction.
                 page.evaluate("document.querySelector('#searchFeedback').outerHTML += singleScanButton('AAA-USDT-SWAP','SHORT',{direction:'SHORT'})")
                 page.locator('[data-single-id]').first.click()
-                page.locator('#singleScanDialog .intraday-flow-cell').first.wait_for()
+                page.locator('#singleScanDialog .flow-mini').first.wait_for()
                 assert requests[-1]['direction_lock'] == 'SHORT'
                 page.locator('#singleScanClose').click()
                 assert not errors, errors
