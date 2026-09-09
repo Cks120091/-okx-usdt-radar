@@ -1,0 +1,94 @@
+name: Mobile layout regression
+on:
+  push:
+    branches: [fix/mobile-layout-20260909]
+permissions:
+  contents: write
+concurrency:
+  group: mobile-layout-review
+  cancel-in-progress: false
+jobs:
+  review:
+    runs-on: ubuntu-latest
+    timeout-minutes: 8
+    steps:
+      - uses: actions/checkout@v6
+      - uses: actions/setup-python@v6
+        with:
+          python-version: '3.12'
+      - name: Apply and verify layout-only source changes
+        run: |
+          python - <<'PY'
+          from pathlib import Path
+          import subprocess
+          file = Path('radar/static/pages.html')
+          html = file.read_text()
+          if '/* Layout-only repair:' not in html:
+              edits = [
+                  ('.decision-panel::before{content:"";position:absolute;inset:0 auto 0 0;width:4px;background:#607083}', '.decision-panel::before{content:none}'),
+                  ('<p><span class="reason-index">${i+1}</span>${esc(shortText(x))}</p>', '<p><span class="reason-index">${i+1}</span><span class="reason-text">${esc(shortText(x))}</span></p>'),
+                  ("dialog.scrollTop=0;$('#dataDetailClose').focus()", "dialog.scrollTop=0;$('#dataDetailContent').scrollTop=0;$('#dataDetailClose').focus()"),
+                  ("$('#headerUpdatedAt').textContent=`更新 ${completedLabel}`;", "$('#headerUpdatedAt').textContent=`更新 ${completedLabel}`;$('#headerUpdatedAt').title=`台灣時間 ${completedLabel}`;"),
+              ]
+              for old, new in edits:
+                  assert html.count(old) == 1, ('Unexpected original source', old)
+                  html = html.replace(old, new, 1)
+              assert html.count('  </style>') == 1
+              html = html.replace('  </style>', Path('.github/mobile-layout.css').read_text() + '  </style>', 1)
+              file.write_text(html)
+              old = 'okx-radar-shell-v4.4-clarity-1'
+              new = 'okx-radar-shell-v4.4-layout-2'
+              for path, count in [('radar/static/service-worker.js', 1), ('tests/test_v2_contract.py', 3)]:
+                  target = Path(path); text = target.read_text()
+                  assert text.count(old) == count, ('Unexpected cache version references', path)
+                  target.write_text(text.replace(old, new))
+          expected = {
+              'radar/static/pages.html': '90ccc2226e79eabb96e2358e5259a9b2c687161b',
+              'radar/static/service-worker.js': 'f7695495f896806a615a3abfd90cfb9b5d2dd2e6',
+              'scripts/check_layout_ui.py': 'd7cbd7707813ced478c881a0dd3598d0104ae878',
+              'tests/test_v2_contract.py': '20e322efa9bf35575e1edfa76c44377bf334c6d4',
+          }
+          for path, wanted in expected.items():
+              actual = subprocess.check_output(['git', 'hash-object', path], text=True).strip()
+              print(path, actual, flush=True)
+              assert actual == wanted, ('Source differs from locally tested version', path, actual, wanted)
+          PY
+      - name: Install test dependencies
+        run: python -m pip install -r requirements.txt playwright
+      - name: Python regression and formatting
+        run: |
+          python -m compileall -q radar run.py scripts tests
+          python -m unittest discover -s tests -v
+          git diff --check
+      - name: JavaScript syntax
+        run: |
+          python - <<'PY'
+          import re
+          from pathlib import Path
+          html = Path('radar/static/pages.html').read_text()
+          Path('/tmp/radar-ui.js').write_text('\n'.join(re.findall(r'<script(?:\s[^>]*)?>(.*?)</script>', html, re.S)))
+          PY
+          node --check /tmp/radar-ui.js
+      - name: Browser availability
+        run: |
+          if ! command -v google-chrome && ! command -v chromium; then
+            python -m playwright install --with-deps chromium
+          fi
+      - name: Blocked cards and independent scrollers on seven viewports
+        run: python scripts/check_layout_ui.py
+      - name: Clarity data-page browser regression
+        run: python scripts/check_clarity_ui.py
+      - name: Single-coin scan and direction-lock browser regression
+        run: python scripts/check_intraday_ui.py
+      - name: Commit verified layout to review branch only
+        run: |
+          test "${GITHUB_REF_NAME}" = 'fix/mobile-layout-20260909'
+          git add radar/static/pages.html radar/static/service-worker.js scripts/check_layout_ui.py tests/test_v2_contract.py
+          if ! git diff --cached --quiet; then
+            git config user.name 'github-actions[bot]'
+            git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+            git commit -m 'Fix mobile card clipping and dialog layout without changing trading logic'
+            git push origin HEAD:fix/mobile-layout-20260909
+          fi
+          git rev-parse HEAD
+          git ls-files -s radar/static/pages.html radar/static/service-worker.js scripts/check_layout_ui.py tests/test_v2_contract.py
