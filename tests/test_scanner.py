@@ -3080,7 +3080,7 @@ class ScannerTests(unittest.TestCase):
         self.assertEqual(
             client.history_calls,
             [
-                ("AAA-USDT-SWAP", "5m", 20),
+                ("AAA-USDT-SWAP", "5m", 60),
                 ("AAA-USDT-SWAP", "1H", 30),
             ],
         )
@@ -3163,7 +3163,7 @@ class ScannerTests(unittest.TestCase):
         self.assertEqual(
             client.history_calls,
             [
-                ("AAA-USDT-SWAP", "5m", 20),
+                ("AAA-USDT-SWAP", "5m", 60),
                 ("AAA-USDT-SWAP", "1H", 30),
             ],
         )
@@ -3201,7 +3201,7 @@ class ScannerTests(unittest.TestCase):
         self.assertEqual(
             client.history_calls,
             [
-                ("AAA-USDT-SWAP", "5m", 20),
+                ("AAA-USDT-SWAP", "5m", 60),
                 ("AAA-USDT-SWAP", "1H", 30),
             ],
         )
@@ -3401,7 +3401,7 @@ class ScannerTests(unittest.TestCase):
         self.assertEqual(
             client.history_calls,
             [
-                ("AAA-USDT-SWAP", "5m", 20),
+                ("AAA-USDT-SWAP", "5m", 60),
                 ("AAA-USDT-SWAP", "1H", 30),
             ],
         )
@@ -3422,7 +3422,7 @@ class ScannerTests(unittest.TestCase):
         self.assertEqual(
             client.history_calls,
             [
-                ("AAA-USDT-SWAP", "5m", 20),
+                ("AAA-USDT-SWAP", "5m", 60),
                 ("AAA-USDT-SWAP", "1H", 30),
             ],
         )

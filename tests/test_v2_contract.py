@@ -122,7 +122,9 @@ class V33ContractTests(unittest.TestCase):
         self.assertIn("function isExpiredSnapshot(item)", html)
         self.assertIn("⏱ 資料已過期", html)
         self.assertIn("資料已過期｜原快照", html)
-        self.assertNotIn("幣種掃描", html)
+        self.assertIn("幣種掃描", html)
+        self.assertIn("/api/instrument/scan", html)
+        self.assertIn("價格・OI・CVD 多週期判讀", html)
         self.assertIn("reportBecameStale", html)
         self.assertIn("overflow-x:hidden", html)
         self.assertIn("env(safe-area-inset-bottom)", html)
@@ -144,7 +146,7 @@ class V33ContractTests(unittest.TestCase):
         self.assertIn('<body data-active-group="home">', html)
         self.assertIn('body:not([data-active-group="home"]) .command-deck', html)
         self.assertIn("document.body.dataset.activeGroup=group", html)
-        self.assertIn("okx-radar-shell-v4.3-preflight-flow-2", service_worker)
+        self.assertIn("okx-radar-shell-v4.3-intraday-flow-1", service_worker)
         self.assertIn("市場方向 · 24H 全市場平均 RSI", html)
         self.assertIn("bias.market_average_rsi", html)
         self.assertIn("rsi24.market_rsi_24h_label", html)
@@ -272,7 +274,7 @@ class V33ContractTests(unittest.TestCase):
         self.assertIn("function signalTriggerTime(item)", html)
         self.assertIn("訊號觸發時間（台灣 UTC+8）", html)
         self.assertNotIn("status!=='ENTRY_READY'&&status!=='MISSED_ENTRY'", html)
-        self.assertIn("okx-radar-shell-v4.3-preflight-flow-2", service_worker)
+        self.assertIn("okx-radar-shell-v4.3-intraday-flow-1", service_worker)
         self.assertIn("$('#preflightRefresh').addEventListener('click',loadPreflight)", html)
         self.assertIn("${decisionPanel(item)}", html)
         self.assertNotIn("showPreflight", html)
@@ -304,11 +306,13 @@ class V33ContractTests(unittest.TestCase):
         retired_route = service_source.split(
             'if path == "/api/instrument/scan":', 1
         )[1].split('if path == "/api/preflight/reanalyze":', 1)[0]
-        self.assertIn("HTTPStatus.GONE", retired_route)
-        self.assertIn("幣種更新已停用", retired_route)
-        self.assertNotIn("runtime.scan_instrument_dict", retired_route)
-        self.assertNotIn("幣種掃描", html)
-        self.assertNotIn("/api/instrument/scan", html)
+        self.assertIn("HTTPStatus.OK", retired_route)
+        self.assertIn("direction_lock", retired_route)
+        self.assertIn("runtime.scan_instrument_dict", retired_route)
+        self.assertIn("幣種掃描", html)
+        self.assertIn("/api/instrument/scan", html)
+        self.assertIn("價格・OI・CVD 多週期判讀", html)
+        self.assertIn("/api/instrument/scan", html)
         self.assertNotIn("data-instrument-id", html)
         self.assertNotIn("function openInstrument", html)
         self.assertNotIn("function scanInstrument", html)
@@ -1158,7 +1162,7 @@ class V33ContractTests(unittest.TestCase):
         self.assertIn("舊 Entry／SL／TP 不會復活", html)
         self.assertIn("舊交易計畫已結束", html)
         self.assertIn("signalTradeGrid(item,{prefix:'原始 ',original:true})", html)
-        self.assertIn("okx-radar-shell-v4.3-preflight-flow-2", worker)
+        self.assertIn("okx-radar-shell-v4.3-intraday-flow-1", worker)
 
     def test_market_scan_has_no_github_schedule(self):
         root = Path(__file__).parents[1]

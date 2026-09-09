@@ -84,6 +84,7 @@ def _preflight_continuation_state(value: dict[str, Any]) -> dict[str, Any]:
         "capital_flow": public_capital_flow_payload(
             observer.get("capital_flow")
         ),
+        "cross_timeframe": value.get("cross_timeframe", {}),
     }
 
 
@@ -104,6 +105,7 @@ def _preflight_continuation_payload(
             "label": "資料不足",
             # A failed refresh must never make the scan-time view look current.
             "capital_flow": {},
+            "cross_timeframe": {},
         }
     direction = str(getattr(signal, "direction", "") or "").upper()
     return {
@@ -3000,6 +3002,7 @@ class RadarRuntime:
             "inst_id": analysis.inst_id,
             "analyzed_at": analysis.analyzed_at,
             "source": "ON_DEMAND_SINGLE_INSTRUMENT",
+            "cross_timeframe": getattr(analysis, "cross_timeframe", {}),
             "requested_horizon": requested_horizon,
             "direction_lock": requested_direction_lock,
             "current_price": analysis.ticker.last,
@@ -4571,17 +4574,17 @@ def serve(runtime: RadarRuntime, host: str, port: int) -> None:
         def do_POST(self) -> None:  # noqa: N802
             path = urlparse(self.path).path
             if path == "/api/instrument/scan":
-                # Removed from the product UI.  Return an explicit terminal
-                # response for older installed PWA shells so they cannot
-                # trigger the heavier multi-timeframe single-symbol scan.
-                self._send_json(
-                    HTTPStatus.GONE,
-                    {
-                        "error": (
-                            "幣種更新已停用；請從正式訊號卡使用進場前更新。"
-                        )
-                    },
-                )
+                try:
+                    payload = self._read_json_body()
+                    result = runtime.scan_instrument_dict(
+                        str(payload.get("inst_id") or ""),
+                        str(payload.get("horizon") or "SHORT"),
+                        payload.get("direction_lock"),
+                    )
+                except PreflightError as exc:
+                    self._send_json(exc.status, exc.response_payload())
+                else:
+                    self._send_json(HTTPStatus.OK, result)
                 return
             if path == "/api/preflight/reanalyze":
                 try:

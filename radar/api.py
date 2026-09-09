@@ -594,6 +594,39 @@ class OKXPublicClient:
             self._open_interest_timestamps = timestamps
         return _float_or_none(row.get("oiUsd"))
 
+    def get_contract_taker_history(
+        self, inst_id: str, period: str = "5m", limit: int = 60,
+        *, request_retries: int | None = None,
+        request_timeout_seconds: float | None = None,
+    ) -> list[dict[str, Any]]:
+        """OKX contract-specific interval flow, quote unit; never coin-wide flow.
+
+        Official V5: /rubik/stat/taker-volume-contract, unit=2 (U),
+        positional response [ts, sellVol, buyVol]. Consumers verify closed
+        bucket coverage and matching candle quote-volume before using delta.
+        """
+        symbol = _usdt_contract_inst_id(inst_id)
+        if period != "5m" or isinstance(limit, bool) or not isinstance(limit, int) or not 1 <= limit <= 100:
+            raise ValueError("taker history requires 5m and limit between 1 and 100")
+        data = self._get(
+            "/api/v5/rubik/stat/taker-volume-contract",
+            {"instId": symbol, "period": period, "limit": limit, "unit": "2"},
+            **_request_overrides(request_retries, request_timeout_seconds),
+        )
+        output = []
+        for row in data:
+            if not isinstance(row, (list, tuple)) or len(row) < 3:
+                continue
+            try:
+                ts, sell, buy = int(row[0]), float(row[1]), float(row[2])
+            except (TypeError, ValueError, OverflowError):
+                continue
+            if ts <= 0 or not all(math.isfinite(v) and v >= 0 for v in (sell, buy)):
+                continue
+            output.append({"ts": ts, "sell": sell, "buy": buy,
+                           "unit": "USDT", "inst_id": symbol})
+        return sorted(output, key=lambda value: value["ts"])
+
     def get_open_interest_history(
         self,
         inst_id: str,

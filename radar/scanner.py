@@ -23,6 +23,7 @@ from .continuation import (
     CAPITAL_FLOW_HISTORY_LIMIT,
     summarize_closed_lookback_samples,
 )
+from .intraday_flow import summarize_intraday_flow
 from .decision import build_decision_context
 from .models import Candle, Instrument, MarketContext, MarketState, RadarReport, Signal, Ticker
 from .repository import SignalRepository, classify_microstructure
@@ -121,6 +122,7 @@ class SingleInstrumentScan:
     long_result: AnalysisResult | None
     analyzed_at: str
     errors: list[str]
+    cross_timeframe: dict[str, Any] = field(default_factory=dict)
 
 
 ProgressCallback = Callable[[str, int | None, int | None, str], None]
@@ -485,6 +487,7 @@ class MarketScanner:
                         instrument_map[inst_id],
                         tickers[inst_id],
                         bundle,
+                        allow_opposite_episode=True,
                     )
                 except Exception as exc:
                     analysis_failures[f"{inst_id}:SHORT"] = f"短線分析錯誤：{exc}"
@@ -576,6 +579,7 @@ class MarketScanner:
                         instrument_map[inst_id],
                         tickers[inst_id],
                         bundles[inst_id],
+                        allow_opposite_episode=True,
                     )
                     if long_result is not None:
                         long_results[inst_id] = long_result
@@ -1498,6 +1502,7 @@ class MarketScanner:
         timing: list[Candle] = []
         lookback_samples: list[dict[str, Any]] = []
         capital_samples: list[dict[str, Any]] = []
+        history: list[dict[str, Any]] = []
         loaded_context: MarketContext | None = None
         try:
             if callable(oi_loader):
@@ -1519,7 +1524,7 @@ class MarketScanner:
                     oi_history_loader,
                     inst_id,
                     "5m",
-                    20,
+                    60,
                     _retry_limit=1,
                     _timeout_limit=6.0,
                 )
@@ -1823,6 +1828,7 @@ class MarketScanner:
             long_result=finalized_long,
             analyzed_at=analyzed_at,
             errors=list(dict.fromkeys([*errors, *advisory_errors])),
+            cross_timeframe=self._intraday_flow(inst_id, timing, history),
         )
 
     @staticmethod
@@ -2345,8 +2351,11 @@ class MarketScanner:
         instrument: Instrument,
         ticker: Ticker,
         bundle: dict[str, list[Candle]],
+        *, allow_opposite_episode: bool = False,
     ) -> AnalysisResult:
         previous = self.repository.load_story(instrument.inst_id, "SHORT")
+        previous = dict(previous or {})
+        previous["allow_opposite_episode"] = allow_opposite_episode
         parameters = inspect.signature(self.engine.analyze).parameters
         kwargs: dict[str, Any] = {}
         if "previous_story" in parameters:
@@ -2374,11 +2383,14 @@ class MarketScanner:
         instrument: Instrument,
         ticker: Ticker,
         bundle: dict[str, list[Candle]],
+        *, allow_opposite_episode: bool = False,
     ) -> AnalysisResult | None:
         analyzer = getattr(self.engine, "analyze_long", None)
         if not callable(analyzer):
             return None
         previous = self.repository.load_story(instrument.inst_id, "LONG")
+        previous = dict(previous or {})
+        previous["allow_opposite_episode"] = allow_opposite_episode
         parameters = inspect.signature(analyzer).parameters
         kwargs: dict[str, Any] = {}
         if "previous_story" in parameters:
@@ -2637,6 +2649,19 @@ class MarketScanner:
             candidate_signal=updated_candidate,
         )
 
+    def _intraday_flow(self, inst_id, candles, history) -> dict[str, Any]:
+        loader = getattr(self.client, "get_contract_taker_history", None)
+        taker = []
+        if callable(loader):
+            try:
+                taker = self._single_scan_call(loader, inst_id, "5m", 60,
+                                               _retry_limit=0, _timeout_limit=3.0)
+            except Exception:
+                # Auxiliary failure must not hide the price plan or block publication.
+                taker = []
+        return summarize_intraday_flow(inst_id, candles, history, taker,
+                                       observed_at_ms=int(time.time() * 1000))
+
     def refresh_continuation_for_signal(self, signal: Signal) -> dict[str, Any]:
         """Refresh only the original Trigger's directional follow-through.
 
@@ -2658,7 +2683,7 @@ class MarketScanner:
                 self.client.get_open_interest_history,
                 signal.inst_id,
                 "5m",
-                20,
+                60,
                 _retry_limit=1,
                 _timeout_limit=6.0,
             )
@@ -2699,7 +2724,9 @@ class MarketScanner:
         metrics["continuation_lookback"] = summary
         refreshed = replace(signal, market_metrics=metrics)
         decision = build_decision_context(refreshed, self.config)
-        return dict(decision.get("continuation_confirmation") or {})
+        result = dict(decision.get("continuation_confirmation") or {})
+        result["cross_timeframe"] = self._intraday_flow(signal.inst_id, candles, history)
+        return result
 
     @staticmethod
     def _rank_context_candidates(
