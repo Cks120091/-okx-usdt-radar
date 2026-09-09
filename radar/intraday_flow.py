@@ -153,7 +153,19 @@ def summarize_intraday_flow(inst_id: str, candles: Sequence[Candle], oi_history:
         shift = now_delta - prior_delta
         comparison = {"status": "OK", "imbalance_change_pp": shift,
             "label": "主動成交向買方移動" if shift > 5 else "主動成交向賣方移動" if shift < -5 else "主動成交比例大致持平"}
-    return {"schema_version": VERSION, "inst_id": inst_id, "source": "OKX_CONTRACT_HISTORY",
+    structure = {}
+    structure_stamps = list(range(end - 15 * INTERVAL_MS, end, INTERVAL_MS))
+    if all(ts in closed for ts in structure_stamps):
+        tail = [closed[ts] for ts in structure_stamps]
+        if all(0 < bar.low <= min(bar.open, bar.close) <= max(bar.open, bar.close) <= bar.high
+               and all(math.isfinite(v) for v in (bar.low, bar.high, bar.open, bar.close)) for bar in tail):
+            ranges = [max(bar.high - bar.low, abs(bar.high - prior.close), abs(bar.low - prior.close))
+                      for prior, bar in zip(tail, tail[1:])]
+            structure = {"as_of_ms": end, "low_15m": min(bar.low for bar in tail[-3:]),
+                         "high_15m": max(bar.high for bar in tail[-3:]),
+                         "atr_5m": sum(ranges) / len(ranges),
+                         "method": "CLOSED_5M_TRUE_RANGE_MEAN_14"}
+    return {"closed_structure": structure, "schema_version": VERSION, "inst_id": inst_id, "source": "OKX_CONTRACT_HISTORY",
         "as_of_ms": end, "observed_at_ms": observed_at_ms, "windows": rows, "previous_15m": previous,
         "change_vs_previous_15m": comparison, "summary": summary,
         "permission": "CONTEXT_ONLY_NEVER_CREATES_OR_CANCELS_TRIGGER",
