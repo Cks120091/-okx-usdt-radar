@@ -19,7 +19,7 @@ jobs:
         run: |
           mkdir -p review-bundle/wheels
           git archive --format=zip --output=review-bundle/radar-source.zip HEAD
-          python -m pip download -r requirements.txt --only-binary=:all: -d review-bundle/wheels
+          python -m pip wheel -r requirements.txt -w review-bundle/wheels || true
           python - <<'PY'
           import urllib.request
           from pathlib import Path
