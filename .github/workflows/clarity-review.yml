@@ -1,0 +1,98 @@
+name: Clarity UI and exit review validation
+on:
+  push:
+    branches: [fix/clarity-exit-review-20260909]
+permissions:
+  contents: write
+concurrency:
+  group: clarity-review-${{ github.ref }}
+  cancel-in-progress: false
+jobs:
+  review:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v6
+      - uses: actions/setup-python@v6
+        with:
+          python-version: '3.12'
+      - name: Apply checksum-verified source edits
+        run: |
+          python - <<'PY'
+          import base64, hashlib, json, lzma
+          from pathlib import Path
+          allowed = {'README.md','radar/exit_review.py','radar/intraday_flow.py','radar/service.py','radar/static/pages.html','radar/static/service-worker.js','scripts/check_clarity_ui.py','scripts/check_intraday_ui.py','tests/test_exit_review.py','tests/test_v2_contract.py'}
+          encoded = ''.join(Path(f'.github/clarity-edit-{i}.b64').read_text().strip() for i in range(3))
+          raw = lzma.decompress(base64.b64decode(encoded, validate=True))
+          assert hashlib.sha256(raw).hexdigest() == '925ef483746358b1860bfe22362a3d4e8bfd153f2b87fd7f2845f95ea4ede71a', 'Bundle checksum mismatch'
+          edits = json.loads(raw)
+          assert len(edits) == len(allowed) and {e['path'] for e in edits} == allowed
+          prepared = []
+          for edit in edits:
+              path = Path(edit['path'])
+              current = path.read_bytes() if path.exists() else b''
+              digest = hashlib.sha256(current).hexdigest()
+              if digest == edit['new']:
+                  continue
+              assert digest == edit['old'], f'Unexpected existing content: {path}'
+              lines = current.decode('utf-8').splitlines(keepends=True)
+              for start, end, replacement in reversed(edit['changes']):
+                  assert 0 <= start <= end <= len(lines)
+                  lines[start:end] = replacement.splitlines(keepends=True)
+              updated = ''.join(lines).encode('utf-8')
+              assert hashlib.sha256(updated).hexdigest() == edit['new'], f'Output checksum mismatch: {path}'
+              prepared.append((path, updated))
+          for path, updated in prepared:
+              path.parent.mkdir(parents=True, exist_ok=True)
+              path.write_bytes(updated)
+          print('All ten source paths and pre/post checksums verified')
+          PY
+      - name: Install test dependencies
+        run: python -m pip install -r requirements.txt playwright
+      - name: Python regression and formatting
+        run: |
+          python -m compileall -q radar run.py scripts tests
+          python -m unittest discover -s tests -v
+          git diff --check
+      - name: JavaScript syntax
+        run: |
+          python - <<'PY'
+          import re
+          from pathlib import Path
+          html = Path('radar/static/pages.html').read_text()
+          Path('/tmp/radar-ui.js').write_text('\n'.join(re.findall(r'<script(?:\s[^>]*)?>(.*?)</script>', html, re.S)))
+          PY
+          node --check /tmp/radar-ui.js
+      - name: Browser availability
+        run: |
+          if ! command -v google-chrome && ! command -v chromium; then
+            python -m playwright install --with-deps chromium
+          fi
+      - name: Compact cards and separate data page on four screen widths
+        run: python scripts/check_clarity_ui.py
+      - name: Single-coin scan and direction-lock browser regression
+        run: python scripts/check_intraday_ui.py
+      - name: Commit verified implementation to review branch only
+        run: |
+          test "${GITHUB_REF_NAME}" = 'fix/clarity-exit-review-20260909'
+          git add README.md radar/exit_review.py radar/intraday_flow.py radar/service.py radar/static/pages.html radar/static/service-worker.js scripts/check_clarity_ui.py scripts/check_intraday_ui.py tests/test_exit_review.py tests/test_v2_contract.py
+          if ! git diff --cached --quiet; then
+            git config user.name 'github-actions[bot]'
+            git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+            git commit -m 'Simplify radar cards and data detail view; add read-only exit management review'
+            git push origin HEAD:fix/clarity-exit-review-20260909
+          fi
+          git rev-parse HEAD
+          git rev-parse HEAD^{tree}
+          git ls-files -s README.md radar/exit_review.py radar/intraday_flow.py radar/service.py radar/static/pages.html radar/static/service-worker.js scripts/check_clarity_ui.py scripts/check_intraday_ui.py tests/test_exit_review.py tests/test_v2_contract.py
+      - name: Export tested source and manifest
+        run: |
+          mkdir -p clarity-result
+          git archive --format=zip --output=clarity-result/tested-source.zip HEAD
+          git rev-parse HEAD > clarity-result/commit.txt
+          git ls-files -s > clarity-result/git-files.txt
+      - uses: actions/upload-artifact@v4
+        with:
+          name: tested-clarity-implementation
+          path: clarity-result/
+          retention-days: 3
