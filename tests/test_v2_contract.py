@@ -736,6 +736,30 @@ class V33ContractTests(unittest.TestCase):
         self.assertNotIn("instrumentButton", decision_panel)
         self.assertIn("status==='HARD_GATE_BLOCKED'", decision_panel)
         self.assertIn("function decisionAlertItems(item)", html)
+        self.assertIn("decisionExecutionNoticeHtml(item)", decision_panel)
+        self.assertIn("function decisionExecutionNoticeHtml(item)", html)
+        self.assertIn("decisionDirectionNoticeHtml(item)", decision_panel)
+        self.assertIn("function decisionDirectionNoticeHtml(item)", html)
+        self.assertIn("執行資料提醒｜不作為禁止條件", html)
+        self.assertIn("滑價／成本暫時無法估算", html)
+        alert_items = html.split("function decisionAlertItems(item)", 1)[1].split(
+            "function decisionAlertHtml", 1
+        )[0]
+        self.assertIn("status||'').toUpperCase()==='BLOCKED'", alert_items)
+        self.assertIn("check?.hard!==false", alert_items)
+        self.assertIn("gate.reasons.slice(0,blockerCount)", alert_items)
+        self.assertNotIn("conflict.items", alert_items)
+        execution_notice = html.split(
+            "function decisionExecutionNoticeHtml(item)", 1
+        )[1].split("function decisionPanel", 1)[0]
+        self.assertIn("check?.hard===false", execution_notice)
+        self.assertIn("toUpperCase()==='UNKNOWN'", execution_notice)
+        self.assertIn("['slippage','execution_cost']", execution_notice)
+        self.assertNotIn("gate.unknowns", execution_notice)
+        direction_notice = html.split(
+            "function decisionDirectionNoticeHtml(item)", 1
+        )[1].split("function decisionExecutionNoticeHtml", 1)[0]
+        self.assertIn("方向衝突提醒｜不單獨禁止進場", direction_notice)
         self.assertIn("高週期方向與本卡相反，這是逆勢訊號", html)
         self.assertNotIn("function entryBadge(item)", html)
         self.assertIn("function reportRenderFingerprint(report)", html)

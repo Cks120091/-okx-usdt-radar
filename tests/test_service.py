@@ -1312,6 +1312,118 @@ class RuntimeSafetyTests(unittest.TestCase):
                 merged = _merge_preflight_confirmation(preflight, confirmation)
                 self.assertFalse(merged["latest_confirmation"]["new_entry_allowed"])
 
+    def test_optional_execution_estimate_gap_does_not_block_ready_entry(self):
+        confirmation = {
+            "status": "REVALIDATED",
+            "new_entry_allowed": True,
+            "hard_blockers": [],
+            "risk_warnings": ["slippage", "execution_cost"],
+        }
+        preflight = {
+            "direction": "LONG",
+            "verdict": {
+                "status": "ENTRY_READY",
+                "situation": "IN_ENTRY_AREA",
+                "actionable": True,
+                "new_entry_allowed": True,
+                "hard_blockers": [],
+                "risk_warnings": ["EXECUTION_ESTIMATE_UNAVAILABLE"],
+            },
+            "signal_lifecycle": {
+                "status": "ACTIVE",
+                "active": True,
+                "terminal": False,
+                "triggered": True,
+            },
+            "plan_state": {
+                "status": "ACTIVE",
+                "new_entry_status": "READY",
+                "new_entry_allowed": True,
+                "old_plan_reusable": True,
+                "old_plan_reusable_for_new_entry": True,
+                "direction_still_valid": True,
+            },
+            "data_quality": {
+                "status": "PARTIAL",
+                "missing_sources": ["order_book_depth"],
+                "required_missing_sources": [],
+                "optional_missing_sources": ["order_book_depth"],
+            },
+        }
+
+        merged = _merge_preflight_confirmation(preflight, confirmation)
+        decision = _canonical_single_decision(
+            allow_entry(signal()),
+            merged,
+            merged["latest_confirmation"],
+        )
+
+        self.assertEqual(merged["verdict"]["status"], "ENTRY_READY")
+        self.assertTrue(merged["verdict"]["actionable"])
+        self.assertTrue(merged["latest_confirmation"]["new_entry_allowed"])
+        self.assertEqual(decision["final"]["status"], "ENTER")
+        self.assertTrue(decision["final"]["new_entry_allowed"])
+
+        required_missing = {
+            **preflight,
+            "data_quality": {
+                "status": "PARTIAL",
+                "missing_sources": ["ticker_quote_volume_24h"],
+                "required_missing_sources": ["ticker_quote_volume_24h"],
+                "optional_missing_sources": [],
+            },
+        }
+        required_decision = _canonical_single_decision(
+            allow_entry(signal()),
+            required_missing,
+            confirmation,
+        )
+        self.assertEqual(
+            required_decision["final"]["status"],
+            "DATA_UNAVAILABLE",
+        )
+        self.assertFalse(required_decision["final"]["new_entry_allowed"])
+
+        inconsistent_split = {
+            **preflight,
+            "data_quality": {
+                "status": "PARTIAL",
+                "missing_sources": ["ticker_quote_volume_24h"],
+                "required_missing_sources": [],
+                "optional_missing_sources": ["order_book_depth"],
+                "quote_volume_available": False,
+            },
+        }
+        inconsistent_decision = _canonical_single_decision(
+            allow_entry(signal()),
+            inconsistent_split,
+            confirmation,
+        )
+        self.assertEqual(
+            inconsistent_decision["final"]["status"],
+            "DATA_UNAVAILABLE",
+        )
+        self.assertFalse(inconsistent_decision["final"]["new_entry_allowed"])
+
+        incomplete_split = {
+            **preflight,
+            "data_quality": {
+                "status": "PARTIAL",
+                "missing_sources": ["ticker_quote_volume_24h"],
+                "optional_missing_sources": ["order_book_depth"],
+            },
+        }
+        incomplete_decision = _canonical_single_decision(
+            allow_entry(signal()),
+            incomplete_split,
+            confirmation,
+        )
+        self.assertEqual(
+            incomplete_decision["final"]["status"],
+            "DATA_UNAVAILABLE",
+        )
+        self.assertFalse(incomplete_decision["final"]["new_entry_allowed"])
+
     def test_legacy_denial_markers_cannot_become_enter(self):
         confirmation = {
             "status": "REVALIDATED",

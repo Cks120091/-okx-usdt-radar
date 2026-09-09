@@ -685,7 +685,7 @@ class PreflightTests(unittest.TestCase):
         self.assertEqual(rr["verdict"]["status"], "HARD_GATE_BLOCKED")
         self.assertIn("RR_INSUFFICIENT", rr["verdict"]["hard_blockers"])
 
-    def test_missing_book_timestamp_cannot_reuse_numeric_cost_for_permission(self):
+    def test_missing_book_timestamp_is_advisory_and_does_not_reuse_numeric_cost(self):
         signal = make_signal()
         client = PreflightClient(price=100.0)
         context = replace(
@@ -703,11 +703,48 @@ class PreflightTests(unittest.TestCase):
             report_generated_at=datetime.now(timezone.utc).isoformat(),
         )
 
-        self.assertEqual(payload["verdict"]["status"], "DATA_UNAVAILABLE")
-        self.assertEqual(
-            payload["verdict"]["hard_blockers"],
-            ["EXECUTION_DATA_UNAVAILABLE"],
+        self.assertEqual(payload["verdict"]["status"], "ENTRY_READY")
+        self.assertEqual(payload["verdict"]["hard_blockers"], [])
+        self.assertIn(
+            "EXECUTION_ESTIMATE_UNAVAILABLE",
+            payload["verdict"]["risk_warnings"],
         )
+        self.assertTrue(payload["verdict"]["actionable"])
+        self.assertTrue(payload["plan_state"]["new_entry_allowed"])
+        self.assertIsNone(payload["execution"]["estimated_round_trip_cost_pct"])
+        self.assertIsNone(payload["execution"]["execution_cost_to_risk_pct"])
+        self.assertIsNone(payload["execution"]["buy_slippage_pct"])
+        self.assertIsNone(payload["execution"]["sell_slippage_pct"])
+        self.assertNotIn("估算滑價偏高", payload["warnings"])
+        self.assertNotIn("交易成本占原始風險超過建議上限", payload["warnings"])
+        self.assertEqual(
+            payload["data_quality"]["required_missing_sources"],
+            [],
+        )
+        self.assertEqual(
+            payload["data_quality"]["optional_missing_sources"],
+            ["order_book_depth"],
+        )
+
+    def test_fresh_known_high_slippage_still_blocks_partial_book(self):
+        signal = make_signal()
+        client = PreflightClient(price=100.0)
+        context = replace(
+            client.get_execution_context(signal.inst_id),
+            buy_slippage_pct=0.20,
+            sell_slippage_pct=None,
+        )
+
+        payload = build_preflight_payload(
+            signal,
+            client.get_ticker(signal.inst_id),
+            context,
+            AppConfig(),
+            report_generated_at=datetime.now(timezone.utc).isoformat(),
+        )
+
+        self.assertEqual(payload["verdict"]["status"], "HARD_GATE_BLOCKED")
+        self.assertIn("SLIPPAGE_TOO_HIGH", payload["verdict"]["hard_blockers"])
         self.assertFalse(payload["verdict"]["actionable"])
         self.assertFalse(payload["plan_state"]["new_entry_allowed"])
 

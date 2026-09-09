@@ -1520,6 +1520,7 @@ class ScannerTests(unittest.TestCase):
             "high_slippage": (
                 {"buy_slippage_pct": 0.30},
                 "SLIPPAGE_TOO_HIGH",
+                False,
             ),
             "missing_order_book": (
                 {
@@ -1527,16 +1528,24 @@ class ScannerTests(unittest.TestCase):
                     "buy_slippage_pct": None,
                 },
                 "EXECUTION_DATA_UNAVAILABLE",
+                True,
             ),
             "cost_too_high": (
                 {"execution_cost_to_risk_pct": 20.0},
                 "EXECUTION_COST_TOO_HIGH",
+                False,
             ),
         }
 
-        for name, (metric_updates, expected_blocker) in cases.items():
+        for name, (
+            metric_updates,
+            expected_blocker,
+            expected_decision_allowed,
+        ) in cases.items():
             with self.subTest(case=name):
-                signal = qualified_signal()
+                # Keep R:R independently above the hard minimum so this table
+                # exercises only the execution-estimate behavior.
+                signal = replace(qualified_signal(), take_profit_1="106")
                 metrics = {
                     **signal.market_metrics,
                     **metric_updates,
@@ -1569,6 +1578,12 @@ class ScannerTests(unittest.TestCase):
                 self.assertEqual(
                     returned_to_entry.entry_eligibility["status"],
                     "ENTRY_READY",
+                )
+                decided = scanner._attach_decision_context(returned_to_entry)
+                self.assertEqual(decided.actionable, expected_decision_allowed)
+                self.assertEqual(
+                    decided.decision_context["final"]["new_entry_allowed"],
+                    expected_decision_allowed,
                 )
 
     def test_execution_cost_warning_band_remains_entry_ready_end_to_end(self):

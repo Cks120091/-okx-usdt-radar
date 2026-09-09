@@ -143,19 +143,19 @@ def build_preflight_payload(
         execution_quality={"entry_location": entry_location},
         trigger_direction=signal.direction,
     )
+    book_available = bool(context.source_timestamps.get("order_book"))
     quality = execution_quality(
         live_story,
         live_spread_pct,
         risk_pct,
         max(quality_rr, 0.0),
-        context,
+        context if book_available else None,
         target_rr=config.minimum_rr,
         max_cost_to_risk_pct=config.max_execution_cost_to_risk_pct,
         max_spread_pct=config.max_spread_pct,
         max_slippage_pct=config.max_slippage_pct,
         estimated_taker_fee_pct=config.estimated_taker_fee_pct,
     )
-    book_available = bool(context.source_timestamps.get("order_book"))
     execution_complete = context.execution_quality_complete and book_available
     directional_slippage = (
         context.buy_slippage_pct
@@ -179,22 +179,28 @@ def build_preflight_payload(
     cost_to_risk = raw_cost_to_risk
     risk_warning_codes: list[str] = []
     unavailable_warning_codes: set[str] = set()
+    advisory_warning_codes: set[str] = set()
     live_quote_volume = liquidity_policy["volume_usdt"]
     if live_quote_volume is None:
         risk_warning_codes.append("QUOTE_VOLUME_DATA_UNAVAILABLE")
         unavailable_warning_codes.add("QUOTE_VOLUME_DATA_UNAVAILABLE")
     elif live_quote_volume < liquidity_policy["effective_min_usdt"]:
         risk_warning_codes.append("LIQUIDITY_TOO_LOW")
-    if not execution_complete or directional_slippage is None:
-        risk_warning_codes.append("EXECUTION_DATA_UNAVAILABLE")
-        unavailable_warning_codes.add("EXECUTION_DATA_UNAVAILABLE")
-    elif directional_slippage > config.max_slippage_pct:
+    known_slippage = [
+        value
+        for value in (context.buy_slippage_pct, context.sell_slippage_pct)
+        if book_available and value is not None
+    ]
+    if any(value > config.max_slippage_pct for value in known_slippage):
         risk_warning_codes.append("SLIPPAGE_TOO_HIGH")
+    elif not execution_complete or directional_slippage is None:
+        risk_warning_codes.append("EXECUTION_ESTIMATE_UNAVAILABLE")
+        advisory_warning_codes.add("EXECUTION_ESTIMATE_UNAVAILABLE")
     if live_spread_pct > config.max_spread_pct:
         risk_warning_codes.append("SPREAD_TOO_HIGH")
     if cost_to_risk is None:
-        risk_warning_codes.append("EXECUTION_DATA_UNAVAILABLE")
-        unavailable_warning_codes.add("EXECUTION_DATA_UNAVAILABLE")
+        risk_warning_codes.append("EXECUTION_ESTIMATE_UNAVAILABLE")
+        advisory_warning_codes.add("EXECUTION_ESTIMATE_UNAVAILABLE")
     elif cost_to_risk > config.max_execution_cost_to_risk_pct:
         risk_warning_codes.append("EXECUTION_COST_TOO_HIGH")
     # On the adverse side of Entry the plan first needs a structural retest,
@@ -274,6 +280,9 @@ def build_preflight_payload(
             f"{liquidity_policy['effective_min_usdt']:,.0f} 門檻"
         ),
         "EXECUTION_DATA_UNAVAILABLE": "Order Book／Slippage 資料不足",
+        "EXECUTION_ESTIMATE_UNAVAILABLE": (
+            "Order Book 深度暫缺，滑價／成本未估算（不禁止進場）"
+        ),
         "SLIPPAGE_TOO_HIGH": "Slippage（滑價）超過建議值",
         "SPREAD_TOO_HIGH": "Spread（買賣價差）超過建議值",
         "EXECUTION_COST_TOO_HIGH": "交易成本占風險偏高",
@@ -344,16 +353,19 @@ def build_preflight_payload(
     elif verdict_status == "MISSED_ENTRY":
         entry_situation = "ENTRY_WINDOW_CLOSED"
 
-    # A price Trigger remains visible for lifecycle/position management, but
-    # execution failures are binding for *new* entries.  Previously these were
-    # rendered as warnings beside an actionable ENTRY_READY verdict, which
-    # allowed a wide spread, excessive slippage/cost, insufficient R:R or an
-    # opposite formal Trigger to look tradable.
+    # A price Trigger remains visible for lifecycle/position management. Known
+    # execution failures are binding for *new* entries, while a missing depth
+    # estimate is advisory because the fresh Bid/Ask and Spread are checked
+    # independently. Never treat "not measured" as a zero-cost pass.
     # Keep binding reasons on the payload even while price location already
     # says WAIT/MISSED.  Otherwise an opposite/risk block disappears from the
     # plan contract until price happens to become ENTRY_READY, and cached
     # consumers can incorrectly regard the old plan as reusable for entry.
-    hard_blockers: list[str] = list(risk_warning_codes)
+    hard_blockers: list[str] = [
+        code
+        for code in risk_warning_codes
+        if code not in advisory_warning_codes
+    ]
     if verdict_status == "ENTRY_READY" and hard_blockers:
         if set(hard_blockers).issubset(unavailable_warning_codes):
             verdict_status = "DATA_UNAVAILABLE"
@@ -536,15 +548,33 @@ def build_preflight_payload(
             "best_bid": round(best_bid, 12),
             "best_ask": round(best_ask, 12),
             "spread_pct": round(live_spread_pct, 4),
-            "buy_slippage_pct": _round_or_none(context.buy_slippage_pct, 5),
-            "sell_slippage_pct": _round_or_none(context.sell_slippage_pct, 5),
-            "estimated_round_trip_cost_pct": quality.get("estimated_round_trip_cost_pct"),
-            "execution_cost_to_risk_pct": quality.get("execution_cost_to_risk_pct"),
-            "bid_depth_usd": _round_or_none(context.bid_depth_usd, 2),
-            "ask_depth_usd": _round_or_none(context.ask_depth_usd, 2),
+            "buy_slippage_pct": _round_or_none(
+                context.buy_slippage_pct if book_available else None,
+                5,
+            ),
+            "sell_slippage_pct": _round_or_none(
+                context.sell_slippage_pct if book_available else None,
+                5,
+            ),
+            "estimated_round_trip_cost_pct": _round_or_none(
+                raw_execution_cost,
+                4,
+            ),
+            "execution_cost_to_risk_pct": _round_or_none(
+                raw_cost_to_risk,
+                1,
+            ),
+            "bid_depth_usd": _round_or_none(
+                context.bid_depth_usd if book_available else None,
+                2,
+            ),
+            "ask_depth_usd": _round_or_none(
+                context.ask_depth_usd if book_available else None,
+                2,
+            ),
             "order_book_imbalance_pct": _round_or_none(
                 (context.order_book_imbalance or 0.0) * 100.0
-                if context.order_book_imbalance is not None
+                if book_available and context.order_book_imbalance is not None
                 else None,
                 1,
             ),
@@ -564,6 +594,16 @@ def build_preflight_payload(
             "quote_volume_available": live_quote_volume is not None,
             "order_book_available": book_available,
             "execution_depth_complete": context.execution_quality_complete,
+            "required_missing_sources": [
+                *(
+                    []
+                    if live_quote_volume is not None
+                    else ["ticker_quote_volume_24h"]
+                ),
+            ],
+            "optional_missing_sources": [
+                *([] if execution_complete else ["order_book_depth"]),
+            ],
             "missing_sources": [
                 *([] if execution_complete else ["order_book_depth"]),
                 *([] if live_quote_volume is not None else ["ticker_quote_volume_24h"]),
@@ -576,7 +616,8 @@ def build_preflight_payload(
             "entry_veto_enabled": True,
             "note": (
                 "即時檢查不產生、刪除、改寫或隱藏核心 Trigger；"
-                "失敗或未知的硬性條件會禁止新進場，舊計畫仍保留供既有持倉管理。"
+                "必要條件失敗或未知會禁止新進場；Order Book 深度估算暫缺只提醒。"
+                "舊計畫仍保留供既有持倉管理。"
             ),
         },
     }

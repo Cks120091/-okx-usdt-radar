@@ -487,7 +487,7 @@ class DecisionContextTests(unittest.TestCase):
                 self.assertEqual(result["final"]["status"], "DATA_UNAVAILABLE")
                 self.assertFalse(result["final"]["new_entry_allowed"])
 
-    def test_missing_execution_numbers_fail_closed(self):
+    def test_missing_execution_estimates_are_advisory_only(self):
         item = complete_signal()
         del item["market_metrics"]["buy_slippage_pct"]
         del item["market_metrics"]["execution_cost_to_risk_pct"]
@@ -495,12 +495,35 @@ class DecisionContextTests(unittest.TestCase):
 
         result = build_decision_context(item)
 
-        self.assertEqual(result["hard_gate"]["status"], "UNKNOWN")
-        self.assertIn("slippage", result["hard_gate"]["unknowns"])
-        self.assertIn("execution_cost", result["hard_gate"]["unknowns"])
-        self.assertEqual(result["final"]["status"], "DATA_UNAVAILABLE")
+        checks = {
+            check["key"]: check
+            for check in result["hard_gate"]["checks"]
+        }
+        self.assertEqual(result["hard_gate"]["status"], "PASSED")
+        self.assertNotIn("slippage", result["hard_gate"]["unknowns"])
+        self.assertNotIn("execution_cost", result["hard_gate"]["unknowns"])
+        self.assertEqual(checks["slippage"]["status"], "UNKNOWN")
+        self.assertFalse(checks["slippage"]["hard"])
+        self.assertEqual(checks["execution_cost"]["status"], "UNKNOWN")
+        self.assertFalse(checks["execution_cost"]["hard"])
+        self.assertTrue(
+            any("不禁止進場" in warning for warning in result["hard_gate"]["warnings"])
+        )
+        self.assertEqual(result["final"]["status"], "ENTER")
+        self.assertTrue(result["final"]["new_entry_allowed"])
+        self.assertIsNone(result["final"]["wait_reason"])
+
+    def test_known_high_slippage_blocks_even_when_other_side_is_missing(self):
+        item = complete_signal()
+        item["market_metrics"]["buy_slippage_pct"] = 0.20
+        del item["market_metrics"]["sell_slippage_pct"]
+
+        result = build_decision_context(item)
+
+        self.assertEqual(result["hard_gate"]["status"], "BLOCKED")
+        self.assertIn("slippage", result["hard_gate"]["blockers"])
+        self.assertEqual(result["final"]["status"], "HARD_GATE_BLOCKED")
         self.assertFalse(result["final"]["new_entry_allowed"])
-        self.assertEqual(result["final"]["wait_reason"]["code"], "DATA_MISSING")
 
     def test_failed_legacy_hard_check_vetoes_ready_entry(self):
         item = complete_signal()

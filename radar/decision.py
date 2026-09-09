@@ -367,21 +367,41 @@ def _hard_gate(
 
     buy_slippage = _number(metrics.get("buy_slippage_pct"))
     sell_slippage = _number(metrics.get("sell_slippage_pct"))
-    slippage = (
-        max(buy_slippage, sell_slippage)
-        if buy_slippage is not None and sell_slippage is not None
-        else None
-    )
-    _numeric_limit_check(
-        checks,
-        key="slippage",
-        label="Slippage（滑價）未超過建議值",
-        value=slippage,
-        limit=limits["max_slippage_pct"],
-        comparison="MAX",
-        missing_reason="缺少完整買入／賣出滑價，執行風險未知。",
-        blocked_reason="估算滑價超過建議值。",
-    )
+    known_slippage = [
+        value
+        for value in (buy_slippage, sell_slippage)
+        if value is not None
+    ]
+    if any(value > limits["max_slippage_pct"] for value in known_slippage):
+        _add_check(
+            checks,
+            "slippage",
+            "Slippage（滑價）未超過建議值",
+            "BLOCKED",
+            round(max(known_slippage), 6),
+            "已取得的估算滑價超過建議值。",
+        )
+    elif buy_slippage is None or sell_slippage is None:
+        _add_check(
+            checks,
+            "slippage",
+            "Slippage（滑價）未超過建議值",
+            "UNKNOWN",
+            None,
+            "本輪未取得完整買入／賣出滑價；只顯示提醒，不禁止進場。",
+            hard=False,
+        )
+    else:
+        _numeric_limit_check(
+            checks,
+            key="slippage",
+            label="Slippage（滑價）未超過建議值",
+            value=max(buy_slippage, sell_slippage),
+            limit=limits["max_slippage_pct"],
+            comparison="MAX",
+            missing_reason="本輪未取得完整買入／賣出滑價；只顯示提醒。",
+            blocked_reason="估算滑價超過建議值。",
+        )
 
     cost_to_risk = _number(
         metrics.get("execution_cost_to_risk_pct")
@@ -395,8 +415,11 @@ def _hard_gate(
         value=cost_to_risk,
         limit=limits["max_execution_cost_to_risk_pct"],
         comparison="MAX",
-        missing_reason="缺少交易成本占風險資料；顯示未知提醒。",
+        missing_reason=(
+            "本輪未取得交易成本占風險資料；只顯示提醒，不禁止進場。"
+        ),
         blocked_reason="交易成本占原始風險高於建議值。",
+        missing_hard=False,
     )
     warning_limit = min(
         limits["execution_cost_warning_to_risk_pct"],
@@ -538,8 +561,22 @@ def _hard_gate(
         chase_reason,
     )
 
-    blocked = [row for row in checks if row["status"] == "BLOCKED"]
-    unknown = [row for row in checks if row["status"] == "UNKNOWN"]
+    blocked = [
+        row
+        for row in checks
+        if row["status"] == "BLOCKED" and bool(row.get("hard", True))
+    ]
+    unknown = [
+        row
+        for row in checks
+        if row["status"] == "UNKNOWN" and bool(row.get("hard", True))
+    ]
+    advisory = [
+        row
+        for row in checks
+        if row["status"] in {"BLOCKED", "UNKNOWN"}
+        and not bool(row.get("hard", True))
+    ]
     status = "BLOCKED" if blocked else "UNKNOWN" if unknown else "PASSED"
     published_thresholds = dict(limits)
     published_thresholds["min_quote_volume_24h"] = liquidity_limit
@@ -559,7 +596,10 @@ def _hard_gate(
         "unknowns": [row["key"] for row in unknown],
         "reasons": _unique([row["reason"] for row in [*blocked, *unknown]])[:6],
         "warnings": _unique(
-            [*warnings, *[row["reason"] for row in [*blocked, *unknown]]]
+            [
+                *warnings,
+                *[row["reason"] for row in [*blocked, *unknown, *advisory]],
+            ]
         )[:8],
         "thresholds": published_thresholds,
         "liquidity_policy": liquidity_policy,
@@ -1875,9 +1915,18 @@ def _numeric_limit_check(
     comparison: str,
     missing_reason: str,
     blocked_reason: str,
+    missing_hard: bool = True,
 ) -> None:
     if value is None:
-        _add_check(checks, key, label, "UNKNOWN", None, missing_reason)
+        _add_check(
+            checks,
+            key,
+            label,
+            "UNKNOWN",
+            None,
+            missing_reason,
+            hard=missing_hard,
+        )
         return
     if comparison == "MIN":
         passed = value >= limit
@@ -1985,6 +2034,8 @@ def _add_check(
     status: str,
     value: Any,
     reason: str,
+    *,
+    hard: bool = True,
 ) -> None:
     checks.append(
         {
@@ -1994,7 +2045,7 @@ def _add_check(
             "passed": status == "PASSED",
             "value": value,
             "reason": reason,
-            "hard": True,
+            "hard": hard,
         }
     )
 

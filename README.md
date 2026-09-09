@@ -1,6 +1,6 @@
 # OKX Radar V3.4
 
-以 OKX 公開市場資料運作的加密資產 USDT 線性永續合約雙雷達。全市場 Universe 只接受 OKX `instCategory=1`，並對 24H USDT 成交額套用「上 200 萬、向下緩衝 50 萬」規則：新標的達 200 萬就納入，已納入標的跌破 150 萬才移除，避免在 200 萬附近反覆進出。股票型永續（`instCategory=3`）、其他非加密分類與未通過緩衝帶的合約都會在多週期 K 線請求前排除。系統只做分析，不接受 API Key、Secret 或 Passphrase，也沒有自動下單、Paper Trading 或 Live Trading 路徑。V3.4 延續既有 Price-first（價格優先）Trigger 與 Signal Episode（訊號生命週期）。正式 Trigger／卡片與「現在能否新進場」分開：輔助 Market Context 不會翻轉方向；正式反向訊號、缺少或過期的執行價格、硬性行情異常、Spread／Slippage／來回成本超標或 R:R 不足，則會保留原卡但封鎖新的進場。
+以 OKX 公開市場資料運作的加密資產 USDT 線性永續合約雙雷達。全市場 Universe 只接受 OKX `instCategory=1`，並對 24H USDT 成交額套用「上 200 萬、向下緩衝 50 萬」規則：新標的達 200 萬就納入，已納入標的跌破 150 萬才移除，避免在 200 萬附近反覆進出。股票型永續（`instCategory=3`）、其他非加密分類與未通過緩衝帶的合約都會在多週期 K 線請求前排除。系統只做分析，不接受 API Key、Secret 或 Passphrase，也沒有自動下單、Paper Trading 或 Live Trading 路徑。V3.4 延續既有 Price-first（價格優先）Trigger 與 Signal Episode（訊號生命週期）。正式 Trigger／卡片與「現在能否新進場」分開：輔助 Market Context 不會翻轉方向；正式反向訊號、缺少或過期的執行價格、硬性行情異常、Spread／已知 Slippage／已知來回成本超標或 R:R 不足，則會保留原卡但封鎖新的進場。若 Order Book 偶發缺失而無法估算滑價／成本，只顯示提醒，不單獨禁止進場。
 
 手機介面將 Entry Zone 統一顯示為「Entry（最佳進場點位）」，並依「方向 → 現在能否進場 → 阻擋原因 → Entry／SL／TP／R:R → 進場前更新 → 輔助判讀」排列。續走力道與 OI 預設收合，摘要只用白話顯示最近 1H 的 OI 增減、推測方向與「僅供輔助」；展開後才看依據、信心與 1H／2H／4H 比較。它不產生加分或一致度分數，也不加入正式方向、進場判定或目標計算。首頁先顯示 15m／4H 當下真正可進數量，曾經可進只屬生命週期歷史；硬性阻擋原因與高週期衝突直接顯示在卡片上方。市場方向由每個具有連續完整 1H 收盤資料的市場，以 25 個收盤計算 24H RSI(24) 後作全市場等權平均，直接顯示真實數字與「強多／偏多／中性／偏空／強空」；原有 15m／4H RSI(14) 平均與樣本數仍保留，不拿 BTC RSI 冒充市場平均。通知與收藏改為收合，完整 OI 異動雷達移到「更多」。Funding（資金費率）、Spread（買賣價差）、Slippage（滑價）與 Order Book（訂單簿）仍收進詳細資料。單幣請求期間只使用輕量 CSS 掃描動畫，不載入 GIF、影片、Canvas 或大型外部資源。
 
@@ -19,7 +19,7 @@ V3.4 的核心原則是：**正式價格 Trigger 成立就保留卡片，但保�
 | 1. Price Trigger（價格觸發） | 已收盤核心週期是否已形成正式方向與交易計畫 | 不用分數或參考資料憑空製造 Trigger |
 | 2. Continuation Confirmation（同向延續確認） | 掃描時最新完整 5m 收線的 OI 相較前段端點均值，配合同窗價格／量能描述資金動向 | 軟分級為 `CONFIRMED`／`FORMING`／`CONFLICT`／`UNKNOWN`，只作輔助說明，不改寫 Trigger、方向、進場權限、排名或目標 |
 | 3. Entry Eligibility（進場資格） | 新鮮可執行價格是否仍在合理 Entry，以及舊 Episode 是否完成新的收線回踩／收復確認 | 走遠不等於訊號死亡，但曾可進或重新回到舊 Entry 都不會自動重開 |
-| 4. Risk Review（風險門檻） | 反向正式訊號、執行價格新鮮度、硬性異常、Spread、Slippage、成本與 R:R 是否通過 | 軟性項目只提醒；硬門檻失敗會保留 Price Trigger／卡片，但封鎖新進場 |
+| 4. Risk Review（風險門檻） | 反向正式訊號、執行價格新鮮度、硬性異常、Spread、已知 Slippage／成本與 R:R 是否通過 | 已知數值超標才觸發對應硬門檻；Order Book 缺失造成無法估算只提醒 |
 
 Market Context、OI、Taker、CVD、Funding 與 Order Book 仍會保存並放在詳細資料中，協助理解行情。OI 必須配合同窗價格才能白話推測「新多資金進場／新空資金進場／空單回補／多單平倉」，不能拆成不存在的「多單 OI／空單 OI」。OI、Taker／CVD 與核心 K 線量比只用來產生獨立的同向延續描述；Funding 與 Order Book 顯示擁擠或執行背景。這些資料不設定正式方向、不授予或加強進場，也不放大 TP／R:R；良好 Order Book 至多為中性，不會改善排序，差的 Spread／Slippage／成本則仍可降低執行品質或封鎖新進場。BTC／全市場與已收盤高週期價格衝突另外顯示；重大核心價格衝突可以封鎖新進場，但仍不能把原 Trigger 翻向。資料缺失就顯示不知道，不用舊值、0 或中性假設補算。
 
@@ -115,10 +115,10 @@ OI 快速清洗、Funding 極端或 Order Book 變化會列為輔助背景，不
 
 ## Execution Quality 與 Trigger 分離
 
-入場位置、結構 R:R、Stop 距離、Spread、深度、估算滑價與來回成本組成 `execution_quality`。它不回答「價格 Trigger 是否存在」或決定多空方向；正式 Trigger 可以繼續顯示，但硬性執行門檻可否決本輪的新進場權限。缺少的資料會明確顯示未知，不用舊值、0 值或預設中性冒充最新結果。
+入場位置、結構 R:R、Stop 距離、Spread、深度、估算滑價與來回成本組成 `execution_quality`。它不回答「價格 Trigger 是否存在」或決定多空方向；正式 Trigger 可以繼續顯示，但已取得且超標的硬性執行門檻可否決本輪的新進場權限。Order Book 偶發缺失時，滑價與成本顯示「未估算」提醒，不沿用舊值、不補 0，也不再單獨禁止進場；最新 Bid／Ask、Spread、價格位置與其他必要條件仍照常核對。
 
 - 正式發布前再次更新 Ticker；LONG 使用最新 Ask、SHORT 使用最新 Bid 計算進場幾何。缺少、無效或早於本輪掃描的發布價格一律標為 `DATA_UNAVAILABLE`，不拿掃描起點舊價放行。
-- Spread／Slippage／來回成本超標、R:R 不足與硬性行情異常會標為 `HARD_GATE_BLOCKED` 並封鎖新進場；SL 距離、深度等未達硬門檻的項目仍只作醒目提醒。兩者都不刪除或翻轉正式 Trigger。
+- Spread／已知 Slippage／已知來回成本超標、R:R 不足與硬性行情異常會標為 `HARD_GATE_BLOCKED` 並封鎖新進場；滑價／成本因 Order Book 缺失而無法估算時只作醒目提醒。兩者都不刪除或翻轉正式 Trigger。
 - 突破追價距離以突破邊界／Entry Zone 計算；從最近防守點累積的整段推進只作警告，避免把剛越過邊界的新 Trigger 誤判為已錯過。
 - OI 偏低、5m 輔助資料不一致或 Funding 擁擠只供參考，不取消有效核心 Trigger、不改進場權限，也不能改善候選排名或目標。Order Book 的方向解讀同樣只供參考；只有實際 Spread／Slippage／成本惡化會降低執行品質或封鎖新進場。
 - 新計畫的 SL 以「市場結構失效位置＋短線 1.6 ATR／長線 1.8 ATR＋近 20 根真實波幅／影線分布＋實際波動分級百分比」取較遠者；短線最低實用距離從 0.45% 起、長線從 0.90% 起，若近期實際波動較大會自動再放寬，避免安靜期 ATR 過小造成 0.04%～0.2% 的雜訊止損。TP1／TP2 由已收盤價格、結構目標、行情型態、真實波動、核心 K 線量比、Timing 與可用的歷史結果自動計算；OI、Taker／CVD、Funding 與 Order Book 不會拉遠 TP 或提高 R:R。過近支撐壓力只列為途中部分減倉／突破觀察，不再直接把約 1R 的位置當成整筆交易完成。

@@ -450,6 +450,51 @@ def _latest_confirmation(result: Any, original_direction: str) -> dict[str, Any]
     }
 
 
+def _preflight_data_quality_unavailable(data_quality: dict[str, Any]) -> bool:
+    """Return whether a preflight is missing a required entry input.
+
+    New payloads split required ticker inputs from optional Order Book depth.
+    Legacy payloads did not make that distinction, so their PARTIAL status or
+    generic missing list remains fail-closed.
+    """
+
+    quality = dict(data_quality or {})
+    status = str(quality.get("status") or "").upper()
+    if status in {"DATA_UNAVAILABLE", "UNAVAILABLE", "UNKNOWN", "ERROR", "FAILED"}:
+        return True
+    if (
+        quality.get("ticker_available") is False
+        or quality.get("quote_volume_available") is False
+    ):
+        return True
+    if "required_missing_sources" in quality:
+        required = {
+            str(value).strip()
+            for value in list(quality.get("required_missing_sources", []) or [])
+            if str(value).strip()
+        }
+        if required:
+            return True
+        optional = {
+            str(value).strip()
+            for value in list(quality.get("optional_missing_sources", []) or [])
+            if str(value).strip()
+        }
+        missing = {
+            str(value).strip()
+            for value in list(quality.get("missing_sources", []) or [])
+            if str(value).strip()
+        }
+        # An explicitly split payload may remain PARTIAL only when every
+        # generic missing source is also identified as optional. Unknown or
+        # malformed omissions stay fail-closed.
+        return bool(missing - optional)
+    return bool(
+        status == "PARTIAL"
+        or list(quality.get("missing_sources", []) or [])
+    )
+
+
 def _merge_preflight_confirmation(
     payload: dict[str, Any],
     confirmation: dict[str, Any],
@@ -552,11 +597,7 @@ def _merge_preflight_confirmation(
         if str(value).strip()
     }
     data_quality = dict(merged.get("data_quality", {}) or {})
-    data_quality_status = str(data_quality.get("status") or "").upper()
-    data_quality_unavailable = bool(
-        data_quality_status in {"DATA_UNAVAILABLE", "PARTIAL", "UNAVAILABLE", "UNKNOWN"}
-        or list(data_quality.get("missing_sources", []) or [])
-    )
+    data_quality_unavailable = _preflight_data_quality_unavailable(data_quality)
     verdict_data_unavailable = bool(
         verdict_status == "DATA_UNAVAILABLE"
         or verdict_situation == "DATA_UNAVAILABLE"
@@ -848,11 +889,7 @@ def _canonical_single_decision(
         or plan_status == "MISSED"
     )
     data_quality = dict(preflight.get("data_quality", {}) or {})
-    data_quality_status = str(data_quality.get("status") or "").upper()
-    data_quality_unavailable = bool(
-        data_quality_status in {"DATA_UNAVAILABLE", "PARTIAL", "UNAVAILABLE", "UNKNOWN"}
-        or list(data_quality.get("missing_sources", []) or [])
-    )
+    data_quality_unavailable = _preflight_data_quality_unavailable(data_quality)
     preflight_data_unavailable = bool(
         status == "DATA_UNAVAILABLE"
         or situation == "DATA_UNAVAILABLE"
