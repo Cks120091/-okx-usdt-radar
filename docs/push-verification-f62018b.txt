@@ -1,0 +1,7 @@
+Temporary GitHub write verification requested by the repository owner.
+
+Scope: verify that the connected tool can create a commit on an isolated test branch.
+Base commit: f62018bfa4c2e620ba9cda2d2f2632fa7380857b
+No application code, strategy, market data, UI, deployment settings, or main branch is changed by this test.
+This is NOT the pending quick-look or multi-timeframe indicator implementation.
+Do not merge or deploy this verification branch.
