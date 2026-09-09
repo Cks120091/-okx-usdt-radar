@@ -303,10 +303,36 @@ class MarketStoryEngine:
             selected["same_episode_update"] = True
             selected["freshness"] = "ACTIVE"
             freshness = "ACTIVE"
+        formal_opposite = bool(
+            prior_story.get("allow_opposite_episode") is True
+            and prior_active in ("LONG", "SHORT")
+            and trigger_direction in ("LONG", "SHORT")
+            and trigger_direction != prior_active
+            and not prior_terminal
+            and selected.get("triggered") is True
+            and prior_event_key and candidate_event_key != prior_event_key
+            and event_ts > _int_or_zero(prior_trigger.get("event_ts"))
+            and candidate_confirmation_ts > _int_or_zero(prior_trigger.get("event_ts"))
+            and core_candles[-1].ts >= prior_last_evaluated
+            and candidate_confirmation_ts <= core_candles[-1].ts
+            and core_candles[-1].confirmed
+        )
+        if formal_opposite:
+            selected["opposite_episode_transition"] = {
+                "authorized_scope": "MARKET_SCAN",
+                "policy_version": "INTRADAY_OPPOSITE_V1",
+                "prior_event_key": prior_event_key,
+                "prior_direction": prior_active,
+                "confirmation_ts": candidate_confirmation_ts,
+            }
+            selected.setdefault("conflicts", []).append(
+                "新反向價格事件已成立；舊計畫保留歷史，不代表已觸發止損"
+            )
         if (
             prior_active in ("LONG", "SHORT")
             and trigger_direction not in ("NEUTRAL", prior_active)
             and not prior_terminal
+            and not formal_opposite
         ):
             opposite_candidate = _opposite_candidate_evidence(selected)
             main_trigger = (
@@ -458,6 +484,18 @@ class MarketStoryEngine:
             tf_timing,
             trigger_direction,
         )
+        if horizon == "SHORT":
+            background = timeframe_states["4H"]
+            # Describe the internal leg without claiming an unfinished 4H close.
+            leg_return = _pct_change(core_candles[-1].close, core_candles[-5].close)
+            phase = (
+                "多頭背景中的短線回落" if background["direction"] == "LONG" and leg_return < -0.05
+                else "空頭背景中的短線反彈" if background["direction"] == "SHORT" and leg_return > 0.05
+                else "短線走勢未明顯逆向"
+            )
+            background["label"] += "｜" + phase
+            background["phase"] = phase
+            background["phase_basis"] = "最近4根已收線15m；非未完成4H的最終結果"
         summary = _human_summary(
             trigger_direction,
             stage,

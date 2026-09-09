@@ -1115,7 +1115,14 @@ class SignalRepository:
         # RLock keeps concurrent scans in this process from creating two main
         # directions for the same instrument/horizon.
         with self._lock:
-            return self._reconcile_raw_signal_locked(raw, completed_at)
+            if self._transaction_depth:
+                return self._reconcile_raw_signal_locked(raw, completed_at)
+            with self._connection:
+                self._transaction_depth += 1
+                try:
+                    return self._reconcile_raw_signal_locked(raw, completed_at)
+                finally:
+                    self._transaction_depth -= 1
 
     def _reconcile_raw_signal_locked(
         self,
@@ -1176,9 +1183,24 @@ class SignalRepository:
                 # accepted closed-core snapshot. A delayed candidate cannot
                 # roll any part of the accepted episode backwards.
                 return self._unchanged_projection(existing)
+            trigger = raw.market_story.get("trigger", {})
+            transition = trigger.get("opposite_episode_transition", {})
+            authorized_opposite = bool(
+                existing.direction != raw.direction
+                and isinstance(transition, dict)
+                and transition.get("authorized_scope") == "MARKET_SCAN"
+                and transition.get("prior_event_key") == active["event_key"]
+                and transition.get("prior_direction") == existing.direction
+                and trigger.get("triggered") is True
+                and int(transition.get("confirmation_ts") or 0) > _signal_trigger_event_timestamp(existing)
+                and int(transition.get("confirmation_ts") or 0) <= candidate_core_ts
+                and logical_event_ts > _signal_trigger_event_timestamp(existing)
+                and event_key != active["event_key"]
+            )
             if (
                 last_evaluated_core_ts > 0
                 and candidate_core_ts == last_evaluated_core_ts
+                and not authorized_opposite
             ):
                 # Deep OI / flow / execution data may finish after the price
                 # Trigger was stored.  Refresh only the explicitly advisory
@@ -1215,6 +1237,22 @@ class SignalRepository:
                     # the same time a genuinely newer Trigger appears. Close
                     # the old Episode first, then create the new one with its
                     # own immutable Entry/SL/TP instead of delaying it a scan.
+                    return self._reconcile_raw_signal_locked(raw, completed_at)
+                if authorized_opposite:
+                    # Retire the scanner's active direction, not the user's actual
+                    # position. The original Entry/SL/TP and event history survive.
+                    # This is NOT a filled stop/target and carries no invented R.
+                    lifecycle = dict(advanced.lifecycle)
+                    lifecycle.update({"terminal": True, "status": "CLOSED_UNKNOWN",
+                        "current_stage": "CLOSED_UNKNOWN", "outcome": "SUPERSEDED",
+                        "transition": "OPPOSITE_CONTROL_TRANSFER", "closed_at": completed_at,
+                        "position_exit_confirmed": False, "superseded_by_event_key": event_key})
+                    archived = replace(advanced, lifecycle=lifecycle, actionable=False)
+                    self._close_row(existing.trigger_id, completed_at, "SUPERSEDED", None, None)
+                    self._connection.execute("UPDATE signals SET payload_json=? WHERE signal_id=?",
+                        (json.dumps(_signal_payload(archived), ensure_ascii=False), existing.trigger_id))
+                    self._append_event(existing.trigger_id, completed_at, existing.signal_stage,
+                        "CLOSED_UNKNOWN", "OPPOSITE_CONTROL_TRANSFER", lifecycle)
                     return self._reconcile_raw_signal_locked(raw, completed_at)
                 return advanced
 
@@ -1991,6 +2029,11 @@ class SignalRepository:
             reason = "價格已到達原始 SL／失效位；舊計畫永久結束。"
             final_status = "INVALIDATED"
             wait_code = "STOP_REACHED"
+        elif outcome == "SUPERSEDED":
+            label = "新反向訊號成立｜舊計畫保留歷史"
+            reason = "雷達主方向已由新價格事件接替；不是已觸發止損，也不是已平倉。"
+            final_status = "DATA_UNAVAILABLE"
+            wait_code = "OPPOSITE_CONTROL_TRANSFER"
         else:
             label = "終局資料不足｜舊計畫已關閉"
             reason = "現有資料無法證明 TP／SL 先後，禁止沿用舊計畫。"
