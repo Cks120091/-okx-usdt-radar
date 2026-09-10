@@ -16,6 +16,10 @@ from .continuation import (
     bounded_observer_samples,
     summarize_continuation_samples,
 )
+from .entry_window import (
+    plan_key as entry_window_plan_key, is_ready as entry_window_is_ready,
+    snapshot as entry_window_snapshot,
+)
 from .decision import build_decision_context
 from .models import MarketContext, MarketState, Signal
 from .price_display import signal_plan_display_fields
@@ -372,6 +376,49 @@ class SignalRepository:
         if row is None:
             return None
         return Signal.from_dict(json.loads(row["payload_json"]))
+
+    def record_entry_window(self, signal: Signal, observed_ms: int) -> Signal:
+        """Persist permission continuity with identity, clock and generation guards.
+
+        This does not mutate the plan or lifecycle stage. A concurrent newer
+        suspension cannot be overwritten by an older ready response.
+        """
+        if signal.radar_horizon != "SHORT" or not signal.trigger_id:
+            return signal
+        with self._lock, self._write_scope():
+            row = self._connection.execute(
+                "SELECT * FROM signals WHERE signal_id=?", (signal.trigger_id,)
+            ).fetchone()
+            if row is None or row["status"] != "ACTIVE":
+                return _entry_window_changed(signal)
+            stored = Signal.from_dict(json.loads(row["payload_json"]))
+            previous = stored.lifecycle.get("entry_window")
+            incoming = signal.lifecycle.get("entry_window")
+            old_clock = int(previous.get("observed_ms") or 0) if isinstance(previous, dict) else 0
+            if (not entry_window_plan_key(signal)
+                    or entry_window_plan_key(stored) != entry_window_plan_key(signal)
+                    or _signal_core_timestamp(stored) != _signal_core_timestamp(signal)
+                    or observed_ms < old_clock
+                    or previous != incoming):
+                return _entry_window_changed(signal)
+            ready = entry_window_is_ready(signal)
+            if ready and isinstance(previous, dict) and previous.get("state") == "SUSPENDED":
+                confirmed = signal.market_story.get("trigger", {}).get("confirmation_ts")
+                proof = signal.entry_eligibility.get("closed_retest_confirmed") is True
+                if not (proof and int(previous.get("core_ts") or 0) < (_number(confirmed) or 0)
+                        <= _signal_core_timestamp(signal)):
+                    return _entry_window_changed(signal)
+            window = entry_window_snapshot(signal, observed_ms, "OPEN" if ready else "SUSPENDED")
+            lifecycle = {**stored.lifecycle, "entry_window": window}
+            persisted = replace(stored, lifecycle=lifecycle)
+            cursor = self._connection.execute(
+                "UPDATE signals SET payload_json=? WHERE signal_id=? AND status='ACTIVE' AND payload_json=?",
+                (json.dumps(_signal_payload(persisted), ensure_ascii=False),
+                 signal.trigger_id, row["payload_json"]),
+            )
+            if cursor.rowcount != 1:
+                return _entry_window_changed(signal)
+            return replace(signal, lifecycle={**signal.lifecycle, "entry_window": window})
 
     def load_continuation_observer(self, signal_id: str) -> dict[str, Any] | None:
         """Return private fixed-window observer state for one Signal Episode."""
@@ -1462,8 +1509,14 @@ class SignalRepository:
             if str(check.get("key") or "") in _LIVE_SAFETY_CHECK_KEYS
         )
 
+        lifecycle = dict(existing.lifecycle)
+        prior_quote_ms = _number(existing.market_metrics.get("ticker_sampled_at"))
+        if (existing.radar_horizon == "SHORT" and "entry_window" not in lifecycle
+                and entry_window_is_ready(existing) and prior_quote_ms is not None):
+            lifecycle["entry_window"] = entry_window_snapshot(existing, int(prior_quote_ms), "OPEN")
         refreshed = replace(
             existing,
+            lifecycle=lifecycle,
             market_metrics=metrics,
             evidence_groups=groups,
             supporting_evidence=list(source.supporting_evidence),
@@ -3401,3 +3454,14 @@ def _number(value: Any) -> float | None:
         return numeric if math.isfinite(numeric) else None
     except (TypeError, ValueError):
         return None
+
+
+def _entry_window_changed(signal: Signal) -> Signal:
+    reason = "進場窗口已有較新的更新或已暫停，請重新掃描；不沿用舊的可進結果。"
+    entry = {**signal.entry_eligibility, "status": "WAIT_RETEST", "label": "等待最新窗口確認",
+             "reason": reason, "actionable": False, "new_entry_allowed": False}
+    decision = dict(signal.decision_context)
+    decision["final"] = {**decision.get("final", {}), "status": "WAIT", "label": reason,
+        "new_entry_allowed": False, "reasons": [reason],
+        "wait_reason": {"code": "ENTRY_WINDOW_CHANGED", "label": reason}}
+    return replace(signal, actionable=False, entry_eligibility=entry, decision_context=decision)

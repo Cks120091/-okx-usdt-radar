@@ -216,7 +216,7 @@ class MarketStoryEngine:
                 candidate_direction,
                 core_candles,
                 tf_core,
-                tf_bias,
+                tf_core if horizon == "SHORT" else tf_bias,
                 zones,
                 location,
                 efficiencies,
@@ -228,7 +228,9 @@ class MarketStoryEngine:
             )
             for candidate_direction in ("LONG", "SHORT")
         }
-        selected = _select_candidate(candidates, direction)
+        # Short Trigger selection must not inherit an averaged HTF direction.
+        selection_direction = _direction_state(core_long)[0] if horizon == "SHORT" else direction
+        selected = _select_candidate(candidates, selection_direction)
         trigger_direction = str(selected.get("direction", "NEUTRAL"))
         stage = str(selected.get("stage", "WATCH"))
         freshness = str(selected.get("freshness", "NONE"))
@@ -469,12 +471,16 @@ class MarketStoryEngine:
         groups = _evidence_groups(
             trigger_direction,
             selected,
-            long_score,
+            core_long if horizon == "SHORT" else long_score,
             location,
             supporting,
             conflicts,
             neutral,
         )
+        if horizon == "SHORT":
+            for key in ("position_structure", "trend_momentum"):
+                groups[key]["source_timeframe"] = "15m"
+                groups[key]["evidence_scope"] = "CORE"
         timeframe_states = _timeframe_states(
             horizon,
             frame_names,
@@ -519,6 +525,7 @@ class MarketStoryEngine:
             "missing_sources": [],
         }
         raw = {
+            "entry_policy_version": "SHORT_CONTEXT_WINDOW_V2" if horizon == "SHORT" else "SWING_UNCHANGED",
             "direction_long_score": round(long_score, 1),
             "higher_long_score": round(higher_long, 1),
             "bias_long_score": round(bias_long, 1),

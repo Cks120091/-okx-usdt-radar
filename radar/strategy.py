@@ -3614,6 +3614,7 @@ def _entry_eligibility(
     existing_episode: bool = False,
     entry_ready_once: bool = False,
     closed_retest_confirmed: bool = False,
+    continuing_entry_window: bool = False,
 ) -> dict[str, Any]:
     is_long = direction == "LONG"
     safe_atr = max(abs(atr), 1e-9)
@@ -3645,7 +3646,8 @@ def _entry_eligibility(
     remaining_rr = current_reward / current_risk if current_risk > 0 else -1.0
     active_stage = stage in ("EARLY_SIGNAL", "CONFIRMED", "REENTRY")
     reentry_confirmation_required = (
-        existing_episode is True or entry_ready_once is True
+        (existing_episode is True or entry_ready_once is True)
+        and continuing_entry_window is not True
     )
     verified_closed_retest = closed_retest_confirmed is True
 
@@ -3737,6 +3739,7 @@ def _entry_eligibility(
         "existing_episode": existing_episode is True,
         "entry_ready_once": entry_ready_once is True,
         "reentry_confirmation_required": reentry_confirmation_required,
+        "continuing_entry_window": continuing_entry_window is True,
         "closed_retest_confirmed": verified_closed_retest,
         "time_alone_never_invalidates": True,
     }

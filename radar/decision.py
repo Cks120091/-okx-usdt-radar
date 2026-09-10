@@ -138,6 +138,7 @@ def build_decision_context(
 
     return {
         "schema_version": "1.0",
+        "entry_policy_version": "SHORT_CONTEXT_WINDOW_V2",
         "hard_gate": hard_gate,
         "evidence": evidence,
         "market_context": market_context,
@@ -320,7 +321,12 @@ def _hard_gate(
             "上游目前位置允許新進場",
             "BLOCKED",
             False,
-            "上游目前位置判定為不可進；原 Trigger 保留，但禁止建立新倉。",
+            str(entry.get("reason") or "上游目前位置判定為不可進；原 Trigger 保留，但禁止建立新倉。"),
+            hard=not (
+                str(entry.get("status") or "").upper() == "WAIT_RETEST"
+                and entry.get("reentry_confirmation_required") is True
+                and entry.get("closed_retest_confirmed") is not True
+            ),
         )
 
     quote_volume = _number(_read(item, "quote_volume_24h", None))
@@ -750,6 +756,7 @@ def _conflict_layer(
     direction: str,
     groups: dict[str, Any],
 ) -> dict[str, Any]:
+    short_scope = str(_read(item, "radar_horizon", "SHORT")).upper() == "SHORT"
     item_conflicts = _strings(_read(item, "conflicts", []))
     group_conflicts: dict[str, list[str]] = {}
     for key, value in groups.items():
@@ -796,9 +803,27 @@ def _conflict_layer(
         group_reasons = group_conflicts.get(group_key, [])
         canonical_domain = _group_conflict_domain(group_key)
         if canonical_domain in {"POSITION_STRUCTURE", "TREND_MOMENTUM"}:
-            domain_items.setdefault(canonical_domain, []).extend(
-                group_reasons or [str(group.get("label") or group_key)]
-            )
+            frame = str(group.get("source_timeframe") or "").upper()
+            scope = str(group.get("evidence_scope") or "").upper()
+            if short_scope and (scope == "CONTEXT" or (frame in {"1H", "4H", "1D"})):
+                domain_items.setdefault("CONTEXT_COUNTERTREND", []).extend(
+                    group_reasons or [str(group.get("label") or group_key)]
+                )
+                continue
+            # Legacy grouped prose may contain only HTF background. Do not
+            # relabel that as a second independent 15m price-domain conflict.
+            core_reasons = []
+            for text in group_reasons:
+                if (short_scope and frame != "15M" and scope != "CORE"
+                        and "15m" not in text.lower()
+                        and _conflict_domain(text) == "CONTEXT_COUNTERTREND"):
+                    domain_items.setdefault("CONTEXT_COUNTERTREND", []).append(text)
+                else:
+                    core_reasons.append(text)
+            if core_reasons or not group_reasons:
+                domain_items.setdefault(canonical_domain, []).extend(
+                    core_reasons or [str(group.get("label") or group_key)]
+                )
         elif group_reasons:
             for text in group_reasons:
                 domain = _conflict_domain(text)
@@ -869,9 +894,12 @@ def _conflict_layer(
         and any(marker in text for marker in ("明顯反向", "強勢反向", "強烈反向"))
         for text in items
     )
+    # For the 15m radar, HTF direction is context, not an extra veto or an
+    # extra vote paired with one core warning. The 4H radar retains its policy.
     core_price_block = len(core_price_domains) >= 2 or (
-        context_countertrend and bool(core_price_domains)
+        not short_scope and context_countertrend and bool(core_price_domains)
     )
+    strong_countertrend = strong_countertrend and not short_scope
     blocks_entry = bool(strong_countertrend or core_price_block)
     blocking_domains = set(core_price_domains if core_price_block else ())
     if strong_countertrend:
@@ -890,8 +918,8 @@ def _conflict_layer(
             {"key": key, "items": values[:3]}
             for key, values in sorted(domain_items.items())
         ],
-        # Only closed-price structure/trend conflicts or an explicitly strong
-        # higher-timeframe opposition can veto a new entry.  OI, Taker/CVD,
+        # Only core-price conflict domains veto a 15m entry. Strong HTF
+        # opposition retains its old role solely for the 4H radar. OI, Taker/CVD,
         # funding, volume participation and book context stay auxiliary: even
         # several auxiliary conflicts may lower confidence, but cannot become
         # a hidden trading switch.
@@ -899,6 +927,7 @@ def _conflict_layer(
         "blocks_entry": blocks_entry,
         "severity_score": explicit_severity,
         "countertrend": context_countertrend,
+        "context_entry_policy": "ADVISORY_15M" if short_scope else "EXISTING_SWING_POLICY",
         "opposite_signal_created": False,
     }
 
@@ -1721,6 +1750,10 @@ def _final_layer(
         elif "chase" in blockers:
             status, label = "NO_CHASE", "已離開合理進場區｜禁止追價"
             wait_code, wait_label = "PRICE_TOO_FAR", "等待新的進場機會"
+        elif blockers == {"entry_permission"} and entry_status == "WAIT_RETEST":
+            status, label = "WAIT", str(entry.get("label") or "等待回踩／重新確認")
+            wait_code = "ENTRY_RETEST"
+            wait_label = str(entry.get("reason") or "等待新的已收盤回踩確認")
         elif blockers == {"risk_reward"}:
             status, label = "NO_EDGE", "風險報酬不足｜禁止新進場"
             wait_code, wait_label = "RISK_REWARD", "等待風險報酬改善"
@@ -1744,8 +1777,8 @@ def _final_layer(
         )
         wait_code, wait_label = "NONE", ""
     elif entry_status == "WAIT_RETEST":
-        status, label = "WAIT", "等待回踩／重新確認"
-        wait_code, wait_label = "ENTRY_RETEST", "等待重新站回合理進場區"
+        status, label = "WAIT", str(entry.get("label") or "等待回踩／重新確認")
+        wait_code, wait_label = "ENTRY_RETEST", str(entry.get("reason") or "等待重新站回合理進場區")
     elif stage in {"NEAR_TRIGGER", "WATCH", "NONE", ""}:
         status, label = "WAIT", "訊號形成中｜等待正式 Trigger"
         wait_code, wait_label = "SIGNAL_FORMING", "等待價格觸發與收盤確認"

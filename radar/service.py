@@ -20,6 +20,7 @@ from urllib.parse import parse_qs, urlparse
 
 from .api import OKXAPIError
 from .config import AppConfig
+from .entry_window import plan_key as entry_window_plan_key
 from .exit_review import review_exit_plan
 from .continuation import ALGORITHM_VERSION, observer_schedule
 from .models import RadarReport
@@ -1287,6 +1288,45 @@ def _read_only_reasons(
     return reasons
 
 
+def _with_durable_entry_window(repository: Any, signal: Any) -> Any:
+    loader = getattr(repository, "load_active_signal", None)
+    if getattr(signal, "radar_horizon", None) != "SHORT" or not callable(loader):
+        return signal
+    latest = loader(signal.inst_id, signal.radar_horizon)
+    if latest is None or entry_window_plan_key(latest) != entry_window_plan_key(signal):
+        return signal
+    # Do not upgrade the report's evidence/core from a standalone quote request.
+    lifecycle = dict(signal.lifecycle)
+    if "entry_window" in latest.lifecycle:
+        lifecycle["entry_window"] = deepcopy(latest.lifecycle["entry_window"])
+    return replace(signal, lifecycle=lifecycle)
+
+
+def _record_preflight_entry_window(repository: Any, signal: Any, payload: dict, observed_ms: int) -> dict:
+    recorder = getattr(repository, "record_entry_window", None)
+    if getattr(signal, "radar_horizon", None) != "SHORT" or not callable(recorder):
+        return payload
+    verdict = payload.get("verdict", {})
+    if payload.get("signal_lifecycle", {}).get("terminal") is True:
+        return payload
+    allowed = bool(verdict.get("status") == "ENTRY_READY" and verdict.get("actionable") is True
+                   and payload.get("plan_state", {}).get("new_entry_allowed") is True)
+    projected = replace(signal, actionable=allowed,
+        entry_eligibility={**signal.entry_eligibility, "status": verdict.get("status"),
+                           "actionable": allowed, "new_entry_allowed": allowed},
+        decision_context={**signal.decision_context, "final": {"status": "ENTER" if allowed else "WAIT",
+                                                               "new_entry_allowed": allowed}})
+    accepted = recorder(projected, observed_ms)
+    if allowed and not accepted.actionable:
+        payload = deepcopy(payload)
+        payload["verdict"].update({"status": "WAIT_RETEST", "situation": "ENTRY_WINDOW_CHANGED",
+            "label": "等待最新窗口確認", "reason": accepted.entry_eligibility["reason"],
+            "actionable": False, "new_entry_allowed": False})
+        payload["plan_state"].update({"status": "WAITING_RETEST", "new_entry_allowed": False,
+            "old_plan_reusable_for_new_entry": False, "new_entry_status": "WAIT"})
+    return payload
+
+
 class PreflightError(RuntimeError):
     def __init__(
         self,
@@ -2515,6 +2555,13 @@ class RadarRuntime:
                     "latest_confirmation": None,
                 }
             stored_signal = stored_signals[horizon]
+            latest_signal = getattr(result, "signal", None)
+            if (stored_signal is not None and latest_signal is not None
+                    and stored_signal.radar_horizon == "SHORT"
+                    and stored_signal.trigger_id == latest_signal.trigger_id
+                    and entry_window_plan_key(stored_signal) == entry_window_plan_key(latest_signal)):
+                # Same immutable plan, but latest closed-core state/window.
+                stored_signal = latest_signal
             confirmation = (
                 _latest_confirmation(result, stored_signal.direction)
                 if stored_signal is not None
@@ -2537,6 +2584,10 @@ class RadarRuntime:
                     preflight = _merge_preflight_confirmation(
                         preflight,
                         confirmation or {},
+                    )
+                    preflight = _record_preflight_entry_window(
+                        getattr(self.scanner, "repository", None), stored_signal, preflight,
+                        int(analysis.ticker.ts or time.time() * 1000),
                     )
                     preflight["cached"] = False
                     preflight["cache_age_seconds"] = 0.0
@@ -3331,6 +3382,7 @@ class RadarRuntime:
         try:
             ticker = client.get_ticker(normalized_id)
             context = client.get_execution_context(normalized_id)
+            signal = _with_durable_entry_window(repository, signal)
             payload = build_preflight_payload(
                 signal,
                 ticker,
@@ -3437,6 +3489,10 @@ class RadarRuntime:
                 signal, payload.get("continuation", {}).get("current", {}).get("cross_timeframe", {}),
                 current_price=payload.get("live", {}).get("price"), now_ms=int(time.time() * 1000),
                 terminal=terminal_kind is not None,
+            )
+            payload = _record_preflight_entry_window(
+                repository, _with_durable_entry_window(repository, signal), payload,
+                int(ticker.ts or time.time() * 1000),
             )
             cached_payload = deepcopy(payload)
             cached_payload["cached"] = False
