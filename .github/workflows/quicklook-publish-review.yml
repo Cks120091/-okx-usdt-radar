@@ -1,0 +1,60 @@
+name: Validate quick-look before manual main promotion
+on:
+  push:
+    branches: [fix/quicklook-publish-20260910]
+  workflow_dispatch:
+permissions:
+  contents: write
+concurrency:
+  group: quicklook-publish-review
+  cancel-in-progress: false
+jobs:
+  verify:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v6
+      - uses: actions/setup-python@v6
+        with:
+          python-version: '3.12'
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+      - name: Apply guarded UI-only patch
+        run: python .github/apply_quicklook_review.py
+      - name: Install declared runtime and browser test dependencies
+        run: |
+          python -m pip install -r requirements.txt playwright
+          python -m playwright install --with-deps chromium
+      - name: Full Python regression
+        run: |
+          python -m compileall -q radar run.py scripts tests
+          python -m unittest discover -s tests -v
+          git diff --check
+      - name: JavaScript syntax
+        run: |
+          python - <<'PY'
+          import re
+          from pathlib import Path
+          html=Path('radar/static/pages.html').read_text()
+          for i,body in enumerate(re.findall(r'<script(?:\s[^>]*)?>(.*?)</script>',html,re.S)):
+              Path(f'/tmp/radar-inline-{i}.js').write_text(body)
+          PY
+          for file in /tmp/radar-inline-*.js; do node --check "$file"; done
+          node --check radar/static/service-worker.js
+      - name: Quick-look seven-viewport regression
+        run: python scripts/check_quicklook_ui.py
+      - name: Existing layout and data-dialog regression
+        run: |
+          python scripts/check_layout_ui.py
+          python scripts/check_clarity_ui.py
+          python scripts/check_intraday_ui.py
+      - name: Commit only tested application changes to this review branch
+        run: |
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git add radar/static/pages.html radar/static/service-worker.js tests/test_v2_contract.py
+          git commit -m 'Add tested read-only quick-look summary; no strategy or deployment changes'
+          git push origin HEAD:refs/heads/fix/quicklook-publish-20260910
+          git rev-parse HEAD
+          git ls-files -s radar/static/pages.html radar/static/service-worker.js tests/test_v2_contract.py scripts/check_quicklook_ui.py
