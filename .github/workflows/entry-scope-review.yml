@@ -1,0 +1,60 @@
+name: Validate 15m context and entry-window repair
+on:
+  push:
+    branches: [fix/15m-context-entry-window-20260910]
+  workflow_dispatch:
+permissions:
+  contents: write
+concurrency:
+  group: entry-scope-review-${{ github.ref }}
+  cancel-in-progress: true
+jobs:
+  verify:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v6
+      - uses: actions/setup-python@v6
+        with:
+          python-version: '3.12'
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+      - name: Apply checksum-guarded scoped repair
+        run: python .github/apply_entry_scope.py
+      - name: Install declared runtime and browser test dependencies
+        run: |
+          python -m pip install -r requirements.txt playwright
+          python -m playwright install --with-deps chromium
+      - name: Full offline Python regression
+        run: |
+          python -m compileall -q radar run.py scripts tests
+          python -m unittest discover -s tests -v
+          git diff --check
+      - name: JavaScript syntax
+        run: |
+          python - <<'PY'
+          import re
+          from pathlib import Path
+          for i, body in enumerate(re.findall(r'<script(?:\s[^>]*)?>(.*?)</script>', Path('radar/static/pages.html').read_text(), re.S)):
+              Path(f'/tmp/radar-inline-{i}.js').write_text(body)
+          PY
+          for file in /tmp/radar-inline-*.js; do node --check "$file"; done
+          node --check radar/static/service-worker.js
+      - name: Existing quick-look, layout, data-dialog and direction-lock regression
+        run: |
+          python scripts/check_quicklook_ui.py
+          python scripts/check_layout_ui.py
+          python scripts/check_clarity_ui.py
+          python scripts/check_intraday_ui.py
+      - name: Commit only validated repair to review branch
+        run: |
+          test "$GITHUB_REF" = 'refs/heads/fix/15m-context-entry-window-20260910'
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          mapfile -t paths < /tmp/entry-scope-allowed.txt
+          git add -- "${paths[@]}"
+          git commit -m 'Validate 15m context-only policy and durable entry-window continuity; no deployment'
+          git push origin HEAD:refs/heads/fix/15m-context-entry-window-20260910
+          git rev-parse HEAD
+          git ls-files -s -- "${paths[@]}"
