@@ -24,6 +24,7 @@ from .continuation import (
     summarize_closed_lookback_samples,
 )
 from .intraday_flow import summarize_intraday_flow
+from .entry_window import can_continue as entry_window_can_continue
 from .decision import build_decision_context
 from .models import Candle, Instrument, MarketContext, MarketState, RadarReport, Signal, Ticker
 from .repository import SignalRepository, classify_microstructure
@@ -1019,9 +1020,9 @@ class MarketScanner:
                     scan_start_ticker=tickers.get(item.inst_id),
                     failure=publication_ticker_failures.get(item.inst_id),
                 )
-            return self._attach_decision_context(
+            return self._record_entry_window(self._attach_decision_context(
                 self._refresh_entry_eligibility(item)
-            )
+            ))
 
         short_signals = [final_signal_projection(item) for item in short_signals]
         long_signals = [final_signal_projection(item) for item in long_signals]
@@ -1793,9 +1794,9 @@ class MarketScanner:
                     failure=None,
                 )
                 signal = _without_internal_metrics(
-                    self._attach_decision_context(
+                    self._record_entry_window(self._attach_decision_context(
                         self._refresh_entry_eligibility(signal)
-                    )
+                    ))
                 )
             state = (
                 _without_internal_metrics(
@@ -3369,6 +3370,9 @@ class MarketScanner:
             existing_episode=existing_episode,
             entry_ready_once=entry_ready_once,
             closed_retest_confirmed=closed_retest_confirmed,
+            continuing_entry_window=entry_window_can_continue(
+                signal, int(metrics.get("ticker_sampled_at") or time.time() * 1000)
+            ),
         )
         eligibility = dict(eligibility)
         eligibility.update(
@@ -3459,6 +3463,13 @@ class MarketScanner:
             entry_eligibility=eligibility,
             actionable=bool(eligibility["actionable"]),
         )
+
+    def _record_entry_window(self, signal: Signal) -> Signal:
+        recorder = getattr(self.repository, "record_entry_window", None)
+        if signal.radar_horizon != "SHORT" or not signal.trigger_id or not callable(recorder):
+            return signal
+        observed_ms = int(signal.market_metrics.get("ticker_sampled_at") or time.time() * 1000)
+        return recorder(signal, observed_ms)
 
     def _attach_decision_context(
         self,

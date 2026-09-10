@@ -996,8 +996,9 @@ class DecisionContextTests(unittest.TestCase):
         self.assertEqual(result["final"]["status"], "HARD_GATE_BLOCKED")
         self.assertFalse(result["final"]["new_entry_allowed"])
 
-    def test_explicit_strong_higher_timeframe_countertrend_suspends_entry(self):
+    def test_swing_explicit_strong_higher_timeframe_countertrend_suspends_entry(self):
         item = complete_signal()
+        item["radar_horizon"] = "LONG"
         item["conflicts"] = [
             "1H 背景反向，屬逆勢 Trigger",
             "更高週期背景明顯反向；只列 Conflict，不取消核心 Trigger",
@@ -1021,9 +1022,10 @@ class DecisionContextTests(unittest.TestCase):
         self.assertEqual(result["confidence"]["key"], "MEDIUM")
         self.assertFalse(result["conflict"]["opposite_signal_created"])
 
-    def test_boundary_cost_does_not_override_strong_countertrend_block(self):
+    def test_swing_boundary_cost_does_not_override_strong_countertrend_block(self):
         """Regression for the DASH-like case that disappeared from 可進."""
         item = complete_signal()
+        item["radar_horizon"] = "LONG"
         item["market_metrics"]["execution_cost_to_risk_pct"] = 13.5
         item["execution_quality"]["execution_cost_to_risk_pct"] = 13.5
         item["conflicts"] = [

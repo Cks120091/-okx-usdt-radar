@@ -9,6 +9,7 @@ from typing import Any, Protocol
 from .market_story import execution_quality
 from .models import MarketContext, Signal, Ticker
 from .price_display import signal_plan_display_fields
+from .entry_window import can_continue as entry_window_can_continue
 from .strategy import _entry_eligibility
 
 
@@ -110,6 +111,9 @@ def build_preflight_payload(
         existing_episode=existing_episode,
         entry_ready_once=entry_ready_once,
         closed_retest_confirmed=closed_retest_confirmed,
+        continuing_entry_window=entry_window_can_continue(
+            signal, int(ticker.ts or now_ms or time.time() * 1000)
+        ),
     )
 
     is_long = signal.direction == "LONG"
@@ -535,6 +539,7 @@ def build_preflight_payload(
                 "reentry_confirmation_required",
                 False,
             ),
+            "continuing_entry_window": eligibility.get("continuing_entry_window", False),
             "closed_retest_confirmed": eligibility.get(
                 "closed_retest_confirmed",
                 False,

@@ -398,6 +398,9 @@ def _public_candidate(item: Any, *, signal: bool) -> dict[str, Any]:
                 "hard_blockers",
                 "risk_warnings",
                 "wait_reason_code",
+                "continuing_entry_window",
+                "reentry_confirmation_required",
+                "closed_retest_confirmed",
                 "current_price_source",
                 "publication_last_price",
             ),
@@ -487,7 +490,7 @@ def _public_market_story(story: Any) -> dict[str, Any]:
 def _public_decision_context(decision: Any) -> dict[str, Any]:
     if not isinstance(decision, Mapping):
         return {}
-    payload = _select(decision, ("schema_version",))
+    payload = _select(decision, ("schema_version", "entry_policy_version"))
     hard_gate = _read(decision, "hard_gate", {})
     payload["hard_gate"] = _select(
         hard_gate,
@@ -717,7 +720,7 @@ def _public_evidence_groups(groups: Any) -> dict[str, Any]:
     for key in ("position_structure", "trend_momentum", "participation_flow"):
         group = _select(
             _read(groups, key, {}),
-            ("label", "score", "stance", "confidence"),
+            ("label", "score", "stance", "confidence", "source_timeframe", "evidence_scope"),
         )
         if group:
             payload[key] = group
