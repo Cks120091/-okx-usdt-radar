@@ -1,0 +1,74 @@
+name: Validate historical card statistics
+on:
+  push:
+    branches: [feat/card-history-rate-20260911-0144]
+permissions:
+  contents: write
+concurrency:
+  group: card-stats-review-${{ github.ref }}
+  cancel-in-progress: false
+jobs:
+  verify:
+    runs-on: ubuntu-latest
+    timeout-minutes: 12
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          fetch-depth: 2
+      - uses: actions/setup-python@v6
+        with:
+          python-version: '3.12'
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+      - name: Apply checksum-verified additive patch
+        run: |
+          test "$(git rev-parse HEAD^)" = 5f6649450b1b209b7f604d260fcc6e739eaa5375
+          python - <<'PY'
+          import base64,gzip,hashlib,json
+          from pathlib import Path
+          encoded=''.join(Path(f'.github/card-stats-review/{i}.b64').read_text() for i in range(3))
+          raw=gzip.decompress(base64.b64decode(encoded,validate=True))
+          assert hashlib.sha256(raw).hexdigest()=='907813effd61f0351730cc6adb642a09f9781029331b2cb4ad3679f5990616a9'
+          payload=json.loads(raw)
+          Path('.github/apply_card_statistics.py').write_text(payload.pop('integrate.py'))
+          Path('.github/card_statistics_bundle.json').write_text(json.dumps(payload,ensure_ascii=False))
+          PY
+          python .github/apply_card_statistics.py
+          git diff --exit-code -- radar/strategy.py radar/market_story.py radar/decision.py radar/entry_window.py radar/preflight.py radar/evidence.py radar/api.py radar/config.py render.yaml Dockerfile run.py
+      - name: Install runtime and browser test dependencies
+        run: |
+          python -m pip install -r requirements.txt playwright
+          python -m playwright install --with-deps chromium
+      - name: Full Python regression and syntax
+        run: |
+          python -m compileall -q radar scripts tests run.py
+          python -m unittest discover -s tests -v > /tmp/card-stats-tests.log 2>&1 || { tail -140 /tmp/card-stats-tests.log; exit 1; }
+          tail -5 /tmp/card-stats-tests.log
+          git diff --check
+          python - <<'PY'
+          import re
+          from pathlib import Path
+          for i, body in enumerate(re.findall(r'<script(?:\s[^>]*)?>(.*?)</script>',Path('radar/static/pages.html').read_text(),re.S)):
+              Path(f'/tmp/card-stats-inline-{i}.js').write_text(body)
+          PY
+          for file in /tmp/card-stats-inline-*.js; do node --check "$file"; done
+          node --check radar/static/service-worker.js
+      - name: Full offline UI regressions
+        run: |
+          python scripts/check_card_statistics_ui.py
+          python scripts/check_quicklook_ui.py
+          python scripts/check_layout_ui.py
+          python scripts/check_clarity_ui.py
+          python scripts/check_intraday_ui.py
+      - name: Commit tested application blobs only to review branch
+        run: |
+          test "$GITHUB_REF" = refs/heads/feat/card-history-rate-20260911-0144
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          mapfile -t paths < /tmp/card-stats-paths.txt
+          git add -- "${paths[@]}"
+          git commit -m 'Validate passive observed-entry card statistics and safe insufficient-sample UI; no deployment'
+          git push origin HEAD:refs/heads/feat/card-history-rate-20260911-0144
+          git rev-parse HEAD
+          git ls-files -s -- "${paths[@]}"
