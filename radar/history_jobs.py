@@ -1,13 +1,16 @@
-"""On-demand, resumable historical scan in ONE bounded low-priority process.
+"""On-demand single-coin 15m historical replay in one bounded worker.
 
-No startup scan, scheduler, order submission or writes to the live SQLite DB.
-HTTP requests only read small aggregate status or launch/pause an explicit job.
+The worker is user-triggered only.  It never starts from the home page, never
+places orders and never writes the live signal/statistics databases.  Finished
+coin snapshots are cached in a separate research SQLite database so a normal
+single-coin refresh can read them without replaying seven days every time.
 """
 from __future__ import annotations
 
 import argparse
 import json
 import os
+import re
 import secrets
 import sqlite3
 import subprocess
@@ -15,20 +18,37 @@ import sys
 import threading
 import time
 import uuid
-from dataclasses import asdict
-from contextlib import contextmanager
 from collections.abc import Iterator
+from contextlib import contextmanager
+from dataclasses import asdict
 from pathlib import Path
 from typing import Any
 
-from .history_replay import (ALLOWED_DAYS, CORE, DAY, HISTORY_SYMBOLS, INTERVALS, MIN_RESOLVED,
-                             MIN_RESOLVED_COVERAGE, STEP, VERSION, NOTE, Interrupted,
-                             aggregate, config_for_replay, fetch_history, fingerprint,
-                             minimum_sample_days, replay_symbol)
+from .history_single_replay import (
+    ALLOWED_DAYS,
+    CORE,
+    DAY,
+    INTERVALS,
+    MIN_RESOLVED,
+    MIN_RESOLVED_COVERAGE,
+    NOTE,
+    STEP,
+    VERSION,
+    Interrupted,
+    aggregate,
+    config_for_replay,
+    fetch_history,
+    fingerprint,
+    minimum_sample_days,
+    replay_symbol,
+)
 
 MAX_WALL_SECONDS = 3600
 MAX_DATABASE_BYTES = 32 * 1024 * 1024
-ACTIVE = {'QUEUED', 'RUNNING', 'WAITING_LIVE_SCAN'}
+MAX_CACHED_COINS = 50
+ACTIVE = {"QUEUED", "RUNNING", "WAITING_LIVE_SCAN"}
+LEGACY_DEFAULT_INST = "BTC-USDT-SWAP"
+_INST_RE = re.compile(r"^[A-Z0-9][A-Z0-9-]{0,48}-USDT-SWAP$")
 
 
 @contextmanager
@@ -45,65 +65,206 @@ def _connect(path: Path) -> Iterator[sqlite3.Connection]:
 
 def _init(path: Path) -> None:
     with _connect(path) as connection:
-        connection.executescript('''
-          CREATE TABLE IF NOT EXISTS history_jobs_v1 (
-            id TEXT PRIMARY KEY, created_ms INTEGER NOT NULL, fingerprint TEXT NOT NULL,
-            settings TEXT NOT NULL, days INTEGER NOT NULL, start_ms INTEGER NOT NULL,
-            end_ms INTEGER NOT NULL, status TEXT NOT NULL, control TEXT NOT NULL DEFAULT '',
-            live_busy INTEGER NOT NULL DEFAULT 0, current_symbol TEXT NOT NULL DEFAULT '',
-            total INTEGER NOT NULL DEFAULT 0, done INTEGER NOT NULL DEFAULT 0,
-            failed INTEGER NOT NULL DEFAULT 0, error TEXT NOT NULL DEFAULT '',
-            heartbeat_ms INTEGER NOT NULL DEFAULT 0, instruments TEXT NOT NULL DEFAULT '[]',
-            summary TEXT NOT NULL DEFAULT '{}');
-          CREATE TABLE IF NOT EXISTS history_symbols_v1 (
-            job_id TEXT NOT NULL, inst_id TEXT NOT NULL, status TEXT NOT NULL,
-            result TEXT NOT NULL, PRIMARY KEY(job_id, inst_id));
-        ''')
+        connection.executescript(
+            """
+            CREATE TABLE IF NOT EXISTS history_jobs_v1 (
+              id TEXT PRIMARY KEY,
+              created_ms INTEGER NOT NULL,
+              fingerprint TEXT NOT NULL,
+              settings TEXT NOT NULL,
+              inst_id TEXT NOT NULL,
+              days INTEGER NOT NULL,
+              start_ms INTEGER NOT NULL,
+              end_ms INTEGER NOT NULL,
+              status TEXT NOT NULL,
+              control TEXT NOT NULL DEFAULT '',
+              live_busy INTEGER NOT NULL DEFAULT 0,
+              current_symbol TEXT NOT NULL DEFAULT '',
+              total INTEGER NOT NULL DEFAULT 1,
+              done INTEGER NOT NULL DEFAULT 0,
+              failed INTEGER NOT NULL DEFAULT 0,
+              error TEXT NOT NULL DEFAULT '',
+              heartbeat_ms INTEGER NOT NULL DEFAULT 0,
+              instruments TEXT NOT NULL DEFAULT '[]',
+              summary TEXT NOT NULL DEFAULT '{}'
+            );
+            CREATE INDEX IF NOT EXISTS idx_history_jobs_coin
+              ON history_jobs_v1(inst_id, created_ms DESC);
+            CREATE TABLE IF NOT EXISTS history_symbols_v1 (
+              job_id TEXT NOT NULL,
+              inst_id TEXT NOT NULL,
+              status TEXT NOT NULL,
+              result TEXT NOT NULL,
+              PRIMARY KEY(job_id, inst_id)
+            );
+            """
+        )
 
 
 def _update(path: Path, job: str, **values: Any) -> None:
-    allowed = {'status', 'control', 'live_busy', 'current_symbol', 'total', 'done', 'failed',
-               'error', 'heartbeat_ms', 'instruments', 'summary'}
+    allowed = {
+        "status",
+        "control",
+        "live_busy",
+        "current_symbol",
+        "total",
+        "done",
+        "failed",
+        "error",
+        "heartbeat_ms",
+        "instruments",
+        "summary",
+    }
     if not values or not set(values) <= allowed:
-        raise ValueError('invalid job update')
+        raise ValueError("invalid job update")
     with _connect(path) as connection:
-        connection.execute('UPDATE history_jobs_v1 SET ' + ','.join(key + '=?' for key in values)
-                           + ' WHERE id=?', (*values.values(), job))
+        connection.execute(
+            "UPDATE history_jobs_v1 SET "
+            + ",".join(key + "=?" for key in values)
+            + " WHERE id=?",
+            (*values.values(), job),
+        )
 
 
-def _latest(path: Path) -> dict | None:
+def _latest(path: Path, inst_id: str | None = None) -> dict | None:
+    sql = "SELECT * FROM history_jobs_v1"
+    params: tuple[Any, ...] = ()
+    if inst_id:
+        sql += " WHERE inst_id=?"
+        params = (inst_id,)
+    sql += " ORDER BY created_ms DESC, id DESC LIMIT 1"
     with _connect(path) as connection:
-        row = connection.execute('SELECT * FROM history_jobs_v1 ORDER BY created_ms DESC, id DESC LIMIT 1').fetchone()
+        row = connection.execute(sql, params).fetchone()
     return dict(row) if row else None
+
+
+def _all_latest(path: Path) -> list[dict[str, Any]]:
+    with _connect(path) as connection:
+        rows = connection.execute(
+            "SELECT * FROM history_jobs_v1 ORDER BY created_ms DESC, id DESC"
+        ).fetchall()
+    output: list[dict[str, Any]] = []
+    seen: set[str] = set()
+    for row in rows:
+        item = dict(row)
+        inst_id = str(item.get("inst_id") or "")
+        if not inst_id or inst_id in seen:
+            continue
+        seen.add(inst_id)
+        output.append(item)
+    return output
 
 
 def _rebuild(path: Path, job: str, complete: bool) -> None:
     with _connect(path) as connection:
-        rows = connection.execute('SELECT result FROM history_symbols_v1 WHERE job_id=?', (job,)).fetchall()
-        meta = connection.execute('SELECT total,start_ms,end_ms,days FROM history_jobs_v1 WHERE id=?', (job,)).fetchone()
-    results = [json.loads(row['result']) for row in rows]
-    failed = sum(result.get('status') != 'OK' for result in results)
-    expected = (meta['end_ms'] - meta['start_ms']) // CORE
-    fully_covered = sum(result.get('status') == 'OK' and result.get('evaluated', 0) >= expected * .95
-                        for result in results)
-    scope_coverage = fully_covered / meta['total'] if meta['total'] else 0
-    summary = aggregate(results, complete=complete and scope_coverage >= .8, days=int(meta['days']))
-    summary.update(scope_coverage_pct=round(scope_coverage * 100, 1),
-                   covered_symbols=fully_covered,
-                   covered_inst_ids=[result['inst_id'] for result in results if result.get('status') == 'OK' and result.get('evaluated', 0) >= expected * .95],
-                   excluded=[{'inst_id': result['inst_id'], 'status': result['status'],
-                              'reason': result.get('error', '歷史窗口不足'),
-                              'evaluated': result.get('evaluated', 0)}
-                             for result in results if result.get('status') != 'OK'
-                             or result.get('evaluated', 0) < expected * .95])
-    _update(path, job, done=len(results), failed=failed, summary=json.dumps(summary, ensure_ascii=False))
+        rows = connection.execute(
+            "SELECT result FROM history_symbols_v1 WHERE job_id=?", (job,)
+        ).fetchall()
+        meta = connection.execute(
+            "SELECT total,start_ms,end_ms,days,inst_id FROM history_jobs_v1 WHERE id=?",
+            (job,),
+        ).fetchone()
+    if meta is None:
+        return
+    results = [json.loads(row["result"]) for row in rows]
+    failed = sum(result.get("status") != "OK" for result in results)
+    expected = max(1, (meta["end_ms"] - meta["start_ms"]) // CORE)
+    successful = next(
+        (
+            result
+            for result in results
+            if result.get("status") == "OK" and result.get("inst_id") == meta["inst_id"]
+        ),
+        None,
+    )
+    evaluated = int(successful.get("evaluated", 0)) if successful else 0
+    coverage = min(1.0, evaluated / expected)
+    covered = successful is not None and coverage >= 0.95
+    summary = aggregate(results, complete=bool(complete and covered), days=int(meta["days"]))
+    excluded = []
+    if successful is None:
+        reason = "尚未完成本幣歷史回放"
+        if results:
+            reason = str(results[0].get("error") or results[0].get("status") or reason)
+        excluded.append(
+            {
+                "inst_id": meta["inst_id"],
+                "status": results[0].get("status", "ERROR") if results else "PENDING",
+                "reason": reason,
+                "evaluated": evaluated,
+            }
+        )
+    elif not covered:
+        excluded.append(
+            {
+                "inst_id": meta["inst_id"],
+                "status": "INCOMPLETE_HISTORY",
+                "reason": "15m歷史窗口完整度不足95%",
+                "evaluated": evaluated,
+            }
+        )
+    summary.update(
+        scope_coverage_pct=round(coverage * 100, 1),
+        covered_symbols=1 if covered else 0,
+        covered_inst_ids=[meta["inst_id"]] if covered else [],
+        excluded=excluded,
+    )
+    _update(
+        path,
+        job,
+        done=len(results),
+        failed=failed,
+        summary=json.dumps(summary, ensure_ascii=False),
+    )
+
+
+def _request_scope(value: Any) -> tuple[int, str]:
+    """Accept new nested UI request while keeping integer calls test/backward-safe."""
+    if isinstance(value, dict):
+        raw_days = value.get("days", 7)
+        raw_inst = value.get("inst_id", "")
+    else:
+        raw_days = value
+        raw_inst = LEGACY_DEFAULT_INST
+    if isinstance(raw_days, bool) or not isinstance(raw_days, int) or raw_days not in ALLOWED_DAYS:
+        raise ValueError("15m短線歷史更新只接受3天或7天")
+    inst_id = str(raw_inst or "").strip().upper()
+    if not _INST_RE.fullmatch(inst_id):
+        raise ValueError("請輸入正確的 USDT 永續幣種，例如 BTC-USDT-SWAP")
+    return raw_days, inst_id
+
+
+def _delete_jobs_for_coin(path: Path, inst_id: str) -> None:
+    with _connect(path) as connection:
+        ids = [
+            row[0]
+            for row in connection.execute(
+                "SELECT id FROM history_jobs_v1 WHERE inst_id=?", (inst_id,)
+            )
+        ]
+        for job_id in ids:
+            connection.execute("DELETE FROM history_symbols_v1 WHERE job_id=?", (job_id,))
+        connection.execute("DELETE FROM history_jobs_v1 WHERE inst_id=?", (inst_id,))
+
+
+def _prune(path: Path) -> None:
+    with _connect(path) as connection:
+        rows = connection.execute(
+            "SELECT id FROM history_jobs_v1 WHERE status NOT IN ('QUEUED','RUNNING','WAITING_LIVE_SCAN') "
+            "ORDER BY created_ms DESC, id DESC"
+        ).fetchall()
+        stale = [row[0] for row in rows[MAX_CACHED_COINS:]]
+        for job_id in stale:
+            connection.execute("DELETE FROM history_symbols_v1 WHERE job_id=?", (job_id,))
+            connection.execute("DELETE FROM history_jobs_v1 WHERE id=?", (job_id,))
 
 
 class HistoryManager:
     def __init__(self, runtime: Any):
         self.runtime = runtime
-        # Explicitly separate from both live episodes and observed-entry statistics.
-        self.path = Path(runtime.config.data_dir) / 'history_replay_v1.sqlite3'
+        # New DB name prevents the previous eight-major pooled cache from being
+        # interpreted as single-coin history.
+        self.path = Path(runtime.config.data_dir) / "history_single_15m_v1.sqlite3"
         self.settings = asdict(runtime.config)
         self.fingerprint = fingerprint(self.settings)
         self.token = secrets.token_urlsafe(24)
@@ -112,62 +273,161 @@ class HistoryManager:
         self._job: str | None = None
         self._closed = False
         _init(self.path)
-        old = _latest(self.path)
-        if old and old['status'] in ACTIVE:
-            _update(self.path, old['id'], status='INTERRUPTED', control='PAUSE',
-                    error='服務曾重啟；已完成標的保留，請按續跑。')
+        with _connect(self.path) as connection:
+            active = connection.execute(
+                "SELECT id FROM history_jobs_v1 WHERE status IN ('QUEUED','RUNNING','WAITING_LIVE_SCAN')"
+            ).fetchall()
+        for row in active:
+            _update(
+                self.path,
+                row["id"],
+                status="INTERRUPTED",
+                control="PAUSE",
+                error="服務曾重啟；本幣已完成資料保留，請按續跑。",
+            )
+
+    def _snapshot(self, row: dict[str, Any]) -> dict[str, Any]:
+        output: dict[str, Any] = {
+            "id": row["id"],
+            "inst_id": row["inst_id"],
+            "status": row["status"],
+            "days": row["days"],
+            "start_ms": row["start_ms"],
+            "end_ms": row["end_ms"],
+            "current_symbol": row["current_symbol"],
+            "total": row["total"],
+            "done": row["done"],
+            "failed": row["failed"],
+            "error": row["error"],
+            "heartbeat_ms": row["heartbeat_ms"],
+            "compatible": row["fingerprint"] == self.fingerprint,
+            "groups": {},
+            "overall": {},
+            "scope_coverage_pct": 0.0,
+            "covered_symbols": 0,
+            "excluded": [],
+        }
+        try:
+            summary = json.loads(row["summary"] or "{}")
+        except (TypeError, json.JSONDecodeError):
+            summary = {}
+        if isinstance(summary, dict):
+            output.update(summary)
+        if not output["compatible"]:
+            output.update(
+                status="VERSION_CHANGED",
+                groups={},
+                symbol_groups={},
+                overall={},
+                scope_coverage_pct=0.0,
+            )
+        return output
 
     def status(self) -> dict:
         with self.lock:
             row = _latest(self.path)
-            if row and row['status'] in ACTIVE and self.process and self.process.poll() is not None:
-                _update(self.path, row['id'], status='INTERRUPTED',
-                        error='歷史工作程序停止；保留已完成進度，可續跑。')
+            if (
+                row
+                and row["status"] in ACTIVE
+                and self.process is not None
+                and self.process.poll() is not None
+            ):
+                _update(
+                    self.path,
+                    row["id"],
+                    status="INTERRUPTED",
+                    error="本幣歷史工作程序停止；已完成資料保留，可續跑。",
+                )
                 row = _latest(self.path)
-            output = {'schema_version': VERSION, 'status': 'IDLE', 'csrf': self.token,
-                      'source': 'HISTORICAL_PRICE_SIMULATION', 'note': NOTE,
-                      'minimum_resolved': MIN_RESOLVED, 'minimum_days': minimum_sample_days(7),
-                      'minimum_coverage_pct': MIN_RESOLVED_COVERAGE * 100,
-                      'storage_bytes': self.path.stat().st_size if self.path.exists() else 0,
-                      'groups': {}, 'symbol_groups': {}, 'total': 0, 'done': 0, 'failed': 0,
-                      'compatible': True, 'holding_hours': 24}
+
+            base: dict[str, Any] = {
+                "schema_version": VERSION,
+                "status": "IDLE",
+                "csrf": self.token,
+                "source": "SINGLE_COIN_15M_PRICE_SIMULATION",
+                "note": NOTE,
+                "minimum_resolved": MIN_RESOLVED,
+                "minimum_days": minimum_sample_days(7),
+                "minimum_coverage_pct": MIN_RESOLVED_COVERAGE * 100,
+                "storage_bytes": self.path.stat().st_size if self.path.exists() else 0,
+                "groups": {},
+                "overall": {},
+                "coins": {},
+                "total": 0,
+                "done": 0,
+                "failed": 0,
+                "compatible": True,
+                "holding_hours": 24,
+                "scope": "單幣15m短線歷史勝率；4H／長線卡完全不使用此功能。",
+                "assumptions": (
+                    "每個15m收線點重跑價格核心；同一Episode只取第一次達到可進場的收線點。"
+                    "固定當時SL／TP1，使用後續已收線5m判定最多24小時；未扣費，且不含完整歷史OI／CVD、"
+                    "實際Bid／Ask、深度或訂單簿。"
+                ),
+            }
+            coins: dict[str, Any] = {}
+            for item in _all_latest(self.path):
+                snapshot = self._snapshot(item)
+                coins[item["inst_id"]] = snapshot
+            base["coins"] = coins
             if not row:
-                return output
-            for key in ('id', 'status', 'days', 'start_ms', 'end_ms', 'current_symbol',
-                        'total', 'done', 'failed', 'error', 'heartbeat_ms'):
-                output[key] = row[key]
-            output.update(json.loads(row['summary']))
-            output['minimum_days'] = minimum_sample_days(int(row['days']))
-            output['compatible'] = row['fingerprint'] == self.fingerprint
-            if not output['compatible']:
-                output.update(status='VERSION_CHANGED', groups={})
-            # Core 15m outcome timeframe is deliberately not a 4H backtest.
-            output['scope'] = ('歷史工作固定掃8支大型主要代幣：BTC、ETH、SOL、XRP、DOGE、ADA、LINK、AVAX；'
-                               '其他幣卡片可引用相同情境的大型幣合併樣本，但會明確標示不是本幣專屬勝率。')
-            output['assumptions'] = ('15m收線後延遲5分鐘，以5m開盤作模擬參考；等待可於後續收線重新評估。'
-                                     '固定原SL／TP1、最多24小時；5m同棒TP／SL先後不明另列。'
-                                     '百分比未扣費，無歷史深度，不代表當時線上一定會放行。')
-            return output
+                return base
+            latest = self._snapshot(row)
+            base.update(latest)
+            base["csrf"] = self.token
+            base["schema_version"] = VERSION
+            base["source"] = "SINGLE_COIN_15M_PRICE_SIMULATION"
+            base["note"] = NOTE
+            base["coins"] = coins
+            base["storage_bytes"] = self.path.stat().st_size if self.path.exists() else 0
+            base["scope"] = "單幣15m短線歷史勝率；4H／長線卡完全不使用此功能。"
+            base["assumptions"] = (
+                "每個15m收線點重跑價格核心；同一Episode只取第一次達到可進場的收線點。"
+                "固定當時SL／TP1，使用後續已收線5m判定最多24小時；未扣費，且不含完整歷史OI／CVD、"
+                "實際Bid／Ask、深度或訂單簿。"
+            )
+            return base
 
     def _spawn(self, job: str) -> None:
         self._job = job
         try:
             self.process = subprocess.Popen(
-                [sys.executable, '-m', 'radar.history_jobs', '--database', str(self.path.resolve()), '--job', job],
-                cwd=str(Path(__file__).resolve().parent.parent), stdin=subprocess.DEVNULL,
-                stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, start_new_session=True)
+                [
+                    sys.executable,
+                    "-m",
+                    "radar.history_jobs",
+                    "--database",
+                    str(self.path.resolve()),
+                    "--job",
+                    job,
+                ],
+                cwd=str(Path(__file__).resolve().parent.parent),
+                stdin=subprocess.DEVNULL,
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+                start_new_session=True,
+            )
         except OSError:
-            _update(self.path, job, status='ERROR', error='無法啟動獨立歷史程序；即時掃描不受影響。')
+            _update(
+                self.path,
+                job,
+                status="ERROR",
+                error="無法啟動單幣歷史程序；即時雷達不受影響。",
+            )
             raise
         process = self.process
-        threading.Thread(target=self._supervise, args=(job, process), daemon=True,
-                         name='history-low-priority-supervisor').start()
+        threading.Thread(
+            target=self._supervise,
+            args=(job, process),
+            daemon=True,
+            name="single-coin-history-supervisor",
+        ).start()
 
     def _supervise(self, job: str, process: subprocess.Popen) -> None:
         previous = None
         while not self._closed and process.poll() is None:
-            busy = bool(getattr(self.runtime, '_running', False))
-            scan_lock = getattr(self.runtime, '_scan_lock', None)
+            busy = bool(getattr(self.runtime, "_running", False))
+            scan_lock = getattr(self.runtime, "_scan_lock", None)
             if scan_lock is not None:
                 acquired = scan_lock.acquire(blocking=False)
                 if acquired:
@@ -180,61 +440,90 @@ class HistoryManager:
                     previous = busy
                 except sqlite3.Error:
                     pass
-            time.sleep(.5)
+            time.sleep(0.5)
 
-    def command(self, action: str, *, days: Any = 7, token: str = '') -> dict:
+    def command(self, action: str, *, days: Any = 7, token: str = "") -> dict:
         if not secrets.compare_digest(str(token), self.token):
-            raise PermissionError('操作驗證已過期，請重新整理歷史掃描頁。')
-        if action not in {'start', 'resume', 'pause', 'delete'}:
-            raise ValueError('不支援的歷史掃描操作')
+            raise PermissionError("操作驗證已過期，請重新整理歷史掃描頁。")
+        if action not in {"start", "resume", "pause", "delete"}:
+            raise ValueError("不支援的歷史掃描操作")
+        requested_days, inst_id = _request_scope(days)
+
         with self.lock:
-            row = _latest(self.path)
             running = self.process is not None and self.process.poll() is None
-            if action == 'pause':
-                if row and running:
-                    _update(self.path, row['id'], control='PAUSE')
+            active = _latest(self.path)
+            if active and active["status"] not in ACTIVE:
+                active = None
+            if action == "pause":
+                if running and active:
+                    _update(self.path, active["id"], control="PAUSE")
                 return self.status()
-            if action == 'delete':
+            if action == "delete":
                 if running:
-                    raise ValueError('請先暫停，等工作程序結束後才清除。')
-                # User-triggered deletion removes only history-scan research data.
+                    raise ValueError("請先暫停歷史更新，等工作程序結束後再清除此幣資料。")
+                _delete_jobs_for_coin(self.path, inst_id)
                 with _connect(self.path) as connection:
-                    connection.execute('DELETE FROM history_symbols_v1')
-                    connection.execute('DELETE FROM history_jobs_v1')
-                with _connect(self.path) as connection:
-                    connection.execute('VACUUM')
+                    connection.execute("VACUUM")
                 return self.status()
             if running:
-                return self.status()  # join existing work; never start a second scan
-            if self._closed:
-                raise ValueError('服務正在關閉')
-            if self.path.stat().st_size > MAX_DATABASE_BYTES:
-                raise ValueError('歷史暫存已達32MB上限；請先清除歷史回測，不影響正式紀錄。')
-            if action == 'resume':
-                if not row or row['fingerprint'] != self.fingerprint:
-                    raise ValueError('沒有可續跑的同版本工作')
-                if row['status'] in {'COMPLETE', 'PARTIAL_COMPLETE'}:
+                if (
+                    active
+                    and active["inst_id"] == inst_id
+                    and int(active["days"]) == requested_days
+                ):
                     return self.status()
-                _update(self.path, row['id'], status='QUEUED', control='', live_busy=0, error='')
-                self._spawn(row['id'])
+                other = active["inst_id"] if active else "另一顆幣"
+                raise ValueError(f"{other} 的15m歷史更新正在執行，請完成或暫停後再換幣。")
+            if self._closed:
+                raise ValueError("服務正在關閉")
+            if self.path.stat().st_size > MAX_DATABASE_BYTES:
+                raise ValueError("單幣歷史暫存已達32MB上限；請先清除不需要的幣種回測。")
+
+            target = _latest(self.path, inst_id)
+            if action == "resume":
+                if not target or target["fingerprint"] != self.fingerprint:
+                    raise ValueError("這顆幣沒有可續跑的同版本工作")
+                if target["status"] in {"COMPLETE", "PARTIAL_COMPLETE"}:
+                    return self.status()
+                _update(
+                    self.path,
+                    target["id"],
+                    status="QUEUED",
+                    control="",
+                    live_busy=0,
+                    error="",
+                )
+                self._spawn(target["id"])
                 return self.status()
-            if isinstance(days, bool) or not isinstance(days, int) or days not in ALLOWED_DAYS:
-                raise ValueError('短線歷史掃描只接受3天或7天')
-            if row and row['status'] in {'PAUSED', 'INTERRUPTED', 'ERROR'}:
-                raise ValueError('已有未完成工作；請按續跑，或先清除再開始新工作。')
-            with _connect(self.path) as connection:
-                count = connection.execute('SELECT COUNT(*) FROM history_jobs_v1').fetchone()[0]
-            if count >= 3:
-                raise ValueError('已保留3次歷史掃描；請先清除歷史回測再建立，正式紀錄不受影響。')
+
+            if target and target["status"] in {"PAUSED", "INTERRUPTED", "ERROR"}:
+                raise ValueError("這顆幣已有未完成歷史工作；請按續跑，或先清除後重新更新。")
+
+            # A fresh user update replaces only this coin's old completed cache.
+            if target:
+                _delete_jobs_for_coin(self.path, inst_id)
+            _prune(self.path)
+
             now = int(time.time() * 1000)
             end = (now // CORE * CORE) - DAY - STEP
-            end = end // CORE * CORE  # leave complete outcome horizon for the last delayed entry
+            end = end // CORE * CORE
             job = uuid.uuid4().hex
             with _connect(self.path) as connection:
-                connection.execute('''INSERT INTO history_jobs_v1
-                    (id,created_ms,fingerprint,settings,days,start_ms,end_ms,status)
-                    VALUES(?,?,?,?,?,?,?,'QUEUED')''',
-                    (job, now, self.fingerprint, json.dumps(self.settings), days, end - days * DAY, end))
+                connection.execute(
+                    """INSERT INTO history_jobs_v1
+                    (id,created_ms,fingerprint,settings,inst_id,days,start_ms,end_ms,status,total)
+                    VALUES(?,?,?,?,?,?,?,?, 'QUEUED',1)""",
+                    (
+                        job,
+                        now,
+                        self.fingerprint,
+                        json.dumps(self.settings),
+                        inst_id,
+                        requested_days,
+                        end - requested_days * DAY,
+                        end,
+                    ),
+                )
             self._spawn(job)
             return self.status()
 
@@ -243,7 +532,7 @@ class HistoryManager:
         with self.lock:
             if self.process is not None and self.process.poll() is None:
                 if self._job:
-                    _update(self.path, self._job, control='PAUSE')
+                    _update(self.path, self._job, control="PAUSE")
                 try:
                     self.process.wait(timeout=2)
                 except subprocess.TimeoutExpired:
@@ -251,107 +540,178 @@ class HistoryManager:
 
 
 def run_job(path: Path, job: str) -> None:
-    # Resource limits apply ONLY to this child, not the web service.
-    if hasattr(os, 'nice'):
+    # Resource limits apply only to the research child, never the web service.
+    if hasattr(os, "nice"):
         os.nice(15)
     try:
         import resource
-        resource.setrlimit(resource.RLIMIT_AS, (256 * 1024 * 1024, 256 * 1024 * 1024))
+
+        resource.setrlimit(
+            resource.RLIMIT_AS,
+            (256 * 1024 * 1024, 256 * 1024 * 1024),
+        )
     except (ImportError, ValueError, OSError):
         pass
+
     from .api import OKXPublicClient
     from .models import Instrument
+
     started = time.monotonic()
     last_check = [0.0]
     with _connect(path) as connection:
-        row = connection.execute('SELECT * FROM history_jobs_v1 WHERE id=?', (job,)).fetchone()
+        row = connection.execute(
+            "SELECT * FROM history_jobs_v1 WHERE id=?", (job,)
+        ).fetchone()
     if row is None:
         return
     meta = dict(row)
-    settings = json.loads(meta['settings'])
-    if meta['fingerprint'] != fingerprint(settings):
-        _update(path, job, status='ERROR', error='程式指紋已改變，未混用舊回測。')
+    settings = json.loads(meta["settings"])
+    if meta["fingerprint"] != fingerprint(settings):
+        _update(path, job, status="ERROR", error="程式指紋已改變，未混用舊回測。")
         return
 
     def checkpoint() -> None:
-        if time.monotonic() - last_check[0] < .2:
+        if time.monotonic() - last_check[0] < 0.2:
             return
         while True:
             with _connect(path) as connection:
-                control = connection.execute('SELECT control,live_busy FROM history_jobs_v1 WHERE id=?', (job,)).fetchone()
-            if control is None or control['control'] == 'PAUSE':
-                raise Interrupted('使用者暫停；已完成進度保留。')
+                control = connection.execute(
+                    "SELECT control,live_busy FROM history_jobs_v1 WHERE id=?", (job,)
+                ).fetchone()
+            if control is None or control["control"] == "PAUSE":
+                raise Interrupted("使用者暫停；已完成進度保留。")
             if time.monotonic() - started >= MAX_WALL_SECONDS:
-                raise Interrupted('單次工作已達60分鐘保護上限，按續跑可接續；不是已完成。')
-            if not control['live_busy']:
+                raise Interrupted("單次工作已達60分鐘保護上限，按續跑可接續；不是已完成。")
+            if not control["live_busy"]:
                 break
-            _update(path, job, status='WAITING_LIVE_SCAN', heartbeat_ms=int(time.time() * 1000))
-            time.sleep(.5)
-        _update(path, job, status='RUNNING', heartbeat_ms=int(time.time() * 1000))
+            _update(
+                path,
+                job,
+                status="WAITING_LIVE_SCAN",
+                heartbeat_ms=int(time.time() * 1000),
+            )
+            time.sleep(0.5)
+        _update(path, job, status="RUNNING", heartbeat_ms=int(time.time() * 1000))
         last_check[0] = time.monotonic()
 
     try:
-        client = OKXPublicClient(base_url=settings.get('okx_base_url', 'https://openapi.okx.com'),
-                                 timeout_seconds=8, retries=1, rate_limit_requests=4)
+        client = OKXPublicClient(
+            base_url=settings.get("okx_base_url", "https://openapi.okx.com"),
+            timeout_seconds=8,
+            retries=1,
+            rate_limit_requests=4,
+        )
         checkpoint()
-        saved = json.loads(meta['instruments'])
+        saved = json.loads(meta["instruments"])
         if not saved:
             instruments = client.get_usdt_swap_instruments()
-            if not instruments:
-                raise ValueError('未取得固定大型幣掃描範圍')
             by_id = {item.inst_id: item for item in instruments}
-            missing = [inst_id for inst_id in HISTORY_SYMBOLS if inst_id not in by_id]
-            if missing:
-                raise ValueError('固定大型幣未完整取得：' + ', '.join(missing))
-            saved = [asdict(by_id[inst_id]) for inst_id in HISTORY_SYMBOLS]
-            _update(path, job, total=len(saved), instruments=json.dumps(saved))
+            instrument = by_id.get(meta["inst_id"])
+            if instrument is None:
+                raise ValueError(f"OKX目前沒有可用的 {meta['inst_id']} USDT永續合約")
+            saved = [asdict(instrument)]
+            _update(path, job, total=1, instruments=json.dumps(saved))
+
         with _connect(path) as connection:
-            done = {row[0] for row in connection.execute('SELECT inst_id FROM history_symbols_v1 WHERE job_id=?', (job,))}
+            done = {
+                row[0]
+                for row in connection.execute(
+                    "SELECT inst_id FROM history_symbols_v1 WHERE job_id=?", (job,)
+                )
+            }
         cfg = config_for_replay(settings)
-        limits = {'4H': cfg.candle_limit_4h, '1H': cfg.candle_limit_1h,
-                  '15m': cfg.candle_limit_15m, '5m': max(288, cfg.candle_limit_5m)}
+        limits = {
+            "4H": cfg.candle_limit_4h,
+            "1H": cfg.candle_limit_1h,
+            "15m": cfg.candle_limit_15m,
+            "5m": max(288, cfg.candle_limit_5m),
+        }
         for raw in saved:
-            if raw['inst_id'] in done:
+            if raw["inst_id"] in done:
                 continue
             checkpoint()
             if path.stat().st_size > MAX_DATABASE_BYTES:
-                raise Interrupted('歷史暫存達32MB保護上限；請清除研究資料後重跑。')
+                raise Interrupted("單幣歷史暫存達32MB保護上限；請清除不需要的研究資料。")
             instrument = Instrument(**raw)
             _update(path, job, current_symbol=instrument.inst_id)
             try:
-                histories = {}
+                histories: dict[str, Any] = {}
                 for tf, interval in INTERVALS.items():
-                    begin = meta['start_ms'] - DAY - (limits[tf] + 2) * interval
-                    finish = meta['end_ms'] + DAY + STEP if tf == '5m' else meta['end_ms']
-                    histories[tf] = fetch_history(client, instrument.inst_id, tf, begin, finish, checkpoint)
+                    begin = meta["start_ms"] - DAY - (limits[tf] + 2) * interval
+                    finish = (
+                        meta["end_ms"] + DAY + STEP
+                        if tf == "5m"
+                        else meta["end_ms"]
+                    )
+                    histories[tf] = fetch_history(
+                        client,
+                        instrument.inst_id,
+                        tf,
+                        begin,
+                        finish,
+                        checkpoint,
+                    )
                 if any(not rows for rows in histories.values()):
-                    raise ValueError('必要週期歷史為空')
-                result = replay_symbol(instrument, histories, meta['start_ms'], meta['end_ms'], settings, checkpoint)
+                    raise ValueError("必要週期歷史為空")
+                result = replay_symbol(
+                    instrument,
+                    histories,
+                    meta["start_ms"],
+                    meta["end_ms"],
+                    settings,
+                    checkpoint,
+                )
             except Interrupted:
                 raise
             except (Exception, MemoryError) as exc:
-                # Isolate a failed instrument and disclose it, never a zero-loss success.
-                result = {'inst_id': instrument.inst_id, 'status': 'ERROR', 'samples': [],
-                          'error': (type(exc).__name__ + ': ' + str(exc))[:240]}
+                result = {
+                    "inst_id": instrument.inst_id,
+                    "status": "ERROR",
+                    "samples": [],
+                    "error": (type(exc).__name__ + ": " + str(exc))[:240],
+                }
             with _connect(path) as connection:
-                connection.execute('INSERT OR IGNORE INTO history_symbols_v1 VALUES(?,?,?,?)',
-                                   (job, instrument.inst_id, result['status'], json.dumps(result, ensure_ascii=False)))
+                connection.execute(
+                    "INSERT OR REPLACE INTO history_symbols_v1 VALUES(?,?,?,?)",
+                    (
+                        job,
+                        instrument.inst_id,
+                        result["status"],
+                        json.dumps(result, ensure_ascii=False),
+                    ),
+                )
             _rebuild(path, job, complete=False)
+
         _rebuild(path, job, complete=True)
         with _connect(path) as connection:
-            row = connection.execute('SELECT failed,summary FROM history_jobs_v1 WHERE id=?', (job,)).fetchone()
-        excluded = json.loads(row['summary']).get('excluded', [])
-        _update(path, job, status='PARTIAL_COMPLETE' if excluded else 'COMPLETE',
-                current_symbol='', heartbeat_ms=int(time.time() * 1000))
+            row = connection.execute(
+                "SELECT summary FROM history_jobs_v1 WHERE id=?", (job,)
+            ).fetchone()
+        excluded = json.loads(row["summary"]).get("excluded", []) if row else []
+        _update(
+            path,
+            job,
+            status="PARTIAL_COMPLETE" if excluded else "COMPLETE",
+            current_symbol="",
+            heartbeat_ms=int(time.time() * 1000),
+        )
     except Interrupted as exc:
-        _update(path, job, status='PAUSED', error=str(exc), current_symbol='')
+        _update(path, job, status="PAUSED", error=str(exc), current_symbol="")
     except (Exception, MemoryError) as exc:
-        _update(path, job, status='ERROR', error=(type(exc).__name__ + ': ' + str(exc))[:240])
+        _update(
+            path,
+            job,
+            status="ERROR",
+            error=(type(exc).__name__ + ": " + str(exc))[:240],
+            current_symbol="",
+        )
 
 
-if __name__ == '__main__':
-    parser = argparse.ArgumentParser(description='Explicit finite historical replay worker (no orders)')
-    parser.add_argument('--database', required=True)
-    parser.add_argument('--job', required=True)
+if __name__ == "__main__":
+    parser = argparse.ArgumentParser(
+        description="Explicit single-coin 15m historical replay worker (no orders)"
+    )
+    parser.add_argument("--database", required=True)
+    parser.add_argument("--job", required=True)
     args = parser.parse_args()
     run_job(Path(args.database), args.job)
