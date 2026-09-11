@@ -4547,6 +4547,17 @@ def serve(runtime: RadarRuntime, host: str, port: int) -> None:
     static_dir = Path(__file__).parent / "static"
     dashboard_path = static_dir / "pages.html"
     dashboard = dashboard_path.read_bytes()
+    from .history_jobs import HistoryManager
+    history_manager = None
+    history_manager_lock = threading.Lock()
+
+    def history_service():
+        nonlocal history_manager
+        # Initialization failures must not take down the existing radar.
+        with history_manager_lock:
+            if history_manager is None:
+                history_manager = HistoryManager(runtime)
+            return history_manager
 
     class Handler(BaseHTTPRequestHandler):
         server_version = "OKXRadar/3.4"
@@ -4574,6 +4585,18 @@ def serve(runtime: RadarRuntime, host: str, port: int) -> None:
                     (static_dir / "radar-icon.svg").read_bytes(),
                     "image/svg+xml; charset=utf-8",
                 )
+            elif path in {"/history-scan", "/history-replay.js", "/history-replay.css", "/history-scan.js"}:
+                name = "history-scan.html" if path == "/history-scan" else path.lstrip("/")
+                mime = "text/html; charset=utf-8" if name.endswith("html") else "text/css; charset=utf-8" if name.endswith("css") else "application/javascript; charset=utf-8"
+                self._send_bytes(HTTPStatus.OK, (static_dir / name).read_bytes(), mime)
+            elif path == "/api/history-scan/status":
+                try:
+                    result = history_service().status()
+                except Exception:
+                    LOGGER.exception("Historical status unavailable; live service preserved")
+                    self._send_json(HTTPStatus.SERVICE_UNAVAILABLE, {"error": "歷史資料庫暫不可用；即時雷達不受影響"})
+                else:
+                    self._send_json(HTTPStatus.OK, result)
             elif path == "/health":
                 self._send_json(HTTPStatus.OK, {"ok": True, **runtime.status()})
             elif path == "/api/status":
@@ -4647,6 +4670,25 @@ def serve(runtime: RadarRuntime, host: str, port: int) -> None:
 
         def do_POST(self) -> None:  # noqa: N802
             path = urlparse(self.path).path
+            if path.startswith("/api/history-scan/"):
+                try:
+                    origin = self.headers.get("Origin", "")
+                    if (self.headers.get("X-History-Intent") != "user"
+                            or (origin and urlparse(origin).netloc != self.headers.get("Host"))):
+                        raise PermissionError("請從本站歷史掃描頁操作。")
+                    payload = self._read_json_body()
+                    result = history_service().command(path.rsplit("/", 1)[-1],
+                        days=payload.get("days", 30), token=str(payload.get("csrf") or ""))
+                except PermissionError as exc:
+                    self._send_json(HTTPStatus.FORBIDDEN, {"error": str(exc)})
+                except (ValueError, OSError) as exc:
+                    self._send_json(HTTPStatus.BAD_REQUEST, {"error": str(exc)})
+                except Exception:
+                    LOGGER.exception("Historical operation failed; live service preserved")
+                    self._send_json(HTTPStatus.SERVICE_UNAVAILABLE, {"error": "歷史工作暫不可用；即時雷達不受影響"})
+                else:
+                    self._send_json(HTTPStatus.OK, result)
+                return
             if path == "/api/instrument/scan":
                 try:
                     payload = self._read_json_body()
@@ -4779,5 +4821,7 @@ def serve(runtime: RadarRuntime, host: str, port: int) -> None:
     except KeyboardInterrupt:
         pass
     finally:
+        if history_manager is not None:
+            history_manager.close()
         runtime.stop()
         server.server_close()
