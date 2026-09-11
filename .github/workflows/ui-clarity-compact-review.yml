@@ -26,6 +26,20 @@ jobs:
         run: |
           python scripts/fix_ui_compact_helper.py
           python scripts/apply_ui_clarity_compact_patch.py
+          python - <<'PY'
+          from pathlib import Path
+          for name in (
+              'radar/static/pages.html',
+              'radar/static/history-scan.html',
+              'radar/static/history-replay.js',
+              'radar/static/history-replay.css',
+              'tests/test_ui_compact.py',
+          ):
+              p = Path(name)
+              text = p.read_text(encoding='utf-8')
+              ending = '\n' if text.endswith('\n') else ''
+              p.write_text('\n'.join(line.rstrip() for line in text.splitlines()) + ending, encoding='utf-8')
+          PY
           node --check radar/static/history-replay.js
           git diff --check
       - name: Install dependencies
