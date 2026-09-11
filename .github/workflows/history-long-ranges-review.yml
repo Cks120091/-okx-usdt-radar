@@ -1,0 +1,48 @@
+name: Validate extended 15m history ranges
+
+on:
+  push:
+    branches: [history-long-ranges-15m]
+
+permissions:
+  contents: write
+
+jobs:
+  patch-and-test:
+    if: ${{ !contains(github.event.head_commit.message, 'Apply extended 15m history ranges') }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 12
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          ref: history-long-ranges-15m
+      - uses: actions/setup-python@v6
+        with:
+          python-version: '3.12'
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+
+      - name: Apply deterministic patch
+        run: |
+          python scripts/apply_history_long_ranges_patch.py
+          node --check radar/static/history-scan.js
+          node --check radar/static/history-replay.js
+          git diff --check
+
+      - name: Install dependencies
+        run: python -m pip install -r requirements.txt
+
+      - name: Run regressions
+        run: |
+          python -m compileall -q radar scripts tests run.py
+          python -m unittest discover -s tests -q
+          git diff --check
+
+      - name: Commit tested changes
+        run: |
+          git config user.name "Cks120091"
+          git config user.email "k7v4srb5rc@privaterelay.appleid.com"
+          git add radar/history_jobs.py radar/history_replay.py radar/static/history-scan.html radar/static/history-scan.js radar/static/history-replay.js docs/HISTORY_SCAN.md tests/test_history_single_replay.py
+          git commit -m "Apply extended 15m history ranges"
+          git push origin HEAD:history-long-ranges-15m
