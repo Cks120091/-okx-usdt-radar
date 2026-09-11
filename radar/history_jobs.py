@@ -247,6 +247,12 @@ def _delete_jobs_for_coin(path: Path, inst_id: str) -> None:
         connection.execute("DELETE FROM history_jobs_v1 WHERE inst_id=?", (inst_id,))
 
 
+def _delete_all_jobs(path: Path) -> None:
+    with _connect(path) as connection:
+        connection.execute("DELETE FROM history_symbols_v1")
+        connection.execute("DELETE FROM history_jobs_v1")
+
+
 def _prune(path: Path) -> None:
     with _connect(path) as connection:
         rows = connection.execute(
@@ -445,9 +451,12 @@ class HistoryManager:
     def command(self, action: str, *, days: Any = 7, token: str = "") -> dict:
         if not secrets.compare_digest(str(token), self.token):
             raise PermissionError("操作驗證已過期，請重新整理歷史掃描頁。")
-        if action not in {"start", "resume", "pause", "delete"}:
+        if action not in {"start", "resume", "pause", "delete", "delete_all"}:
             raise ValueError("不支援的歷史掃描操作")
-        requested_days, inst_id = _request_scope(days)
+        if action == "delete_all":
+            requested_days, inst_id = 7, ""
+        else:
+            requested_days, inst_id = _request_scope(days)
 
         with self.lock:
             running = self.process is not None and self.process.poll() is None
@@ -457,6 +466,15 @@ class HistoryManager:
             if action == "pause":
                 if running and active:
                     _update(self.path, active["id"], control="PAUSE")
+                return self.status()
+            if action == "delete_all":
+                if running:
+                    raise ValueError("請先暫停歷史更新，等工作程序結束後再清除所有歷史資料。")
+                _delete_all_jobs(self.path)
+                self.process = None
+                self._job = None
+                with _connect(self.path) as connection:
+                    connection.execute("VACUUM")
                 return self.status()
             if action == "delete":
                 if running:

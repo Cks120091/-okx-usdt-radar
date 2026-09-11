@@ -84,18 +84,26 @@
     $('pause').disabled = busy || !globalBusy;
     $('resume').disabled = busy || !valid || globalBusy || !['PAUSED','INTERRUPTED','ERROR'].includes(coin?.status);
     $('delete').disabled = busy || !valid || globalBusy || !coin;
+    $('deleteAll').disabled = busy || globalBusy || !Object.keys(latest?.coins || {}).length;
     $('days').disabled = busy || globalBusy;
     $('inst').disabled = busy || globalBusy;
   }
 
   async function command(action) {
     if (busy || !latest) return;
+    const clearAll = action === 'delete_all';
     const inst = selectedInst();
-    if (!inst) {
+    if (!clearAll && !inst) {
       $('error').textContent = '請輸入正確幣種，例如 BTC 或 BTC-USDT-SWAP。';
       return;
     }
     if (action === 'delete' && !confirm(`確定清除 ${inst} 的15m歷史資料？正式訊號與即時掃描觀測不會刪除。`)) return;
+    if (clearAll) {
+      const count = Object.keys(latest?.coins || {}).length;
+      if (!count) return;
+      if (!confirm(`確定清除目前儲存的 ${count} 顆幣全部歷史 K 線勝率資料？`)) return;
+      if (!confirm('最後確認：清除後所有單幣歷史勝率都要重新手動更新。仍要全部清除嗎？')) return;
+    }
     busy = true;
     render(latest);
     let failure = '';
@@ -103,7 +111,7 @@
       const response = await fetch('/api/history-scan/' + action, {
         method:'POST',
         headers:{'Content-Type':'application/json','X-History-Intent':'user'},
-        body:JSON.stringify({
+        body:JSON.stringify(clearAll ? {csrf:latest.csrf} : {
           csrf:latest.csrf,
           days:{days:Number($('days').value), inst_id:inst}
         })
@@ -125,6 +133,7 @@
   if (queryInst) $('inst').value = normalize(queryInst) || String(queryInst).toUpperCase();
   $('inst').addEventListener('input', () => render(latest));
   for (const action of ['start','pause','resume','delete']) $(action).addEventListener('click', () => command(action));
+  $('deleteAll').addEventListener('click', () => command('delete_all'));
   window.addEventListener('history-replay-status', event => render(event.detail));
   window.addEventListener('history-replay-error', event => {$('error').textContent = event.detail;});
   render({schema_version:'HISTORY_SINGLE_15M_V1',status:'IDLE',coins:{},csrf:''});
