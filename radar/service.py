@@ -3002,6 +3002,14 @@ class RadarRuntime:
                 confirmation,
             )
             if is_signal_item:
+                statistics_hook = getattr(self.scanner, "_card_statistics", None)
+                if callable(statistics_hook):
+                    projected = replace(item, decision_context=canonical_decision)
+                    # The immutable Episode and the final merged decision must
+                    # agree; statistics never alters the item used for trading.
+                    stats_items = statistics_hook([projected], [], analysis.analyzed_at)
+                    if stats_items:
+                        item = replace(item, historical_performance=stats_items[0].historical_performance)
                 message = str(
                     canonical_decision.get("final", {}).get("label")
                     or "已使用最新資料更新同一個 Signal Episode。"

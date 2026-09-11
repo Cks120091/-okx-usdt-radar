@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import inspect
+import logging
 import math
 import threading
 import time
@@ -28,6 +29,7 @@ from .entry_window import can_continue as entry_window_can_continue
 from .decision import build_decision_context
 from .models import Candle, Instrument, MarketContext, MarketState, RadarReport, Signal, Ticker
 from .repository import SignalRepository, classify_microstructure
+from .card_statistics import fingerprint as card_statistics_fingerprint
 from .strategy import (
     AdaptiveStrategyEngine,
     AnalysisResult,
@@ -1030,6 +1032,7 @@ class MarketScanner:
         long_states = [self._attach_decision_context(item) for item in long_states]
         short_signals = [_without_internal_metrics(item) for item in short_signals]
         long_signals = [_without_internal_metrics(item) for item in long_signals]
+        statistics_states = [*short_states, *long_states]
         short_states = [_without_internal_metrics(item) for item in short_states]
         long_states = [_without_internal_metrics(item) for item in long_states]
         short_signals = sorted(short_signals, key=self._signal_sort_key, reverse=True)[
@@ -1038,6 +1041,11 @@ class MarketScanner:
         long_signals = sorted(long_signals, key=self._signal_sort_key, reverse=True)[
             : min(max(self.config.max_signals, 0), 20)
         ]
+        # Enroll only final top-card candidates, never CORE_PREVIEW or raw signals.
+        statistics_items = self._card_statistics(
+            [*short_signals, *long_signals], statistics_states, completed_at)
+        short_signals = [item for item in statistics_items if item.radar_horizon == "SHORT"]
+        long_signals = [item for item in statistics_items if item.radar_horizon == "LONG"]
         short_watchlist = self._watchlist(short_states)
         long_watchlist = self._watchlist(long_states)
         short_states.sort(key=lambda item: item.inst_id)
@@ -1354,6 +1362,18 @@ class MarketScanner:
             }[normalized_mode],
         )
         return report
+
+    def _card_statistics(self, signals, states, observed_at, *, enroll_samples=True):
+        recorder = getattr(self.repository, "observe_card_statistics", None)
+        if not callable(recorder):
+            return list(signals)
+        try:
+            return recorder(signals, states, observed_at,
+                            card_statistics_fingerprint(self.config), enroll_samples=enroll_samples)
+        except Exception:
+            # Failure of optional statistics may not change a trading decision.
+            logging.getLogger(__name__).warning("Optional card statistics unavailable", exc_info=True)
+            return [replace(item, historical_performance={}) for item in signals]
 
     def _single_scan_call(
         self,
@@ -1761,6 +1781,8 @@ class MarketScanner:
                 # persist a genuinely reversed Episode.
                 signal = None
                 reason = "card_direction_locked_opposite"
+            self._card_statistics([], [result.market_state] if result.market_state else [],
+                                  analyzed_at, enroll_samples=False)
             raw_signal = signal
             reconciler = getattr(self.repository, "reconcile_instrument", None)
             if callable(reconciler):

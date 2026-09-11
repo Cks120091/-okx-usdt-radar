@@ -5,6 +5,7 @@ from typing import Any
 
 from .continuation import CAPITAL_FLOW_ALGORITHM_VERSION, LOOKBACK_ALGORITHM_VERSION
 from .price_display import signal_plan_display_fields
+from .card_statistics import public_summary as public_card_statistics
 
 
 _MISSING = object()
@@ -301,6 +302,8 @@ def _public_candidate(item: Any, *, signal: bool) -> dict[str, Any]:
     payload["instrument_tick_size"] = display_fields["instrument_tick_size"]
     payload["display_precision"] = display_fields["display_precision"]
     if signal:
+        payload["historical_performance"] = public_card_statistics(
+            _read(item, "historical_performance", {}))
         payload["tp1_r"] = display_fields["tp1_r"]
         payload["tp2_r"] = display_fields["tp2_r"]
     payload["market_metrics"] = _public_metrics(
