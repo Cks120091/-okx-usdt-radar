@@ -20,20 +20,21 @@ def main():
     item['market_metrics'].update(entry_execution_price=100)
     item['timeframe_states']={'4H':{'direction':'LONG'},'1H':{'direction':'LONG'},'15m':{'direction':'LONG'}}
     key=setup(item,100)['cohort']
-    good={'schema_version':'HISTORY_PRICE_REPLAY_V2','status':'COMPLETE','compatible':True,'csrf':'test-only',
+    good={'schema_version':'HISTORY_PRICE_REPLAY_V3','status':'COMPLETE','compatible':True,'csrf':'test-only',
           'total':8,'done':8,'failed':0,'covered_symbols':8,'covered_inst_ids':[item['inst_id']],
           'scope_coverage_pct':100,'minimum_days':5,'groups':{key:{'label':'模擬情境','status':'AVAILABLE','resolved':50,
-          'wins':31,'losses':19,'total':50,'days':5,'rate_pct':62,'unknown':0,'timeout':0,'interval_pct':[48.1,74.1]}}}
+          'wins':31,'losses':19,'total':50,'days':5,'rate_pct':62,'unknown':0,'timeout':0,'interval_pct':[48.1,74.1]}},
+          'symbol_groups':{item['inst_id']:{key:{'label':'模擬情境','status':'AVAILABLE','resolved':50,'wins':40,'losses':10,'total':50,'days':5,'rate_pct':80,'unknown':0,'timeout':0,'interval_pct':[66.9,89.1]}}}}
     cases=[]
     def case(name,changes,text):
         data=copy.deepcopy(good);changes(data);cases.append((name,data,text))
-    case('available',lambda d:None,'62.0%')
+    case('available-own',lambda d:None,'80.0%')
     case('running',lambda d:d.update(status='RUNNING',done=10),'歷史掃描中')
-    case('missing-cohort',lambda d:d.update(groups={}),'同類情境樣本不足')
+    case('missing-cohort',lambda d:d.update(groups={},symbol_groups={}),'同類情境樣本不足')
     case('wrong-version',lambda d:d.update(compatible=False,status='VERSION_CHANGED'),'已變更')
-    case('too-small',lambda d:d['groups'][key].update(resolved=5,wins=3,losses=2,total=5),'不足')
+    case('too-small',lambda d:(d['groups'][key].update(resolved=5,wins=3,losses=2,total=5),d['symbol_groups'][item['inst_id']][key].update(resolved=5,wins=3,losses=2,total=5)),'不足')
     case('coverage',lambda d:d.update(scope_coverage_pct=10),'不足')
-    case('unknown-symbol',lambda d:d.update(covered_inst_ids=[]),'此幣不在8支大型幣樣本／歷史不足')
+    case('unknown-symbol',lambda d:d.update(covered_inst_ids=[]),'62.0%')
     case('no-job',lambda d:d.update(status='IDLE',groups={}),'尚未執行')
     outputs=Path(os.environ.get('RADAR_UI_OUTPUT','/tmp/radar-history-ui'));outputs.mkdir(parents=True,exist_ok=True)
     with sync_playwright() as p:
@@ -76,6 +77,13 @@ def main():
                 assert page.locator('#fifteenAllBox .history-stats-panel').count()==1,'observed source preserved'
                 if name=='available' and width==390:
                     panel.scroll_into_view_if_needed();page.screenshot(path=str(outputs/'history-card-390.png'))
+            outsider=copy.deepcopy(item);outsider['inst_id']='MINA-USDT-SWAP'
+            page.evaluate("data=>window.__historyData=data",good);page.evaluate('HistoryReplay.refresh()')
+            outsider_html=page.evaluate('item=>HistoryReplay.card(item)',outsider)
+            page.locator('#fifteenAllBox').evaluate('(el,html)=>el.innerHTML=html',outsider_html)
+            page.evaluate('HistoryReplay.refresh()')
+            page.wait_for_function('document.querySelector(\"#fifteenAllBox .history-replay-card\")?.textContent.includes(\"62.0%\")')
+            assert '8支大型幣同類情境樣本' in page.locator('#fifteenAllBox .history-replay-card').inner_text()
             # No heavy POST happens when opening a normal card / home page.
             assert not page.evaluate("window.__historyPosts")
             long=copy.deepcopy(item);long['radar_horizon']='LONG'

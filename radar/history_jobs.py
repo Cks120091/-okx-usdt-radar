@@ -129,7 +129,7 @@ class HistoryManager:
                       'minimum_resolved': MIN_RESOLVED, 'minimum_days': minimum_sample_days(7),
                       'minimum_coverage_pct': MIN_RESOLVED_COVERAGE * 100,
                       'storage_bytes': self.path.stat().st_size if self.path.exists() else 0,
-                      'groups': {}, 'total': 0, 'done': 0, 'failed': 0,
+                      'groups': {}, 'symbol_groups': {}, 'total': 0, 'done': 0, 'failed': 0,
                       'compatible': True, 'holding_hours': 24}
             if not row:
                 return output
@@ -142,8 +142,8 @@ class HistoryManager:
             if not output['compatible']:
                 output.update(status='VERSION_CHANGED', groups={})
             # Core 15m outcome timeframe is deliberately not a 4H backtest.
-            output['scope'] = ('固定8支大型主要代幣：BTC、ETH、SOL、XRP、DOGE、ADA、LINK、AVAX；'
-                               '逐時點仍套用歷史24H成交額門檻，不延伸到其他小幣。')
+            output['scope'] = ('歷史工作固定掃8支大型主要代幣：BTC、ETH、SOL、XRP、DOGE、ADA、LINK、AVAX；'
+                               '其他幣卡片可引用相同情境的大型幣合併樣本，但會明確標示不是本幣專屬勝率。')
             output['assumptions'] = ('15m收線後延遲5分鐘，以5m開盤作模擬參考；等待可於後續收線重新評估。'
                                      '固定原SL／TP1、最多24小時；5m同棒TP／SL先後不明另列。'
                                      '百分比未扣費，無歷史深度，不代表當時線上一定會放行。')

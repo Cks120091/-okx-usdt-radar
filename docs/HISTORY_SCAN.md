@@ -1,4 +1,4 @@
-# Historical scanning and card rates — HISTORY_PRICE_REPLAY_V2
+# Historical scanning and card rates — HISTORY_PRICE_REPLAY_V3
 
 This feature is a separate, user-started **15m price-core simulation**. It is not
 CARD_STATISTICS_V1's observed-entry history, calibrated per-trade probability,
@@ -56,6 +56,11 @@ same setup tuple (15m, side, trigger, stage, higher-timeframe relation, target-R
 bucket) as the existing statistics helper, under this model's source/config
 fingerprint. Cross-coin pooling is explicit. There is no market-wide fallback,
 quality-score conversion, five-coin constant, or 15m-rate reuse on a 4H card.
+For any 15m card, an adequate same-symbol cohort is preferred. If that symbol is
+not in the eight replay instruments or its same-symbol cohort is inadequate, an
+adequate pooled eight-major cohort with the exact same setup tuple may be shown
+as an explicitly labeled reference. This fallback is not represented as that
+coin's own historical win rate.
 
 A headline is released only after enumeration completes, the current instrument
 has at least 95% cutoff coverage, at least 80% of the whole manifest has that
@@ -92,6 +97,8 @@ observed card_statistics_v1 or code. There is no automatic deletion. Persistence
 is only as durable as the host's existing storage; free ephemeral hosting may
 lose the research database on restart/deployment. No new paid storage, deployment
 configuration, strategy threshold or ranking is provisioned by this patch.
+The fallback changes only which already-computed aggregate is displayed; it does
+not cause additional symbols to be downloaded or replayed.
 
 Tests are synthetic/offline unless specifically identified as a limited exchange
 compatibility smoke check. Installing this feature does not mean a complete
