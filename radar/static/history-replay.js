@@ -89,7 +89,8 @@
   }
 
   function chooseCandidate(key,inst) {
-    const ownMap=symbolGroups.get(inst),own=key&&ownMap?ownMap.get(key):null,pooled=key?groups.get(key):null;
+    const covered=Array.isArray(data?.covered_inst_ids)&&data.covered_inst_ids.includes(inst);
+    const ownMap=symbolGroups.get(inst),own=covered&&key&&ownMap?ownMap.get(key):null,pooled=key?groups.get(key):null;
     const exact=[candidate(own,'本幣歷史樣本','精準情境',true),candidate(pooled,'8支大型幣同類情境樣本','精準情境',false)].filter(Boolean);
     if(exact.length){
       exact.sort((a,b)=>b.q.rank-a.q.rank||(a.own===b.own?b.q.resolved-a.q.resolved:(a.own?-1:1)));
