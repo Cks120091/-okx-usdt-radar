@@ -1,0 +1,122 @@
+from pathlib import Path
+
+
+def replace_once(path: str, old: str, new: str) -> None:
+    p = Path(path)
+    text = p.read_text(encoding="utf-8")
+    count = text.count(old)
+    if count != 1:
+        raise SystemExit(f"{path}: expected exactly one match, found {count}")
+    p.write_text(text.replace(old, new), encoding="utf-8")
+
+
+# 1) Expose a compact preflight-only cached statistics panel. It reads
+# existing status only and never starts/replays history by itself.
+history = Path("radar/static/history-replay.js")
+text = history.read_text(encoding="utf-8")
+marker = "  function refreshCards() {"
+if text.count(marker) != 1:
+    raise SystemExit("history-replay.js: refreshCards marker mismatch")
+preflight_fn = r'''  function preflight(instId) {
+    instId = String(instId || '').toUpperCase();
+    if (!instId) return '';
+    const link = `<a class="history-replay-link" href="/history-scan?inst_id=${encodeURIComponent(instId)}">歷史 K 棒勝率 →</a>`;
+    const coin = snapshot(instId);
+    if (!data || data.schema_version !== VERSION) {
+      return `<section class="history-replay-card preflight-history-rate" aria-label="15m進場前更新歷史K棒勝率"><div class="history-replay-heading"><h3>歷史 K 棒勝率｜本幣 15m</h3><strong>載入中</strong></div><p>只讀既有單幣 3／7 日歷史結果；本次進場前更新不會重跑歷史 K 棒。</p>${link}</section>`;
+    }
+    if (!coin) {
+      return `<section class="history-replay-card preflight-history-rate" aria-label="15m進場前更新歷史K棒勝率"><div class="history-replay-heading"><h3>歷史 K 棒勝率｜本幣 15m</h3><strong>尚未更新</strong></div><p>${esc(instId)} 尚無已完成的單幣歷史結果；進場前更新不會自動啟動歷史掃描。</p>${link}</section>`;
+    }
+    if (coin.compatible === false || coin.status === 'VERSION_CHANGED') {
+      return `<section class="history-replay-card preflight-history-rate" aria-label="15m進場前更新歷史K棒勝率"><div class="history-replay-heading"><h3>歷史 K 棒勝率｜本幣 15m</h3><strong>版本已變更</strong></div><p>舊回放不混用；如需新勝率請手動更新歷史 K 棒。</p>${link}</section>`;
+    }
+    if (!terminal.has(coin.status)) {
+      const label = coin.status === 'PAUSED' ? '歷史更新已暫停' : coin.status === 'INTERRUPTED' ? '歷史更新中斷' : coin.status === 'ERROR' ? '歷史更新失敗' : '歷史更新中';
+      return `<section class="history-replay-card preflight-history-rate" aria-label="15m進場前更新歷史K棒勝率"><div class="history-replay-heading"><h3>歷史 K 棒勝率｜本幣 15m</h3><strong>${esc(label)}</strong></div><p>${esc(instId)}｜沿用目前已存歷史資料；進場前更新不會另開歷史回放。</p>${link}</section>`;
+    }
+    const overall = coin.overall || {};
+    const n = counts(overall);
+    const rate = finite(overall.rate_pct);
+    const headline = rate === null ? (n.total ? '尚無已判定結果' : '沒有可進訊號') : `${rate.toFixed(1)}%`;
+    let detail = `${instId}｜近 ${coin.days || 7} 日 15m｜可進訊號 ${n.total} 筆｜已判定 ${n.resolved} 筆`;
+    if (n.resolved) detail += `：TP1 ${n.wins}｜SL ${n.losses}`;
+    if (overall.tier) detail += `｜${overall.tier}`;
+    return `<section class="history-replay-card preflight-history-rate" aria-label="15m進場前更新歷史K棒勝率"><div class="history-replay-heading"><h3>歷史 K 棒勝率｜本幣 15m</h3><strong data-preflight-history-rate>${esc(headline)}</strong></div><p>${esc(detail)}</p><small>沿用最近一次已完成的單幣歷史回放；按進場前更新只更新現在行情，不重跑歷史 K 棒。</small>${link}</section>`;
+  }
+
+'''
+text = text.replace(marker, preflight_fn + marker)
+old_export = "  window.HistoryReplay = {card, refresh, refreshCards, keyFor, snapshot};"
+new_export = "  window.HistoryReplay = {card, preflight, refresh, refreshCards, keyFor, snapshot};"
+if text.count(old_export) != 1:
+    raise SystemExit("history-replay.js: export marker mismatch")
+history.write_text(text.replace(old_export, new_export), encoding="utf-8")
+
+# 2) Show the cached rate inside 15m preflight. Refreshing preflight may
+# re-read the aggregate status endpoint, but never POST /start.
+pages = Path("radar/static/pages.html")
+text = pages.read_text(encoding="utf-8")
+old_note = "        <p class=\"preflight-note\">${tech(data.safety?.note||'即時檢查不改寫原始 Trigger（價格觸發）。')} 此頁只作下單前風險確認，不會連接私人 API（應用程式介面）或自動下單。</p>"
+new_note = "        <div id=\"preflightHistoryRate\">${state.preflight?.horizon==='SHORT'?(window.HistoryReplay?.preflight?.(data.inst_id)||''):''}</div>\n" + old_note
+if text.count(old_note) != 1:
+    raise SystemExit(f"pages.html: preflight note marker mismatch {text.count(old_note)}")
+text = text.replace(old_note, new_note)
+
+old_after_render = "      $('#preflightContent').dataset.direction=data.direction||'NEUTRAL';\n}\n    function preflightTerminalKind(data)"
+new_after_render = "      $('#preflightContent').dataset.direction=data.direction||'NEUTRAL';\n}\n    function refreshPreflightHistoryRate(){const slot=$('#preflightHistoryRate');if(!slot||!state.preflight||normalizedHorizon(state.preflight.horizon,false)!=='SHORT')return;slot.innerHTML=window.HistoryReplay?.preflight?.(state.preflight.instId)||''}\n    window.addEventListener('history-replay-status',refreshPreflightHistoryRate);\n    function preflightTerminalKind(data)"
+if text.count(old_after_render) != 1:
+    raise SystemExit("pages.html: renderPreflight tail marker mismatch")
+text = text.replace(old_after_render, new_after_render)
+
+old_render_call = "        renderPreflight(data);"
+new_render_call = "        renderPreflight(data);refreshPreflightHistoryRate();Promise.resolve(window.HistoryReplay?.refresh?.()).then(()=>{if(preflightRequestIsCurrent(token,instId,horizon,triggerId))refreshPreflightHistoryRate()}).catch(()=>{});"
+if text.count(old_render_call) != 1:
+    raise SystemExit(f"pages.html: renderPreflight call mismatch {text.count(old_render_call)}")
+text = text.replace(old_render_call, new_render_call)
+pages.write_text(text, encoding="utf-8")
+
+# 3) Bump shell cache so installed/PWA clients receive the changed UI.
+replace_once(
+    "radar/static/service-worker.js",
+    "okx-radar-shell-v4.6-single-coin-history-1",
+    "okx-radar-shell-v4.7-preflight-history-rate-1",
+)
+
+# Keep cache-key assertions aligned.
+contract = Path("tests/test_v2_contract.py")
+ctext = contract.read_text(encoding="utf-8")
+old_key = "okx-radar-shell-v4.6-single-coin-history-1"
+key_count = ctext.count(old_key)
+if key_count < 1:
+    raise SystemExit("test_v2_contract.py: no old cache-key assertion found")
+ctext = ctext.replace(old_key, "okx-radar-shell-v4.7-preflight-history-rate-1")
+anchor = "        self.assertIn('window.HistoryReplay', source)\n"
+if anchor in ctext and "preflightHistoryRate" not in ctext:
+    ctext = ctext.replace(
+        anchor,
+        anchor
+        + "        self.assertIn('preflightHistoryRate', source)\n"
+        + "        self.assertIn('HistoryReplay?.preflight', source)\n"
+        + "        self.assertIn('HistoryReplay?.refresh', source)\n",
+    )
+contract.write_text(ctext, encoding="utf-8")
+
+# Browser regression: compact preflight block shows cached rate/button,
+# does not start replay, and missing coins stay explicitly unscanned.
+ui = Path("scripts/check_history_replay_ui.py")
+utext = ui.read_text(encoding="utf-8")
+anchor = "            assert not page.evaluate('window.__historyPosts'), 'card load must not start replay'\n"
+insert = anchor + (
+    "            before_posts = page.evaluate('window.__historyPosts.length')\n"
+    "            preflight_html = page.evaluate(\"HistoryReplay.preflight('MINA-USDT-SWAP')\")\n"
+    "            assert '歷史 K 棒勝率' in preflight_html and '65.4%' in preflight_html, preflight_html\n"
+    "            assert '近 7 日 15m' in preflight_html and '歷史 K 棒勝率 →' in preflight_html, preflight_html\n"
+    "            assert '/history-scan?inst_id=MINA-USDT-SWAP' in preflight_html, preflight_html\n"
+    "            assert page.evaluate('window.__historyPosts.length') == before_posts, 'preflight history display must not start replay'\n"
+    "            missing_preflight = page.evaluate(\"HistoryReplay.preflight('BTC-USDT-SWAP')\")\n"
+    "            assert '尚未更新' in missing_preflight and '65.4%' not in missing_preflight, missing_preflight\n"
+)
+if utext.count(anchor) != 1:
+    raise SystemExit("check_history_replay_ui.py: insertion anchor mismatch")
+ui.write_text(utext.replace(anchor, insert), encoding="utf-8")
