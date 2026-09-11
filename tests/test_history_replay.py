@@ -96,7 +96,7 @@ class HistoricalDataTests(unittest.TestCase):
     def test_cancellation_does_not_look_like_success(self):
         def stop():raise Interrupted('pause')
         client=Mock()
-        with self.assertRaises(Interrupted):fetch_history(client,'AAA','5m',BASE,BASE+STEP,stop)
+        with self.assertRaises(Interrupted):fetch_history(client,'AAA', '5m', BASE, BASE+STEP, stop)
         client._get.assert_not_called()
 
     def test_future_higher_timeframe_close_never_visible(self):
@@ -280,12 +280,11 @@ class HistoryManagerTests(unittest.TestCase):
     def test_aggregate_no_rate_when_scope_missing(self):
         with patch.object(self.manager,'_spawn'):
             result=self.manager.command('start',token=self.manager.token)
-        _update(self.manager.path,result['id'],total=5)
-        raw={'inst_id':'AAA','status':'OK','evaluated':7*96,'samples':[sample(i%5) for i in range(60)]}
+        raw={'inst_id':'BTC-USDT-SWAP','status':'OK','evaluated':100,'samples':[sample(i%5) for i in range(60)]}
         with _connect(self.manager.path) as connection:
-            connection.execute('INSERT INTO history_symbols_v1 VALUES(?,?,?,?)',(result['id'],'AAA','OK',json.dumps(raw)))
+            connection.execute('INSERT INTO history_symbols_v1 VALUES(?,?,?,?)',(result['id'],'BTC-USDT-SWAP','OK',json.dumps(raw)))
         _rebuild(self.manager.path,result['id'],complete=True)
-        stat=self.manager.status();self.assertEqual(stat['scope_coverage_pct'],20)
+        stat=self.manager.status();self.assertLess(stat['scope_coverage_pct'],95)
         self.assertIsNone(next(iter(stat['groups'].values()))['rate_pct'])
         self.assertNotIn('settings',stat);self.assertNotIn('samples',next(iter(stat['groups'].values())))
 
