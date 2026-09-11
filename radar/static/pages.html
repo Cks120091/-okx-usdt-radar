@@ -1670,6 +1670,7 @@
             <ul>${(warnings.length?warnings:['目前沒有額外執行警告']).map(item=>`<li>${tech(item)}</li>`).join('')}<li>Order Book（委託簿）：${quality.order_book_available?'可用':'資料不足'}；成交深度：${quality.execution_depth_complete?'完整':'無法完整估算'}</li></ul>
           </section>
         </details>
+        <div id="preflightHistoryRate">${state.preflight?.horizon==='SHORT'?(window.HistoryReplay?.preflight?.(data.inst_id)||''):''}</div>
         <p class="preflight-note">${tech(data.safety?.note||'即時檢查不改寫原始 Trigger（價格觸發）。')} 此頁只作下單前風險確認，不會連接私人 API（應用程式介面）或自動下單。</p>
         <div class="preflight-trust"><span>只分析、不下單</span><span>不連私人 API</span><span>不改寫 Trigger／Entry／SL／TP</span></div>
         <div class="preflight-cache">${data.cached?`使用 ${num(data.cache_age_seconds,1)} 秒內快取，避免重複請求 OKX`:'已向 OKX 取得本次即時公開資料'}</div>`;
@@ -1678,6 +1679,8 @@
       if(disclosure){const wrapper=document.createElement('div');wrapper.innerHTML=dataPageButton('execution:'+data.inst_id,displaySymbol(data.inst_id)+' · 成交與資料品質',disclosure.innerHTML.replace(/<summary[\s\S]*?<\/summary>/,''),'查看成交、品質與資料細節');disclosure.replaceWith(wrapper)}
       $('#preflightContent').dataset.direction=data.direction||'NEUTRAL';
 }
+    function refreshPreflightHistoryRate(){const slot=$('#preflightHistoryRate');if(!slot||!state.preflight||normalizedHorizon(state.preflight.horizon,false)!=='SHORT')return;slot.innerHTML=window.HistoryReplay?.preflight?.(state.preflight.instId)||''}
+    window.addEventListener('history-replay-status',refreshPreflightHistoryRate);
     function preflightTerminalKind(data){const statuses=[data?.verdict?.status,data?.verdict?.situation,data?.signal_lifecycle?.status,data?.plan_state?.status].map(value=>String(value||'').toUpperCase());if(statuses.includes('CLOSED_UNKNOWN'))return 'CLOSED_UNKNOWN';if(statuses.some(value=>['PLAN_INVALIDATED','INVALIDATED','STOP_LOSS'].includes(value)))return 'STOP_LOSS';if(statuses.some(value=>['COMPLETED','TARGET_REACHED','TAKE_PROFIT'].includes(value)))return 'TAKE_PROFIT';return data?.signal_lifecycle?.terminal===true?'CLOSED_UNKNOWN':''}
     function preflightResponseTerminal(data){return Boolean(preflightTerminalKind(data))}
     async function loadPreflight(){
@@ -1692,7 +1695,7 @@
         const query=new URLSearchParams({inst_id:instId,horizon,expected_trigger_id:triggerId}),data=await api(`/api/preflight?${query}`,{signal:controller?.signal});
         if(!preflightRequestIsCurrent(token,instId,horizon,triggerId))return;
         if(String(data?.trigger_id||'')!==triggerId){const mismatch=new Error('這張卡的 Trigger 已更新；為避免錯查另一筆交易計畫，已停止顯示結果。');mismatch.code='TRIGGER_MISMATCH';throw mismatch}
-        renderPreflight(data);
+        renderPreflight(data);refreshPreflightHistoryRate();Promise.resolve(window.HistoryReplay?.refresh?.()).then(()=>{if(preflightRequestIsCurrent(token,instId,horizon,triggerId))refreshPreflightHistoryRate()}).catch(()=>{});
         if(preflightResponseTerminal(data)){
           state.preflight.terminal=true;button.disabled=true;button.textContent='交易計畫已結束';
           try{await loadReport()}catch(refreshError){console.error('交易計畫結束後無法同步清單',refreshError)}
