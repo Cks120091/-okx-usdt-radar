@@ -22,6 +22,7 @@ from .entry_window import (
 )
 from .decision import build_decision_context
 from .models import MarketContext, MarketState, Signal
+from . import card_statistics
 from .price_display import signal_plan_display_fields
 
 
@@ -240,6 +241,7 @@ class SignalRepository:
                 );
                 """
             )
+            card_statistics.initialize(self._connection)
             self._repair_active_episode_conflicts()
             self._connection.execute(
                 """
@@ -2675,6 +2677,27 @@ class SignalRepository:
                     json.dumps(metrics, ensure_ascii=False),
                 ),
             )
+
+    def observe_card_statistics(self, signals, states, observed_at, version, *, enroll_samples=True):
+        """Passive independent ledger; returned copies change statistics only."""
+        now = card_statistics.timestamp(observed_at)
+        if not now:
+            return list(signals)
+        with self._lock, self._write_scope():
+            card_statistics.advance(self._connection, states, now)
+            if enroll_samples:
+                for item in signals:
+                    row = self._connection.execute(
+                        "SELECT inst_id,horizon,direction,stop_price,tp1_price,status FROM signals WHERE signal_id=?",
+                        (item.trigger_id,),
+                    ).fetchone()
+                    if (row is not None and row["status"] == "ACTIVE"
+                            and (row["inst_id"],row["horizon"],row["direction"],row["stop_price"],row["tp1_price"])
+                            == (item.inst_id,item.radar_horizon,item.direction,
+                                card_statistics.number(item.stop_loss),card_statistics.number(item.take_profit_1))):
+                        card_statistics.enroll(self._connection, item, version, now)
+            return [replace(item, historical_performance=card_statistics.summarize(
+                self._connection, item, version, now)) for item in signals]
 
     def performance(self, strategy_version: str = "V3.4_CONTEXT") -> dict[str, Any]:
         with self._lock:
