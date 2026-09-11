@@ -1,0 +1,44 @@
+name: Validate compact UI clarity
+
+on:
+  push:
+    branches: [ui-clarity-compact]
+
+permissions:
+  contents: write
+
+jobs:
+  patch-and-test:
+    if: ${{ !contains(github.event.head_commit.message, 'Apply compact UI clarity') }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 12
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          ref: ui-clarity-compact
+      - uses: actions/setup-python@v6
+        with:
+          python-version: '3.12'
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+      - name: Apply display-only patch
+        run: |
+          python scripts/fix_ui_compact_helper.py
+          python scripts/apply_ui_clarity_compact_patch.py
+          node --check radar/static/history-replay.js
+          git diff --check
+      - name: Install dependencies
+        run: python -m pip install -r requirements.txt
+      - name: Run regressions
+        run: |
+          python -m compileall -q radar scripts tests run.py
+          python -m unittest discover -s tests -q
+          git diff --check
+      - name: Commit tested UI files
+        run: |
+          git config user.name "Cks120091"
+          git config user.email "k7v4srb5rc@privaterelay.appleid.com"
+          git add radar/static/pages.html radar/static/history-scan.html radar/static/history-replay.js radar/static/history-replay.css tests/test_ui_compact.py
+          git commit -m "Apply compact UI clarity"
+          git push origin HEAD:ui-clarity-compact
