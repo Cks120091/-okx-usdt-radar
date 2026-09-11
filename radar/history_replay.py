@@ -21,23 +21,32 @@ from .decision import build_decision_context
 from .models import Candle, Instrument, Ticker
 from .scanner import MarketScanner, ScannerConfig
 
-VERSION = 'HISTORY_PRICE_REPLAY_V1'
+VERSION = 'HISTORY_PRICE_REPLAY_V2'
 MINUTE = 60_000
 STEP = 5 * MINUTE
 CORE = 15 * MINUTE
 DAY = 86_400_000
 INTERVALS = {'5m': STEP, '15m': CORE, '1H': 3_600_000, '4H': 14_400_000}
-ALLOWED_DAYS = (7, 30)
+ALLOWED_DAYS = (3, 7)
+HISTORY_SYMBOLS = (
+    'BTC-USDT-SWAP', 'ETH-USDT-SWAP', 'SOL-USDT-SWAP', 'XRP-USDT-SWAP',
+    'DOGE-USDT-SWAP', 'ADA-USDT-SWAP', 'LINK-USDT-SWAP', 'AVAX-USDT-SWAP',
+)
 MIN_RESOLVED = 50
-MIN_DATES = 5
+MIN_DATES_BY_RANGE = {3: 3, 7: 5}
 MIN_RESOLVED_COVERAGE = .8
 MAX_PAGES = 180
-NOTE = ('歷史價格核心回測；模擬 TP1 先達率，非本單機率或實盤成交勝率。'
+NOTE = ('歷史價格核心回測；固定8支大型主要代幣，模擬 TP1 先達率，非本單機率或實盤成交勝率。'
         '不含完整歷史 OI／CVD、Bid／Ask、深度及全市場前20名排序。')
 
 
 class Interrupted(RuntimeError):
     """Cooperative cancellation; not an empty successful result."""
+
+
+def minimum_sample_days(days: int) -> int:
+    """Display guard follows the selected short-history window."""
+    return MIN_DATES_BY_RANGE.get(int(days), MIN_DATES_BY_RANGE[7])
 
 
 def iso(ms: int) -> str:
@@ -304,7 +313,8 @@ def replay_symbol(instrument: Instrument, histories: dict[str, list[Candle]],
         scanner.repository.close()
 
 
-def aggregate(results: list[dict[str, Any]], *, complete: bool) -> dict[str, Any]:
+def aggregate(results: list[dict[str, Any]], *, complete: bool, days: int = 7) -> dict[str, Any]:
+    required_days = minimum_sample_days(days)
     groups = {}
     for result in results:
         for sample in result.get('samples', []):
@@ -319,12 +329,14 @@ def aggregate(results: list[dict[str, Any]], *, complete: bool) -> dict[str, Any
         n = group['wins'] + group['losses']
         group['resolved'] = n
         group['coverage_pct'] = round(100 * n / group['total'], 1) if group['total'] else 0
-        available = (complete and n >= MIN_RESOLVED and group['days'] >= MIN_DATES
+        group['minimum_days'] = required_days
+        available = (complete and n >= MIN_RESOLVED and group['days'] >= required_days
                      and n / group['total'] >= MIN_RESOLVED_COVERAGE)
         group['status'] = 'AVAILABLE' if available else 'INSUFFICIENT' if complete else 'PARTIAL'
         group['rate_pct'] = round(100 * group['wins'] / n, 1) if available else None
         group['interval_pct'] = wilson(group['wins'], n) if available else None
     return {'groups': groups, 'samples': sum(group['total'] for group in groups.values()),
+            'minimum_days': required_days,
             'episodes': sum(result.get('episodes', 0) for result in results),
             'entry_attempts': sum(result.get('entry_attempts', 0) for result in results),
             'missing_windows': sum(result.get('missing_windows', 0) for result in results)}

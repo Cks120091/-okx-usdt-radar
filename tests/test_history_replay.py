@@ -11,9 +11,9 @@ from types import SimpleNamespace
 from unittest.mock import Mock, patch
 
 from radar.config import AppConfig
-from radar.history_replay import (CORE, STEP, DAY, INTERVALS, Interrupted, aggregate,
+from radar.history_replay import (CORE, STEP, DAY, HISTORY_SYMBOLS, INTERVALS, Interrupted, aggregate,
     classify_path, config_for_replay, delayed_attempt, fetch_history, fingerprint,
-    past_window, replay_symbol, valid_bar, _price_projection)
+    minimum_sample_days, past_window, replay_symbol, valid_bar, _price_projection)
 from radar.history_jobs import HistoryManager, _connect, _update, _latest, _rebuild
 from radar.models import Candle, Instrument
 from radar.scanner import MarketScanner, ScannerConfig
@@ -122,6 +122,10 @@ class HistoricalDataTests(unittest.TestCase):
     def test_config_change_separates_results(self):
         self.assertNotEqual(fingerprint({'minimum_rr':1.8}),fingerprint({'minimum_rr':2.0}))
 
+    def test_short_history_scope_is_fixed_to_eight_major_tokens(self):
+        self.assertEqual(HISTORY_SYMBOLS, ('BTC-USDT-SWAP','ETH-USDT-SWAP','SOL-USDT-SWAP','XRP-USDT-SWAP','DOGE-USDT-SWAP','ADA-USDT-SWAP','LINK-USDT-SWAP','AVAX-USDT-SWAP'))
+        self.assertEqual(minimum_sample_days(3),3);self.assertEqual(minimum_sample_days(7),5)
+
 
 class HistoricalStatisticsTests(unittest.TestCase):
     def test_release_only_complete_adequate_cohort(self):
@@ -130,6 +134,12 @@ class HistoricalStatisticsTests(unittest.TestCase):
         group=next(iter(result['groups'].values()))
         self.assertEqual(group['rate_pct'],62);self.assertEqual(group['days'],5)
         self.assertEqual(len(group['interval_pct']),2)
+
+    def test_three_day_mode_releases_after_three_sample_dates(self):
+        samples=[sample(i%3) for i in range(50)]
+        g3=next(iter(aggregate([{'samples':samples}],complete=True,days=3)['groups'].values()))
+        g7=next(iter(aggregate([{'samples':samples}],complete=True,days=7)['groups'].values()))
+        self.assertEqual(g3['rate_pct'],100);self.assertEqual(g3['minimum_days'],3);self.assertIsNone(g7['rate_pct'])
 
     def test_partial_never_advertises_full_market_percentage(self):
         g=next(iter(aggregate([{'samples':[sample(i%5) for i in range(60)]}],complete=False)['groups'].values()))
@@ -201,14 +211,14 @@ class HistoryManagerTests(unittest.TestCase):
     def test_csrf_and_invalid_operations_rejected(self):
         with self.assertRaises(PermissionError):self.manager.command('start',token='bad')
         with self.assertRaises(ValueError):self.manager.command('oops',token=self.manager.token)
-        for value in [True,'30',0,90]:
+        for value in [True,'7',0,30,90]:
             with self.assertRaises(ValueError):self.manager.command('start',days=value,token=self.manager.token)
 
     def test_job_starts_with_past_full_outcome_period(self):
         with patch.object(self.manager,'_spawn') as spawn:
             result=self.manager.command('start',token=self.manager.token)
             spawn.assert_called_once()
-        self.assertEqual(result['end_ms']-result['start_ms'],30*DAY)
+        self.assertEqual(result['end_ms']-result['start_ms'],7*DAY)
         self.assertEqual(result['status'],'QUEUED')
         row=_latest(self.manager.path)
         self.assertLessEqual(result['end_ms']+DAY+STEP,row['created_ms'])
@@ -262,7 +272,7 @@ class HistoryManagerTests(unittest.TestCase):
         with patch.object(self.manager,'_spawn'):
             result=self.manager.command('start',token=self.manager.token)
         _update(self.manager.path,result['id'],total=5)
-        raw={'inst_id':'AAA','status':'OK','evaluated':30*96,'samples':[sample(i%5) for i in range(60)]}
+        raw={'inst_id':'AAA','status':'OK','evaluated':7*96,'samples':[sample(i%5) for i in range(60)]}
         with _connect(self.manager.path) as connection:
             connection.execute('INSERT INTO history_symbols_v1 VALUES(?,?,?,?)',(result['id'],'AAA','OK',json.dumps(raw)))
         _rebuild(self.manager.path,result['id'],complete=True)
