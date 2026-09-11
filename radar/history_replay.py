@@ -21,7 +21,7 @@ from .decision import build_decision_context
 from .models import Candle, Instrument, Ticker
 from .scanner import MarketScanner, ScannerConfig
 
-VERSION = 'HISTORY_PRICE_REPLAY_V2'
+VERSION = 'HISTORY_PRICE_REPLAY_V3'
 MINUTE = 60_000
 STEP = 5 * MINUTE
 CORE = 15 * MINUTE
@@ -315,27 +315,42 @@ def replay_symbol(instrument: Instrument, histories: dict[str, list[Candle]],
 
 def aggregate(results: list[dict[str, Any]], *, complete: bool, days: int = 7) -> dict[str, Any]:
     required_days = minimum_sample_days(days)
-    groups = {}
+
+    def add_sample(groups: dict[str, Any], sample: dict[str, Any]) -> None:
+        group = groups.setdefault(sample['cohort'], {'label': sample['label'], 'wins': 0,
+               'losses': 0, 'timeout': 0, 'unknown': 0, 'days': set(), 'total': 0})
+        group['total'] += 1
+        group['days'].add(sample['entry_ms'] // DAY)
+        key = {'TP1_FIRST': 'wins', 'SL_FIRST': 'losses', 'TIMEOUT': 'timeout'}.get(sample['outcome'], 'unknown')
+        group[key] += 1
+
+    def finish(groups: dict[str, Any]) -> None:
+        for group in groups.values():
+            group['days'] = len(group['days'])
+            n = group['wins'] + group['losses']
+            group['resolved'] = n
+            group['coverage_pct'] = round(100 * n / group['total'], 1) if group['total'] else 0
+            group['minimum_days'] = required_days
+            available = (complete and n >= MIN_RESOLVED and group['days'] >= required_days
+                         and n / group['total'] >= MIN_RESOLVED_COVERAGE)
+            group['status'] = 'AVAILABLE' if available else 'INSUFFICIENT' if complete else 'PARTIAL'
+            group['rate_pct'] = round(100 * group['wins'] / n, 1) if available else None
+            group['interval_pct'] = wilson(group['wins'], n) if available else None
+
+    groups: dict[str, Any] = {}
+    symbol_groups: dict[str, dict[str, Any]] = {}
     for result in results:
+        inst_id = str(result.get('inst_id') or '')
+        own = symbol_groups.setdefault(inst_id, {}) if inst_id else None
         for sample in result.get('samples', []):
-            group = groups.setdefault(sample['cohort'], {'label': sample['label'], 'wins': 0,
-                   'losses': 0, 'timeout': 0, 'unknown': 0, 'days': set(), 'total': 0})
-            group['total'] += 1
-            group['days'].add(sample['entry_ms'] // DAY)
-            key = {'TP1_FIRST': 'wins', 'SL_FIRST': 'losses', 'TIMEOUT': 'timeout'}.get(sample['outcome'], 'unknown')
-            group[key] += 1
-    for group in groups.values():
-        group['days'] = len(group['days'])
-        n = group['wins'] + group['losses']
-        group['resolved'] = n
-        group['coverage_pct'] = round(100 * n / group['total'], 1) if group['total'] else 0
-        group['minimum_days'] = required_days
-        available = (complete and n >= MIN_RESOLVED and group['days'] >= required_days
-                     and n / group['total'] >= MIN_RESOLVED_COVERAGE)
-        group['status'] = 'AVAILABLE' if available else 'INSUFFICIENT' if complete else 'PARTIAL'
-        group['rate_pct'] = round(100 * group['wins'] / n, 1) if available else None
-        group['interval_pct'] = wilson(group['wins'], n) if available else None
-    return {'groups': groups, 'samples': sum(group['total'] for group in groups.values()),
+            add_sample(groups, sample)
+            if own is not None:
+                add_sample(own, sample)
+    finish(groups)
+    for own in symbol_groups.values():
+        finish(own)
+    return {'groups': groups, 'symbol_groups': symbol_groups,
+            'samples': sum(group['total'] for group in groups.values()),
             'minimum_days': required_days,
             'episodes': sum(result.get('episodes', 0) for result in results),
             'entry_attempts': sum(result.get('entry_attempts', 0) for result in results),

@@ -1,7 +1,7 @@
 <!doctype html><html lang="zh-Hant"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>歷史掃描｜OKX 雷達</title><link rel="stylesheet" href="/history-replay.css"><script src="/history-replay.js"></script></head>
 <body class="history-replay-page" data-history-page="true"><main class="history-replay-shell">
 <a href="/">← 回到即時雷達</a><h1>大型幣短線歷史掃描</h1><p>把過去的 K 棒按時間順序重跑，結果獨立顯示在卡片的「歷史 K 棒回測」，不混入實際掃描觀測。</p>
-<section><h2>先選期間，再手動開始</h2><p>掃描範圍固定為8支大型主要代幣：BTC、ETH、SOL、XRP、DOGE、ADA、LINK、AVAX。逐時點仍核對當時的24H成交額門檻；不掃其他小幣，讓短線回測更快完成。</p>
+<section><h2>先選期間，再手動開始</h2><p>歷史工作固定掃8支大型主要代幣：BTC、ETH、SOL、XRP、DOGE、ADA、LINK、AVAX。其他幣不另外下載歷史資料；卡片會先用本幣樣本，若不足則引用8大幣相同情境樣本並清楚標示來源。</p>
 <div class="history-replay-actions"><label for="days">期間</label><select id="days"><option value="3">最近3天（近期節奏）</option><option value="7" selected>最近7天（主要短線樣本）</option></select><button id="start" disabled>開始大型幣歷史掃描</button><button id="pause" disabled>暫停</button><button id="resume" disabled>接續未完成標的</button></div>
 <p class="history-warning">不會在開啟首頁時自動跑。每次只有一個低優先工作程序；即時掃描優先，歷史下載會分批進行。主機休眠或重啟可能中斷，已完成標的可在資料仍存在時續跑。</p>
 <p class="history-foot">單次最多執行60分鐘再暫停，可續跑；資料庫上限32MB，原始K棒處理完不常駐儲存。資料是否跨部署保留，仍取決於主機持久儲存設定。</p></section>

@@ -141,6 +141,15 @@ class HistoricalStatisticsTests(unittest.TestCase):
         g7=next(iter(aggregate([{'samples':samples}],complete=True,days=7)['groups'].values()))
         self.assertEqual(g3['rate_pct'],100);self.assertEqual(g3['minimum_days'],3);self.assertIsNone(g7['rate_pct'])
 
+    def test_symbol_groups_are_separate_and_pooled_group_is_preserved(self):
+        btc=[sample(i%5,'TP1_FIRST') for i in range(50)]
+        eth=[sample(i%5,'SL_FIRST') for i in range(50)]
+        result=aggregate([{'inst_id':'BTC-USDT-SWAP','samples':btc},{'inst_id':'ETH-USDT-SWAP','samples':eth}],complete=True,days=7)
+        key='[\"SHORT\",\"LONG\"]'
+        self.assertEqual(result['symbol_groups']['BTC-USDT-SWAP'][key]['rate_pct'],100)
+        self.assertEqual(result['symbol_groups']['ETH-USDT-SWAP'][key]['rate_pct'],0)
+        self.assertEqual(result['groups'][key]['rate_pct'],50)
+
     def test_partial_never_advertises_full_market_percentage(self):
         g=next(iter(aggregate([{'samples':[sample(i%5) for i in range(60)]}],complete=False)['groups'].values()))
         self.assertIsNone(g['rate_pct']);self.assertEqual(g['status'],'PARTIAL')

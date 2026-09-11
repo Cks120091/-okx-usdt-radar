@@ -2,7 +2,7 @@
 (() => {
   'use strict';
   const esc = value => String(value ?? '').replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
-  let data = null, groups = new Map(), fetching = false;
+  let data = null, groups = new Map(), symbolGroups = new Map(), fetching = false;
   const finite = value => value !== null && value !== undefined && typeof value !== 'boolean' && Number.isFinite(Number(value)) ? Number(value) : null;
   const terminal = new Set(['COMPLETE','PARTIAL_COMPLETE']);
   const active = new Set(['QUEUED','RUNNING','WAITING_LIVE_SCAN']);
@@ -20,20 +20,27 @@
   function textFor(key,horizon,inst) {
     const link='<a class="history-replay-link" href="/history-scan">開啟大型幣歷史掃描 →</a>';
     if(horizon!=='SHORT') return '<h3>歷史 K 棒回測</h3><p>本版先支援 15m；不把短線結果套用到 4H。</p>'+link;
-    const known=data?.schema_version==='HISTORY_PRICE_REPLAY_V2',group=key?groups.get(key):null;
-    const n=finite(group?.resolved),wins=finite(group?.wins),losses=finite(group?.losses),count=finite(group?.total),days=finite(group?.days);
+    const known=data?.schema_version==='HISTORY_PRICE_REPLAY_V3',pooled=key?groups.get(key):null;
+    const ownMap=symbolGroups.get(inst),own=key&&ownMap?ownMap.get(key):null;
     const covered=Array.isArray(data?.covered_inst_ids)&&data.covered_inst_ids.includes(inst);
-    const enough=known&&data.compatible===true&&terminal.has(data.status)&&covered&&group?.status==='AVAILABLE'
-      &&[n,wins,losses,count,days].every(v=>v!==null&&Number.isInteger(v)&&v>=0)&&n===wins+losses&&count>=n
-      &&n>=50&&days>=Number(data.minimum_days||5)&&n/count>=.8&&finite(data.scope_coverage_pct)>=80;
+    const validGroup=group=>{
+      const n=finite(group?.resolved),wins=finite(group?.wins),losses=finite(group?.losses),count=finite(group?.total),days=finite(group?.days);
+      return group?.status==='AVAILABLE'&&[n,wins,losses,count,days].every(v=>v!==null&&Number.isInteger(v)&&v>=0)
+        &&n===wins+losses&&count>=n&&n>=50&&days>=Number(data?.minimum_days||5)&&n/count>=.8;
+    };
+    const baseReady=known&&data.compatible===true&&terminal.has(data.status)&&finite(data.scope_coverage_pct)>=80;
+    const ownEnough=baseReady&&covered&&validGroup(own),pooledEnough=baseReady&&validGroup(pooled);
+    const group=ownEnough?own:pooledEnough?pooled:null,source=ownEnough?'本幣歷史樣本':pooledEnough?'8支大型幣同類情境樣本':'';
+    const n=finite(group?.resolved),wins=finite(group?.wins),losses=finite(group?.losses),count=finite(group?.total),days=finite(group?.days);
+    const enough=Boolean(group);
     const headline=enough?`${(100*wins/n).toFixed(1)}%`:!known?'尚未載入回測':!terminal.has(data.status)?(titles[data.status]||'尚未完成'):
-      !covered?'此幣不在8支大型幣樣本／歷史不足':!key?'當前計畫無法配對':!group?'同類情境樣本不足':'同類樣本／覆蓋不足';
-    let detail=enough?`已判定 ${n} 筆：TP1 先達 ${wins}｜SL 先達 ${losses}`:group?`同類已判定 ${n??0} 筆；至少50筆、${Number(data?.minimum_days||5)}個取樣日及80%結果覆蓋才顯示`:'不套用五幣測試、全市場總勝率或交易品質分數。';
-    if(known&&data.total) detail+=`；標的處理 ${data.done}/${data.total}，完整覆蓋 ${data.covered_symbols??0} 個。`;
+      !key?'當前計畫無法配對':pooled||own?'本幣／同類樣本不足':'同類情境樣本不足';
+    let detail=enough?`${source}｜已判定 ${n} 筆：TP1 先達 ${wins}｜SL 先達 ${losses}`:(own||pooled)?`目前樣本未達門檻；至少50筆、${Number(data?.minimum_days||5)}個取樣日及80%結果覆蓋才顯示`:'沒有符合本卡條件的歷史樣本。';
+    if(known&&data.total) detail+=`；大型幣處理 ${data.done}/${data.total}，完整覆蓋 ${data.covered_symbols??0} 個。`;
     const ci=enough&&Array.isArray(group.interval_pct)&&group.interval_pct.length===2&&group.interval_pct.every(v=>finite(v)!==null)?`Wilson 95%描述區間 ${group.interval_pct[0]}%～${group.interval_pct[1]}%；未校正幣種相關性。`:'';
-    const extra=group?`期限未達 ${group.timeout??0}｜結果不明 ${group.unknown??0}；跨幣同類樣本。`:'';
+    const extra=group?`期限未達 ${group.timeout??0}｜結果不明 ${group.unknown??0}；${ownEnough?'本幣樣本。':'跨8支大型幣同類情境樣本，非本幣專屬勝率。'}`:'';
     const period=known&&data.start_ms&&data.end_ms?new Date(data.start_ms).toLocaleString('zh-TW',{timeZone:'Asia/Taipei'})+' ～ '+new Date(data.end_ms).toLocaleString('zh-TW',{timeZone:'Asia/Taipei'}):'—';
-    return `<div class="history-replay-heading"><h3>歷史 K 棒回測｜15m</h3><strong data-replay-rate>${esc(headline)}</strong></div><p>${esc(detail)}</p><small>模擬 TP1 先達率，未扣費；非本單預測，不改進場資格。</small><details><summary>回測來源與限制</summary><p>${esc(group?.label||'尚無符合本卡條件的回測')}</p><p>${esc(extra)}</p><p>${esc(ci)}</p><p>訊號期間（台灣時間）：${esc(period)}</p><p>逐根已收線資料重跑原價格核心，保留等待／重新確認；收線後延遲5分鐘，以5m開盤作模擬參考，固定原SL／TP1，觀察24小時。</p><p>固定8支大型主要代幣樣本；不重播歷史OI／CVD、實際價差、滑價或全市場前20名排序。其他小幣不直接套用此回測百分比。</p><p>本輪取樣比例與95%區間不代表已驗證可預測未來，也未校正幣種相關性。</p></details>${link}`;
+    return `<div class="history-replay-heading"><h3>歷史 K 棒回測｜15m</h3><strong data-replay-rate>${esc(headline)}</strong></div><p>${esc(detail)}</p><small>模擬 TP1 先達率，未扣費；非本單預測，不改進場資格。</small><details><summary>回測來源與限制</summary><p>${esc(group?.label||'尚無符合本卡條件的回測')}</p><p>${esc(extra)}</p><p>${esc(ci)}</p><p>訊號期間（台灣時間）：${esc(period)}</p><p>逐根已收線資料重跑原價格核心，保留等待／重新確認；收線後延遲5分鐘，以5m開盤作模擬參考，固定原SL／TP1，觀察24小時。</p><p>歷史工作固定取樣8支大型主要代幣；本幣樣本達標時優先使用本幣，否則只引用相同情境的大型幣合併樣本並標示來源。不重播歷史OI／CVD、實際價差、滑價或全市場前20名排序。</p><p>本輪取樣比例與95%區間不代表已驗證可預測未來，也未校正幣種相關性。</p></details>${link}`;
   }
   function card(item,preview=false) {
     if(preview) return '';
@@ -53,8 +60,11 @@
     try{
       const response=await fetch('/api/history-scan/status',{cache:'no-store'});
       if(!response.ok) throw new Error('歷史狀態無法取得');
-      data=await response.json();groups=new Map();
-      if(data.schema_version==='HISTORY_PRICE_REPLAY_V2'&&data.compatible===true)for(const [key,value]of Object.entries(data.groups||{})){try{groups.set(JSON.stringify(JSON.parse(key)),value)}catch(_){}}
+      data=await response.json();groups=new Map();symbolGroups=new Map();
+      if(data.schema_version==='HISTORY_PRICE_REPLAY_V3'&&data.compatible===true){
+        for(const [key,value]of Object.entries(data.groups||{})){try{groups.set(JSON.stringify(JSON.parse(key)),value)}catch(_){}}
+        for(const [inst,bucket]of Object.entries(data.symbol_groups||{})){const mapped=new Map();for(const [key,value]of Object.entries(bucket||{})){try{mapped.set(JSON.stringify(JSON.parse(key)),value)}catch(_){}}symbolGroups.set(inst,mapped);}
+      }
       refreshCards();window.dispatchEvent(new CustomEvent('history-replay-status',{detail:data}));
     }catch(error){window.dispatchEvent(new CustomEvent('history-replay-error',{detail:String(error.message||error)}));}
     finally{fetching=false;}
