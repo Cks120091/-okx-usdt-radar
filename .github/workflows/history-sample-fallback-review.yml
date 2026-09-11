@@ -1,0 +1,44 @@
+name: Validate history sample fallback
+on:
+  push:
+    branches: [feat/history-sample-fallback]
+permissions:
+  contents: write
+jobs:
+  verify:
+    if: github.actor != 'github-actions[bot]'
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          fetch-depth: 0
+      - uses: actions/setup-python@v6
+        with:
+          python-version: '3.12'
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+      - name: Apply patch
+        run: python scripts/apply_history_sample_fallback_patch.py
+      - name: Install test dependencies
+        run: |
+          python -m pip install -r requirements.txt playwright
+          python -m playwright install --with-deps chromium
+      - name: Validate
+        run: |
+          python -m compileall -q radar scripts tests run.py
+          python -m unittest discover -s tests -q
+          python scripts/check_history_replay_ui.py
+          python scripts/check_card_statistics_ui.py
+          python scripts/check_quicklook_ui.py
+          git diff --check
+          node --check radar/static/history-replay.js
+          node --check radar/static/history-scan.js
+      - name: Commit tested feature files
+        run: |
+          git config user.name github-actions[bot]
+          git config user.email 41898282+github-actions[bot]@users.noreply.github.com
+          git add docs/HISTORY_SCAN.md radar/history_jobs.py radar/history_replay.py radar/static/history-replay.js radar/static/history-scan.html scripts/check_history_replay_ui.py tests/test_history_replay.py
+          git commit -m "Add per-coin historical rate with pooled major fallback"
+          git push
