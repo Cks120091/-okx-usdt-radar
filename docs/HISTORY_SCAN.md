@@ -1,4 +1,4 @@
-# Historical scanning and card rates — HISTORY_PRICE_REPLAY_V1
+# Historical scanning and card rates — HISTORY_PRICE_REPLAY_V2
 
 This feature is a separate, user-started **15m price-core simulation**. It is not
 CARD_STATISTICS_V1's observed-entry history, calibrated per-trade probability,
@@ -6,15 +6,14 @@ net execution P&L, or a recreation of the full live execution scanner.
 
 ## Use and scope
 
-Open More → 歷史K棒掃描 (or the link in each card), select 7 or 30 days, and press
+Open More → 歷史K棒掃描 (or the link in each card), select 3 or 7 days, and press
 Start. Loading the home page or status endpoint never starts a worker. One
 low-priority child process downloads and replays one instrument at a time.
-All currently listed eligible OKX crypto USDT linear perpetuals are enumerated,
-not a fixed five-coin basket and not the current top-20 cards. The manifest is
-frozen for resumption. Historical trailing-24h quote volume and the configured
-entry/retention hysteresis determine eligibility at each replay time. Delisted
-instruments and historical tick-size changes cannot be reconstructed by this
-first version: current-universe survivorship and metadata limitations remain.
+The replay scope is fixed to eight liquid major USDT perpetuals: BTC, ETH, SOL,
+XRP, DOGE, ADA, LINK and AVAX. It does not enumerate the whole exchange or the
+current top-20 cards. The frozen eight-symbol manifest is used for resumption,
+and historical trailing-24h quote volume plus the configured entry/retention
+hysteresis still determine eligibility at each replay time.
 
 The latest one day is reserved for outcomes. The chosen signal interval ends
 at least 24h plus the entry delay before job creation. It is not a future test.
@@ -60,8 +59,8 @@ quality-score conversion, five-coin constant, or 15m-rate reuse on a 4H card.
 
 A headline is released only after enumeration completes, the current instrument
 has at least 95% cutoff coverage, at least 80% of the whole manifest has that
-coverage, and its group has 50 resolved samples, five UTC entry dates and at
-least 80% resolved outcomes. These are chosen display guards, not proof of
+coverage, and its group has 50 resolved samples, at least three UTC entry dates
+for a 3-day replay or five for a 7-day replay, and at least 80% resolved outcomes. These are chosen display guards, not proof of
 predictive reliability. Failures, insufficient history, UNKNOWN and TIMEOUT are
 shown, not silently omitted. Rate = TP1_FIRST / (TP1_FIRST + SL_FIRST), gross.
 The Wilson 95% interval is descriptive and does not correct coin/time clustering.
@@ -96,4 +95,4 @@ configuration, strategy threshold or ranking is provisioned by this patch.
 
 Tests are synthetic/offline unless specifically identified as a limited exchange
 compatibility smoke check. Installing this feature does not mean a complete
-7-day/30-day all-instrument replay has already been run.
+3-day/7-day eight-major replay has already been run.

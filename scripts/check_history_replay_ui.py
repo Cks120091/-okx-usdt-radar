@@ -20,9 +20,9 @@ def main():
     item['market_metrics'].update(entry_execution_price=100)
     item['timeframe_states']={'4H':{'direction':'LONG'},'1H':{'direction':'LONG'},'15m':{'direction':'LONG'}}
     key=setup(item,100)['cohort']
-    good={'schema_version':'HISTORY_PRICE_REPLAY_V1','status':'COMPLETE','compatible':True,'csrf':'test-only',
-          'total':200,'done':200,'failed':0,'covered_symbols':200,'covered_inst_ids':[item['inst_id']],
-          'scope_coverage_pct':100,'groups':{key:{'label':'模擬情境','status':'AVAILABLE','resolved':50,
+    good={'schema_version':'HISTORY_PRICE_REPLAY_V2','status':'COMPLETE','compatible':True,'csrf':'test-only',
+          'total':8,'done':8,'failed':0,'covered_symbols':8,'covered_inst_ids':[item['inst_id']],
+          'scope_coverage_pct':100,'minimum_days':5,'groups':{key:{'label':'模擬情境','status':'AVAILABLE','resolved':50,
           'wins':31,'losses':19,'total':50,'days':5,'rate_pct':62,'unknown':0,'timeout':0,'interval_pct':[48.1,74.1]}}}
     cases=[]
     def case(name,changes,text):
@@ -88,7 +88,8 @@ def main():
             assert not page.evaluate("window.__historyPosts")
             page.locator('#start').click();page.wait_for_function('document.getElementById("status").textContent==="歷史掃描中"')
             posts=page.evaluate('window.__historyPosts')
-            assert posts[-1]['path'].endswith('/start') and posts[-1]['body']['days']==30
+            assert page.locator('#days option').evaluate_all('(nodes)=>nodes.map(n=>n.value)')==['3','7']
+            assert posts[-1]['path'].endswith('/start') and posts[-1]['body']['days']==7
             assert posts[-1]['body']['csrf']=='test-only'
             page.locator('#pause').click();page.wait_for_function('document.getElementById("status").textContent==="已暫停"')
             assert not page.locator('#resume').is_disabled()

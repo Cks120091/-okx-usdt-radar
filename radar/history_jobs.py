@@ -21,10 +21,10 @@ from collections.abc import Iterator
 from pathlib import Path
 from typing import Any
 
-from .history_replay import (ALLOWED_DAYS, CORE, DAY, INTERVALS, MIN_DATES, MIN_RESOLVED,
+from .history_replay import (ALLOWED_DAYS, CORE, DAY, HISTORY_SYMBOLS, INTERVALS, MIN_RESOLVED,
                              MIN_RESOLVED_COVERAGE, STEP, VERSION, NOTE, Interrupted,
                              aggregate, config_for_replay, fetch_history, fingerprint,
-                             replay_symbol)
+                             minimum_sample_days, replay_symbol)
 
 MAX_WALL_SECONDS = 3600
 MAX_DATABASE_BYTES = 32 * 1024 * 1024
@@ -80,14 +80,14 @@ def _latest(path: Path) -> dict | None:
 def _rebuild(path: Path, job: str, complete: bool) -> None:
     with _connect(path) as connection:
         rows = connection.execute('SELECT result FROM history_symbols_v1 WHERE job_id=?', (job,)).fetchall()
-        meta = connection.execute('SELECT total,start_ms,end_ms FROM history_jobs_v1 WHERE id=?', (job,)).fetchone()
+        meta = connection.execute('SELECT total,start_ms,end_ms,days FROM history_jobs_v1 WHERE id=?', (job,)).fetchone()
     results = [json.loads(row['result']) for row in rows]
     failed = sum(result.get('status') != 'OK' for result in results)
     expected = (meta['end_ms'] - meta['start_ms']) // CORE
     fully_covered = sum(result.get('status') == 'OK' and result.get('evaluated', 0) >= expected * .95
                         for result in results)
     scope_coverage = fully_covered / meta['total'] if meta['total'] else 0
-    summary = aggregate(results, complete=complete and scope_coverage >= .8)
+    summary = aggregate(results, complete=complete and scope_coverage >= .8, days=int(meta['days']))
     summary.update(scope_coverage_pct=round(scope_coverage * 100, 1),
                    covered_symbols=fully_covered,
                    covered_inst_ids=[result['inst_id'] for result in results if result.get('status') == 'OK' and result.get('evaluated', 0) >= expected * .95],
@@ -126,7 +126,7 @@ class HistoryManager:
                 row = _latest(self.path)
             output = {'schema_version': VERSION, 'status': 'IDLE', 'csrf': self.token,
                       'source': 'HISTORICAL_PRICE_SIMULATION', 'note': NOTE,
-                      'minimum_resolved': MIN_RESOLVED, 'minimum_days': MIN_DATES,
+                      'minimum_resolved': MIN_RESOLVED, 'minimum_days': minimum_sample_days(7),
                       'minimum_coverage_pct': MIN_RESOLVED_COVERAGE * 100,
                       'storage_bytes': self.path.stat().st_size if self.path.exists() else 0,
                       'groups': {}, 'total': 0, 'done': 0, 'failed': 0,
@@ -137,12 +137,13 @@ class HistoryManager:
                         'total', 'done', 'failed', 'error', 'heartbeat_ms'):
                 output[key] = row[key]
             output.update(json.loads(row['summary']))
+            output['minimum_days'] = minimum_sample_days(int(row['days']))
             output['compatible'] = row['fingerprint'] == self.fingerprint
             if not output['compatible']:
                 output.update(status='VERSION_CHANGED', groups={})
             # Core 15m outcome timeframe is deliberately not a 4H backtest.
-            output['scope'] = ('目前可交易的全部 OKX 加密 USDT 永續；逐時點套用歷史24H成交額。'
-                               '不含已下架合約，存在存活者偏差；不是歷史全市場完整重建。')
+            output['scope'] = ('固定8支大型主要代幣：BTC、ETH、SOL、XRP、DOGE、ADA、LINK、AVAX；'
+                               '逐時點仍套用歷史24H成交額門檻，不延伸到其他小幣。')
             output['assumptions'] = ('15m收線後延遲5分鐘，以5m開盤作模擬參考；等待可於後續收線重新評估。'
                                      '固定原SL／TP1、最多24小時；5m同棒TP／SL先後不明另列。'
                                      '百分比未扣費，無歷史深度，不代表當時線上一定會放行。')
@@ -181,7 +182,7 @@ class HistoryManager:
                     pass
             time.sleep(.5)
 
-    def command(self, action: str, *, days: Any = 30, token: str = '') -> dict:
+    def command(self, action: str, *, days: Any = 7, token: str = '') -> dict:
         if not secrets.compare_digest(str(token), self.token):
             raise PermissionError('操作驗證已過期，請重新整理歷史掃描頁。')
         if action not in {'start', 'resume', 'pause', 'delete'}:
@@ -218,7 +219,7 @@ class HistoryManager:
                 self._spawn(row['id'])
                 return self.status()
             if isinstance(days, bool) or not isinstance(days, int) or days not in ALLOWED_DAYS:
-                raise ValueError('第一版只接受7天或30天')
+                raise ValueError('短線歷史掃描只接受3天或7天')
             if row and row['status'] in {'PAUSED', 'INTERRUPTED', 'ERROR'}:
                 raise ValueError('已有未完成工作；請按續跑，或先清除再開始新工作。')
             with _connect(self.path) as connection:
@@ -297,10 +298,12 @@ def run_job(path: Path, job: str) -> None:
         if not saved:
             instruments = client.get_usdt_swap_instruments()
             if not instruments:
-                raise ValueError('未取得掃描範圍，不能把空清單當全部完成')
-            if len(instruments) > 2000:
-                raise ValueError('標的數超過安全上限；未截短冒充全範圍')
-            saved = [asdict(item) for item in instruments]
+                raise ValueError('未取得固定大型幣掃描範圍')
+            by_id = {item.inst_id: item for item in instruments}
+            missing = [inst_id for inst_id in HISTORY_SYMBOLS if inst_id not in by_id]
+            if missing:
+                raise ValueError('固定大型幣未完整取得：' + ', '.join(missing))
+            saved = [asdict(by_id[inst_id]) for inst_id in HISTORY_SYMBOLS]
             _update(path, job, total=len(saved), instruments=json.dumps(saved))
         with _connect(path) as connection:
             done = {row[0] for row in connection.execute('SELECT inst_id FROM history_symbols_v1 WHERE job_id=?', (job,))}
