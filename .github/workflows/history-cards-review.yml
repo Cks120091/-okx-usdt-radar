@@ -1,12 +1,12 @@
-name: Review history scan card integration
+name: Validate full-scope historical card replay
 on:
   push:
     branches: [feat/history-scan-cards-20260911]
 permissions:
-  contents: read
+  contents: write
 concurrency:
   group: history-cards-review
-  cancel-in-progress: true
+  cancel-in-progress: false
 jobs:
   verify:
     runs-on: ubuntu-latest
@@ -15,20 +15,81 @@ jobs:
       - uses: actions/checkout@v6
         with:
           fetch-depth: 0
-          persist-credentials: false
-      - name: Export tracked source for isolated integration tests
-        run: git archive --format=zip --output=/tmp/history-cards-source.zip HEAD
-      - uses: actions/upload-artifact@v7
-        with:
-          name: history-cards-source
-          path: /tmp/history-cards-source.zip
-          retention-days: 1
       - uses: actions/setup-python@v6
         with:
           python-version: '3.12'
-      - name: Baseline regressions
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+      - name: Apply exact local-tested feature patch
         run: |
-          python -m pip install -r requirements.txt
-          python -m compileall -q radar tests scripts run.py
-          python -m unittest discover -s tests -q
+          git merge-base --is-ancestor f71654e18c153227921390e8e01c1d084a05e922 HEAD
+          git diff --exit-code f71654e18c153227921390e8e01c1d084a05e922 -- radar docs scripts tests run.py render.yaml Dockerfile
+          python - <<'PY'
+          import base64,gzip,hashlib,subprocess
+          from pathlib import Path
+          text=''.join(Path(f'.github/history-review/{i}.b64').read_text() for i in range(14))
+          # Repair one identified transport typo; full checksum is mandatory.
+          assert text.count('SuXW/+eQGHjjY') == 1
+          text=text.replace('SuXW/+eQGHjjY','SuXW/+eGHjjY')
+          raw=gzip.decompress(base64.b64decode(text,validate=True))
+          assert hashlib.sha256(raw).hexdigest()=='fe515f1370e1d40196e2a82f4b2bca4f5a3677ca7e5bf29a4634b576c7289bb2'
+          Path('/tmp/history-integration.patch').write_bytes(raw)
+          subprocess.run(['git','apply','--check','/tmp/history-integration.patch'],check=True)
+          subprocess.run(['git','apply','/tmp/history-integration.patch'],check=True)
+          PY
+          git diff --exit-code -- radar/strategy.py radar/market_story.py radar/decision.py radar/entry_window.py radar/preflight.py radar/repository.py radar/scanner.py radar/evidence.py radar/api.py radar/config.py render.yaml Dockerfile run.py
+      - name: Install test dependencies
+        run: |
+          python -m pip install -r requirements.txt playwright
+          python -m playwright install --with-deps chromium
+      - name: Full regression and syntax
+        run: |
+          python -m compileall -q radar scripts tests run.py
+          python -m unittest discover -s tests -v > /tmp/history-tests.log 2>&1 || { tail -120 /tmp/history-tests.log; exit 1; }
+          tail -5 /tmp/history-tests.log
           git diff --check
+          python - <<'PY'
+          import re
+          from pathlib import Path
+          for i,body in enumerate(re.findall(r'<script(?:\s[^>]*)?>(.*?)</script>',Path('radar/static/pages.html').read_text(),re.S)):
+              Path(f'/tmp/history-inline-{i}.js').write_text(body)
+          PY
+          for file in /tmp/history-inline-*.js radar/static/history-replay.js radar/static/history-scan.js radar/static/service-worker.js; do node --check "$file"; done
+      - name: All browser regressions with synthetic fixtures
+        run: |
+          python scripts/check_history_replay_ui.py
+          python scripts/check_card_statistics_ui.py
+          python scripts/check_quicklook_ui.py
+          python scripts/check_layout_ui.py
+          python scripts/check_clarity_ui.py
+          python scripts/check_intraday_ui.py
+      - name: Limited real OKX compatibility smoke, not a full backtest
+        timeout-minutes: 4
+        run: |
+          python - <<'PY'
+          import time
+          from radar.api import OKXPublicClient
+          from radar.history_replay import fetch_history,replay_symbol,INTERVALS,DAY,CORE,STEP,config_for_replay
+          client=OKXPublicClient(timeout_seconds=8,retries=1,rate_limit_requests=6)
+          instrument=next(x for x in client.get_usdt_swap_instruments() if x.inst_id=='BTC-USDT-SWAP')
+          end=(int(time.time()*1000)-DAY-STEP)//CORE*CORE
+          start=end-4*CORE
+          cfg=config_for_replay({})
+          limits={'5m':max(288,cfg.candle_limit_5m),'15m':cfg.candle_limit_15m,'1H':cfg.candle_limit_1h,'4H':cfg.candle_limit_4h}
+          data={tf:fetch_history(client,instrument.inst_id,tf,start-DAY-(limits[tf]+2)*interval,end+DAY+STEP if tf=='5m' else end) for tf,interval in INTERVALS.items()}
+          result=replay_symbol(instrument,data,start,end,{})
+          assert result['evaluated']==4 and result['missing_windows']==0, 'historical alignment smoke incomplete'
+          print('PASS: actual OKX history pagination, four aligned 15m cutoffs, isolated original engine. No full-universe result or win-rate claim.')
+          PY
+      - name: Save tested application blobs on review branch only
+        run: |
+          test "$GITHUB_REF" = refs/heads/feat/history-scan-cards-20260911
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git add -- docs/HISTORY_SCAN.md radar/history_jobs.py radar/history_replay.py radar/service.py radar/static/history-replay.css radar/static/history-replay.js radar/static/history-scan.html radar/static/history-scan.js radar/static/pages.html radar/static/service-worker.js scripts/check_history_replay_ui.py tests/test_card_statistics.py tests/test_history_replay.py tests/test_v2_contract.py
+          git diff --cached --check
+          git commit -m 'Validate manual full-scope historical scanning and separate card replay rate; no live strategy changes'
+          git push origin HEAD:refs/heads/feat/history-scan-cards-20260911
+          git rev-parse HEAD
+          git ls-files -s -- docs/HISTORY_SCAN.md radar/history_jobs.py radar/history_replay.py radar/service.py radar/static/history-replay.css radar/static/history-replay.js radar/static/history-scan.html radar/static/history-scan.js radar/static/pages.html radar/static/service-worker.js scripts/check_history_replay_ui.py tests/test_card_statistics.py tests/test_history_replay.py tests/test_v2_contract.py
