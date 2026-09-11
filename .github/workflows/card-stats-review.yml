@@ -44,6 +44,7 @@ jobs:
           Path('.github/apply_card_statistics.py').write_text(source)
           Path('.github/card_statistics_bundle.json').write_text(json.dumps(payload,ensure_ascii=False))
           PY
+          python .github/card-stats-review/fix.py
           python .github/apply_card_statistics.py
           git diff --exit-code -- radar/strategy.py radar/market_story.py radar/decision.py radar/entry_window.py radar/preflight.py radar/evidence.py radar/api.py radar/config.py render.yaml Dockerfile run.py
       - name: Install runtime and browser test dependencies
