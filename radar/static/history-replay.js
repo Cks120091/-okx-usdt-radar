@@ -6,6 +6,7 @@
   const terminal = new Set(['COMPLETE', 'PARTIAL_COMPLETE']);
   const esc = value => String(value ?? '').replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
   const finite = value => value !== null && value !== undefined && typeof value !== 'boolean' && Number.isFinite(Number(value)) ? Number(value) : null;
+  const periodLabel = days => ({3:'3天',7:'7天',30:'30天',90:'3個月',180:'6個月',270:'9個月',365:'12個月'})[Number(days || 7)] || `${Number(days || 7)}天`;
   let data = null;
   let fetching = false;
 
@@ -50,7 +51,7 @@
     const coin = snapshot(instId);
     const key = keyFor(item);
     if (!data || data.schema_version !== VERSION) {
-      return `<div class="history-replay-heading"><h3>本幣 15m 歷史勝率</h3><strong>尚未載入</strong></div><p>新版只使用這顆幣自己的 3／7 日 15m 可進場訊號。</p>${link}`;
+      return `<div class="history-replay-heading"><h3>本幣 15m 歷史勝率</h3><strong>尚未載入</strong></div><p>新版只使用這顆幣自己的 3天／7天／30天／3／6／9／12個月的 15m 可進場訊號。</p>${link}`;
     }
     if (!coin) {
       return `<div class="history-replay-heading"><h3>本幣 15m 歷史勝率</h3><strong>尚未更新</strong></div><p>${esc(instId)} 還沒有單幣歷史資料；不再套用其他幣的勝率。</p>${link}`;
@@ -60,7 +61,7 @@
     }
     if (!terminal.has(coin.status)) {
       const label = coin.status === 'WAITING_LIVE_SCAN' ? '即時掃描優先，歷史暫候' : coin.status === 'PAUSED' ? '歷史更新已暫停' : coin.status === 'INTERRUPTED' ? '歷史更新中斷，可續跑' : coin.status === 'ERROR' ? '歷史更新失敗' : '歷史更新中';
-      return `<div class="history-replay-heading"><h3>本幣 15m 歷史勝率</h3><strong>${esc(label)}</strong></div><p>${esc(instId)}｜最近 ${esc(coin.days || 7)} 天｜處理 ${esc(coin.done || 0)}/${esc(coin.total || 1)}</p>${link}`;
+      return `<div class="history-replay-heading"><h3>本幣 15m 歷史勝率</h3><strong>${esc(label)}</strong></div><p>${esc(instId)}｜最近 ${esc(periodLabel(coin.days || 7))}｜處理 ${esc(coin.done || 0)}/${esc(coin.total || 1)}</p>${link}`;
     }
 
     const overall = coin.overall || {};
@@ -69,7 +70,7 @@
     const headline = rate === null ? (overallCounts.total ? '尚無已判定結果' : '沒有可進訊號') : `${rate.toFixed(1)}%`;
     const tier = String(overall.tier || (overallCounts.resolved ? '短期樣本' : ''));
     const coverage = finite(overall.coverage_pct);
-    let detail = `${instId}｜近 ${coin.days || 7} 日 15m｜可進訊號 ${overallCounts.total} 筆｜已判定 ${overallCounts.resolved} 筆`;
+    let detail = `${instId}｜近 ${periodLabel(coin.days || 7)} 15m｜可進訊號 ${overallCounts.total} 筆｜已判定 ${overallCounts.resolved} 筆`;
     if (overallCounts.resolved) detail += `：TP1 ${overallCounts.wins}｜SL ${overallCounts.losses}`;
     if (overallCounts.timeout || overallCounts.unknown) detail += `｜Timeout ${overallCounts.timeout}｜不明 ${overallCounts.unknown}`;
     if (tier) detail += `｜${tier}`;
@@ -103,7 +104,7 @@
     const link = `<a class="history-replay-link" href="/history-scan?inst_id=${encodeURIComponent(instId)}">歷史 K 棒勝率 →</a>`;
     const coin = snapshot(instId);
     if (!data || data.schema_version !== VERSION) {
-      return `<section class="history-replay-card preflight-history-rate" aria-label="15m進場前更新歷史K棒勝率"><div class="history-replay-heading"><h3>歷史 K 棒勝率｜本幣 15m</h3><strong>載入中</strong></div><p>只讀既有單幣 3／7 日歷史結果；本次進場前更新不會重跑歷史 K 棒。</p>${link}</section>`;
+      return `<section class="history-replay-card preflight-history-rate" aria-label="15m進場前更新歷史K棒勝率"><div class="history-replay-heading"><h3>歷史 K 棒勝率｜本幣 15m</h3><strong>載入中</strong></div><p>只讀既有單幣 所選歷史區間結果；本次進場前更新不會重跑歷史 K 棒。</p>${link}</section>`;
     }
     if (!coin) {
       return `<section class="history-replay-card preflight-history-rate" aria-label="15m進場前更新歷史K棒勝率"><div class="history-replay-heading"><h3>歷史 K 棒勝率｜本幣 15m</h3><strong>尚未更新</strong></div><p>${esc(instId)} 尚無已完成的單幣歷史結果；進場前更新不會自動啟動歷史掃描。</p>${link}</section>`;
@@ -119,7 +120,7 @@
     const n = counts(overall);
     const rate = finite(overall.rate_pct);
     const headline = rate === null ? (n.total ? '尚無已判定結果' : '沒有可進訊號') : `${rate.toFixed(1)}%`;
-    let detail = `${instId}｜近 ${coin.days || 7} 日 15m｜可進訊號 ${n.total} 筆｜已判定 ${n.resolved} 筆`;
+    let detail = `${instId}｜近 ${periodLabel(coin.days || 7)} 15m｜可進訊號 ${n.total} 筆｜已判定 ${n.resolved} 筆`;
     if (n.resolved) detail += `：TP1 ${n.wins}｜SL ${n.losses}`;
     if (overall.tier) detail += `｜${overall.tier}`;
     return `<section class="history-replay-card preflight-history-rate" aria-label="15m進場前更新歷史K棒勝率"><div class="history-replay-heading"><h3>歷史 K 棒勝率｜本幣 15m</h3><strong data-preflight-history-rate>${esc(headline)}</strong></div><p>${esc(detail)}</p><small>沿用最近一次已完成的單幣歷史回放；按進場前更新只更新現在行情，不重跑歷史 K 棒。</small>${link}</section>`;
@@ -140,7 +141,7 @@
       const link = coinLink(instId);
       let html;
       if (!data || data.schema_version !== VERSION) {
-        html = `<div class="history-replay-heading"><h3>本幣 15m 歷史勝率</h3><strong>尚未載入</strong></div><p>新版只使用這顆幣自己的 3／7 日 15m 可進場訊號。</p>${link}`;
+        html = `<div class="history-replay-heading"><h3>本幣 15m 歷史勝率</h3><strong>尚未載入</strong></div><p>新版只使用這顆幣自己的 3天／7天／30天／3／6／9／12個月的 15m 可進場訊號。</p>${link}`;
       } else if (!coin) {
         html = `<div class="history-replay-heading"><h3>本幣 15m 歷史勝率</h3><strong>尚未更新</strong></div><p>${esc(instId)} 還沒有單幣歷史資料；不再套用其他幣的勝率。</p>${link}`;
       } else {
@@ -151,10 +152,10 @@
           html = `<div class="history-replay-heading"><h3>本幣 15m 歷史勝率</h3><strong>版本已變更</strong></div><p>請重新更新 ${esc(instId)}。</p>${link}`;
         } else if (!terminal.has(coin.status)) {
           const label = coin.status === 'PAUSED' ? '歷史更新已暫停' : coin.status === 'INTERRUPTED' ? '歷史更新中斷，可續跑' : coin.status === 'ERROR' ? '歷史更新失敗' : coin.status === 'WAITING_LIVE_SCAN' ? '即時掃描優先，歷史暫候' : '歷史更新中';
-          html = `<div class="history-replay-heading"><h3>本幣 15m 歷史勝率</h3><strong>${esc(label)}</strong></div><p>${esc(instId)}｜最近 ${esc(coin.days || 7)} 天</p>${link}`;
+          html = `<div class="history-replay-heading"><h3>本幣 15m 歷史勝率</h3><strong>${esc(label)}</strong></div><p>${esc(instId)}｜最近 ${esc(periodLabel(coin.days || 7))}</p>${link}`;
         } else {
           const headline = rate === null ? (n.total ? '尚無已判定結果' : '沒有可進訊號') : `${rate.toFixed(1)}%`;
-          let detail = `${instId}｜近 ${coin.days || 7} 日 15m｜可進訊號 ${n.total} 筆｜已判定 ${n.resolved} 筆`;
+          let detail = `${instId}｜近 ${periodLabel(coin.days || 7)} 15m｜可進訊號 ${n.total} 筆｜已判定 ${n.resolved} 筆`;
           if (n.resolved) detail += `：TP1 ${n.wins}｜SL ${n.losses}`;
           if (overall.tier) detail += `｜${overall.tier}`;
           const cohort = key ? coin.groups?.[key] : null;

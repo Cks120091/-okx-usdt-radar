@@ -220,7 +220,7 @@ class HistoryManagerTests(unittest.TestCase):
     def test_csrf_and_invalid_operations_rejected(self):
         with self.assertRaises(PermissionError):self.manager.command('start',token='bad')
         with self.assertRaises(ValueError):self.manager.command('oops',token=self.manager.token)
-        for value in [True,'7',0,30,90]:
+        for value in [True,'7',0,14,60,360,366]:
             with self.assertRaises(ValueError):self.manager.command('start',days=value,token=self.manager.token)
 
     def test_job_starts_with_past_full_outcome_period(self):

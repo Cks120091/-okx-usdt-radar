@@ -9,7 +9,7 @@ from unittest.mock import patch
 
 from radar.config import AppConfig
 from radar.history_jobs import HistoryManager
-from radar.history_replay import CORE, STEP
+from radar.history_replay import CORE, STEP, MAX_PAGES
 from radar.history_single_replay import VERSION, aggregate, replay_symbol
 from radar.models import Candle, Instrument
 from tests.test_short_entry_window import ready_signal
@@ -117,19 +117,35 @@ class SingleCoinManagerTests(unittest.TestCase):
         self.manager = HistoryManager(runtime)
         self.addCleanup(self.manager.close)
 
-    def test_new_request_selects_one_coin_and_three_or_seven_days_only(self):
-        with patch.object(self.manager, '_spawn') as spawn:
-            result = self.manager.command(
-                'start',
-                days={'days':3, 'inst_id':'sol-usdt-swap'},
-                token=self.manager.token,
-            )
-        spawn.assert_called_once()
-        self.assertEqual(result['schema_version'], VERSION)
-        self.assertEqual(result['inst_id'], 'SOL-USDT-SWAP')
-        self.assertEqual(result['days'], 3)
-        self.assertIn('SOL-USDT-SWAP', result['coins'])
-        self.assertEqual(result['total'], 1)
+    def test_new_request_accepts_all_supported_short_history_ranges(self):
+        supported = (3, 7, 30, 90, 180, 270, 365)
+        for days in supported:
+            with self.subTest(days=days):
+                with patch.object(self.manager, '_spawn') as spawn:
+                    result = self.manager.command(
+                        'start',
+                        days={'days':days, 'inst_id':'sol-usdt-swap'},
+                        token=self.manager.token,
+                    )
+                spawn.assert_called_once()
+                self.assertEqual(result['schema_version'], VERSION)
+                self.assertEqual(result['inst_id'], 'SOL-USDT-SWAP')
+                self.assertEqual(result['days'], days)
+                self.assertIn('SOL-USDT-SWAP', result['coins'])
+                self.manager.command('delete', days={'days':days, 'inst_id':'SOL-USDT-SWAP'}, token=self.manager.token)
+
+        for invalid in (0, 14, 60, 360, 366):
+            with self.subTest(invalid=invalid):
+                with self.assertRaises(ValueError):
+                    self.manager.command('start', days={'days':invalid, 'inst_id':'SOL-USDT-SWAP'}, token=self.manager.token)
+
+    def test_long_range_ui_and_history_pagination_capacity(self):
+        root = Path(__file__).parents[1]
+        html = (root / 'radar/static/history-scan.html').read_text(encoding='utf-8')
+        for value, label in ((30,'最近30天'), (90,'最近3個月'), (180,'最近6個月'), (270,'最近9個月'), (365,'最近12個月')):
+            self.assertIn(f'value="{value}"', html)
+            self.assertIn(label, html)
+        self.assertGreaterEqual(MAX_PAGES, 360)
 
     def test_different_coin_does_not_inherit_cached_result(self):
         with patch.object(self.manager, '_spawn'):

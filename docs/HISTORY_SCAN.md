@@ -9,7 +9,7 @@ historical live-execution input.
 
 The old fixed eight-major pooled updater is no longer the active historical
 statistics source. A user selects one current OKX USDT perpetual and requests
-**3 days or 7 days**. Only that instrument is downloaded and replayed. Finished
+**3 days, 7 days, 30 days, 3 months (90 days), 6 months (180 days), 9 months (270 days), or 12 months (365 days)**. Only that instrument is downloaded and replayed. Finished
 results are cached per instrument in a separate research database so normal
 card rendering only reads cached aggregates; opening a card never starts a
 history job.
@@ -21,8 +21,8 @@ only use BTC data, and so on.
 
 To give every historical sample a complete 24-hour outcome horizon, the signal
 window deliberately ends about one day before the current time. Therefore a
-"7-day" job means seven days of 15m signal cutoffs ending roughly 24 hours ago,
-not the latest seven calendar days all the way to the present minute.
+selected range means that many rolling days of 15m signal cutoffs ending roughly 24 hours ago,
+not a calendar-month boundary extending to the present minute. Month labels map to 90/180/270/365 rolling days.
 
 ## Which signals become samples
 
@@ -69,7 +69,7 @@ TP1-vs-SL result.
 ## What the card shows
 
 A 15m card first shows the selected coin's **overall recent actionable-signal
-rate** for its latest cached 3-day or 7-day replay. If the current card's exact
+rate** for its latest cached selected-range replay. If the current card's exact
 setup tuple also exists in that coin's history, the card additionally shows a
 "current same-scenario" rate using the exact tuple:
 
@@ -113,8 +113,9 @@ The user starts history work explicitly from the single-coin history page. One
 low-priority child process runs at a time and yields while the normal live scan
 or single-instrument scan is busy. On supported systems the child attempts a
 256MiB address-space limit and lower OS priority. Each session pauses after 60
-minutes and can be resumed. There is no cron, startup scan or automatic order
-submission.
+minutes and can be resumed. Longer 30-day through 12-month jobs download substantially more
+historical candles and may take longer; they remain the same 15m SHORT replay and never become
+a 4H/long strategy. There is no cron, startup scan or automatic order submission.
 
 Research data is stored in `history_single_15m_v1.sqlite3` under `data_dir`,
 separate from live signals and CARD_STATISTICS_V1. The database has a 32MiB
