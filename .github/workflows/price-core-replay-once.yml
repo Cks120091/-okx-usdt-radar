@@ -1,0 +1,48 @@
+name: One-off 30-day price-core replay
+on:
+  push:
+    branches: [research/price-core-30d-20260911]
+    paths:
+      - research/price_core_replay.py
+      - research/replay_recipient.pem
+      - .github/workflows/price-core-replay-once.yml
+permissions:
+  contents: write
+concurrency:
+  group: price-core-replay-once
+  cancel-in-progress: false
+jobs:
+  replay:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          fetch-depth: 0
+      - uses: actions/setup-python@v6
+        with:
+          python-version: '3.12'
+      - name: Verify pinned strategy and install existing runtime
+        run: |
+          git merge-base --is-ancestor f71654e18c153227921390e8e01c1d084a05e922 HEAD
+          git diff --exit-code f71654e18c153227921390e8e01c1d084a05e922 -- radar requirements.txt config.example.json run.py
+          python -m pip install -q -r requirements.txt
+      - name: Regression and replay integrity tests
+        run: |
+          python -m compileall -q radar research
+          python -m unittest discover -s tests > /tmp/offline-tests.log 2>&1 || { tail -50 /tmp/offline-tests.log; exit 1; }
+          tail -5 /tmp/offline-tests.log
+          python research/price_core_replay.py --self-test
+      - name: Fetch actual OKX history and run finite sequential replay
+        run: python -u research/price_core_replay.py --public-key research/replay_recipient.pem --output research/price_core_summary.enc.json
+      - name: Preserve encrypted aggregate only on research branch
+        if: always()
+        run: |
+          test "$GITHUB_REF" = refs/heads/research/price-core-30d-20260911
+          if test -f research/price_core_summary.enc.json; then
+            git config user.name 'github-actions[bot]'
+            git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+            git add -- research/price_core_summary.enc.json
+            git diff --cached --quiet || git commit -m 'Preserve encrypted one-off historical replay aggregate; no raw samples or deployment'
+            git push origin HEAD:refs/heads/research/price-core-30d-20260911
+          fi
