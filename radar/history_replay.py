@@ -35,7 +35,7 @@ HISTORY_SYMBOLS = (
 MIN_RESOLVED = 50
 MIN_DATES_BY_RANGE = {3: 3, 7: 5}
 MIN_RESOLVED_COVERAGE = .8
-MAX_PAGES = 180
+MAX_PAGES = 420
 NOTE = ('歷史價格核心回測；固定8支大型主要代幣，模擬 TP1 先達率，非本單機率或實盤成交勝率。'
         '不含完整歷史 OI／CVD、Bid／Ask、深度及全市場前20名排序。')
 

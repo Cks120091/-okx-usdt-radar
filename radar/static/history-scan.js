@@ -33,6 +33,11 @@
     return value ? new Date(value).toLocaleString('zh-TW', {timeZone:'Asia/Taipei'}) : '—';
   }
 
+  function periodLabel(days) {
+    const n = Number(days || 7);
+    return ({3:'3天',7:'7天',30:'30天',90:'3個月',180:'6個月',270:'9個月',365:'12個月'})[n] || `${n}天`;
+  }
+
   function render(data) {
     latest = data || latest || {};
     const inst = selectedInst();
@@ -57,9 +62,9 @@
     const losses = Number(overall.losses || 0);
     const rate = overall.rate_pct;
     if (coin && ['COMPLETE','PARTIAL_COMPLETE'].includes(coin.status)) {
-      $('counts').textContent = `${inst}｜近 ${coin.days} 日｜15m可進訊號 ${totalSignals} 筆｜已判定 ${resolved} 筆｜TP1 ${wins}｜SL ${losses}${rate === null || rate === undefined ? '' : `｜TP1先達率 ${Number(rate).toFixed(1)}%`}｜${overall.tier || '樣本統計中'}`;
+      $('counts').textContent = `${inst}｜近 ${periodLabel(coin.days)}｜15m可進訊號 ${totalSignals} 筆｜已判定 ${resolved} 筆｜TP1 ${wins}｜SL ${losses}${rate === null || rate === undefined ? '' : `｜TP1先達率 ${Number(rate).toFixed(1)}%`}｜${overall.tier || '樣本統計中'}`;
     } else if (sameActive) {
-      $('counts').textContent = `${inst}｜近 ${latest.days || Number($('days').value)} 日｜處理 ${done}/${total}`;
+      $('counts').textContent = `${inst}｜近 ${periodLabel(latest.days || Number($('days').value))}｜處理 ${done}/${total}`;
     } else if (coin) {
       $('counts').textContent = `${inst}｜${labels[coin.status] || coin.status}`;
     } else {
