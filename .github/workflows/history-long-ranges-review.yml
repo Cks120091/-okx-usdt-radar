@@ -43,6 +43,6 @@ jobs:
         run: |
           git config user.name "Cks120091"
           git config user.email "k7v4srb5rc@privaterelay.appleid.com"
-          git add radar/history_jobs.py radar/history_replay.py radar/static/history-scan.html radar/static/history-scan.js radar/static/history-replay.js docs/HISTORY_SCAN.md tests/test_history_single_replay.py
+          git add radar/history_jobs.py radar/history_replay.py radar/static/history-scan.html radar/static/history-scan.js radar/static/history-replay.js docs/HISTORY_SCAN.md tests/test_history_single_replay.py tests/test_history_replay.py
           git commit -m "Apply extended 15m history ranges"
           git push origin HEAD:history-long-ranges-15m
