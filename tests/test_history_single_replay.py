@@ -2,6 +2,7 @@
 import tempfile
 import threading
 import unittest
+from pathlib import Path
 from dataclasses import replace
 from types import SimpleNamespace
 from unittest.mock import patch
@@ -140,6 +141,30 @@ class SingleCoinManagerTests(unittest.TestCase):
         status = self.manager.status()
         self.assertIn('BTC-USDT-SWAP', status['coins'])
         self.assertNotIn('MINA-USDT-SWAP', status['coins'])
+
+    def test_delete_all_clears_every_coin_without_touching_schema(self):
+        with patch.object(self.manager, '_spawn'):
+            self.manager.command('start', days={'days':3, 'inst_id':'BTC-USDT-SWAP'}, token=self.manager.token)
+            self.manager.command('start', days={'days':7, 'inst_id':'SOL-USDT-SWAP'}, token=self.manager.token)
+        self.assertEqual(set(self.manager.status()['coins']), {'BTC-USDT-SWAP', 'SOL-USDT-SWAP'})
+        cleared = self.manager.command('delete_all', token=self.manager.token)
+        self.assertEqual(cleared['status'], 'IDLE')
+        self.assertEqual(cleared['coins'], {})
+        with patch.object(self.manager, '_spawn') as spawn:
+            restarted = self.manager.command('start', days={'days':3, 'inst_id':'ETH-USDT-SWAP'}, token=self.manager.token)
+        spawn.assert_called_once()
+        self.assertIn('ETH-USDT-SWAP', restarted['coins'])
+
+    def test_history_page_places_clear_all_in_capacity_danger_zone(self):
+        root = Path(__file__).parents[1]
+        html = (root / 'radar/static/history-scan.html').read_text(encoding='utf-8')
+        js = (root / 'radar/static/history-scan.js').read_text(encoding='utf-8')
+        self.assertIn('id="deleteAll"', html)
+        self.assertIn('清除所有歷史 K 線資料', html)
+        self.assertIn('history-danger-zone', html)
+        self.assertIn("const clearAll = action === 'delete_all';", js)
+        self.assertIn("command('delete_all')", js)
+        self.assertIn("clearAll ? {csrf:latest.csrf}", js)
 
 
 if __name__ == '__main__':
