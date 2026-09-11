@@ -1,6 +1,5 @@
 """Synthetic browser checks for single-coin sample tier labels; no market calls."""
 import copy
-import json
 import shutil
 from pathlib import Path
 
@@ -14,7 +13,6 @@ ITEM = {
     'take_profit_1':112,'market_metrics':{'entry_execution_price':100},
     'timeframe_states':{'4H':{'direction':'LONG'}},
 }
-KEY = json.dumps(['SHORT','LONG','CONTINUATION','EARLY_SIGNAL','同向背景','2–<3R'], ensure_ascii=False, separators=(',',':'))
 VERSION = 'HISTORY_SINGLE_15M_V1'
 
 
@@ -30,14 +28,20 @@ def status(resolved, tier, wins=None):
     overall = group(resolved, tier, wins)
     coin = {'inst_id':'MINA-USDT-SWAP','status':'COMPLETE','compatible':True,'days':7,'total':1,'done':1,
             'start_ms':1_799_000_000_000,'end_ms':1_799_604_800_000,'scope_coverage_pct':100,
-            'overall':overall,'groups':{KEY:copy.deepcopy(overall)},'excluded':[]}
+            'overall':overall,'groups':{},'excluded':[]}
     return {'schema_version':VERSION,'status':'COMPLETE','csrf':'test','inst_id':'MINA-USDT-SWAP','coins':{'MINA-USDT-SWAP':coin}}
 
 
 def render(page, data, item=None):
-    page.evaluate('data=>window.__historyData=data', data)
+    actual_item = item or ITEM
+    payload = copy.deepcopy(data)
+    key = page.evaluate('item=>HistoryReplay.keyFor(item)', actual_item)
+    coin = payload.get('coins', {}).get(str(actual_item.get('inst_id') or '').upper())
+    if key and coin:
+        coin['groups'] = {key: copy.deepcopy(coin.get('overall') or {})}
+    page.evaluate('data=>window.__historyData=data', payload)
     page.evaluate('HistoryReplay.refresh()')
-    page.locator('#box').evaluate('(el,html)=>el.innerHTML=html', page.evaluate('item=>HistoryReplay.card(item)', item or ITEM))
+    page.locator('#box').evaluate('(el,html)=>el.innerHTML=html', page.evaluate('item=>HistoryReplay.card(item)', actual_item))
     page.evaluate('HistoryReplay.refresh()')
     page.wait_for_timeout(60)
     return page.locator('#box .history-replay-card').inner_text()
