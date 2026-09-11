@@ -33,7 +33,7 @@ def main():
     case('wrong-version',lambda d:d.update(compatible=False,status='VERSION_CHANGED'),'已變更')
     case('too-small',lambda d:d['groups'][key].update(resolved=5,wins=3,losses=2,total=5),'不足')
     case('coverage',lambda d:d.update(scope_coverage_pct=10),'不足')
-    case('unknown-symbol',lambda d:d.update(covered_inst_ids=[]),'此幣歷史尚不足')
+    case('unknown-symbol',lambda d:d.update(covered_inst_ids=[]),'此幣不在8支大型幣樣本／歷史不足')
     case('no-job',lambda d:d.update(status='IDLE',groups={}),'尚未執行')
     outputs=Path(os.environ.get('RADAR_UI_OUTPUT','/tmp/radar-history-ui'));outputs.mkdir(parents=True,exist_ok=True)
     with sync_playwright() as p:
