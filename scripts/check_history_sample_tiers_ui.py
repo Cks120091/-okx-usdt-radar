@@ -14,7 +14,7 @@ ITEM = {
     'take_profit_1':112,'market_metrics':{'entry_execution_price':100},
     'timeframe_states':{'4H':{'direction':'LONG'}},
 }
-KEY = json.dumps(['SHORT','LONG','CONTINUATION','EARLY_SIGNAL','同向背景','2–<3R'], ensure_ascii=False)
+KEY = json.dumps(['SHORT','LONG','CONTINUATION','EARLY_SIGNAL','同向背景','2–<3R'], ensure_ascii=False, separators=(',',':'))
 VERSION = 'HISTORY_SINGLE_15M_V1'
 
 
