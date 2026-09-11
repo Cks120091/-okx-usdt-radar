@@ -1,0 +1,174 @@
+name: Validate 8-major 3d-7d historical replay
+on:
+  push:
+    branches: [feat/history-major-3d7d]
+permissions:
+  contents: write
+jobs:
+  verify:
+    if: github.actor != 'github-actions[bot]'
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          fetch-depth: 0
+      - uses: actions/setup-python@v6
+        with:
+          python-version: '3.12'
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+      - name: Apply short-history scope patch
+        run: |
+          python - <<'PY'
+          from pathlib import Path
+
+          def exact(path, old, new):
+              p=Path(path); text=p.read_text()
+              count=text.count(old)
+              assert count==1, f'{path}: expected one match, got {count}: {old[:80]!r}'
+              p.write_text(text.replace(old,new))
+
+          # New schema/source identity: old full-universe results must never mix with the new 8-major scope.
+          for root in ('radar','scripts','tests','docs'):
+              for p in Path(root).rglob('*'):
+                  if p.is_file() and p.suffix in {'.py','.js','.html','.md'}:
+                      text=p.read_text()
+                      if 'HISTORY_PRICE_REPLAY_V1' in text:
+                          p.write_text(text.replace('HISTORY_PRICE_REPLAY_V1','HISTORY_PRICE_REPLAY_V2'))
+
+          exact('radar/history_replay.py',
+                "ALLOWED_DAYS = (7, 30)\nMIN_RESOLVED = 50\nMIN_DATES = 5\nMIN_RESOLVED_COVERAGE = .8\n",
+                "ALLOWED_DAYS = (3, 7)\nHISTORY_SYMBOLS = (\n    'BTC-USDT-SWAP', 'ETH-USDT-SWAP', 'SOL-USDT-SWAP', 'XRP-USDT-SWAP',\n    'DOGE-USDT-SWAP', 'ADA-USDT-SWAP', 'LINK-USDT-SWAP', 'AVAX-USDT-SWAP',\n)\nMIN_RESOLVED = 50\nMIN_DATES_BY_RANGE = {3: 3, 7: 5}\nMIN_RESOLVED_COVERAGE = .8\n")
+          exact('radar/history_replay.py',
+                "NOTE = ('歷史價格核心回測；模擬 TP1 先達率，非本單機率或實盤成交勝率。'\n        '不含完整歷史 OI／CVD、Bid／Ask、深度及全市場前20名排序。')",
+                "NOTE = ('歷史價格核心回測；固定8支大型主要代幣，模擬 TP1 先達率，非本單機率或實盤成交勝率。'\n        '不含完整歷史 OI／CVD、Bid／Ask、深度及全市場前20名排序。')")
+          exact('radar/history_replay.py',
+                "class Interrupted(RuntimeError):\n    \"\"\"Cooperative cancellation; not an empty successful result.\"\"\"\n\n\ndef iso(ms: int) -> str:",
+                "class Interrupted(RuntimeError):\n    \"\"\"Cooperative cancellation; not an empty successful result.\"\"\"\n\n\ndef minimum_sample_days(days: int) -> int:\n    \"\"\"Display guard follows the selected short-history window.\"\"\"\n    return MIN_DATES_BY_RANGE.get(int(days), MIN_DATES_BY_RANGE[7])\n\n\ndef iso(ms: int) -> str:")
+          exact('radar/history_replay.py',
+                "def aggregate(results: list[dict[str, Any]], *, complete: bool) -> dict[str, Any]:\n    groups = {}",
+                "def aggregate(results: list[dict[str, Any]], *, complete: bool, days: int = 7) -> dict[str, Any]:\n    required_days = minimum_sample_days(days)\n    groups = {}")
+          exact('radar/history_replay.py',
+                "        available = (complete and n >= MIN_RESOLVED and group['days'] >= MIN_DATES\n                     and n / group['total'] >= MIN_RESOLVED_COVERAGE)\n        group['status'] = 'AVAILABLE' if available else 'INSUFFICIENT' if complete else 'PARTIAL'",
+                "        group['minimum_days'] = required_days\n        available = (complete and n >= MIN_RESOLVED and group['days'] >= required_days\n                     and n / group['total'] >= MIN_RESOLVED_COVERAGE)\n        group['status'] = 'AVAILABLE' if available else 'INSUFFICIENT' if complete else 'PARTIAL'")
+          exact('radar/history_replay.py',
+                "    return {'groups': groups, 'samples': sum(group['total'] for group in groups.values()),\n            'episodes': sum(result.get('episodes', 0) for result in results),",
+                "    return {'groups': groups, 'samples': sum(group['total'] for group in groups.values()),\n            'minimum_days': required_days,\n            'episodes': sum(result.get('episodes', 0) for result in results),")
+
+          exact('radar/history_jobs.py',
+                "from .history_replay import (ALLOWED_DAYS, CORE, DAY, INTERVALS, MIN_DATES, MIN_RESOLVED,\n                             MIN_RESOLVED_COVERAGE, STEP, VERSION, NOTE, Interrupted,\n                             aggregate, config_for_replay, fetch_history, fingerprint,\n                             replay_symbol)",
+                "from .history_replay import (ALLOWED_DAYS, CORE, DAY, HISTORY_SYMBOLS, INTERVALS, MIN_RESOLVED,\n                             MIN_RESOLVED_COVERAGE, STEP, VERSION, NOTE, Interrupted,\n                             aggregate, config_for_replay, fetch_history, fingerprint,\n                             minimum_sample_days, replay_symbol)")
+          exact('radar/history_jobs.py',
+                "        meta = connection.execute('SELECT total,start_ms,end_ms FROM history_jobs_v1 WHERE id=?', (job,)).fetchone()",
+                "        meta = connection.execute('SELECT total,start_ms,end_ms,days FROM history_jobs_v1 WHERE id=?', (job,)).fetchone()")
+          exact('radar/history_jobs.py',
+                "    summary = aggregate(results, complete=complete and scope_coverage >= .8)",
+                "    summary = aggregate(results, complete=complete and scope_coverage >= .8, days=int(meta['days']))")
+          exact('radar/history_jobs.py',
+                "                      'minimum_resolved': MIN_RESOLVED, 'minimum_days': MIN_DATES,",
+                "                      'minimum_resolved': MIN_RESOLVED, 'minimum_days': minimum_sample_days(7),")
+          exact('radar/history_jobs.py',
+                "            output.update(json.loads(row['summary']))\n            output['compatible'] = row['fingerprint'] == self.fingerprint",
+                "            output.update(json.loads(row['summary']))\n            output['minimum_days'] = minimum_sample_days(int(row['days']))\n            output['compatible'] = row['fingerprint'] == self.fingerprint")
+          exact('radar/history_jobs.py',
+                "            output['scope'] = ('目前可交易的全部 OKX 加密 USDT 永續；逐時點套用歷史24H成交額。'\n                               '不含已下架合約，存在存活者偏差；不是歷史全市場完整重建。')",
+                "            output['scope'] = ('固定8支大型主要代幣：BTC、ETH、SOL、XRP、DOGE、ADA、LINK、AVAX；'\n                               '逐時點仍套用歷史24H成交額門檻，不延伸到其他小幣。')")
+          exact('radar/history_jobs.py',
+                "    def command(self, action: str, *, days: Any = 30, token: str = '') -> dict:",
+                "    def command(self, action: str, *, days: Any = 7, token: str = '') -> dict:")
+          exact('radar/history_jobs.py',
+                "                raise ValueError('第一版只接受7天或30天')",
+                "                raise ValueError('短線歷史掃描只接受3天或7天')")
+          exact('radar/history_jobs.py',
+                "            instruments = client.get_usdt_swap_instruments()\n            if not instruments:\n                raise ValueError('未取得掃描範圍，不能把空清單當全部完成')\n            if len(instruments) > 2000:\n                raise ValueError('標的數超過安全上限；未截短冒充全範圍')\n            saved = [asdict(item) for item in instruments]\n            _update(path, job, total=len(saved), instruments=json.dumps(saved))",
+                "            instruments = client.get_usdt_swap_instruments()\n            if not instruments:\n                raise ValueError('未取得固定大型幣掃描範圍')\n            by_id = {item.inst_id: item for item in instruments}\n            missing = [inst_id for inst_id in HISTORY_SYMBOLS if inst_id not in by_id]\n            if missing:\n                raise ValueError('固定大型幣未完整取得：' + ', '.join(missing))\n            saved = [asdict(by_id[inst_id]) for inst_id in HISTORY_SYMBOLS]\n            _update(path, job, total=len(saved), instruments=json.dumps(saved))")
+
+          exact('radar/static/history-scan.html', '<a href="/">← 回到即時雷達</a><h1>全範圍歷史掃描</h1>', '<a href="/">← 回到即時雷達</a><h1>大型幣短線歷史掃描</h1>')
+          exact('radar/static/history-scan.html',
+                '<section><h2>先選期間，再手動開始</h2><p>掃描範圍：目前仍可交易的全部 OKX 加密 USDT 永續，逐時點核對當時的24H成交額，不只測五個幣。已下架標的不在集合中，不能當作歷史全市場完整重建。</p>',
+                '<section><h2>先選期間，再手動開始</h2><p>掃描範圍固定為8支大型主要代幣：BTC、ETH、SOL、XRP、DOGE、ADA、LINK、AVAX。逐時點仍核對當時的24H成交額門檻；不掃其他小幣，讓短線回測更快完成。</p>')
+          exact('radar/static/history-scan.html',
+                '<div class="history-replay-actions"><label for="days">期間</label><select id="days"><option value="7">最近7天（先驗證流程）</option><option value="30" selected>最近30天</option></select><button id="start" disabled>開始全範圍歷史掃描</button><button id="pause" disabled>暫停</button><button id="resume" disabled>接續未完成標的</button></div>',
+                '<div class="history-replay-actions"><label for="days">期間</label><select id="days"><option value="3">最近3天（近期節奏）</option><option value="7" selected>最近7天（主要短線樣本）</option></select><button id="start" disabled>開始大型幣歷史掃描</button><button id="pause" disabled>暫停</button><button id="resume" disabled>接續未完成標的</button></div>')
+          exact('radar/static/history-scan.html',
+                '<section><h2>這個百分比代表什麼？</h2><p>價格核心的模擬 TP1 先達率＝先達TP1／（先達TP1＋先達SL）。同類已判定至少50筆、涵蓋5個取樣日、80%結果可判定，且本輪標的歷史完整覆蓋至少80%，才釋出百分比。這些是顯示保護條件，不是勝率可靠性的證明。</p>',
+                '<section><h2>這個百分比代表什麼？</h2><p>價格核心的模擬 TP1 先達率＝先達TP1／（先達TP1＋先達SL）。同類已判定至少50筆、80%結果可判定；3天模式至少涵蓋3個取樣日，7天模式至少涵蓋5個取樣日，且8支大型幣本輪歷史完整覆蓋至少80%，才釋出百分比。這些是顯示保護條件，不是勝率可靠性的證明。</p>')
+
+          exact('radar/static/history-replay.js', "const link='<a class=\"history-replay-link\" href=\"/history-scan\">開啟全範圍歷史掃描 →</a>';", "const link='<a class=\"history-replay-link\" href=\"/history-scan\">開啟大型幣歷史掃描 →</a>';")
+          exact('radar/static/history-replay.js', "&&n>=50&&days>=5&&n/count>=.8&&finite(data.scope_coverage_pct)>=80;", "&&n>=50&&days>=Number(data.minimum_days||5)&&n/count>=.8&&finite(data.scope_coverage_pct)>=80;")
+          exact('radar/static/history-replay.js', "!covered?'此幣歷史尚不足':", "!covered?'此幣不在8支大型幣樣本／歷史不足':")
+          exact('radar/static/history-replay.js', "`同類已判定 ${n??0} 筆；至少50筆、5個取樣日及80%結果覆蓋才顯示`", "`同類已判定 ${n??0} 筆；至少50筆、${Number(data?.minimum_days||5)}個取樣日及80%結果覆蓋才顯示`")
+          exact('radar/static/history-replay.js', "<p>目前可交易合約集合，不含已下架幣；不重播歷史OI／CVD、實際價差、滑價或全市場前20名排序。百分比不是實盤獲利率。</p>", "<p>固定8支大型主要代幣樣本；不重播歷史OI／CVD、實際價差、滑價或全市場前20名排序。其他小幣不直接套用此回測百分比。</p>")
+
+          exact('scripts/check_history_replay_ui.py',
+                "'total':200,'done':200,'failed':0,'covered_symbols':200,'covered_inst_ids':[item['inst_id']],\n          'scope_coverage_pct':100,",
+                "'total':8,'done':8,'failed':0,'covered_symbols':8,'covered_inst_ids':[item['inst_id']],\n          'scope_coverage_pct':100,'minimum_days':5,")
+          exact('scripts/check_history_replay_ui.py',
+                "            assert posts[-1]['path'].endswith('/start') and posts[-1]['body']['days']==30",
+                "            assert page.locator('#days option').evaluate_all('(nodes)=>nodes.map(n=>n.value)')==['3','7']\n            assert posts[-1]['path'].endswith('/start') and posts[-1]['body']['days']==7")
+
+          exact('tests/test_history_replay.py',
+                "from radar.history_replay import (CORE, STEP, DAY, INTERVALS, Interrupted, aggregate,\n    classify_path, config_for_replay, delayed_attempt, fetch_history, fingerprint,\n    past_window, replay_symbol, valid_bar, _price_projection)",
+                "from radar.history_replay import (CORE, STEP, DAY, HISTORY_SYMBOLS, INTERVALS, Interrupted, aggregate,\n    classify_path, config_for_replay, delayed_attempt, fetch_history, fingerprint,\n    minimum_sample_days, past_window, replay_symbol, valid_bar, _price_projection)")
+          exact('tests/test_history_replay.py',
+                "    def test_config_change_separates_results(self):\n        self.assertNotEqual(fingerprint({'minimum_rr':1.8}),fingerprint({'minimum_rr':2.0}))",
+                "    def test_config_change_separates_results(self):\n        self.assertNotEqual(fingerprint({'minimum_rr':1.8}),fingerprint({'minimum_rr':2.0}))\n\n    def test_short_history_scope_is_fixed_to_eight_major_tokens(self):\n        self.assertEqual(HISTORY_SYMBOLS, ('BTC-USDT-SWAP','ETH-USDT-SWAP','SOL-USDT-SWAP','XRP-USDT-SWAP','DOGE-USDT-SWAP','ADA-USDT-SWAP','LINK-USDT-SWAP','AVAX-USDT-SWAP'))\n        self.assertEqual(minimum_sample_days(3),3);self.assertEqual(minimum_sample_days(7),5)")
+          exact('tests/test_history_replay.py',
+                "    def test_partial_never_advertises_full_market_percentage(self):",
+                "    def test_three_day_mode_releases_after_three_sample_dates(self):\n        samples=[sample(i%3) for i in range(50)]\n        g3=next(iter(aggregate([{'samples':samples}],complete=True,days=3)['groups'].values()))\n        g7=next(iter(aggregate([{'samples':samples}],complete=True,days=7)['groups'].values()))\n        self.assertEqual(g3['rate_pct'],100);self.assertEqual(g3['minimum_days'],3);self.assertIsNone(g7['rate_pct'])\n\n    def test_partial_never_advertises_full_market_percentage(self):")
+          exact('tests/test_history_replay.py',
+                "        for value in [True,'30',0,90]:",
+                "        for value in [True,'7',0,30,90]:")
+          exact('tests/test_history_replay.py',
+                "        self.assertEqual(result['end_ms']-result['start_ms'],30*DAY)",
+                "        self.assertEqual(result['end_ms']-result['start_ms'],7*DAY)")
+          exact('tests/test_history_replay.py',
+                "        raw={'inst_id':'AAA','status':'OK','evaluated':30*96,'samples':[sample(i%5) for i in range(60)]}",
+                "        raw={'inst_id':'AAA','status':'OK','evaluated':7*96,'samples':[sample(i%5) for i in range(60)]}")
+
+          exact('docs/HISTORY_SCAN.md', 'select 7 or 30 days, and press', 'select 3 or 7 days, and press')
+          exact('docs/HISTORY_SCAN.md',
+                'All currently listed eligible OKX crypto USDT linear perpetuals are enumerated,\nnot a fixed five-coin basket and not the current top-20 cards. The manifest is\nfrozen for resumption. Historical trailing-24h quote volume and the configured\nentry/retention hysteresis determine eligibility at each replay time. Delisted\ninstruments and historical tick-size changes cannot be reconstructed by this\nfirst version: current-universe survivorship and metadata limitations remain.',
+                'The replay scope is fixed to eight liquid major USDT perpetuals: BTC, ETH, SOL,\nXRP, DOGE, ADA, LINK and AVAX. It does not enumerate the whole exchange or the\ncurrent top-20 cards. The frozen eight-symbol manifest is used for resumption,\nand historical trailing-24h quote volume plus the configured entry/retention\nhysteresis still determine eligibility at each replay time.')
+          exact('docs/HISTORY_SCAN.md',
+                'coverage, and its group has 50 resolved samples, five UTC entry dates and at\nleast 80% resolved outcomes.',
+                'coverage, and its group has 50 resolved samples, at least three UTC entry dates\nfor a 3-day replay or five for a 7-day replay, and at least 80% resolved outcomes.')
+          exact('docs/HISTORY_SCAN.md',
+                '7-day/30-day all-instrument replay has already been run.',
+                '3-day/7-day eight-major replay has already been run.')
+
+          exact('radar/static/service-worker.js', 'okx-radar-shell-v4.5-history-replay-1', 'okx-radar-shell-v4.6-history-major-3d7d')
+
+          # Guard against stale user-facing scope / period strings in the changed feature files.
+          targets=[Path('radar/history_replay.py'),Path('radar/history_jobs.py'),Path('radar/static/history-scan.html'),Path('radar/static/history-replay.js'),Path('scripts/check_history_replay_ui.py'),Path('tests/test_history_replay.py'),Path('docs/HISTORY_SCAN.md')]
+          joined='\n'.join(p.read_text() for p in targets)
+          assert 'HISTORY_PRICE_REPLAY_V1' not in joined
+          assert 'value="30"' not in Path('radar/static/history-scan.html').read_text()
+          assert 'ALLOWED_DAYS = (3, 7)' in Path('radar/history_replay.py').read_text()
+          assert all(symbol in Path('radar/history_replay.py').read_text() for symbol in ('BTC-USDT-SWAP','AVAX-USDT-SWAP'))
+          PY
+      - name: Install test dependencies
+        run: |
+          python -m pip install -r requirements.txt playwright
+          python -m playwright install --with-deps chromium
+      - name: Validate Python, JavaScript and regressions
+        run: |
+          python -m compileall -q radar scripts tests run.py
+          python -m unittest discover -s tests -q
+          python scripts/check_history_replay_ui.py
+          python scripts/check_card_statistics_ui.py
+          python scripts/check_quicklook_ui.py
+          git diff --check
+          node --check radar/static/history-replay.js
+          node --check radar/static/history-scan.js
+          node --check radar/static/service-worker.js
+      - name: Commit only tested feature files to review branch
+        run: |
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git add -- docs/HISTORY_SCAN.md radar/history_jobs.py radar/history_replay.py radar/static/history-replay.js radar/static/history-scan.html radar/static/service-worker.js scripts/check_history_replay_ui.py tests/test_history_replay.py tests/test_v2_contract.py
+          git diff --cached --check
+          git commit -m 'Limit historical replay to 8 major tokens and 3d/7d windows'
+          git push origin HEAD:refs/heads/feat/history-major-3d7d
