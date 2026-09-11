@@ -1,0 +1,146 @@
+name: Validate history clear all
+
+on:
+  push:
+    branches: [history-clear-all]
+
+permissions:
+  contents: write
+
+jobs:
+  patch-and-test:
+    if: ${{ !contains(github.event.head_commit.message, 'Apply history clear-all control') }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          ref: history-clear-all
+      - uses: actions/setup-python@v6
+        with:
+          python-version: '3.12'
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+
+      - name: Apply deterministic patch
+        run: |
+          python - <<'PY'
+          from pathlib import Path
+
+          def replace_once(path, old, new):
+              p = Path(path)
+              text = p.read_text(encoding='utf-8')
+              count = text.count(old)
+              if count != 1:
+                  raise SystemExit(f'{path}: expected exactly one match, found {count}')
+              p.write_text(text.replace(old, new), encoding='utf-8')
+
+          # Backend: add an explicit all-history delete action. It keeps the
+          # SQLite schema but removes all single-coin research rows only.
+          jobs = Path('radar/history_jobs.py')
+          text = jobs.read_text(encoding='utf-8')
+          prune_marker = '\n\ndef _prune(path: Path) -> None:\n'
+          if text.count(prune_marker) != 1:
+              raise SystemExit('history_jobs.py: prune marker mismatch')
+          helper = '''\n\ndef _delete_all_jobs(path: Path) -> None:\n    with _connect(path) as connection:\n        connection.execute("DELETE FROM history_symbols_v1")\n        connection.execute("DELETE FROM history_jobs_v1")\n'''
+          text = text.replace(prune_marker, helper + prune_marker)
+          text = text.replace(
+              'if action not in {"start", "resume", "pause", "delete"}:',
+              'if action not in {"start", "resume", "pause", "delete", "delete_all"}:',
+              1,
+          )
+          text = text.replace(
+              '        requested_days, inst_id = _request_scope(days)\n',
+              '        if action == "delete_all":\n            requested_days, inst_id = 7, ""\n        else:\n            requested_days, inst_id = _request_scope(days)\n',
+              1,
+          )
+          pause_block = '''            if action == "pause":\n                if running and active:\n                    _update(self.path, active["id"], control="PAUSE")\n                return self.status()\n'''
+          clear_block = pause_block + '''            if action == "delete_all":\n                if running:\n                    raise ValueError("請先暫停歷史更新，等工作程序結束後再清除所有歷史資料。")\n                _delete_all_jobs(self.path)\n                self.process = None\n                self._job = None\n                with _connect(self.path) as connection:\n                    connection.execute("VACUUM")\n                return self.status()\n'''
+          if text.count(pause_block) != 1:
+              raise SystemExit('history_jobs.py: pause block mismatch')
+          jobs.write_text(text.replace(pause_block, clear_block), encoding='utf-8')
+
+          # History page: keep per-coin delete and add a separated dangerous
+          # all-history action at the very bottom of capacity management.
+          html = Path('radar/static/history-scan.html')
+          htext = html.read_text(encoding='utf-8')
+          old_capacity = '<section><h2>容量管理</h2><p id="storage">—</p><button id="delete" disabled>清除此幣歷史資料</button><p class="history-foot">只刪目前輸入幣種的15m歷史研究資料，不碰正式訊號、實際掃描觀測或雷達核心。</p></section>'
+          new_capacity = '<section><h2>容量管理</h2><p id="storage">—</p><button id="delete" disabled>清除此幣歷史資料</button><p class="history-foot">只刪目前輸入幣種的15m歷史研究資料，不碰正式訊號、實際掃描觀測或雷達核心。</p><div class="history-danger-zone"><h3>危險操作</h3><p>清除所有已儲存的單幣 15m 歷史 K 線勝率資料。執行後，每顆幣都要重新手動跑 3／7 日歷史更新才會再有勝率。</p><button id="deleteAll" class="history-danger-button" disabled>清除所有歷史 K 線資料</button><p class="history-foot">只清除歷史研究資料庫，不會刪正式訊號、上線後掃描觀測、即時雷達資料或交易計畫。</p></div></section>'
+          if htext.count(old_capacity) != 1:
+              raise SystemExit('history-scan.html: capacity block mismatch')
+          html.write_text(htext.replace(old_capacity, new_capacity), encoding='utf-8')
+
+          # Page logic: all-history delete does not require a selected coin and
+          # gets two confirmations. No active historical worker may be running.
+          js = Path('radar/static/history-scan.js')
+          jtext = js.read_text(encoding='utf-8')
+          replace_old = "    $('delete').disabled = busy || !valid || globalBusy || !coin;\n"
+          replace_new = replace_old + "    $('deleteAll').disabled = busy || globalBusy || !Object.keys(latest?.coins || {}).length;\n"
+          if jtext.count(replace_old) != 1:
+              raise SystemExit('history-scan.js: delete disabled marker mismatch')
+          jtext = jtext.replace(replace_old, replace_new)
+          old_head = '''    const inst = selectedInst();\n    if (!inst) {\n      $('error').textContent = '請輸入正確幣種，例如 BTC 或 BTC-USDT-SWAP。';\n      return;\n    }\n    if (action === 'delete' && !confirm(`確定清除 ${inst} 的15m歷史資料？正式訊號與即時掃描觀測不會刪除。`)) return;\n'''
+          new_head = '''    const clearAll = action === 'delete_all';\n    const inst = selectedInst();\n    if (!clearAll && !inst) {\n      $('error').textContent = '請輸入正確幣種，例如 BTC 或 BTC-USDT-SWAP。';\n      return;\n    }\n    if (action === 'delete' && !confirm(`確定清除 ${inst} 的15m歷史資料？正式訊號與即時掃描觀測不會刪除。`)) return;\n    if (clearAll) {\n      const count = Object.keys(latest?.coins || {}).length;\n      if (!count) return;\n      if (!confirm(`確定清除目前儲存的 ${count} 顆幣全部歷史 K 線勝率資料？`)) return;\n      if (!confirm('最後確認：清除後所有單幣歷史勝率都要重新手動更新。仍要全部清除嗎？')) return;\n    }\n'''
+          if jtext.count(old_head) != 1:
+              raise SystemExit('history-scan.js: command head mismatch')
+          jtext = jtext.replace(old_head, new_head)
+          old_body = '''        body:JSON.stringify({\n          csrf:latest.csrf,\n          days:{days:Number($('days').value), inst_id:inst}\n        })\n'''
+          new_body = '''        body:JSON.stringify(clearAll ? {csrf:latest.csrf} : {\n          csrf:latest.csrf,\n          days:{days:Number($('days').value), inst_id:inst}\n        })\n'''
+          if jtext.count(old_body) != 1:
+              raise SystemExit('history-scan.js: request body mismatch')
+          jtext = jtext.replace(old_body, new_body)
+          old_events = "  for (const action of ['start','pause','resume','delete']) $(action).addEventListener('click', () => command(action));\n"
+          new_events = old_events + "  $('deleteAll').addEventListener('click', () => command('delete_all'));\n"
+          if jtext.count(old_events) != 1:
+              raise SystemExit('history-scan.js: events marker mismatch')
+          js.write_text(jtext.replace(old_events, new_events), encoding='utf-8')
+
+          css = Path('radar/static/history-replay.css')
+          ctext = css.read_text(encoding='utf-8')
+          if '.history-danger-zone{' not in ctext:
+              ctext += '\n.history-danger-zone{margin-top:18px;padding:14px;border:1px solid #78323c;border-radius:14px;background:#211014}.history-danger-zone h3{margin:0 0 8px;color:#ff8e9b}.history-danger-zone p{line-height:1.6}.history-danger-button{width:100%;min-height:46px;border:1px solid #b84b5c;border-radius:12px;background:#5a1d29;color:#fff;font-weight:900}.history-danger-button:disabled{opacity:.45}.history-danger-button:not(:disabled):hover{background:#742636}\n'
+          css.write_text(ctext, encoding='utf-8')
+
+          replace_once(
+              'radar/static/service-worker.js',
+              'okx-radar-shell-v4.7-preflight-history-rate-1',
+              'okx-radar-shell-v4.8-history-clear-all-1',
+          )
+          replace_once(
+              'tests/test_v2_contract.py',
+              'okx-radar-shell-v4.7-preflight-history-rate-1',
+              'okx-radar-shell-v4.8-history-clear-all-1',
+          )
+
+          # Backend + static UI regression.
+          test = Path('tests/test_history_single_replay.py')
+          ttext = test.read_text(encoding='utf-8')
+          if 'from pathlib import Path\n' not in ttext:
+              ttext = ttext.replace('import unittest\n', 'import unittest\nfrom pathlib import Path\n', 1)
+          insert_anchor = '''    def test_different_coin_does_not_inherit_cached_result(self):\n        with patch.object(self.manager, '_spawn'):\n            self.manager.command(\n                'start',\n                days={'days':7, 'inst_id':'BTC-USDT-SWAP'},\n                token=self.manager.token,\n            )\n        status = self.manager.status()\n        self.assertIn('BTC-USDT-SWAP', status['coins'])\n        self.assertNotIn('MINA-USDT-SWAP', status['coins'])\n'''
+          addition = insert_anchor + '''\n    def test_delete_all_clears_every_coin_without_touching_schema(self):\n        with patch.object(self.manager, '_spawn'):\n            self.manager.command('start', days={'days':3, 'inst_id':'BTC-USDT-SWAP'}, token=self.manager.token)\n            self.manager.command('start', days={'days':7, 'inst_id':'SOL-USDT-SWAP'}, token=self.manager.token)\n        self.assertEqual(set(self.manager.status()['coins']), {'BTC-USDT-SWAP', 'SOL-USDT-SWAP'})\n        cleared = self.manager.command('delete_all', token=self.manager.token)\n        self.assertEqual(cleared['status'], 'IDLE')\n        self.assertEqual(cleared['coins'], {})\n        with patch.object(self.manager, '_spawn') as spawn:\n            restarted = self.manager.command('start', days={'days':3, 'inst_id':'ETH-USDT-SWAP'}, token=self.manager.token)\n        spawn.assert_called_once()\n        self.assertIn('ETH-USDT-SWAP', restarted['coins'])\n\n    def test_history_page_places_clear_all_in_capacity_danger_zone(self):\n        root = Path(__file__).parents[1]\n        html = (root / 'radar/static/history-scan.html').read_text(encoding='utf-8')\n        js = (root / 'radar/static/history-scan.js').read_text(encoding='utf-8')\n        self.assertIn('id="deleteAll"', html)\n        self.assertIn('清除所有歷史 K 線資料', html)\n        self.assertIn('history-danger-zone', html)\n        self.assertIn("const clearAll = action === 'delete_all';", js)\n        self.assertIn("command('delete_all')", js)\n        self.assertIn("clearAll ? {csrf:latest.csrf}", js)\n'''
+          if ttext.count(insert_anchor) != 1:
+              raise SystemExit('test_history_single_replay.py: manager test anchor mismatch')
+          test.write_text(ttext.replace(insert_anchor, addition), encoding='utf-8')
+          PY
+          node --check radar/static/history-scan.js
+          node --check radar/static/history-replay.js
+          git diff --check
+
+      - name: Install dependencies
+        run: python -m pip install -r requirements.txt
+
+      - name: Run regressions
+        run: |
+          python -m compileall -q radar scripts tests run.py
+          python -m unittest discover -s tests -q
+          git diff --check
+
+      - name: Commit tested changes
+        run: |
+          git config user.name "Cks120091"
+          git config user.email "k7v4srb5rc@privaterelay.appleid.com"
+          git add radar/history_jobs.py radar/static/history-scan.html radar/static/history-scan.js radar/static/history-replay.css radar/static/service-worker.js tests/test_history_single_replay.py tests/test_v2_contract.py
+          git commit -m "Apply history clear-all control"
+          git push origin HEAD:history-clear-all
