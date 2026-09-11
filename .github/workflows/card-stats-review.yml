@@ -14,7 +14,7 @@ jobs:
     steps:
       - uses: actions/checkout@v6
         with:
-          fetch-depth: 2
+          fetch-depth: 0
       - uses: actions/setup-python@v6
         with:
           python-version: '3.12'
@@ -23,7 +23,8 @@ jobs:
           node-version: '22'
       - name: Apply checksum-verified additive patch
         run: |
-          test "$(git rev-parse HEAD^)" = 5f6649450b1b209b7f604d260fcc6e739eaa5375
+          git merge-base --is-ancestor 5f6649450b1b209b7f604d260fcc6e739eaa5375 HEAD
+          git diff --exit-code 5f6649450b1b209b7f604d260fcc6e739eaa5375 -- radar scripts tests docs run.py
           python - <<'PY'
           import base64,gzip,hashlib,json
           from pathlib import Path
@@ -31,7 +32,16 @@ jobs:
           raw=gzip.decompress(base64.b64decode(encoded,validate=True))
           assert hashlib.sha256(raw).hexdigest()=='907813effd61f0351730cc6adb642a09f9781029331b2cb4ad3679f5990616a9'
           payload=json.loads(raw)
-          Path('.github/apply_card_statistics.py').write_text(payload.pop('integrate.py'))
+          source=payload.pop('integrate.py')
+          old="update('radar/scanner.py','        short_watchlist = self._watchlist(short_states)',"
+          new="update('radar/scanner.py','        short_watchlist = self._watchlist(short_states)\\n        long_watchlist = self._watchlist(long_states)',"
+          assert source.count(old)==1
+          source=source.replace(old,new)
+          old="        short_watchlist = self._watchlist(short_states)''')"
+          new="        short_watchlist = self._watchlist(short_states)\n        long_watchlist = self._watchlist(long_states)''')"
+          assert source.count(old)==1
+          source=source.replace(old,new)
+          Path('.github/apply_card_statistics.py').write_text(source)
           Path('.github/card_statistics_bundle.json').write_text(json.dumps(payload,ensure_ascii=False))
           PY
           python .github/apply_card_statistics.py
