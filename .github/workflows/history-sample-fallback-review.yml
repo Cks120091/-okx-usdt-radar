@@ -20,7 +20,9 @@ jobs:
         with:
           node-version: '22'
       - name: Apply patch
-        run: python scripts/apply_history_sample_fallback_patch.py
+        run: |
+          python scripts/apply_history_sample_fallback_patch.py
+          python scripts/fix_history_sample_fallback_ui_fixture.py
       - name: Install test dependencies
         run: |
           python -m pip install -r requirements.txt playwright
