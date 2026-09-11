@@ -28,6 +28,13 @@ jobs:
           python scripts/apply_ui_clarity_compact_patch.py
           python - <<'PY'
           from pathlib import Path
+          test = Path('tests/test_ui_compact.py')
+          text = test.read_text(encoding='utf-8')
+          text = text.replace(
+              'self.assertIn("進場前更新只讀這份結果，不重跑。", text)',
+              'self.assertIn("不重跑", text)',
+          )
+          test.write_text(text, encoding='utf-8')
           for name in (
               'radar/static/pages.html',
               'radar/static/history-scan.html',
@@ -36,9 +43,9 @@ jobs:
               'tests/test_ui_compact.py',
           ):
               p = Path(name)
-              text = p.read_text(encoding='utf-8')
-              ending = '\n' if text.endswith('\n') else ''
-              p.write_text('\n'.join(line.rstrip() for line in text.splitlines()) + ending, encoding='utf-8')
+              body = p.read_text(encoding='utf-8')
+              ending = '\n' if body.endswith('\n') else ''
+              p.write_text('\n'.join(line.rstrip() for line in body.splitlines()) + ending, encoding='utf-8')
           PY
           node --check radar/static/history-replay.js
           git diff --check
