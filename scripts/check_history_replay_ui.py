@@ -1,6 +1,5 @@
 """Synthetic browser checks for single-coin 15m history; no market calls."""
 import copy
-import json
 import os
 import shutil
 import sys
@@ -10,7 +9,6 @@ ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
 from playwright.sync_api import sync_playwright
 from scripts.check_layout_ui import fixtures
-from radar.card_statistics import setup
 
 VERSION = 'HISTORY_SINGLE_15M_V1'
 
@@ -25,7 +23,6 @@ def main():
                 take_profit_2='115', trigger_type='CONTINUATION', signal_stage='EARLY_SIGNAL')
     item['market_metrics'].update(entry_execution_price=100)
     item['timeframe_states'] = {'4H': {'direction': 'LONG'}, '1H': {'direction': 'LONG'}, '15m': {'direction': 'LONG'}}
-    key = setup(item, 100)['cohort']
     same = {'label':'15m 多｜回踩續走｜同向背景｜2–<3R','status':'AVAILABLE','resolved':6,
             'wins':4,'losses':2,'total':7,'days':3,'rate_pct':66.7,'unknown':1,'timeout':0,
             'tier':'極低樣本','coverage_pct':85.7,'interval_pct':[30.0,90.3]}
@@ -35,7 +32,7 @@ def main():
             'overall':{'label':'全部15m可進訊號','status':'AVAILABLE','resolved':26,'wins':17,'losses':9,
                        'total':28,'days':7,'rate_pct':65.4,'unknown':1,'timeout':1,'tier':'中等樣本',
                        'coverage_pct':92.9,'interval_pct':[46.2,80.6]},
-            'groups':{key:same}}
+            'groups':{}}
     good = {'schema_version':VERSION,'status':'COMPLETE','csrf':'test-only','inst_id':'MINA-USDT-SWAP',
             'days':7,'total':1,'done':1,'failed':0,'storage_bytes':1048576,
             'coins':{'MINA-USDT-SWAP':coin}}
@@ -85,7 +82,10 @@ def main():
             page.route('**/*', lambda route: route.abort())
             page.on('pageerror', lambda e: errors.append(str(e)))
             page.set_content(document('pages.html'), wait_until='domcontentloaded')
-            install(page, copy.deepcopy(good))
+            browser_key = page.evaluate('item=>HistoryReplay.keyFor(item)', item)
+            page_good = copy.deepcopy(good)
+            page_good['coins']['MINA-USDT-SWAP']['groups'] = {browser_key: copy.deepcopy(same)}
+            install(page, page_good)
             page.evaluate("item=>{renderSignals([item],'#fifteenAllBox');activateTab('fifteenAll',false)}", item)
             page.evaluate('HistoryReplay.refresh()')
             page.wait_for_function("document.querySelector('#fifteenAllBox .history-replay-card')?.textContent.includes('65.4%')")
