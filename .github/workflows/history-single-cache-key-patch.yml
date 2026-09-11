@@ -15,7 +15,7 @@ jobs:
       - uses: actions/checkout@v6
         with:
           ref: feat/history-all-actionable-15m-20260911
-      - name: Update only the two stale PWA cache-key assertions
+      - name: Update only stale PWA cache-key assertions
         run: |
           python - <<'PY'
           from pathlib import Path
@@ -24,8 +24,8 @@ jobs:
           old = 'okx-radar-shell-v4.5-history-replay-1'
           new = 'okx-radar-shell-v4.6-single-coin-history-1'
           count = text.count(old)
-          if count != 2:
-              raise SystemExit(f'expected exactly 2 stale cache-key assertions, found {count}')
+          if count != 3:
+              raise SystemExit(f'expected exactly 3 stale cache-key assertions, found {count}')
           path.write_text(text.replace(old, new), encoding='utf-8')
           PY
           git diff --check
