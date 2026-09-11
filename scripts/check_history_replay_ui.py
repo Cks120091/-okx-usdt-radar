@@ -84,8 +84,8 @@ def main():
             page = context.new_page();page.set_default_timeout(6000);errors=[]
             page.route('**/*', lambda route: route.abort())
             page.on('pageerror', lambda e: errors.append(str(e)))
-            install(page, copy.deepcopy(good))
             page.set_content(document('pages.html'), wait_until='domcontentloaded')
+            install(page, copy.deepcopy(good))
             page.evaluate("item=>{renderSignals([item],'#fifteenAllBox');activateTab('fifteenAll',false)}", item)
             page.evaluate('HistoryReplay.refresh()')
             page.wait_for_function("document.querySelector('#fifteenAllBox .history-replay-card')?.textContent.includes('65.4%')")
@@ -107,8 +107,9 @@ def main():
             page.close();page=context.new_page();page.set_default_timeout(6000);errors=[]
             page.route('**/*', lambda route: route.abort());page.on('pageerror',lambda e:errors.append(str(e)))
             idle={'schema_version':VERSION,'status':'IDLE','csrf':'test-only','coins':{},'storage_bytes':0}
-            install(page, idle)
             page.set_content(document('history-scan.html'),wait_until='domcontentloaded')
+            install(page, idle)
+            page.evaluate('HistoryReplay.refresh()')
             page.locator('#inst').fill('MINA')
             page.wait_for_function("!document.getElementById('start').disabled")
             assert page.locator('#days option').evaluate_all('(nodes)=>nodes.map(n=>n.value)') == ['3','7']
