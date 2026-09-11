@@ -96,10 +96,10 @@ def main():
         assert "58.3%" in text and "合併訊號階段＋R區間" in text and "較寬鬆情境" in text, text
 
         text = render(page, status({KEY: group(2, 2, days=2), CONFIRMED: group(2, 1, days=2), OTHER_R: group(1, 1, days=2)}))
-        assert "樣本不足" in text and "%" not in text.split("歷史 K 棒回測｜15m", 1)[1].split("模擬 TP1", 1)[0], text
+        assert page.locator("#box [data-replay-rate]").inner_text() == "樣本不足", text
 
         text = render(page, status({KEY: group(6, 4, total=20, days=5)}))
-        assert "樣本不足" in text, text
+        assert page.locator("#box [data-replay-rate]").inner_text() == "樣本不足", text
 
         assert "不改進場資格" in text
         browser.close()
