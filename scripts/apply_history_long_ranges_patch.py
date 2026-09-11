@@ -10,7 +10,7 @@ def replace_once(path: str, old: str, new: str) -> None:
     p.write_text(text.replace(old, new), encoding="utf-8")
 
 
-# Keep HISTORY_SINGLE_15M_V1 compatible with existing 3/7-day caches.  The
+# Keep HISTORY_SINGLE_15M_V1 compatible with existing 3/7-day caches. The
 # accepted request ranges live in the job/controller layer, so adding options
 # does not invalidate already-computed single-coin results.
 jobs = Path("radar/history_jobs.py")
@@ -21,9 +21,7 @@ if text.count(anchor) != 1:
     raise SystemExit("history_jobs.py: constants anchor mismatch")
 text = text.replace(
     anchor,
-    anchor
-    + "ALLOWED_DAYS = (3, 7, 30, 90, 180, 270, 365)\n"
-    + "PERIOD_LABELS = {3: '3天', 7: '7天', 30: '30天', 90: '3個月', 180: '6個月', 270: '9個月', 365: '12個月'}\n",
+    anchor + "ALLOWED_DAYS = (3, 7, 30, 90, 180, 270, 365)\n",
     1,
 )
 text = text.replace(
@@ -44,8 +42,8 @@ text = text.replace(
 jobs.write_text(text, encoding="utf-8")
 
 # One year of 5m bars is roughly 350 OKX pages at 300 bars/page after warmup
-# and the forward outcome window.  Keep headroom while still retaining a hard
-# finite safety bound.
+# and the forward outcome window. Keep headroom while retaining a hard finite
+# safety bound.
 replace_once("radar/history_replay.py", "MAX_PAGES = 180", "MAX_PAGES = 420")
 
 # History controls + explanatory copy.
@@ -148,3 +146,13 @@ if ttext.count(old_test) != 1:
     raise SystemExit("test_history_single_replay.py: range test anchor mismatch")
 ttext = ttext.replace(old_test, new_test, 1)
 test.write_text(ttext, encoding="utf-8")
+
+# Legacy HistoryManager contract tests exercise the same active manager. 30 and
+# 90 are now valid by design, so keep only genuinely invalid ranges here.
+legacy = Path("tests/test_history_replay.py")
+ltext = legacy.read_text(encoding="utf-8")
+old_invalid = "        for value in [True,'7',0,30,90]:\n"
+new_invalid = "        for value in [True,'7',0,14,60,360,366]:\n"
+if ltext.count(old_invalid) != 1:
+    raise SystemExit("tests/test_history_replay.py: invalid-range anchor mismatch")
+legacy.write_text(ltext.replace(old_invalid, new_invalid), encoding="utf-8")
