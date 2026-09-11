@@ -94,6 +94,14 @@ def main():
             assert '66.7%' in text, text
             assert page.locator('#fifteenAllBox .history-stats-panel').count() == 1, 'observed-entry block must remain separate'
             assert not page.evaluate('window.__historyPosts'), 'card load must not start replay'
+            before_posts = page.evaluate('window.__historyPosts.length')
+            preflight_html = page.evaluate("HistoryReplay.preflight('MINA-USDT-SWAP')")
+            assert '歷史 K 棒勝率' in preflight_html and '65.4%' in preflight_html, preflight_html
+            assert '近 7 日 15m' in preflight_html and '歷史 K 棒勝率 →' in preflight_html, preflight_html
+            assert '/history-scan?inst_id=MINA-USDT-SWAP' in preflight_html, preflight_html
+            assert page.evaluate('window.__historyPosts.length') == before_posts, 'preflight history display must not start replay'
+            missing_preflight = page.evaluate("HistoryReplay.preflight('BTC-USDT-SWAP')")
+            assert '尚未更新' in missing_preflight and '65.4%' not in missing_preflight, missing_preflight
 
             btc = copy.deepcopy(item);btc['inst_id']='BTC-USDT-SWAP'
             btc_html = page.evaluate('item=>HistoryReplay.card(item)', btc)
