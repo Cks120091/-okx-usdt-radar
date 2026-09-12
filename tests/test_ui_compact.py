@@ -14,16 +14,25 @@ class CompactUiTests(unittest.TestCase):
         self.assertIn("Compact clarity pass:", text)
         self.assertIn("更新現價、進場距離、成交條件、續走力道與歷史 OI 持倉動向；不改寫方向或原 Entry／SL／TP", text)
 
-    def test_history_page_hides_methodology_behind_details(self):
+    def test_history_page_groups_secondary_information_behind_one_details_block(self):
         text = (ROOT / "radar/static/history-scan.html").read_text(encoding="utf-8")
-        self.assertIn('<details class="history-help"><summary>執行說明</summary>', text)
-        self.assertIn('<summary>勝率算法與限制</summary>', text)
+        self.assertIn('<details class="history-tools"><summary>說明、完整度與資料管理</summary>', text)
+        self.assertIn("怎麼算", text)
+        self.assertIn("資料完整度", text)
         self.assertIn("資料管理", text)
+        self.assertIn('<option value="14">14 日</option>', text)
+        self.assertNotIn('value="90"', text)
 
-    def test_history_cards_keep_numbers_but_shorten_explanations(self):
+    def test_history_cards_keep_numbers_and_group_with_quick_look(self):
         text = (ROOT / "radar/static/history-replay.js").read_text(encoding="utf-8")
+        css = (ROOT / "radar/static/history-replay.css").read_text(encoding="utf-8")
         self.assertIn("尚無歷史勝率", text)
-        self.assertIn("不重跑", text)
+        self.assertIn("有效機會", text)
+        self.assertIn("首進 / 再進", text)
+        self.assertIn("organizeSignalCards", text)
+        self.assertIn("decision-front-grid", text)
+        self.assertNotIn("目前同類情境", text)
+        self.assertIn(".history-stats-panel{display:none!important}", css)
         self.assertNotIn("可判定率 ${coverage.toFixed(1)}%", text)
 
 
