@@ -9,6 +9,7 @@
   const periodLabel = days => ({3:'3天',7:'7天',14:'14天',30:'30天'})[Number(days || 7)] || `${Number(days || 7)}天`;
   let data = null;
   let fetching = false;
+  let organizing = false;
 
   // Kept for browser/API compatibility only. Same-scenario rates are no longer shown.
   function keyFor(item) {
@@ -113,6 +114,113 @@
     });
   }
 
+  function blockWithHeading(root, text) {
+    return [...root.querySelectorAll(':scope > .preflight-block')].find(block =>
+      String(block.querySelector(':scope > h3')?.textContent || '').includes(text)
+    ) || null;
+  }
+
+  function moveAfter(anchor, node) {
+    if (!anchor || !node || anchor === node || anchor.nextElementSibling === node) return;
+    anchor.after(node);
+  }
+
+  function organizePreflightPage() {
+    const root = document.querySelector('#preflightContent');
+    if (!root || organizing || !root.querySelector(':scope > .preflight-verdict')) return;
+    organizing = true;
+    try {
+      root.classList.add('compact-preflight-layout');
+      const verdict = root.querySelector(':scope > .preflight-verdict');
+      const position = blockWithHeading(root, '現在位置與進場資格');
+      const plan = root.querySelector(':scope > .preflight-plan-block');
+      const history = root.querySelector(':scope > #preflightHistoryRate');
+      if (position) position.classList.add('preflight-priority-position');
+      if (plan) plan.classList.add('preflight-priority-plan');
+
+      let anchor = verdict;
+      for (const node of [position, plan, history]) {
+        if (!node) continue;
+        moveAfter(anchor, node);
+        anchor = node;
+      }
+
+      let details = root.querySelector(':scope > .preflight-secondary-stack');
+      if (!details) {
+        details = document.createElement('details');
+        details.className = 'preflight-secondary-stack';
+        details.innerHTML = '<summary><span>更多確認與資料細節</span><small>成交品質・OI/CVD・續走・資料來源</small></summary><div class="preflight-secondary-stack-body"></div>';
+      }
+      const body = details.querySelector('.preflight-secondary-stack-body');
+      const keep = new Set([verdict, position, plan, history, details].filter(Boolean));
+      const extras = [...root.children].filter(child => !keep.has(child));
+      extras.forEach(child => body.appendChild(child));
+      if (body.children.length) {
+        moveAfter(anchor, details);
+      } else if (details.parentElement === root) {
+        details.remove();
+      }
+    } finally {
+      organizing = false;
+    }
+  }
+
+  function organizeSingleScanDialog() {
+    const root = document.querySelector('#singleScanContent');
+    if (!root || organizing || !root.children.length) return;
+    organizing = true;
+    try {
+      root.classList.add('compact-single-scan');
+      const decision = root.querySelector(':scope > .decision-panel');
+      if (!decision) return;
+      decision.classList.add('single-scan-core');
+      root.querySelectorAll('.single-scan-button').forEach(button => {
+        button.hidden = true;
+        button.setAttribute('aria-hidden', 'true');
+      });
+
+      const note = root.querySelector(':scope > .intraday-note');
+      const badges = root.querySelector(':scope > .badges');
+      const warning = root.querySelector(':scope > .entry-callout.wait');
+      let anchor = note || badges || decision;
+      if (note && badges) moveAfter(note, badges);
+      if (badges) anchor = badges;
+      moveAfter(anchor, decision);
+      anchor = decision;
+      if (warning) {
+        moveAfter(anchor, warning);
+        anchor = warning;
+      }
+
+      let details = root.querySelector(':scope > .single-scan-details');
+      if (!details) {
+        details = document.createElement('details');
+        details.className = 'single-scan-details';
+        details.innerHTML = '<summary><span>更多市場與持倉資料</span><small>資金流・OI/CVD・完整數據</small></summary><div class="single-scan-details-body"></div>';
+      }
+      const body = details.querySelector('.single-scan-details-body');
+      const keep = new Set([note, badges, decision, warning, details].filter(Boolean));
+      const extras = [...root.children].filter(child => !keep.has(child));
+      extras.forEach(child => body.appendChild(child));
+      if (body.children.length) moveAfter(anchor, details);
+      else if (details.parentElement === root) details.remove();
+    } finally {
+      organizing = false;
+    }
+  }
+
+  function installLayoutObservers() {
+    const observe = (selector, organizer) => {
+      const root = document.querySelector(selector);
+      if (!root || typeof MutationObserver !== 'function') return;
+      const observer = new MutationObserver(() => queueMicrotask(organizer));
+      observer.observe(root, {childList:true, subtree:false});
+      queueMicrotask(organizer);
+    };
+    observe('#preflightContent', organizePreflightPage);
+    observe('#singleScanContent', organizeSingleScanDialog);
+  }
+
   function card(item, preview = false) {
     queueMicrotask(organizeSignalCards);
     if (preview || item?.radar_horizon !== 'SHORT') return '';
@@ -138,6 +246,7 @@
       }
     }
     organizeSignalCards();
+    organizePreflightPage();
   }
 
   async function refresh() {
@@ -158,8 +267,11 @@
     }
   }
 
-  window.HistoryReplay = {card, preflight, refresh, refreshCards, keyFor, snapshot, organizeSignalCards};
-  const boot = () => refresh();
+  window.HistoryReplay = {card, preflight, refresh, refreshCards, keyFor, snapshot, organizeSignalCards, organizePreflightPage, organizeSingleScanDialog};
+  const boot = () => {
+    installLayoutObservers();
+    refresh();
+  };
   if (document.readyState === 'loading') document.addEventListener('DOMContentLoaded', boot, {once:true});
   else boot();
   setInterval(() => {
