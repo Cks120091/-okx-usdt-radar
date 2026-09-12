@@ -5,10 +5,13 @@
   let pushConfig = null;
   let pushSubscription = null;
   let pushLoading = false;
+  let watchedJob = null;
+  const notifiedJobs = new Set();
   const HISTORY_PUSH_KEY = 'okx-radar-history-push-enabled';
   const VAPID_KEY_ID = 'okx-radar-vapid-key-id';
   const $ = id => document.getElementById(id);
   const active = new Set(['QUEUED','RUNNING','WAITING_LIVE_SCAN']);
+  const notificationTerminal = new Set(['COMPLETE','PARTIAL_COMPLETE','ERROR']);
   const labels = {
     IDLE:'尚未建立本幣歷史資料', QUEUED:'準備更新', RUNNING:'15m Trigger 歷史更新中',
     WAITING_LIVE_SCAN:'即時掃描優先，歷史暫候', PAUSED:'歷史已暫停', INTERRUPTED:'歷史中斷，可續跑',
@@ -193,7 +196,65 @@
     }
   }
 
+  function historyNotificationPayload(data) {
+    const inst = String(data?.inst_id || watchedJob?.inst_id || '');
+    const coin = data?.coins?.[inst] || data || {};
+    const overall = coin?.overall || {};
+    const symbol = inst.replace(/-USDT-SWAP$/,'') || '本幣';
+    const days = Number(coin?.days || data?.days || watchedJob?.days || 0);
+    const triggers = Number(overall.total || coin?.trigger_signals || 0);
+    const wins = Number(overall.wins || 0);
+    const losses = Number(overall.losses || 0);
+    const rate = overall.rate_pct;
+    const status = String(coin?.status || data?.status || '');
+    if (status === 'ERROR') {
+      return {
+        title:`${symbol} 勝率更新未完成`,
+        body:`${days}日｜${String(coin?.error || data?.error || '更新失敗，可回頁面查看或續跑。').slice(0,140)}`,
+        url:`/history-scan?inst_id=${encodeURIComponent(inst)}`
+      };
+    }
+    return {
+      title:`${symbol} 勝率更新完成${status === 'PARTIAL_COMPLETE' ? '（部分資料）' : ''}`,
+      body:`${days}日｜Trigger ${triggers}｜TP1 ${wins} / SL ${losses}｜先達率 ${rate === null || rate === undefined ? '—' : Number(rate).toFixed(1) + '%'}`,
+      url:`/history-scan?inst_id=${encodeURIComponent(inst)}`
+    };
+  }
+
+  async function showHistoryCompletionNotification(data) {
+    if (!historyPushEnabled() || !supportsPush() || Notification.permission !== 'granted') return;
+    if (document.visibilityState === 'visible') return;
+    try {
+      await navigator.serviceWorker.register('/service-worker.js');
+      const registration = await navigator.serviceWorker.ready;
+      const payload = historyNotificationPayload(data);
+      await registration.showNotification(payload.title, {
+        body:payload.body,
+        icon:'/radar-icon.svg',
+        badge:'/radar-icon.svg',
+        tag:`okx-radar-history-${String(data?.id || watchedJob?.id || 'complete')}`,
+        renotify:false,
+        data:{url:payload.url}
+      });
+    } catch (_) {}
+  }
+
+  function watchCompletionTransition(data) {
+    const id = String(data?.id || '');
+    const status = String(data?.status || '');
+    if (!id) return;
+    if (active.has(status)) {
+      watchedJob = {id, inst_id:String(data?.inst_id || ''), days:Number(data?.days || 0)};
+      return;
+    }
+    if (!watchedJob || watchedJob.id !== id || !notificationTerminal.has(status) || notifiedJobs.has(id)) return;
+    notifiedJobs.add(id);
+    showHistoryCompletionNotification(data);
+    watchedJob = null;
+  }
+
   function render(data) {
+    watchCompletionTransition(data);
     latest = data || latest || {};
     const inst = selectedInst();
     const coin = selectedCoin();
@@ -287,6 +348,7 @@
       const result = await response.json();
       if (!response.ok) throw new Error(result.error || '操作失敗');
       latest = result;
+      watchCompletionTransition(result);
     } catch (error) {
       failure = String(error.message || error);
     } finally {
