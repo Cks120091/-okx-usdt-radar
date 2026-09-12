@@ -1,4 +1,4 @@
-"""Offline tests for the single-coin 15m history model."""
+"""Offline tests for the single-coin 15m Trigger-time history model."""
 import tempfile
 import threading
 import unittest
@@ -21,12 +21,13 @@ def candle(ts=BASE, price=100.0):
     return Candle(ts, price, price + 1, price - 1, price, 100, 100_000, True)
 
 
-def sample(outcome='TP1_FIRST', i=0, key='same', kind='INITIAL'):
+def sample(outcome='TP1_FIRST', i=0, key='same'):
     return {
         'cohort': key,
         'label': '15m測試情境',
         'entry_ms': BASE + i * CORE,
-        'opportunity_kind': kind,
+        'trigger_ms': BASE + i * CORE,
+        'opportunity_kind': 'TRIGGER',
         'outcome': outcome,
     }
 
@@ -39,7 +40,7 @@ class SingleCoinAggregateTests(unittest.TestCase):
         self.assertEqual(result['overall']['total'], 1)
         self.assertEqual(result['overall']['resolved'], 1)
 
-    def test_all_actionable_outcomes_are_counted_without_hiding_timeout_unknown(self):
+    def test_all_trigger_outcomes_are_counted_without_hiding_timeout_unknown(self):
         samples = [sample('TP1_FIRST', i) for i in range(12)]
         samples += [sample('SL_FIRST', 20+i) for i in range(8)]
         samples += [sample('TIMEOUT', 40), sample('UNKNOWN', 41)]
@@ -52,15 +53,15 @@ class SingleCoinAggregateTests(unittest.TestCase):
         self.assertEqual(overall['timeout'], 1)
         self.assertEqual(overall['unknown'], 1)
 
-    def test_initial_and_reentry_opportunities_are_split_without_changing_total(self):
-        samples = [sample('TP1_FIRST', 0, kind='INITIAL')]
-        samples += [sample('SL_FIRST', 1, kind='REENTRY')]
+    def test_trigger_samples_have_no_reentry_sample_class(self):
+        samples = [sample('TP1_FIRST', 0), sample('SL_FIRST', 1)]
         result = aggregate([{'inst_id':'BTC-USDT-SWAP','samples':samples}], complete=True, days=7)
         self.assertEqual(result['overall']['total'], 2)
-        self.assertEqual(result['initial_overall']['total'], 1)
-        self.assertEqual(result['reentry_overall']['total'], 1)
-        self.assertEqual(result['initial_signals'], 1)
-        self.assertEqual(result['reentry_signals'], 1)
+        self.assertEqual(result['initial_overall']['total'], 2)
+        self.assertEqual(result['reentry_overall']['total'], 0)
+        self.assertEqual(result['trigger_signals'], 2)
+        self.assertEqual(result['initial_signals'], 2)
+        self.assertEqual(result['reentry_signals'], 0)
         self.assertEqual(result['overall']['rate_pct'], 50.0)
 
     def test_incomplete_history_never_releases_rate(self):
@@ -69,18 +70,18 @@ class SingleCoinAggregateTests(unittest.TestCase):
         self.assertEqual(result['overall']['status'], 'PARTIAL')
 
 
-class FirstActionableEpisodeTests(unittest.TestCase):
-    def _run_actionable_sequence(self, sequence):
-        start, end = BASE, BASE + len(sequence) * CORE
-        signal = ready_signal('LONG')
-        signal.trigger_id = 'episode-one'
-        signal.stop_loss = '95'
-        signal.take_profit_1 = '110'
-        signal.entry_low = '99'
-        signal.entry_high = '101'
-        signal.radar_horizon = 'SHORT'
-        signal.actionable = True
-        signal.lifecycle = {**signal.lifecycle, 'terminal': False}
+class FirstTriggerEpisodeTests(unittest.TestCase):
+    def _run_trigger_sequence(self, trigger_ids, actionable=None):
+        start, end = BASE, BASE + len(trigger_ids) * CORE
+        base_signal = ready_signal('LONG')
+        base_signal.stop_loss = '95'
+        base_signal.take_profit_1 = '110'
+        base_signal.entry_low = '99'
+        base_signal.entry_high = '101'
+        base_signal.radar_horizon = 'SHORT'
+        base_signal.signal_stage = 'EARLY_SIGNAL'
+        base_signal.lifecycle = {**base_signal.lifecycle, 'terminal': False}
+        actionable = actionable or [False] * len(trigger_ids)
 
         class Repo:
             def load_active_signal(self, *_): return None
@@ -91,7 +92,29 @@ class FirstActionableEpisodeTests(unittest.TestCase):
 
         class Engine:
             def analyze(self, instrument, ticker, *args, **kwargs):
-                return SimpleNamespace(market_state=None, signal=signal if ticker.ts >= start else None)
+                if ticker.ts < start:
+                    return SimpleNamespace(market_state=None, signal=None)
+                index = (ticker.ts - start) // CORE
+                if not 0 <= index < len(trigger_ids):
+                    return SimpleNamespace(market_state=None, signal=None)
+                trigger_id = trigger_ids[index]
+                if not trigger_id:
+                    return SimpleNamespace(market_state=None, signal=None)
+                signal = replace(
+                    base_signal,
+                    trigger_id=trigger_id,
+                    actionable=bool(actionable[index]),
+                    entry_eligibility={
+                        **base_signal.entry_eligibility,
+                        'actionable': bool(actionable[index]),
+                        'new_entry_allowed': bool(actionable[index]),
+                    },
+                    market_metrics={
+                        **base_signal.market_metrics,
+                        'trigger_event_ts': ticker.ts - CORE,
+                    },
+                )
+                return SimpleNamespace(market_state=None, signal=signal)
 
         fake = SimpleNamespace(
             config=SimpleNamespace(
@@ -101,54 +124,49 @@ class FirstActionableEpisodeTests(unittest.TestCase):
             ),
             repository=Repo(),
             engine=Engine(),
-            _record_entry_window=lambda item: item,
         )
         histories = {tf:[candle(BASE)] for tf in ('5m','15m','1H','4H')}
         window = [candle(BASE + i * STEP) for i in range(288)]
         instrument = Instrument('BTC-USDT-SWAP','live','USDT','linear',0.01)
 
-        def project(scanner, item, asof, price):
-            index = (asof - start) // CORE
-            actionable = bool(sequence[index]) if 0 <= index < len(sequence) else False
-            return replace(
-                item,
-                actionable=actionable,
-                entry_eligibility={
-                    **item.entry_eligibility,
-                    'actionable': actionable,
-                    'new_entry_allowed': actionable,
-                },
-            )
-
         with patch('radar.history_single_replay.MarketScanner', return_value=fake), \
              patch('radar.history_single_replay.past_window', return_value=window), \
-             patch('radar.history_single_replay._price_projection', side_effect=project), \
              patch('radar.history_single_replay.classify_path', return_value={'outcome':'TP1_FIRST','r':2.0}):
             return replay_symbol(instrument, histories, start, end, {'min_quote_volume_24h':0})
 
-    def test_same_episode_continuous_actionable_window_is_sampled_once(self):
-        result = self._run_actionable_sequence([True, True])
-        self.assertEqual(result['actionable_signals'], 1)
+    def test_trigger_is_sampled_immediately_even_before_entry_permission(self):
+        result = self._run_trigger_sequence(['episode-one'], actionable=[False])
+        self.assertEqual(result['trigger_signals'], 1)
         self.assertEqual(len(result['samples']), 1)
         self.assertEqual(result['samples'][0]['episode'], 'episode-one')
+        self.assertEqual(result['samples'][0]['trigger_ms'], BASE)
         self.assertEqual(result['samples'][0]['entry_ms'], BASE)
-        self.assertEqual(result['samples'][0]['opportunity_kind'], 'INITIAL')
+        self.assertEqual(result['samples'][0]['opportunity_kind'], 'TRIGGER')
 
-    def test_same_episode_reentry_requires_four_closed_non_actionable_bars(self):
-        result = self._run_actionable_sequence([True, False, False, False, False, True])
-        self.assertEqual(result['actionable_signals'], 2)
-        self.assertEqual(result['initial_signals'], 1)
-        self.assertEqual(result['reentry_signals'], 1)
-        self.assertEqual(
-            [row['opportunity_kind'] for row in result['samples']],
-            ['INITIAL', 'REENTRY'],
+    def test_same_episode_retest_and_entry_confirmation_do_not_add_samples(self):
+        result = self._run_trigger_sequence(
+            ['episode-one'] * 6,
+            actionable=[False, False, True, False, False, True],
         )
-        self.assertEqual(result['samples'][1]['entry_ms'], BASE + 5 * CORE)
-
-    def test_brief_loss_of_permission_does_not_create_fake_reentry(self):
-        result = self._run_actionable_sequence([True, False, False, False, True])
-        self.assertEqual(result['actionable_signals'], 1)
+        self.assertEqual(result['trigger_signals'], 1)
+        self.assertEqual(result['initial_signals'], 1)
         self.assertEqual(result['reentry_signals'], 0)
+        self.assertEqual(len(result['samples']), 1)
+
+    def test_distinct_episode_gets_its_own_trigger_time_sample(self):
+        result = self._run_trigger_sequence(
+            ['episode-one', 'episode-one', 'episode-two'],
+            actionable=[False, True, False],
+        )
+        self.assertEqual(result['trigger_signals'], 2)
+        self.assertEqual(
+            [row['episode'] for row in result['samples']],
+            ['episode-one', 'episode-two'],
+        )
+        self.assertEqual(
+            [row['trigger_ms'] for row in result['samples']],
+            [BASE, BASE + 2 * CORE],
+        )
 
 
 class SingleCoinManagerTests(unittest.TestCase):
