@@ -29,7 +29,8 @@ def main():
     coin = {'id':'job-mina','inst_id':'MINA-USDT-SWAP','status':'COMPLETE','compatible':True,'days':7,
             'start_ms':1_799_000_000_000,'end_ms':1_799_604_800_000,'total':1,'done':1,'failed':0,
             'scope_coverage_pct':100,'covered_symbols':1,'excluded':[],
-            'overall':{'label':'全部15m可進訊號','status':'AVAILABLE','resolved':26,'wins':17,'losses':9,
+            'initial_signals':18,'reentry_signals':10,
+            'overall':{'label':'全部15m有效進場機會','status':'AVAILABLE','resolved':26,'wins':17,'losses':9,
                        'total':28,'days':7,'rate_pct':65.4,'unknown':1,'timeout':1,'tier':'中等樣本',
                        'coverage_pct':92.9,'interval_pct':[46.2,80.6]},
             'groups':{}}
@@ -90,14 +91,17 @@ def main():
             page.evaluate('HistoryReplay.refresh()')
             page.wait_for_function("document.querySelector('#fifteenAllBox .history-replay-card')?.textContent.includes('65.4%')")
             text = page.locator('#fifteenAllBox .history-replay-card').inner_text()
-            assert 'MINA-USDT-SWAP' in text and '可進訊號 28 筆' in text and '目前同類情境' in text, text
-            assert '66.7%' in text, text
-            assert page.locator('#fifteenAllBox .history-stats-panel').count() == 1, 'observed-entry block must remain separate'
+            assert '65.4%' in text and '有效機會' in text and '首進 / 再進' in text, text
+            assert '目前同類情境' not in text and '66.7%' not in text, text
+            assert page.locator('#fifteenAllBox .decision-front-grid').count() == 1
+            assert page.locator('#fifteenAllBox .decision-front-grid .quicklook-panel').count() == 1
+            assert page.locator('#fifteenAllBox .decision-front-grid .history-replay-card').count() == 1
+            assert page.locator('#fifteenAllBox .history-stats-panel').is_hidden(), 'same-scenario observed block must be hidden'
             assert not page.evaluate('window.__historyPosts'), 'card load must not start replay'
             before_posts = page.evaluate('window.__historyPosts.length')
             preflight_html = page.evaluate("HistoryReplay.preflight('MINA-USDT-SWAP')")
-            assert '歷史 K 棒勝率' in preflight_html and '65.4%' in preflight_html, preflight_html
-            assert '近 7 日 15m' in preflight_html and '歷史 K 棒勝率 →' in preflight_html, preflight_html
+            assert '本幣 15m 歷史勝率' in preflight_html and '65.4%' in preflight_html, preflight_html
+            assert '7天' in preflight_html and '更新勝率' in preflight_html, preflight_html
             assert '/history-scan?inst_id=MINA-USDT-SWAP' in preflight_html, preflight_html
             assert page.evaluate('window.__historyPosts.length') == before_posts, 'preflight history display must not start replay'
             missing_preflight = page.evaluate("HistoryReplay.preflight('BTC-USDT-SWAP')")
@@ -120,7 +124,7 @@ def main():
             page.evaluate('HistoryReplay.refresh()')
             page.locator('#inst').fill('MINA')
             page.wait_for_function("!document.getElementById('start').disabled")
-            assert page.locator('#days option').evaluate_all('(nodes)=>nodes.map(n=>n.value)') == ['3','7']
+            assert page.locator('#days option').evaluate_all('(nodes)=>nodes.map(n=>n.value)') == ['3','7','14','30']
             page.locator('#start').click()
             page.wait_for_function("document.getElementById('status').textContent.includes('更新中')")
             posts = page.evaluate('window.__historyPosts')
@@ -132,10 +136,10 @@ def main():
             assert not page.locator('#resume').is_disabled()
             assert page.evaluate('document.documentElement.scrollWidth<=innerWidth'), width
             assert not errors, errors
-            print(f'Single-coin history UI {width}x{height}: own coin, no fallback, 15m-only, controls passed', flush=True)
+            print(f'Single-coin history UI {width}x{height}: compact summary and 3/7/14/30 controls passed', flush=True)
             context.close()
         browser.close()
-    print('PASS: single-coin 15m history cards and controls; six responsive viewports; synthetic only.')
+    print('PASS: compact quick-look/history layout, hidden scenario rates, and reduced range controls.')
 
 
 if __name__ == '__main__':
