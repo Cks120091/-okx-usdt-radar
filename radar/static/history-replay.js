@@ -1,4 +1,4 @@
-/* Single-coin 15m historical statistics. Read-only; never changes entry permission. */
+/* Single-coin 15m Trigger-time historical statistics. Read-only; never changes entry permission. */
 (() => {
   'use strict';
   const VERSION = 'HISTORY_SINGLE_15M_V1';
@@ -10,6 +10,7 @@
   let data = null;
   let fetching = false;
 
+  // Kept for browser/API compatibility only. Same-scenario rates are no longer shown.
   function keyFor(item) {
     if (item?.radar_horizon !== 'SHORT' || !['LONG','SHORT'].includes(item?.direction)) return null;
     const entry = finite(item?.market_metrics?.entry_execution_price);
@@ -41,22 +42,15 @@
     return {wins, losses, total, timeout, unknown, resolved};
   }
 
-  function opportunitySplit(coin, total) {
-    const initial = Math.max(0, finite(coin?.initial_signals) ?? finite(coin?.initial_overall?.total) ?? total ?? 0);
-    const reentry = Math.max(0, finite(coin?.reentry_signals) ?? finite(coin?.reentry_overall?.total) ?? 0);
-    return {initial, reentry};
-  }
-
   function coinLink(instId) {
     return `<a class="history-replay-link" href="/history-scan?inst_id=${encodeURIComponent(instId)}">更新勝率 →</a>`;
   }
 
-  function completedMarkup(instId, coin, heading = '本幣 15m 歷史勝率') {
+  function completedMarkup(instId, coin, heading = '本幣 15m Trigger 勝率') {
     const overall = coin.overall || {};
     const n = counts(overall);
-    const split = opportunitySplit(coin, n.total);
     const rate = finite(overall.rate_pct);
-    const headline = rate === null ? (n.total ? '尚無已判定結果' : '沒有進場機會') : `${rate.toFixed(1)}%`;
+    const headline = rate === null ? (n.total ? '尚無已判定結果' : '沒有 Trigger 樣本') : `${rate.toFixed(1)}%`;
     const tier = String(overall.tier || (n.resolved ? '短期樣本' : ''));
     const interval = Array.isArray(overall.interval_pct) && overall.interval_pct.length === 2
       ? `Wilson 95% 描述區間 ${overall.interval_pct[0]}%～${overall.interval_pct[1]}%。`
@@ -64,20 +58,20 @@
     const period = coin.start_ms && coin.end_ms
       ? `${new Date(coin.start_ms).toLocaleString('zh-TW',{timeZone:'Asia/Taipei'})} ～ ${new Date(coin.end_ms).toLocaleString('zh-TW',{timeZone:'Asia/Taipei'})}`
       : '—';
-    const unresolved = n.timeout || n.unknown ? `｜Timeout ${n.timeout}｜不明 ${n.unknown}` : '';
+    const unresolved = n.timeout + n.unknown;
     return `<div class="history-replay-heading"><h3>${esc(heading)}</h3><strong data-replay-rate>${esc(headline)}</strong></div>
       <div class="history-replay-metrics">
         <div><span>期間</span><b>${esc(periodLabel(coin.days || 7))}</b></div>
-        <div><span>有效機會</span><b>${n.total}</b></div>
-        <div><span>首進 / 再進</span><b>${split.initial} / ${split.reentry}</b></div>
+        <div><span>Trigger 樣本</span><b>${n.total}</b></div>
         <div><span>TP1 / SL</span><b>${n.wins} / ${n.losses}</b></div>
+        <div><span>未判定</span><b>${unresolved}</b></div>
       </div>
-      <p class="history-replay-status-line">已判定 ${n.resolved} 筆${tier ? `｜${esc(tier)}` : ''}${unresolved}</p>
-      <details><summary>統計說明</summary><div class="history-replay-details"><p>${esc(interval)}</p><p>訊號期間（台灣）：${esc(period)}</p><p>同一 Episode 連續可進不重複計數；失去可進至少 4 根 15m 後重新可進，才算有效再進。</p><p>未扣手續費、滑價與資金費；沒有完整歷史 OI／CVD、Bid／Ask、深度與訂單簿，因此不是實盤成交獲利率。</p></div></details>
+      <p class="history-replay-status-line">TP1 先達率只用已判定 ${n.resolved} 筆計算${tier ? `｜${esc(tier)}` : ''}${n.timeout || n.unknown ? `｜Timeout ${n.timeout}｜不明 ${n.unknown}` : ''}</p>
+      <details><summary>統計說明</summary><div class="history-replay-details"><p>${esc(interval)}</p><p>訊號期間（台灣）：${esc(period)}</p><p>每個 Signal Episode 只取第一次正式 Trigger 成立的 15m 收線當樣本；後續回踩、可進場與再進只算確認／執行狀態，不再增加樣本。</p><p>Trigger 當下固定當時價格、SL、TP1；之後用已收線 5m 判斷 24 小時內 TP1 或 SL 誰先到。</p><p>未扣手續費、滑價與資金費；沒有完整歷史 OI／CVD、Bid／Ask、深度與訂單簿，因此不是實盤成交獲利率。</p></div></details>
       ${coinLink(instId)}`;
   }
 
-  function markupFor(instId, coin, heading = '本幣 15m 歷史勝率') {
+  function markupFor(instId, coin, heading = '本幣 15m Trigger 勝率') {
     if (!data || data.schema_version !== VERSION) {
       return `<div class="history-replay-heading"><h3>${esc(heading)}</h3><strong>載入中</strong></div><p>讀取歷史資料中。</p>${coinLink(instId)}`;
     }
@@ -85,7 +79,7 @@
       return `<div class="history-replay-heading"><h3>${esc(heading)}</h3><strong>尚未更新</strong></div><p>${esc(instId)} 尚無歷史勝率。</p>${coinLink(instId)}`;
     }
     if (coin.compatible === false || coin.status === 'VERSION_CHANGED') {
-      return `<div class="history-replay-heading"><h3>${esc(heading)}</h3><strong>需重新更新</strong></div><p>歷史算法或設定已變更。</p>${coinLink(instId)}`;
+      return `<div class="history-replay-heading"><h3>${esc(heading)}</h3><strong>需重新更新</strong></div><p>歷史樣本口徑或設定已變更。</p>${coinLink(instId)}`;
     }
     if (!terminal.has(coin.status)) {
       const label = coin.status === 'WAITING_LIVE_SCAN' ? '即時掃描優先，歷史暫候' : coin.status === 'PAUSED' ? '已暫停，可續跑' : coin.status === 'INTERRUPTED' ? '已中斷，可續跑' : coin.status === 'ERROR' ? '更新失敗' : '更新中';
@@ -124,21 +118,20 @@
     if (preview || item?.radar_horizon !== 'SHORT') return '';
     const instId = String(item?.inst_id || '').toUpperCase();
     if (!instId) return '';
-    return `<section class="history-replay-card" aria-label="本幣15m歷史勝率" data-replay-inst="${esc(instId)}">${markupFor(instId, snapshot(instId))}</section>`;
+    return `<section class="history-replay-card" aria-label="本幣15m Trigger歷史勝率" data-replay-inst="${esc(instId)}">${markupFor(instId, snapshot(instId))}</section>`;
   }
 
   function preflight(instId) {
     instId = String(instId || '').toUpperCase();
     if (!instId) return '';
-    return `<section class="history-replay-card preflight-history-rate" aria-label="本幣15m歷史勝率" data-replay-inst="${esc(instId)}">${markupFor(instId, snapshot(instId), '本幣 15m 歷史勝率')}</section>`;
+    return `<section class="history-replay-card preflight-history-rate" aria-label="本幣15m Trigger歷史勝率" data-replay-inst="${esc(instId)}">${markupFor(instId, snapshot(instId), '本幣 15m Trigger 勝率')}</section>`;
   }
 
   function refreshCards() {
     for (const panel of document.querySelectorAll('.history-replay-card')) {
       const instId = String(panel.dataset.replayInst || '').toUpperCase();
       if (!instId) continue;
-      const heading = panel.classList.contains('preflight-history-rate') ? '本幣 15m 歷史勝率' : '本幣 15m 歷史勝率';
-      const html = markupFor(instId, snapshot(instId), heading);
+      const html = markupFor(instId, snapshot(instId), '本幣 15m Trigger 勝率');
       if (panel._historyMarkup !== html) {
         panel._historyMarkup = html;
         panel.innerHTML = html;
