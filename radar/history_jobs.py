@@ -5,10 +5,9 @@ places orders and never writes the live signal/statistics databases.  Finished
 coin snapshots are cached in a separate research SQLite database so a normal
 single-coin refresh can read them without replaying seven days every time.
 
-Long ranges are processed in bounded seven-day chunks.  Every completed chunk
-is persisted before the next one starts, so a 60-minute pause, service restart
-or explicit user pause can resume from the remaining chunks instead of
-restarting an entire 30/90/180/270/365-day replay.
+The 14-day and 30-day ranges are processed in bounded seven-day chunks. Every
+completed chunk is persisted before the next one starts, so a 60-minute pause,
+service restart or explicit user pause can resume from the remaining chunks.
 """
 from __future__ import annotations
 
@@ -54,7 +53,7 @@ MAX_CACHED_COINS = 50
 ACTIVE = {"QUEUED", "RUNNING", "WAITING_LIVE_SCAN"}
 LEGACY_DEFAULT_INST = "BTC-USDT-SWAP"
 _INST_RE = re.compile(r"^[A-Z0-9][A-Z0-9-]{0,48}-USDT-SWAP$")
-ALLOWED_DAYS = (3, 7, 30, 90, 180, 270, 365)
+ALLOWED_DAYS = (3, 7, 14, 30)
 
 
 @contextmanager
@@ -317,7 +316,7 @@ def _request_scope(value: Any) -> tuple[int, str]:
         raw_days = value
         raw_inst = LEGACY_DEFAULT_INST
     if isinstance(raw_days, bool) or not isinstance(raw_days, int) or raw_days not in ALLOWED_DAYS:
-        raise ValueError("15m短線歷史更新只接受3天、7天、30天、3個月、6個月、9個月或12個月")
+        raise ValueError("15m短線歷史更新只接受3天、7天、14天或30天")
     inst_id = str(raw_inst or "").strip().upper()
     if not _INST_RE.fullmatch(inst_id):
         raise ValueError("請輸入正確的 USDT 永續幣種，例如 BTC-USDT-SWAP")
@@ -457,10 +456,10 @@ class HistoryManager:
                 "failed": 0,
                 "compatible": True,
                 "holding_hours": 24,
-                "scope": "單幣15m短線歷史勝率；長區間每7天保存一段，可續跑；4H／長線卡完全不使用此功能。",
+                "scope": "單幣15m短線歷史勝率；只提供3／7／14／30日；14／30日每7天保存一段，可續跑。4H／長線卡不使用。",
                 "assumptions": (
                     "每個15m收線點重跑價格核心；Episode先統計首次可進，之後須連續至少4根15m不可進再重新可進才算有效再進。"
-                    "長區間以連續7天區段回放，每段自帶1天Episode暖機並保存完成結果。"
+                    "14／30日以連續7天區段回放，每段自帶1天Episode暖機並保存完成結果。"
                     "固定當時SL／TP1，使用後續已收線5m判定最多24小時；未扣費，且不含完整歷史OI／CVD、"
                     "實際Bid／Ask、深度或訂單簿。"
                 ),
@@ -480,10 +479,10 @@ class HistoryManager:
             base["note"] = NOTE
             base["coins"] = coins
             base["storage_bytes"] = self.path.stat().st_size if self.path.exists() else 0
-            base["scope"] = "單幣15m短線歷史勝率；長區間每7天保存一段，可續跑；4H／長線卡完全不使用此功能。"
+            base["scope"] = "單幣15m短線歷史勝率；只提供3／7／14／30日；14／30日每7天保存一段，可續跑。4H／長線卡不使用。"
             base["assumptions"] = (
                 "每個15m收線點重跑價格核心；Episode先統計首次可進，之後須連續至少4根15m不可進再重新可進才算有效再進。"
-                "長區間以連續7天區段回放，每段自帶1天Episode暖機並保存完成結果。"
+                "14／30日以連續7天區段回放，每段自帶1天Episode暖機並保存完成結果。"
                 "固定當時SL／TP1，使用後續已收線5m判定最多24小時；未扣費，且不含完整歷史OI／CVD、"
                 "實際Bid／Ask、深度或訂單簿。"
             )
@@ -596,6 +595,8 @@ class HistoryManager:
             if action == "resume":
                 if not target or target["fingerprint"] != self.fingerprint:
                     raise ValueError("這顆幣沒有可續跑的同版本工作")
+                if int(target["days"]) not in ALLOWED_DAYS:
+                    raise ValueError("這顆幣是舊的長區間工作；請清除此幣後改用3／7／14／30日重新更新。")
                 if target["status"] in {"COMPLETE", "PARTIAL_COMPLETE"}:
                     return self.status()
                 _update(

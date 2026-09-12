@@ -1,4 +1,4 @@
-"""Regression tests for resumable long-range single-coin history jobs."""
+"""Regression tests for resumable 14/30-day single-coin history jobs."""
 import resource
 import tempfile
 import threading
@@ -31,7 +31,7 @@ class LongRangeChunkTests(unittest.TestCase):
         self.manager = HistoryManager(runtime)
         self.addCleanup(self.manager.close)
 
-    def _start(self, days=90, inst_id="SOL-USDT-SWAP"):
+    def _start(self, days=30, inst_id="SOL-USDT-SWAP"):
         with patch.object(self.manager, "_spawn"):
             return self.manager.command(
                 "start",
@@ -39,19 +39,17 @@ class LongRangeChunkTests(unittest.TestCase):
                 token=self.manager.token,
             )
 
-    def test_supported_long_ranges_split_into_bounded_seven_day_chunks(self):
+    def test_supported_resumable_ranges_split_into_seven_day_chunks(self):
         start = 1_800_000_000_000 // DAY * DAY
         self.assertEqual(len(_chunk_ranges(start, start + 7 * DAY)), 1)
+        self.assertEqual(len(_chunk_ranges(start, start + 14 * DAY)), 2)
         self.assertEqual(len(_chunk_ranges(start, start + 30 * DAY)), 5)
-        self.assertEqual(len(_chunk_ranges(start, start + 90 * DAY)), 13)
-        self.assertEqual(len(_chunk_ranges(start, start + 180 * DAY)), 26)
-        self.assertEqual(len(_chunk_ranges(start, start + 365 * DAY)), 53)
 
     def test_job_progress_is_persisted_per_chunk(self):
-        status = self._start(90)
+        status = self._start(14)
         job = status["id"]
         chunks = _chunk_ranges(status["start_ms"], status["end_ms"])
-        self.assertEqual(status["total"], 13)
+        self.assertEqual(status["total"], 2)
 
         chunk_start, chunk_end = chunks[0]
         result = {
@@ -77,11 +75,11 @@ class LongRangeChunkTests(unittest.TestCase):
         _rebuild(self.manager.path, job, complete=False)
         coin = self.manager.status()["coins"]["SOL-USDT-SWAP"]
         self.assertEqual(coin["done"], 1)
-        self.assertEqual(coin["total"], 13)
+        self.assertEqual(coin["total"], 2)
         self.assertEqual(coin["chunks_done"], 1)
-        self.assertEqual(coin["chunks_total"], 13)
+        self.assertEqual(coin["chunks_total"], 2)
 
-    def test_resume_skips_completed_chunks_instead_of_restarting_months(self):
+    def test_resume_skips_completed_chunks_instead_of_restarting_30_days(self):
         status = self._start(30)
         job = status["id"]
         instrument = Instrument("SOL-USDT-SWAP", "live", "USDT", "linear", 0.01)
