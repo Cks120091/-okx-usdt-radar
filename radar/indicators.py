@@ -22,21 +22,57 @@ def ema_series(values: list[float], period: int) -> list[float]:
     return output
 
 
-def rsi(values: list[float], period: int = 14) -> float:
-    if len(values) <= period:
+def _ema_if_ready(values: list[float], period: int) -> float:
+    """Return an EMA only when the requested period exists in the source.
+
+    Long tunnel-style EMAs must never be fabricated from a short candle
+    window.  The ordinary 7/12/21/55 EMAs still use the same EMA seed as the
+    rest of the radar once their full requested period is present.
+    """
+
+    if period <= 0 or len(values) < period:
         return math.nan
+    return ema_series(values, period)[-1]
+
+
+def _rsi_series(values: list[float], period: int = 14) -> list[float]:
+    """Wilder RSI series after the first complete RSI window."""
+
+    if period <= 0 or len(values) <= period:
+        return []
     changes = [values[index] - values[index - 1] for index in range(1, len(values))]
     gains = [max(change, 0.0) for change in changes]
     losses = [max(-change, 0.0) for change in changes]
     avg_gain = sum(gains[:period]) / period
     avg_loss = sum(losses[:period]) / period
+
+    def value() -> float:
+        if avg_loss == 0:
+            return 100.0 if avg_gain > 0 else 50.0
+        relative = avg_gain / avg_loss
+        return 100.0 - (100.0 / (1.0 + relative))
+
+    output = [value()]
     for gain, loss in zip(gains[period:], losses[period:]):
         avg_gain = ((avg_gain * (period - 1)) + gain) / period
         avg_loss = ((avg_loss * (period - 1)) + loss) / period
-    if avg_loss == 0:
-        return 100.0 if avg_gain > 0 else 50.0
-    relative = avg_gain / avg_loss
-    return 100.0 - (100.0 / (1.0 + relative))
+        output.append(value())
+    return output
+
+
+def _wilder_series(values: list[float], period: int) -> list[float]:
+    if not values:
+        return []
+    alpha = 1.0 / max(period, 1)
+    output = [values[0]]
+    for value in values[1:]:
+        output.append((value * alpha) + (output[-1] * (1.0 - alpha)))
+    return output
+
+
+def rsi(values: list[float], period: int = 14) -> float:
+    series = _rsi_series(values, period)
+    return series[-1] if series else math.nan
 
 
 def macd(values: list[float], fast: int = 12, slow: int = 26, signal: int = 9) -> tuple[float, float, float, float]:
@@ -117,6 +153,148 @@ def adx(candles: list[Candle], period: int = 14) -> float:
     return value
 
 
+def _clamp(value: float, low: float = 0.0, high: float = 100.0) -> float:
+    return max(low, min(high, value))
+
+
+def _dynamic_rsi_persistence(closes: list[float]) -> tuple[float, float, float]:
+    """Return smoothed RSI, dynamic band width, and bullish persistence score.
+
+    This keeps the useful concept of a volatility-adjusted, smoothed RSI
+    confirmation without adding a second independent RSI vote.  It is one
+    component inside the fused trend/momentum description only.
+    """
+
+    raw = _rsi_series(closes, 14)
+    if len(raw) < 8:
+        return math.nan, math.nan, 50.0
+    smooth = ema_series(raw, 5)
+    changes = [abs(current - previous) for previous, current in zip(smooth, smooth[1:])]
+    if not changes:
+        return smooth[-1], 0.0, 50.0
+    volatility = _wilder_series(_wilder_series(changes, 27), 27)
+    band = max(volatility[-1] * 4.236, 0.25)
+    current = smooth[-1]
+    previous = smooth[-2]
+    delta = current - previous
+    distance = current - 50.0
+    directional = 50.0 + (distance * 1.35) + (delta * 3.0)
+    if abs(distance) <= band:
+        directional = 50.0 + (directional - 50.0) * 0.55
+    return current, band, _clamp(directional)
+
+
+def _fusion_components(
+    candles: list[Candle],
+    closes: list[float],
+    ema21_values: list[float],
+    ema55_values: list[float],
+    current_atr: float,
+    histogram: float,
+    previous_histogram: float,
+) -> dict[str, float | bool]:
+    """Build a non-gating fused core view from trend, retest and persistence.
+
+    The score is descriptive telemetry.  Trigger creation, Entry permission,
+    SL/TP geometry and Signal Episode transitions do not read it.
+    """
+
+    ema7_values = ema_series(closes, 7)
+    ema12_values = ema_series(closes, 12)
+    ema144 = _ema_if_ready(closes, 144)
+    ema169 = _ema_if_ready(closes, 169)
+    ema576 = _ema_if_ready(closes, 576)
+    ema676 = _ema_if_ready(closes, 676)
+    medium_available = math.isfinite(ema144) and math.isfinite(ema169)
+    deep_available = math.isfinite(ema576) and math.isfinite(ema676)
+    atr_value = max(current_atr, abs(closes[-1]) * 0.0001, 1e-9)
+
+    short_trend = 50.0
+    short_trend += _clamp((ema21_values[-1] - ema55_values[-1]) / atr_value * 9.0, -16.0, 16.0)
+    short_trend += _clamp((ema21_values[-1] - ema21_values[-6]) / atr_value * 8.0, -10.0, 10.0)
+    short_trend = _clamp(short_trend)
+
+    trend_score = short_trend
+    if medium_available:
+        medium = 50.0
+        upper = max(ema144, ema169)
+        lower = min(ema144, ema169)
+        if closes[-1] > upper:
+            medium += 16.0
+        elif closes[-1] < lower:
+            medium -= 16.0
+        medium += 12.0 if ema144 > ema169 else -12.0 if ema144 < ema169 else 0.0
+        trend_score = (short_trend * 0.55) + (_clamp(medium) * 0.45)
+    if deep_available:
+        deep = 50.0
+        upper = max(ema576, ema676)
+        lower = min(ema576, ema676)
+        if closes[-1] > upper:
+            deep += 14.0
+        elif closes[-1] < lower:
+            deep -= 14.0
+        deep += 10.0 if ema576 > ema676 else -10.0 if ema576 < ema676 else 0.0
+        trend_score = (trend_score * 0.80) + (_clamp(deep) * 0.20)
+
+    current_ema12 = ema12_values[-1]
+    previous_ema12 = ema12_values[-2]
+    latest = candles[-1]
+    previous = candles[-2]
+    if latest.close >= current_ema12:
+        retest_score = 62.0
+        if previous.close < previous_ema12:
+            retest_score = 76.0
+        if latest.low <= current_ema12 <= latest.close:
+            retest_score = max(retest_score, 80.0)
+    else:
+        retest_score = 38.0
+        if previous.close > previous_ema12:
+            retest_score = 24.0
+        if latest.high >= current_ema12 >= latest.close:
+            retest_score = min(retest_score, 20.0)
+
+    smooth_rsi, dynamic_band, rsi_persistence = _dynamic_rsi_persistence(closes)
+    macd_scale = max(abs(histogram), abs(previous_histogram), abs(closes[-1]) * 1e-8, 1e-12)
+    macd_delta = (histogram - previous_histogram) / macd_scale
+    macd_score = _clamp(50.0 + math.tanh(histogram / macd_scale) * 18.0 + math.tanh(macd_delta) * 10.0)
+    momentum_score = (rsi_persistence * 0.65) + (macd_score * 0.35)
+
+    current_ema7 = ema7_values[-1]
+    previous_ema7 = ema7_values[-2]
+    if latest.close >= current_ema7:
+        fast_score = 60.0
+        if previous.close < previous_ema7:
+            fast_score = 72.0
+    else:
+        fast_score = 40.0
+        if previous.close > previous_ema7:
+            fast_score = 28.0
+
+    fusion_long_score = _clamp(
+        (trend_score * 0.40)
+        + (retest_score * 0.25)
+        + (momentum_score * 0.25)
+        + (fast_score * 0.10)
+    )
+    return {
+        "ema7": ema7_values[-1],
+        "ema12": ema12_values[-1],
+        "ema144": ema144,
+        "ema169": ema169,
+        "ema576": ema576,
+        "ema676": ema676,
+        "smoothed_rsi": smooth_rsi,
+        "rsi_dynamic_band": dynamic_band,
+        "fusion_trend_score": _clamp(trend_score),
+        "fusion_retest_score": _clamp(retest_score),
+        "fusion_momentum_score": _clamp(momentum_score),
+        "fusion_fast_score": _clamp(fast_score),
+        "fusion_long_score": fusion_long_score,
+        "fusion_medium_tunnel_available": medium_available,
+        "fusion_deep_tunnel_available": deep_available,
+    }
+
+
 @dataclass(frozen=True)
 class TimeframeFeatures:
     close: float
@@ -150,6 +328,23 @@ class TimeframeFeatures:
     lower_wick_ratio: float
     upper_wick_ratio: float
     atr_pct: float
+    # Hidden/non-gating fusion telemetry.  Defaults preserve tests and any
+    # callers that construct TimeframeFeatures manually.
+    ema7: float = math.nan
+    ema12: float = math.nan
+    ema144: float = math.nan
+    ema169: float = math.nan
+    ema576: float = math.nan
+    ema676: float = math.nan
+    smoothed_rsi: float = math.nan
+    rsi_dynamic_band: float = math.nan
+    fusion_trend_score: float = 50.0
+    fusion_retest_score: float = 50.0
+    fusion_momentum_score: float = 50.0
+    fusion_fast_score: float = 50.0
+    fusion_long_score: float = 50.0
+    fusion_medium_tunnel_available: bool = False
+    fusion_deep_tunnel_available: bool = False
 
 
 def features(candles: list[Candle]) -> TimeframeFeatures:
@@ -161,6 +356,15 @@ def features(candles: list[Candle]) -> TimeframeFeatures:
     ema55_values = ema_series(closes, 55)
     current_atr = atr(candles, 14)
     macd_line, macd_signal, histogram, previous_histogram = macd(closes)
+    fusion = _fusion_components(
+        candles,
+        closes,
+        ema21_values,
+        ema55_values,
+        current_atr,
+        histogram,
+        previous_histogram,
+    )
     history = candles[:-1]
 
     def prior_bounds(lookback: int) -> tuple[float, float]:
@@ -245,4 +449,19 @@ def features(candles: list[Candle]) -> TimeframeFeatures:
         lower_wick_ratio=lower_wick_ratio,
         upper_wick_ratio=upper_wick_ratio,
         atr_pct=(current_atr / closes[-1] * 100.0) if closes[-1] > 0 else float("inf"),
+        ema7=float(fusion["ema7"]),
+        ema12=float(fusion["ema12"]),
+        ema144=float(fusion["ema144"]),
+        ema169=float(fusion["ema169"]),
+        ema576=float(fusion["ema576"]),
+        ema676=float(fusion["ema676"]),
+        smoothed_rsi=float(fusion["smoothed_rsi"]),
+        rsi_dynamic_band=float(fusion["rsi_dynamic_band"]),
+        fusion_trend_score=float(fusion["fusion_trend_score"]),
+        fusion_retest_score=float(fusion["fusion_retest_score"]),
+        fusion_momentum_score=float(fusion["fusion_momentum_score"]),
+        fusion_fast_score=float(fusion["fusion_fast_score"]),
+        fusion_long_score=float(fusion["fusion_long_score"]),
+        fusion_medium_tunnel_available=bool(fusion["fusion_medium_tunnel_available"]),
+        fusion_deep_tunnel_available=bool(fusion["fusion_deep_tunnel_available"]),
     )
