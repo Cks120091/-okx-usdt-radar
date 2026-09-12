@@ -42,6 +42,7 @@ self.addEventListener("push", event => {
   }
   const title = String(payload.title || "OKX 雷達掃描完成");
   const body = String(payload.body || "最新市場報告已完成，點擊查看結果。");
+  const historyCompletion = String(payload.kind || "") === "HISTORY_COMPLETION";
   let target = "/";
   try {
     const candidate = new URL(String(payload.url || "/"), self.location.origin);
@@ -49,7 +50,7 @@ self.addEventListener("push", event => {
   } catch (_) {}
   event.waitUntil((async () => {
     const windows = await self.clients.matchAll({type: "window", includeUncontrolled: true});
-    if (windows.some(client => client.visibilityState === "visible")) return;
+    if (!historyCompletion && windows.some(client => client.visibilityState === "visible")) return;
     await self.registration.showNotification(title, {
       body,
       icon: "/radar-icon.svg",
