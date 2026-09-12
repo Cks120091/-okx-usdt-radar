@@ -1,6 +1,6 @@
 <!doctype html><html lang="zh-Hant"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>單幣15m Trigger歷史勝率｜OKX 雷達</title><link rel="stylesheet" href="/history-replay.css"><script src="/history-replay.js"></script></head>
 <body class="history-replay-page" data-history-page="true"><main class="history-replay-shell">
-<a class="history-back" href="/">← 回到雷達</a>
+<a id="historyBack" class="history-back" href="/">← 回到原幣</a>
 <header class="history-page-head"><h1>單幣 15m Trigger 歷史勝率</h1><p>樣本只取 Trigger 第一次成立當下；期間保留 3 / 7 / 14 / 30 日。</p></header>
 <section class="history-main-panel" aria-live="polite">
 <div class="history-main-head"><div><span class="history-eyebrow">本幣 Trigger 回放</span><h2 id="status">讀取狀態…</h2></div><p id="selected">請輸入幣種</p></div>
@@ -14,4 +14,23 @@
 <div class="history-tool-card"><h3>資料完整度</h3><div id="excluded">—</div><p>Timeout／Unknown 不硬算勝敗。不含完整歷史 OI／CVD、Bid／Ask、深度、訂單簿、手續費、滑價與資金費；4H／長線不使用。</p></div>
 <div class="history-tool-card"><h3>資料管理</h3><p id="storage">—</p><div class="history-tool-actions"><button id="delete" disabled>清除此幣</button><button id="deleteAll" class="history-danger-button" disabled>清除全部</button></div><p class="history-foot">只清除歷史研究資料，不會刪正式訊號、即時雷達或交易計畫。</p></div>
 </div></details>
-</main><script src="/history-scan.js"></script></body></html>
+</main><script src="/history-scan.js"></script><script>
+(() => {
+  const back = document.getElementById('historyBack');
+  if (!back) return;
+  const raw = new URLSearchParams(location.search).get('inst_id') || '';
+  const inst = String(raw).trim().toUpperCase();
+  const symbol = inst.replace(/-USDT-SWAP$/, '');
+  if (symbol) back.textContent = `← 回到 ${symbol}`;
+  let sameOriginPrevious = false;
+  try {
+    const previous = new URL(document.referrer);
+    sameOriginPrevious = previous.origin === location.origin && previous.pathname !== '/history-scan';
+  } catch (_) {}
+  back.addEventListener('click', event => {
+    if (!sameOriginPrevious || event.button !== 0 || event.metaKey || event.ctrlKey || event.shiftKey || event.altKey) return;
+    event.preventDefault();
+    history.back();
+  });
+})();
+</script></body></html>
