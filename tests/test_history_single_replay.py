@@ -21,11 +21,12 @@ def candle(ts=BASE, price=100.0):
     return Candle(ts, price, price + 1, price - 1, price, 100, 100_000, True)
 
 
-def sample(outcome='TP1_FIRST', i=0, key='same'):
+def sample(outcome='TP1_FIRST', i=0, key='same', kind='INITIAL'):
     return {
         'cohort': key,
         'label': '15m測試情境',
         'entry_ms': BASE + i * CORE,
+        'opportunity_kind': kind,
         'outcome': outcome,
     }
 
@@ -51,6 +52,17 @@ class SingleCoinAggregateTests(unittest.TestCase):
         self.assertEqual(overall['timeout'], 1)
         self.assertEqual(overall['unknown'], 1)
 
+    def test_initial_and_reentry_opportunities_are_split_without_changing_total(self):
+        samples = [sample('TP1_FIRST', 0, kind='INITIAL')]
+        samples += [sample('SL_FIRST', 1, kind='REENTRY')]
+        result = aggregate([{'inst_id':'BTC-USDT-SWAP','samples':samples}], complete=True, days=7)
+        self.assertEqual(result['overall']['total'], 2)
+        self.assertEqual(result['initial_overall']['total'], 1)
+        self.assertEqual(result['reentry_overall']['total'], 1)
+        self.assertEqual(result['initial_signals'], 1)
+        self.assertEqual(result['reentry_signals'], 1)
+        self.assertEqual(result['overall']['rate_pct'], 50.0)
+
     def test_incomplete_history_never_releases_rate(self):
         result = aggregate([{'inst_id':'BTC-USDT-SWAP','samples':[sample()]}], complete=False, days=7)
         self.assertIsNone(result['overall']['rate_pct'])
@@ -58,8 +70,8 @@ class SingleCoinAggregateTests(unittest.TestCase):
 
 
 class FirstActionableEpisodeTests(unittest.TestCase):
-    def test_same_episode_is_sampled_once_at_first_actionable_15m_close(self):
-        start, end = BASE, BASE + 2 * CORE
+    def _run_actionable_sequence(self, sequence):
+        start, end = BASE, BASE + len(sequence) * CORE
         signal = ready_signal('LONG')
         signal.trigger_id = 'episode-one'
         signal.stop_loss = '95'
@@ -94,15 +106,49 @@ class FirstActionableEpisodeTests(unittest.TestCase):
         histories = {tf:[candle(BASE)] for tf in ('5m','15m','1H','4H')}
         window = [candle(BASE + i * STEP) for i in range(288)]
         instrument = Instrument('BTC-USDT-SWAP','live','USDT','linear',0.01)
+
+        def project(scanner, item, asof, price):
+            index = (asof - start) // CORE
+            actionable = bool(sequence[index]) if 0 <= index < len(sequence) else False
+            return replace(
+                item,
+                actionable=actionable,
+                entry_eligibility={
+                    **item.entry_eligibility,
+                    'actionable': actionable,
+                    'new_entry_allowed': actionable,
+                },
+            )
+
         with patch('radar.history_single_replay.MarketScanner', return_value=fake), \
              patch('radar.history_single_replay.past_window', return_value=window), \
-             patch('radar.history_single_replay._price_projection', side_effect=lambda scanner,item,asof,price: replace(item, actionable=True)), \
+             patch('radar.history_single_replay._price_projection', side_effect=project), \
              patch('radar.history_single_replay.classify_path', return_value={'outcome':'TP1_FIRST','r':2.0}):
-            result = replay_symbol(instrument, histories, start, end, {'min_quote_volume_24h':0})
+            return replay_symbol(instrument, histories, start, end, {'min_quote_volume_24h':0})
+
+    def test_same_episode_continuous_actionable_window_is_sampled_once(self):
+        result = self._run_actionable_sequence([True, True])
         self.assertEqual(result['actionable_signals'], 1)
         self.assertEqual(len(result['samples']), 1)
         self.assertEqual(result['samples'][0]['episode'], 'episode-one')
-        self.assertEqual(result['samples'][0]['entry_ms'], start)
+        self.assertEqual(result['samples'][0]['entry_ms'], BASE)
+        self.assertEqual(result['samples'][0]['opportunity_kind'], 'INITIAL')
+
+    def test_same_episode_reentry_requires_four_closed_non_actionable_bars(self):
+        result = self._run_actionable_sequence([True, False, False, False, False, True])
+        self.assertEqual(result['actionable_signals'], 2)
+        self.assertEqual(result['initial_signals'], 1)
+        self.assertEqual(result['reentry_signals'], 1)
+        self.assertEqual(
+            [row['opportunity_kind'] for row in result['samples']],
+            ['INITIAL', 'REENTRY'],
+        )
+        self.assertEqual(result['samples'][1]['entry_ms'], BASE + 5 * CORE)
+
+    def test_brief_loss_of_permission_does_not_create_fake_reentry(self):
+        result = self._run_actionable_sequence([True, False, False, False, True])
+        self.assertEqual(result['actionable_signals'], 1)
+        self.assertEqual(result['reentry_signals'], 0)
 
 
 class SingleCoinManagerTests(unittest.TestCase):

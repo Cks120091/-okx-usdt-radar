@@ -31,24 +31,33 @@ chronologically using only confirmed data that existed at that cutoff. The
 existing price engine, Episode/retest/window state and price-entry permission
 logic run in an isolated in-memory repository.
 
-A sample is admitted when an Episode reaches **actionable / 可進場** at a 15m
-close. The Episode is counted only once: its **first actionable 15m close**.
-If the same card remains actionable for later 15m bars, those later bars do not
-create duplicate samples. Waiting, early or otherwise non-actionable states do
-not count until they actually become actionable.
+The first sample for an Episode is admitted at its **first actionable / 可進場
+15m close**. If the same card simply remains actionable for later 15m bars,
+those later bars do not create duplicate samples.
 
-Unlike the prior pooled research model, this single-coin statistic does **not**
-require an additional five-minute revalidation before admitting the sample.
-The historical signal has already passed the price-core actionable decision at
-the 15m cutoff, so that cutoff is the sample point. Entry reference, original SL
-and original TP1 are frozen from that actionable state.
+A later same-Episode sample is admitted only as a **valid re-entry opportunity**:
+after a prior admitted opportunity, the Episode must remain non-actionable for
+at least **four consecutive completed 15m bars (one hour)** and then become
+actionable again. A one-, two- or three-bar permission flicker therefore does
+not manufacture another trade. After a re-entry is admitted, another full
+four-bar non-actionable reset is required before a further re-entry can count.
+This intentionally keeps the sample expansion conservative rather than counting
+every actionable candle as a separate trade.
+
+Waiting, early or otherwise non-actionable states do not count until they
+actually become actionable. Unlike the prior pooled research model, this
+single-coin statistic does **not** require an additional five-minute
+revalidation before admitting the sample. The historical signal has already
+passed the price-core actionable decision at the 15m cutoff, so that cutoff is
+the sample point. Entry reference, original SL and original TP1 are frozen from
+that actionable state.
 
 Historical trailing-24h quote volume and the configured inclusion/retention
 hysteresis still determine whether the instrument is eligible at each cutoff.
-Thus "all actionable signals" means all historical 15m Episodes that the price
-model could actually mark actionable while the instrument satisfied the
-historical liquidity-universe rule; it does not invent signals outside those
-conditions.
+Thus "all actionable entry opportunities" means historical 15m opportunities
+the price model could actually mark actionable while the instrument satisfied
+the historical liquidity-universe rule; it does not invent signals outside
+those conditions.
 
 ## Outcome classification
 
@@ -63,15 +72,18 @@ used only for outcome classification. Each sample is followed for up to 24 hours
 
 The headline rate is `TP1_FIRST / (TP1_FIRST + SL_FIRST)`. Timeout and Unknown
 stay visible and are not silently converted to wins or losses. The card also
-shows how many actionable signals were found and how many have a resolved
-TP1-vs-SL result.
+shows how many valid entry opportunities were found, split into first entries
+and valid re-entries, and how many have a resolved TP1-vs-SL result.
 
 ## What the card shows
 
-A 15m card first shows the selected coin's **overall recent actionable-signal
-rate** for its latest cached selected-range replay. If the current card's exact
-setup tuple also exists in that coin's history, the card additionally shows a
-"current same-scenario" rate using the exact tuple:
+A 15m card first shows the selected coin's **overall recent valid-entry-opportunity
+rate** for its latest cached selected-range replay. The total is split into
+`首進` and `有效再進` so users can see whether a larger sample came from new
+Episodes or conservative same-Episode re-entry windows.
+
+If the current card's exact setup tuple also exists in that coin's history, the
+card additionally shows a "current same-scenario" rate using the exact tuple:
 
 - 15m horizon
 - direction
@@ -107,6 +119,11 @@ or realized profitability. Historical metadata uses the currently listed
 instrument definition; delisted instruments or historical tick-size changes are
 not reconstructed.
 
+Same-Episode re-entry samples are deliberately correlated with their parent
+Episode. They are useful for estimating distinct entry windows a trader could
+actually encounter, but they must not be interpreted as statistically
+independent market regimes.
+
 ## Worker, cache and isolation
 
 The user starts history work explicitly from the single-coin history page. One
@@ -122,6 +139,10 @@ separate from live signals and CARD_STATISTICS_V1. The database has a 32MiB
 safety limit and keeps a bounded set of recent coin caches. Clearing a coin's
 history removes only that coin's research rows; it does not delete live signals,
 observed statistics or strategy code.
+
+Because the replay fingerprint includes the historical replay source, this
+sampling-rule change makes older cached results incompatible until that coin is
+manually refreshed. It does not alter live strategy state.
 
 The same hosting caveat remains: persistence is only as durable as the service's
 existing storage. Ephemeral/free hosting can lose the research cache when the

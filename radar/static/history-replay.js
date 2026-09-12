@@ -41,6 +41,12 @@
     return {wins, losses, total, timeout, unknown, resolved};
   }
 
+  function opportunitySplit(coin, total) {
+    const initial = Math.max(0, finite(coin?.initial_signals) ?? finite(coin?.initial_overall?.total) ?? total ?? 0);
+    const reentry = Math.max(0, finite(coin?.reentry_signals) ?? finite(coin?.reentry_overall?.total) ?? 0);
+    return {initial, reentry};
+  }
+
   function coinLink(instId) {
     return `<a class="history-replay-link" href="/history-scan?inst_id=${encodeURIComponent(instId)}">更新歷史勝率 →</a>`;
   }
@@ -66,11 +72,12 @@
 
     const overall = coin.overall || {};
     const overallCounts = counts(overall);
+    const split = opportunitySplit(coin, overallCounts.total);
     const rate = finite(overall.rate_pct);
-    const headline = rate === null ? (overallCounts.total ? '尚無已判定結果' : '沒有可進訊號') : `${rate.toFixed(1)}%`;
+    const headline = rate === null ? (overallCounts.total ? '尚無已判定結果' : '沒有進場機會') : `${rate.toFixed(1)}%`;
     const tier = String(overall.tier || (overallCounts.resolved ? '短期樣本' : ''));
     const coverage = finite(overall.coverage_pct);
-    let detail = `${instId}｜近 ${periodLabel(coin.days || 7)} 15m｜可進訊號 ${overallCounts.total} 筆｜已判定 ${overallCounts.resolved} 筆`;
+    let detail = `${instId}｜近 ${periodLabel(coin.days || 7)} 15m｜有效進場機會 ${overallCounts.total} 筆（首進 ${split.initial}｜再進 ${split.reentry}）｜已判定 ${overallCounts.resolved} 筆`;
     if (overallCounts.resolved) detail += `：TP1 ${overallCounts.wins}｜SL ${overallCounts.losses}`;
     if (overallCounts.timeout || overallCounts.unknown) detail += `｜Timeout ${overallCounts.timeout}｜不明 ${overallCounts.unknown}`;
     if (tier) detail += `｜${tier}`;
@@ -80,14 +87,14 @@
     if (cohort) {
       const c = counts(cohort);
       const cohortRate = finite(cohort.rate_pct);
-      cohortHtml = `<p><b>目前同類情境：</b>${cohortRate === null ? '尚無已判定結果' : cohortRate.toFixed(1) + '%'}｜可進 ${c.total} 筆｜已判定 ${c.resolved} 筆${c.resolved ? `｜TP1 ${c.wins}／SL ${c.losses}` : ''}</p>`;
+      cohortHtml = `<p><b>目前同類情境：</b>${cohortRate === null ? '尚無已判定結果' : cohortRate.toFixed(1) + '%'}｜進場機會 ${c.total} 筆｜已判定 ${c.resolved} 筆${c.resolved ? `｜TP1 ${c.wins}／SL ${c.losses}` : ''}</p>`;
     } else if (key && overallCounts.total) {
       cohortHtml = '<p><b>目前同類情境：</b>這次本幣回放沒有相同情境樣本。</p>';
     }
 
     const interval = Array.isArray(overall.interval_pct) && overall.interval_pct.length === 2 ? `Wilson 95% 描述區間 ${overall.interval_pct[0]}%～${overall.interval_pct[1]}%。` : '';
     const period = coin.start_ms && coin.end_ms ? `${new Date(coin.start_ms).toLocaleString('zh-TW',{timeZone:'Asia/Taipei'})} ～ ${new Date(coin.end_ms).toLocaleString('zh-TW',{timeZone:'Asia/Taipei'})}` : '—';
-    return `<div class="history-replay-heading"><h3>本幣 15m 歷史勝率</h3><strong data-replay-rate>${esc(headline)}</strong></div><p>${esc(detail)}</p>${cohortHtml}<small>15m 可進訊號統計，不影響進場資格。</small><details><summary>歷史來源與限制</summary><p>${esc(interval)}</p><p>訊號期間（台灣時間）：${esc(period)}</p><p>逐個15m收線點重跑價格核心；同一Episode只算第一次可進。固定當時SL／TP1，再用後續已收線5m判定24小時內TP1或SL誰先到。</p><p>沒有完整歷史OI／CVD、實際Bid／Ask、深度與訂單簿；未扣手續費、滑價與資金費，因此不是實盤成交獲利率。</p></details>${link}`;
+    return `<div class="history-replay-heading"><h3>本幣 15m 歷史勝率</h3><strong data-replay-rate>${esc(headline)}</strong></div><p>${esc(detail)}</p>${cohortHtml}<small>15m 有效進場機會統計，不影響進場資格。</small><details><summary>歷史來源與限制</summary><p>${esc(interval)}</p><p>訊號期間（台灣時間）：${esc(period)}</p><p>逐個15m收線點重跑價格核心；每個Episode先算第一次可進。若之後連續至少4根15m（1小時）不可進，再重新回到可進，才另算一次有效再進。每筆固定當時SL／TP1，再用後續已收線5m判定24小時內TP1或SL誰先到。</p><p>沒有完整歷史OI／CVD、實際Bid／Ask、深度與訂單簿；未扣手續費、滑價與資金費，因此不是實盤成交獲利率。</p></details>${link}`;
   }
 
   function card(item, preview = false) {
@@ -117,9 +124,10 @@
     }
     const overall = coin.overall || {};
     const n = counts(overall);
+    const split = opportunitySplit(coin, n.total);
     const rate = finite(overall.rate_pct);
-    const headline = rate === null ? (n.total ? '尚無已判定結果' : '沒有可進訊號') : `${rate.toFixed(1)}%`;
-    let detail = `${instId}｜近 ${periodLabel(coin.days || 7)} 15m｜可進訊號 ${n.total} 筆｜已判定 ${n.resolved} 筆`;
+    const headline = rate === null ? (n.total ? '尚無已判定結果' : '沒有進場機會') : `${rate.toFixed(1)}%`;
+    let detail = `${instId}｜近 ${periodLabel(coin.days || 7)} 15m｜有效進場機會 ${n.total} 筆（首進 ${split.initial}｜再進 ${split.reentry}）｜已判定 ${n.resolved} 筆`;
     if (n.resolved) detail += `：TP1 ${n.wins}｜SL ${n.losses}`;
     if (overall.tier) detail += `｜${overall.tier}`;
     return `<section class="history-replay-card preflight-history-rate" aria-label="15m進場前更新歷史K棒勝率"><div class="history-replay-heading"><h3>歷史 K 棒勝率｜本幣 15m</h3><strong data-preflight-history-rate>${esc(headline)}</strong></div><p>${esc(detail)}</p><small>進場前更新只讀這份結果，不重跑。</small>${link}</section>`;
@@ -146,6 +154,7 @@
       } else {
         const overall = coin.overall || {};
         const n = counts(overall);
+        const split = opportunitySplit(coin, n.total);
         const rate = finite(overall.rate_pct);
         if (coin.compatible === false || coin.status === 'VERSION_CHANGED') {
           html = `<div class="history-replay-heading"><h3>本幣 15m 歷史勝率</h3><strong>版本已變更</strong></div><p>請重新更新 ${esc(instId)}。</p>${link}`;
@@ -153,17 +162,17 @@
           const label = coin.status === 'PAUSED' ? '歷史更新已暫停' : coin.status === 'INTERRUPTED' ? '歷史更新中斷，可續跑' : coin.status === 'ERROR' ? '歷史更新失敗' : coin.status === 'WAITING_LIVE_SCAN' ? '即時掃描優先，歷史暫候' : '歷史更新中';
           html = `<div class="history-replay-heading"><h3>本幣 15m 歷史勝率</h3><strong>${esc(label)}</strong></div><p>${esc(instId)}｜最近 ${esc(periodLabel(coin.days || 7))}</p>${link}`;
         } else {
-          const headline = rate === null ? (n.total ? '尚無已判定結果' : '沒有可進訊號') : `${rate.toFixed(1)}%`;
-          let detail = `${instId}｜近 ${periodLabel(coin.days || 7)} 15m｜可進訊號 ${n.total} 筆｜已判定 ${n.resolved} 筆`;
+          const headline = rate === null ? (n.total ? '尚無已判定結果' : '沒有進場機會') : `${rate.toFixed(1)}%`;
+          let detail = `${instId}｜近 ${periodLabel(coin.days || 7)} 15m｜有效進場機會 ${n.total} 筆（首進 ${split.initial}｜再進 ${split.reentry}）｜已判定 ${n.resolved} 筆`;
           if (n.resolved) detail += `：TP1 ${n.wins}｜SL ${n.losses}`;
           if (overall.tier) detail += `｜${overall.tier}`;
           const cohort = key ? coin.groups?.[key] : null;
           let same = '';
           if (cohort) {
             const c = counts(cohort), cr = finite(cohort.rate_pct);
-            same = `<p><b>目前同類情境：</b>${cr === null ? '尚無已判定結果' : cr.toFixed(1) + '%'}｜可進 ${c.total} 筆｜已判定 ${c.resolved} 筆</p>`;
+            same = `<p><b>目前同類情境：</b>${cr === null ? '尚無已判定結果' : cr.toFixed(1) + '%'}｜進場機會 ${c.total} 筆｜已判定 ${c.resolved} 筆</p>`;
           }
-          html = `<div class="history-replay-heading"><h3>本幣 15m 歷史勝率</h3><strong data-replay-rate>${esc(headline)}</strong></div><p>${esc(detail)}</p>${same}<small>只用本幣15m可進場Episode；非本單預測，不改進場資格。</small>${link}`;
+          html = `<div class="history-replay-heading"><h3>本幣 15m 歷史勝率</h3><strong data-replay-rate>${esc(headline)}</strong></div><p>${esc(detail)}</p>${same}<small>只用本幣15m有效進場機會；非本單預測，不改進場資格。</small>${link}`;
         }
       }
       if (panel._historyMarkup !== html) {

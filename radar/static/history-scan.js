@@ -57,12 +57,14 @@
 
     const overall = coin?.overall || {};
     const totalSignals = Number(overall.total || 0);
+    const initialSignals = Number(coin?.initial_signals ?? coin?.initial_overall?.total ?? totalSignals);
+    const reentrySignals = Number(coin?.reentry_signals ?? coin?.reentry_overall?.total ?? 0);
     const resolved = Number(overall.resolved || 0);
     const wins = Number(overall.wins || 0);
     const losses = Number(overall.losses || 0);
     const rate = overall.rate_pct;
     if (coin && ['COMPLETE','PARTIAL_COMPLETE'].includes(coin.status)) {
-      $('counts').textContent = `${inst}｜近 ${periodLabel(coin.days)}｜15m可進訊號 ${totalSignals} 筆｜已判定 ${resolved} 筆｜TP1 ${wins}｜SL ${losses}${rate === null || rate === undefined ? '' : `｜TP1先達率 ${Number(rate).toFixed(1)}%`}｜${overall.tier || '樣本統計中'}`;
+      $('counts').textContent = `${inst}｜近 ${periodLabel(coin.days)}｜15m有效進場機會 ${totalSignals} 筆（首進 ${initialSignals}｜有效再進 ${reentrySignals}）｜已判定 ${resolved} 筆｜TP1 ${wins}｜SL ${losses}${rate === null || rate === undefined ? '' : `｜TP1先達率 ${Number(rate).toFixed(1)}%`}｜${overall.tier || '樣本統計中'}`;
     } else if (sameActive) {
       $('counts').textContent = `${inst}｜近 ${periodLabel(latest.days || Number($('days').value))}｜處理 ${done}/${total}`;
     } else if (coin) {

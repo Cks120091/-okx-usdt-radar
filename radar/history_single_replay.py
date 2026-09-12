@@ -1,9 +1,12 @@
-"""Single-instrument 15m historical replay for actionable Episodes only.
+"""Single-instrument 15m historical replay for actionable entry opportunities.
 
 This module is intentionally separate from the old pooled eight-major replay.
 It replays one requested USDT perpetual through the existing price engine,
-records the first 15m close where each Episode is actionable, and then checks
-whether TP1 or SL is reached first using later confirmed 5m candles.
+records each Episode's first actionable 15m close, and may record a later
+same-Episode re-entry only after the setup has stayed non-actionable for at
+least one full hour before becoming actionable again.  Each admitted entry
+opportunity is then checked for TP1-versus-SL order using later confirmed 5m
+candles.
 
 It never changes the live strategy, never places orders, and never fabricates
 historical OI/CVD/order-book data.
@@ -39,10 +42,13 @@ VERSION = "HISTORY_SINGLE_15M_V1"
 ALLOWED_DAYS = (3, 7)
 MIN_RESOLVED = 1
 MIN_RESOLVED_COVERAGE = 0.8
+REENTRY_RESET_BARS = 4
+REENTRY_RESET_MS = REENTRY_RESET_BARS * CORE
 NOTE = (
-    "單幣15m價格核心歷史回放；只統計每個Episode第一次達到可進場的15m收線點，"
-    "再用後續已收線5m判定TP1或SL誰先到。非實盤成交勝率，也不含完整歷史OI／CVD、"
-    "Bid／Ask、深度或訂單簿。"
+    "單幣15m價格核心歷史回放；每個Episode先統計第一次達到可進場的15m收線點。"
+    "若之後連續至少4根15m（1小時）失去可進資格，再重新回到可進，才另外算一次有效再進；"
+    "不會把同一波連續可進的K棒重複灌成樣本。再用後續已收線5m判定TP1或SL誰先到。"
+    "非實盤成交勝率，也不含完整歷史OI／CVD、Bid／Ask、深度或訂單簿。"
 )
 
 
@@ -86,7 +92,7 @@ def replay_symbol(
     settings: dict[str, Any],
     checkpoint: Callable[[], None] = lambda: None,
 ) -> dict[str, Any]:
-    """Replay every 15m close and record the first actionable state per Episode."""
+    """Replay every 15m close and record conservative independent entry opportunities."""
     scanner = MarketScanner(None, config_for_replay(settings))
     cfg = scanner.config
     limits = {
@@ -100,7 +106,7 @@ def replay_symbol(
         for tf, rows in histories.items()
     }
     prices = {bar.ts: bar for bar in histories["5m"]}
-    sampled: set[str] = set()
+    opportunity_state: dict[str, dict[str, Any]] = {}
     episodes: set[str] = set()
     samples: list[dict[str, Any]] = []
     checked = 0
@@ -177,8 +183,9 @@ def replay_symbol(
             for signal in reconciled:
                 if signal.lifecycle.get("terminal") or not signal.trigger_id:
                     continue
+                trigger_id = signal.trigger_id
                 if asof >= start:
-                    episodes.add(signal.trigger_id)
+                    episodes.add(trigger_id)
                 signal = _price_projection(scanner, signal, asof, close)
                 if not membership:
                     signal = replace(
@@ -191,13 +198,42 @@ def replay_symbol(
                         },
                     )
                 signal = scanner._record_entry_window(signal)
-                if not signal.actionable or signal.trigger_id in sampled:
+                state = opportunity_state.setdefault(
+                    trigger_id,
+                    {
+                        "accepted": 0,
+                        "last_entry_ms": 0,
+                        "non_actionable_bars": 0,
+                        "reentry_armed": False,
+                    },
+                )
+
+                if not signal.actionable:
+                    if state["accepted"]:
+                        state["non_actionable_bars"] += 1
+                        if state["non_actionable_bars"] >= REENTRY_RESET_BARS:
+                            state["reentry_armed"] = True
                     continue
 
-                # The user's requested sample definition is the first 15m close
-                # where the Episode is already actionable. Do not require another
-                # five-minute revalidation before admitting the sample.
-                sampled.add(signal.trigger_id)
+                is_initial = state["accepted"] == 0
+                is_reentry = (
+                    state["accepted"] > 0
+                    and state["reentry_armed"]
+                    and asof - state["last_entry_ms"] >= REENTRY_RESET_MS
+                )
+                if not is_initial and not is_reentry:
+                    # The same Episode becoming actionable again before a full
+                    # four-bar reset is still the same entry window, not a new
+                    # historical trade opportunity.
+                    state["non_actionable_bars"] = 0
+                    state["reentry_armed"] = False
+                    continue
+
+                opportunity_kind = "INITIAL" if is_initial else "REENTRY"
+                state["accepted"] += 1
+                state["last_entry_ms"] = asof
+                state["non_actionable_bars"] = 0
+                state["reentry_armed"] = False
                 if asof < start:
                     continue
                 spec = setup(signal, close)
@@ -212,7 +248,9 @@ def replay_symbol(
                         "entry": close,
                         "stop": spec["stop"],
                         "target": spec["target"],
-                        "episode": signal.trigger_id,
+                        "episode": trigger_id,
+                        "opportunity_kind": opportunity_kind,
+                        "opportunity_index": state["accepted"],
                         "trigger_type": str(getattr(signal, "trigger_type", "UNKNOWN")),
                         "signal_stage": str(getattr(signal, "signal_stage", "UNKNOWN")),
                         "outcome": None,
@@ -232,6 +270,8 @@ def replay_symbol(
                     prices,
                 )
             )
+        initial_signals = sum(sample.get("opportunity_kind") != "REENTRY" for sample in samples)
+        reentry_signals = sum(sample.get("opportunity_kind") == "REENTRY" for sample in samples)
         return {
             "inst_id": instrument.inst_id,
             "status": "OK",
@@ -239,6 +279,8 @@ def replay_symbol(
             "missing_windows": missing,
             "eligible_windows": eligible_count,
             "episodes": len(episodes),
+            "initial_signals": initial_signals,
+            "reentry_signals": reentry_signals,
             "actionable_signals": len(samples),
             "entry_attempts": len(samples),
             "samples": samples,
@@ -302,13 +344,19 @@ def aggregate(
     results: list[dict[str, Any]], *, complete: bool, days: int = 7
 ) -> dict[str, Any]:
     groups: dict[str, dict[str, Any]] = {}
-    overall = _new_bucket("全部15m可進訊號")
+    overall = _new_bucket("全部15m有效進場機會")
+    initial_overall = _new_bucket("Episode首次可進")
+    reentry_overall = _new_bucket("同Episode有效再進")
     symbol_groups: dict[str, dict[str, Any]] = {}
     for result in results:
         inst_id = str(result.get("inst_id") or "")
         own = symbol_groups.setdefault(inst_id, {}) if inst_id else None
         for sample in result.get("samples", []):
             _add(overall, sample)
+            if sample.get("opportunity_kind") == "REENTRY":
+                _add(reentry_overall, sample)
+            else:
+                _add(initial_overall, sample)
             group = groups.setdefault(sample["cohort"], _new_bucket(sample["label"]))
             _add(group, sample)
             if own is not None:
@@ -323,11 +371,27 @@ def aggregate(
     return {
         "days": int(days),
         "overall": _finish(overall, complete),
+        "initial_overall": _finish(initial_overall, complete),
+        "reentry_overall": _finish(reentry_overall, complete),
         "groups": finished_groups,
         "symbol_groups": finished_symbols,
         "samples": overall["total"],
         "minimum_days": 0,
         "episodes": sum(result.get("episodes", 0) for result in results),
+        "initial_signals": sum(
+            result.get(
+                "initial_signals",
+                sum(sample.get("opportunity_kind") != "REENTRY" for sample in result.get("samples", [])),
+            )
+            for result in results
+        ),
+        "reentry_signals": sum(
+            result.get(
+                "reentry_signals",
+                sum(sample.get("opportunity_kind") == "REENTRY" for sample in result.get("samples", [])),
+            )
+            for result in results
+        ),
         "actionable_signals": sum(result.get("actionable_signals", 0) for result in results),
         "entry_attempts": sum(result.get("entry_attempts", 0) for result in results),
         "missing_windows": sum(result.get("missing_windows", 0) for result in results),
