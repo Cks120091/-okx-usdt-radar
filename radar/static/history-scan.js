@@ -2,8 +2,16 @@
   'use strict';
   let latest = null;
   let busy = false;
+  let pushConfig = null;
+  let pushSubscription = null;
+  let pushLoading = false;
+  let watchedJob = null;
+  const notifiedJobs = new Set();
+  const HISTORY_PUSH_KEY = 'okx-radar-history-push-enabled';
+  const VAPID_KEY_ID = 'okx-radar-vapid-key-id';
   const $ = id => document.getElementById(id);
   const active = new Set(['QUEUED','RUNNING','WAITING_LIVE_SCAN']);
+  const notificationTerminal = new Set(['COMPLETE','PARTIAL_COMPLETE','ERROR']);
   const labels = {
     IDLE:'尚未建立本幣歷史資料', QUEUED:'準備更新', RUNNING:'15m Trigger 歷史更新中',
     WAITING_LIVE_SCAN:'即時掃描優先，歷史暫候', PAUSED:'歷史已暫停', INTERRUPTED:'歷史中斷，可續跑',
@@ -38,7 +46,215 @@
     return ({3:'3日',7:'7日',14:'14日',30:'30日'})[n] || `${n}日`;
   }
 
+  function historyPushEnabled() {
+    try { return localStorage.getItem(HISTORY_PUSH_KEY) === '1'; }
+    catch (_) { return false; }
+  }
+
+  function setHistoryPushEnabled(enabled) {
+    try {
+      if (enabled) localStorage.setItem(HISTORY_PUSH_KEY, '1');
+      else localStorage.removeItem(HISTORY_PUSH_KEY);
+    } catch (_) {}
+  }
+
+  function supportsPush() {
+    return window.isSecureContext && 'serviceWorker' in navigator && 'PushManager' in window && 'Notification' in window;
+  }
+
+  function isIOSDevice() {
+    return /iphone|ipad|ipod/i.test(navigator.userAgent) || (navigator.platform === 'MacIntel' && navigator.maxTouchPoints > 1);
+  }
+
+  function isStandaloneApp() {
+    return window.matchMedia?.('(display-mode: standalone)').matches || navigator.standalone === true;
+  }
+
+  function base64UrlBytes(value) {
+    const padding = '='.repeat((4 - value.length % 4) % 4);
+    const raw = atob((value + padding).replace(/-/g, '+').replace(/_/g, '/'));
+    return Uint8Array.from(raw, ch => ch.charCodeAt(0));
+  }
+
+  function storedVapidKeyId() {
+    try { return localStorage.getItem(VAPID_KEY_ID) || ''; }
+    catch (_) { return ''; }
+  }
+
+  function setStoredVapidKeyId(value) {
+    try {
+      if (value) localStorage.setItem(VAPID_KEY_ID, value);
+      else localStorage.removeItem(VAPID_KEY_ID);
+    } catch (_) {}
+  }
+
+  function installNotifyControl() {
+    if ($('historyNotifyButton')) return;
+    const actions = document.querySelector('.history-secondary-actions');
+    if (!actions) return;
+    const row = document.createElement('div');
+    row.className = 'history-notify-row';
+    row.innerHTML = '<div class="history-notify-copy"><b>勝率更新完成通知</b><span id="historyNotifyText">可選擇在這次工作完成後收到瀏覽器通知。</span></div><button id="historyNotifyButton" class="history-notify-button" type="button" aria-pressed="false">完成通知：關</button>';
+    actions.after(row);
+    $('historyNotifyButton').addEventListener('click', toggleHistoryNotifications);
+  }
+
+  function renderNotifyState(message = '') {
+    const button = $('historyNotifyButton');
+    const copy = $('historyNotifyText');
+    if (!button || !copy) return;
+    const enabled = historyPushEnabled();
+    const running = active.has(latest?.status);
+    const available = Boolean(pushConfig?.available && supportsPush());
+    button.classList.toggle('on', enabled && available);
+    button.setAttribute('aria-pressed', String(enabled && available));
+    button.disabled = pushLoading || running || !available;
+    button.textContent = enabled && available ? '完成通知：開' : '完成通知：關';
+    if (message) copy.textContent = message;
+    else if (!supportsPush()) copy.textContent = '這台裝置或瀏覽器目前不支援 Web Push。';
+    else if (!pushConfig?.available) copy.textContent = pushConfig?.note || '通知服務目前不可用；勝率更新本身不受影響。';
+    else if (running && enabled) copy.textContent = '這一筆工作完成後會通知；執行中先鎖定通知設定。';
+    else if (enabled) copy.textContent = '手動啟動／續跑的勝率工作完成後通知；不會訂閱交易訊號。';
+    else copy.textContent = '只通知你手動啟動的勝率更新；和市場掃描通知分開設定。';
+  }
+
+  async function ensureHistoryPushSubscription() {
+    if (!pushConfig?.available || !supportsPush()) throw new Error('這台裝置目前無法使用完成通知');
+    if (isIOSDevice() && !isStandaloneApp()) throw new Error('iPhone／iPad 請先把雷達加入主畫面，再開啟通知');
+    if (Notification.permission !== 'granted') throw new Error('尚未允許通知權限');
+    await navigator.serviceWorker.register('/service-worker.js');
+    const registration = await navigator.serviceWorker.ready;
+    let subscription = await registration.pushManager.getSubscription();
+    const currentKey = String(pushConfig.key_id || '');
+    if (subscription && storedVapidKeyId() !== currentKey) {
+      await subscription.unsubscribe();
+      subscription = null;
+    }
+    if (!subscription) {
+      subscription = await registration.pushManager.subscribe({
+        userVisibleOnly:true,
+        applicationServerKey:base64UrlBytes(pushConfig.public_key)
+      });
+    }
+    setStoredVapidKeyId(currentKey);
+    pushSubscription = subscription;
+    return subscription;
+  }
+
+  function serializedSubscription(subscription) {
+    if (!subscription) return null;
+    if (typeof subscription.toJSON === 'function') return subscription.toJSON();
+    try { return JSON.parse(JSON.stringify(subscription)); }
+    catch (_) { return null; }
+  }
+
+  async function loadPushConfig() {
+    installNotifyControl();
+    if (!supportsPush()) {
+      renderNotifyState();
+      return;
+    }
+    try {
+      const response = await fetch('/api/push/config', {cache:'no-store'});
+      if (!response.ok) throw new Error('通知設定無法取得');
+      pushConfig = await response.json();
+      if (historyPushEnabled() && Notification.permission === 'granted' && (!isIOSDevice() || isStandaloneApp())) {
+        try { await ensureHistoryPushSubscription(); }
+        catch (error) { renderNotifyState(`完成通知需重新開啟：${error.message || error}`); return; }
+      }
+      renderNotifyState();
+    } catch (error) {
+      pushConfig = {available:false, note:`通知設定無法取得：${error.message || error}`};
+      renderNotifyState();
+    }
+  }
+
+  async function toggleHistoryNotifications() {
+    if (pushLoading || active.has(latest?.status)) return;
+    if (historyPushEnabled()) {
+      setHistoryPushEnabled(false);
+      renderNotifyState();
+      return;
+    }
+    pushLoading = true;
+    renderNotifyState('正在開啟完成通知…');
+    try {
+      if (!pushConfig?.available || !supportsPush()) throw new Error('這台裝置目前無法使用完成通知');
+      if (isIOSDevice() && !isStandaloneApp()) throw new Error('iPhone／iPad 請先把雷達加入主畫面，再開啟通知');
+      let permission = Notification.permission;
+      if (permission === 'default') permission = await Notification.requestPermission();
+      if (permission !== 'granted') throw new Error('通知權限沒有允許');
+      await ensureHistoryPushSubscription();
+      setHistoryPushEnabled(true);
+      renderNotifyState('已開啟；下一筆手動勝率更新完成時會通知。');
+    } catch (error) {
+      setHistoryPushEnabled(false);
+      renderNotifyState(String(error.message || error));
+    } finally {
+      pushLoading = false;
+      renderNotifyState();
+    }
+  }
+
+  function historyNotificationPayload(data) {
+    const inst = String(data?.inst_id || watchedJob?.inst_id || '');
+    const coin = data?.coins?.[inst] || data || {};
+    const overall = coin?.overall || {};
+    const symbol = inst.replace(/-USDT-SWAP$/,'') || '本幣';
+    const days = Number(coin?.days || data?.days || watchedJob?.days || 0);
+    const triggers = Number(overall.total || coin?.trigger_signals || 0);
+    const wins = Number(overall.wins || 0);
+    const losses = Number(overall.losses || 0);
+    const rate = overall.rate_pct;
+    const status = String(coin?.status || data?.status || '');
+    if (status === 'ERROR') {
+      return {
+        title:`${symbol} 勝率更新未完成`,
+        body:`${days}日｜${String(coin?.error || data?.error || '更新失敗，可回頁面查看或續跑。').slice(0,140)}`,
+        url:`/history-scan?inst_id=${encodeURIComponent(inst)}`
+      };
+    }
+    return {
+      title:`${symbol} 勝率更新完成${status === 'PARTIAL_COMPLETE' ? '（部分資料）' : ''}`,
+      body:`${days}日｜Trigger ${triggers}｜TP1 ${wins} / SL ${losses}｜先達率 ${rate === null || rate === undefined ? '—' : Number(rate).toFixed(1) + '%'}`,
+      url:`/history-scan?inst_id=${encodeURIComponent(inst)}`
+    };
+  }
+
+  async function showHistoryCompletionNotification(data) {
+    if (!historyPushEnabled() || !supportsPush() || Notification.permission !== 'granted') return;
+    if (document.visibilityState === 'visible') return;
+    try {
+      await navigator.serviceWorker.register('/service-worker.js');
+      const registration = await navigator.serviceWorker.ready;
+      const payload = historyNotificationPayload(data);
+      await registration.showNotification(payload.title, {
+        body:payload.body,
+        icon:'/radar-icon.svg',
+        badge:'/radar-icon.svg',
+        tag:`okx-radar-history-${String(data?.id || watchedJob?.id || 'complete')}`,
+        renotify:false,
+        data:{url:payload.url}
+      });
+    } catch (_) {}
+  }
+
+  function watchCompletionTransition(data) {
+    const id = String(data?.id || '');
+    const status = String(data?.status || '');
+    if (!id) return;
+    if (active.has(status)) {
+      watchedJob = {id, inst_id:String(data?.inst_id || ''), days:Number(data?.days || 0)};
+      return;
+    }
+    if (!watchedJob || watchedJob.id !== id || !notificationTerminal.has(status) || notifiedJobs.has(id)) return;
+    notifiedJobs.add(id);
+    showHistoryCompletionNotification(data);
+    watchedJob = null;
+  }
+
   function render(data) {
+    watchCompletionTransition(data);
     latest = data || latest || {};
     const inst = selectedInst();
     const coin = selectedCoin();
@@ -94,6 +310,7 @@
     $('deleteAll').disabled = busy || globalBusy || !Object.keys(latest?.coins || {}).length;
     $('days').disabled = busy || globalBusy;
     $('inst').disabled = busy || globalBusy;
+    renderNotifyState();
   }
 
   async function command(action) {
@@ -114,34 +331,43 @@
     busy = true;
     render(latest);
     let failure = '';
+    let notificationIssue = '';
+    let notificationSubscription = null;
+    if ((action === 'start' || action === 'resume') && historyPushEnabled()) {
+      try { notificationSubscription = serializedSubscription(await ensureHistoryPushSubscription()); }
+      catch (error) { notificationIssue = `勝率更新會照常執行，但完成通知未啟用：${error.message || error}`; }
+    }
     try {
+      const days = {days:Number($('days').value), inst_id:inst};
+      if (notificationSubscription) days.push_subscription = notificationSubscription;
       const response = await fetch('/api/history-scan/' + action, {
         method:'POST',
         headers:{'Content-Type':'application/json','X-History-Intent':'user'},
-        body:JSON.stringify(clearAll ? {csrf:latest.csrf} : {
-          csrf:latest.csrf,
-          days:{days:Number($('days').value), inst_id:inst}
-        })
+        body:JSON.stringify(clearAll ? {csrf:latest.csrf} : {csrf:latest.csrf, days})
       });
       const result = await response.json();
       if (!response.ok) throw new Error(result.error || '操作失敗');
       latest = result;
+      watchCompletionTransition(result);
     } catch (error) {
       failure = String(error.message || error);
     } finally {
       busy = false;
       render(latest);
       if (failure) $('error').textContent = failure;
+      else if (notificationIssue) renderNotifyState(notificationIssue);
     }
     if (!failure) HistoryReplay.refresh();
   }
 
   const queryInst = new URLSearchParams(location.search).get('inst_id');
   if (queryInst) $('inst').value = normalize(queryInst) || String(queryInst).toUpperCase();
+  installNotifyControl();
   $('inst').addEventListener('input', () => render(latest));
   for (const action of ['start','pause','resume','delete']) $(action).addEventListener('click', () => command(action));
   $('deleteAll').addEventListener('click', () => command('delete_all'));
   window.addEventListener('history-replay-status', event => render(event.detail));
   window.addEventListener('history-replay-error', event => {$('error').textContent = event.detail;});
   render({schema_version:'HISTORY_SINGLE_15M_V1',status:'IDLE',coins:{},csrf:''});
+  loadPushConfig();
 })();
