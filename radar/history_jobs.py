@@ -1,7 +1,7 @@
 """On-demand single-coin 15m historical replay in one bounded worker.
 
-The worker is user-triggered only.  It never starts from the home page, never
-places orders and never writes the live signal/statistics databases.  Finished
+The worker is user-triggered only. It never starts from the home page, never
+places orders and never writes the live signal/statistics databases. Finished
 coin snapshots are cached in a separate research SQLite database so a normal
 single-coin refresh can read them without replaying seven days every time.
 
@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import logging
 import os
 import re
 import secrets
@@ -46,11 +47,13 @@ from .history_single_replay import (
     replay_symbol,
 )
 
+LOGGER = logging.getLogger("okx_radar.history")
 MAX_WALL_SECONDS = 3600
 HISTORY_CHUNK_DAYS = 7
 MAX_DATABASE_BYTES = 32 * 1024 * 1024
 MAX_CACHED_COINS = 50
 ACTIVE = {"QUEUED", "RUNNING", "WAITING_LIVE_SCAN"}
+NOTIFY_TERMINAL = {"COMPLETE", "PARTIAL_COMPLETE", "ERROR"}
 LEGACY_DEFAULT_INST = "BTC-USDT-SWAP"
 _INST_RE = re.compile(r"^[A-Z0-9][A-Z0-9-]{0,48}-USDT-SWAP$")
 ALLOWED_DAYS = (3, 7, 14, 30)
@@ -360,8 +363,6 @@ def _prune(path: Path) -> None:
 class HistoryManager:
     def __init__(self, runtime: Any):
         self.runtime = runtime
-        # New DB name prevents the previous eight-major pooled cache from being
-        # interpreted as single-coin history.
         self.path = Path(runtime.config.data_dir) / "history_single_15m_v1.sqlite3"
         self.settings = asdict(runtime.config)
         self.fingerprint = fingerprint(self.settings)
@@ -370,6 +371,7 @@ class HistoryManager:
         self.process: subprocess.Popen | None = None
         self._job: str | None = None
         self._closed = False
+        self._job_push_subscriptions: dict[str, dict[str, dict[str, Any]]] = {}
         _init(self.path)
         with _connect(self.path) as connection:
             active = connection.execute(
@@ -458,9 +460,10 @@ class HistoryManager:
                 "holding_hours": 24,
                 "scope": "單幣15m短線歷史勝率；只提供3／7／14／30日；14／30日每7天保存一段，可續跑。4H／長線卡不使用。",
                 "assumptions": (
-                    "每個15m收線點重跑價格核心；Episode先統計首次可進，之後須連續至少4根15m不可進再重新可進才算有效再進。"
+                    "每個15m收線點重跑價格核心；每個 Signal Episode 只在第一次正式 Trigger 成立時取 1 筆樣本。"
+                    "後續回踩、可進場或再進只算同一 Trigger 的確認／執行狀態，不另加樣本。"
                     "14／30日以連續7天區段回放，每段自帶1天Episode暖機並保存完成結果。"
-                    "固定當時SL／TP1，使用後續已收線5m判定最多24小時；未扣費，且不含完整歷史OI／CVD、"
+                    "固定Trigger當下價格與當時SL／TP1，使用後續已收線5m判定最多24小時；未扣費，且不含完整歷史OI／CVD、"
                     "實際Bid／Ask、深度或訂單簿。"
                 ),
             }
@@ -480,13 +483,85 @@ class HistoryManager:
             base["coins"] = coins
             base["storage_bytes"] = self.path.stat().st_size if self.path.exists() else 0
             base["scope"] = "單幣15m短線歷史勝率；只提供3／7／14／30日；14／30日每7天保存一段，可續跑。4H／長線卡不使用。"
-            base["assumptions"] = (
-                "每個15m收線點重跑價格核心；Episode先統計首次可進，之後須連續至少4根15m不可進再重新可進才算有效再進。"
-                "14／30日以連續7天區段回放，每段自帶1天Episode暖機並保存完成結果。"
-                "固定當時SL／TP1，使用後續已收線5m判定最多24小時；未扣費，且不含完整歷史OI／CVD、"
-                "實際Bid／Ask、深度或訂單簿。"
-            )
+            base["assumptions"] = base["assumptions"]
             return base
+
+    def _push_notifier(self) -> Any | None:
+        notifier = getattr(self.runtime, "push_notifier", None)
+        if notifier is None or getattr(notifier, "available", False) is not True:
+            return None
+        return notifier
+
+    def _normalize_push_subscription(self, payload: Any) -> dict[str, Any] | None:
+        if payload is None:
+            return None
+        notifier = self._push_notifier()
+        if notifier is None:
+            return None
+        return notifier.normalize_subscription(payload)
+
+    def _register_job_push(self, job: str, subscription: dict[str, Any] | None) -> None:
+        if not subscription:
+            return
+        notifier = self._push_notifier()
+        if notifier is None:
+            return
+        key = notifier.subscription_key(subscription)
+        if not key:
+            return
+        bucket = self._job_push_subscriptions.setdefault(job, {})
+        if key not in bucket and len(bucket) >= 4:
+            raise ValueError("這筆勝率工作的通知裝置已達安全上限")
+        bucket[key] = subscription
+
+    def _send_job_push_if_terminal(self, job: str) -> None:
+        with _connect(self.path) as connection:
+            row = connection.execute(
+                "SELECT * FROM history_jobs_v1 WHERE id=?", (job,)
+            ).fetchone()
+        if row is None or str(row["status"]) not in NOTIFY_TERMINAL:
+            return
+        subscriptions = self._job_push_subscriptions.pop(job, {})
+        if not subscriptions:
+            return
+        notifier = self._push_notifier()
+        if notifier is None:
+            return
+        snapshot = self._snapshot(dict(row))
+        inst_id = str(snapshot.get("inst_id") or "")
+        symbol = inst_id.removesuffix("-USDT-SWAP") or "本幣"
+        days = int(snapshot.get("days") or 0)
+        overall = snapshot.get("overall") if isinstance(snapshot.get("overall"), dict) else {}
+        status = str(snapshot.get("status") or "")
+        if status == "ERROR":
+            title = f"{symbol} 勝率更新未完成"
+            detail = str(snapshot.get("error") or "更新失敗，可回頁面查看或續跑。")[:140]
+            body = f"{days}日｜{detail}"
+        else:
+            total = int(overall.get("total") or snapshot.get("trigger_signals") or 0)
+            wins = int(overall.get("wins") or 0)
+            losses = int(overall.get("losses") or 0)
+            rate = overall.get("rate_pct")
+            rate_text = "—" if rate is None else f"{float(rate):.1f}%"
+            suffix = "（部分資料）" if status == "PARTIAL_COMPLETE" else ""
+            title = f"{symbol} 勝率更新完成{suffix}"
+            body = f"{days}日｜Trigger {total}｜TP1 {wins} / SL {losses}｜先達率 {rate_text}"
+        payload = {
+            "title": title,
+            "body": body,
+            "url": f"/history-scan?inst_id={inst_id}",
+            "tag": f"okx-radar-history-{job}",
+            "kind": "HISTORY_COMPLETION",
+            "status": status,
+        }
+        for subscription in subscriptions.values():
+            try:
+                notifier.send(subscription, payload)
+            except Exception as exc:
+                LOGGER.warning(
+                    "Unable to deliver history completion notification error=%s",
+                    type(exc).__name__,
+                )
 
     def _spawn(self, job: str) -> None:
         self._job = job
@@ -514,6 +589,7 @@ class HistoryManager:
                 status="ERROR",
                 error="無法啟動單幣歷史程序；即時雷達不受影響。",
             )
+            self._job_push_subscriptions.pop(job, None)
             raise
         process = self.process
         threading.Thread(
@@ -541,12 +617,23 @@ class HistoryManager:
                 except sqlite3.Error:
                     pass
             time.sleep(0.5)
+        if not self._closed:
+            try:
+                self._send_job_push_if_terminal(job)
+            except Exception:
+                LOGGER.exception("Unable to finalize history completion notification")
 
     def command(self, action: str, *, days: Any = 7, token: str = "") -> dict:
         if not secrets.compare_digest(str(token), self.token):
             raise PermissionError("操作驗證已過期，請重新整理歷史掃描頁。")
         if action not in {"start", "resume", "pause", "delete", "delete_all"}:
             raise ValueError("不支援的歷史掃描操作")
+        raw_push = days.get("push_subscription") if isinstance(days, dict) else None
+        push_subscription = (
+            self._normalize_push_subscription(raw_push)
+            if action in {"start", "resume"}
+            else None
+        )
         if action == "delete_all":
             requested_days, inst_id = 7, ""
         else:
@@ -565,6 +652,7 @@ class HistoryManager:
                 if running:
                     raise ValueError("請先暫停歷史更新，等工作程序結束後再清除所有歷史資料。")
                 _delete_all_jobs(self.path)
+                self._job_push_subscriptions.clear()
                 self.process = None
                 self._job = None
                 with _connect(self.path) as connection:
@@ -573,6 +661,9 @@ class HistoryManager:
             if action == "delete":
                 if running:
                     raise ValueError("請先暫停歷史更新，等工作程序結束後再清除此幣資料。")
+                target = _latest(self.path, inst_id)
+                if target:
+                    self._job_push_subscriptions.pop(str(target["id"]), None)
                 _delete_jobs_for_coin(self.path, inst_id)
                 with _connect(self.path) as connection:
                     connection.execute("VACUUM")
@@ -583,6 +674,7 @@ class HistoryManager:
                     and active["inst_id"] == inst_id
                     and int(active["days"]) == requested_days
                 ):
+                    self._register_job_push(str(active["id"]), push_subscription)
                     return self.status()
                 other = active["inst_id"] if active else "另一顆幣"
                 raise ValueError(f"{other} 的15m歷史更新正在執行，請完成或暫停後再換幣。")
@@ -607,14 +699,15 @@ class HistoryManager:
                     live_busy=0,
                     error="",
                 )
+                self._register_job_push(str(target["id"]), push_subscription)
                 self._spawn(target["id"])
                 return self.status()
 
             if target and target["status"] in {"PAUSED", "INTERRUPTED", "ERROR"}:
                 raise ValueError("這顆幣已有未完成歷史工作；請按續跑，或先清除後重新更新。")
 
-            # A fresh user update replaces only this coin's old completed cache.
             if target:
+                self._job_push_subscriptions.pop(str(target["id"]), None)
                 _delete_jobs_for_coin(self.path, inst_id)
             _prune(self.path)
 
@@ -641,6 +734,7 @@ class HistoryManager:
                         len(chunks),
                     ),
                 )
+            self._register_job_push(job, push_subscription)
             self._spawn(job)
             return self.status()
 
@@ -654,10 +748,10 @@ class HistoryManager:
                     self.process.wait(timeout=2)
                 except subprocess.TimeoutExpired:
                     self.process.terminate()
+        self._job_push_subscriptions.clear()
 
 
 def run_job(path: Path, job: str) -> None:
-    # Resource limits apply only to the research child, never the web service.
     if hasattr(os, "nice"):
         os.nice(15)
     try:
@@ -761,11 +855,7 @@ def run_job(path: Path, job: str) -> None:
                     histories: dict[str, Any] = {}
                     for tf, interval in INTERVALS.items():
                         begin = chunk_start - DAY - (limits[tf] + 2) * interval
-                        finish = (
-                            chunk_end + DAY + STEP
-                            if tf == "5m"
-                            else chunk_end
-                        )
+                        finish = chunk_end + DAY + STEP if tf == "5m" else chunk_end
                         histories[tf] = fetch_history(
                             client,
                             instrument.inst_id,
