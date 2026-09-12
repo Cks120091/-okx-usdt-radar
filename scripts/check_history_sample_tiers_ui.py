@@ -21,7 +21,7 @@ VERSION = 'HISTORY_SINGLE_15M_V1'
 def group(resolved, tier, wins=None):
     wins = resolved if wins is None else wins
     losses = resolved - wins
-    return {'label':'全部15m可進訊號','status':'AVAILABLE','resolved':resolved,'wins':wins,'losses':losses,
+    return {'label':'全部15m有效進場機會','status':'AVAILABLE','resolved':resolved,'wins':wins,'losses':losses,
             'total':resolved,'days':3,'unknown':0,'timeout':0,'rate_pct':round(100*wins/resolved,1) if resolved else None,
             'tier':tier,'coverage_pct':100,'interval_pct':[0,100] if resolved else None}
 
@@ -58,10 +58,11 @@ def main():
             text = render(page, status(resolved, tier))
             assert tier in text and f'已判定 {resolved} 筆' in text, (resolved, text)
             assert '本幣' in text and '8支大型幣' not in text, text
+            assert '目前同類情境' not in text, text
 
         data = status(10, '低樣本參考', wins=6)
         text = render(page, data)
-        assert '60.0%' in text and '目前同類情境' in text, text
+        assert '60.0%' in text and '目前同類情境' not in text, text
 
         btc = dict(ITEM, inst_id='BTC-USDT-SWAP')
         text = render(page, data, btc)
@@ -71,7 +72,7 @@ def main():
         assert page.evaluate('item=>HistoryReplay.card(item)', long_item) == ''
         assert page.evaluate('item=>HistoryReplay.card(item,true)', ITEM) == ''
         browser.close()
-    print('PASS: single-coin sample tiers, no cross-coin fallback, and 4H exclusion')
+    print('PASS: single-coin sample tiers, hidden same-scenario rates, no cross-coin fallback, and 4H exclusion')
 
 
 if __name__ == '__main__':
