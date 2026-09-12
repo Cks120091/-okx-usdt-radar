@@ -330,7 +330,7 @@ class CardStatisticsIntegrationTests(unittest.TestCase):
     def test_final_html_and_public_projection_have_stats_not_quality_conversion(self):
         from pathlib import Path
         html=(Path(__file__).resolve().parents[1]/'radar/static/pages.html').read_text()
-        self.assertIn("quickLookPanel(item)+(window.HistoryReplay?.card(item,isPreviewItem(item))||'')+historicalStatsPanel(item)+decisionPanelBody(item)",html)
+        self.assertIn("decisionPanelBody(item)+quickLookPanel(item)+(window.HistoryReplay?.card(item,isPreviewItem(item))||'')+historicalStatsPanel(item)",html)
         self.assertIn('return [item.historical_performance,item.timeframe_states',html)
 
 

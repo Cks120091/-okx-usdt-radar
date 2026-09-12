@@ -42,7 +42,7 @@
   }
 
   function coinLink(instId) {
-    return `<a class="history-replay-link" href="/history-scan?inst_id=${encodeURIComponent(instId)}">更新本幣 15m 歷史勝率 →</a>`;
+    return `<a class="history-replay-link" href="/history-scan?inst_id=${encodeURIComponent(instId)}">更新歷史勝率 →</a>`;
   }
 
   function textFor(item) {
@@ -51,13 +51,13 @@
     const coin = snapshot(instId);
     const key = keyFor(item);
     if (!data || data.schema_version !== VERSION) {
-      return `<div class="history-replay-heading"><h3>本幣 15m 歷史勝率</h3><strong>尚未載入</strong></div><p>新版只使用這顆幣自己的 3天／7天／30天／3／6／9／12個月的 15m 可進場訊號。</p>${link}`;
+      return `<div class="history-replay-heading"><h3>本幣 15m 歷史勝率</h3><strong>尚未載入</strong></div><p>讀取本幣歷史資料中。</p>${link}`;
     }
     if (!coin) {
-      return `<div class="history-replay-heading"><h3>本幣 15m 歷史勝率</h3><strong>尚未更新</strong></div><p>${esc(instId)} 還沒有單幣歷史資料；不再套用其他幣的勝率。</p>${link}`;
+      return `<div class="history-replay-heading"><h3>本幣 15m 歷史勝率</h3><strong>尚未更新</strong></div><p>${esc(instId)} 尚無歷史勝率。</p>${link}`;
     }
     if (coin.compatible === false || coin.status === 'VERSION_CHANGED') {
-      return `<div class="history-replay-heading"><h3>本幣 15m 歷史勝率</h3><strong>版本已變更</strong></div><p>舊的單幣回放不混用，請重新更新 ${esc(instId)}。</p>${link}`;
+      return `<div class="history-replay-heading"><h3>本幣 15m 歷史勝率</h3><strong>版本已變更</strong></div><p>請重新更新 ${esc(instId)}。</p>${link}`;
     }
     if (!terminal.has(coin.status)) {
       const label = coin.status === 'WAITING_LIVE_SCAN' ? '即時掃描優先，歷史暫候' : coin.status === 'PAUSED' ? '歷史更新已暫停' : coin.status === 'INTERRUPTED' ? '歷史更新中斷，可續跑' : coin.status === 'ERROR' ? '歷史更新失敗' : '歷史更新中';
@@ -74,7 +74,6 @@
     if (overallCounts.resolved) detail += `：TP1 ${overallCounts.wins}｜SL ${overallCounts.losses}`;
     if (overallCounts.timeout || overallCounts.unknown) detail += `｜Timeout ${overallCounts.timeout}｜不明 ${overallCounts.unknown}`;
     if (tier) detail += `｜${tier}`;
-    if (coverage !== null) detail += `｜可判定率 ${coverage.toFixed(1)}%`;
 
     let cohortHtml = '';
     const cohort = key ? coin.groups?.[key] : null;
@@ -88,7 +87,7 @@
 
     const interval = Array.isArray(overall.interval_pct) && overall.interval_pct.length === 2 ? `Wilson 95% 描述區間 ${overall.interval_pct[0]}%～${overall.interval_pct[1]}%。` : '';
     const period = coin.start_ms && coin.end_ms ? `${new Date(coin.start_ms).toLocaleString('zh-TW',{timeZone:'Asia/Taipei'})} ～ ${new Date(coin.end_ms).toLocaleString('zh-TW',{timeZone:'Asia/Taipei'})}` : '—';
-    return `<div class="history-replay-heading"><h3>本幣 15m 歷史勝率</h3><strong data-replay-rate>${esc(headline)}</strong></div><p>${esc(detail)}</p>${cohortHtml}<small>只統計本幣每個 Episode 第一次達到可進場的 15m 收線；非本單預測，不改進場資格。</small><details><summary>歷史來源與限制</summary><p>${esc(interval)}</p><p>訊號期間（台灣時間）：${esc(period)}</p><p>逐個15m收線點重跑價格核心；同一Episode只算第一次可進。固定當時SL／TP1，再用後續已收線5m判定24小時內TP1或SL誰先到。</p><p>沒有完整歷史OI／CVD、實際Bid／Ask、深度與訂單簿；未扣手續費、滑價與資金費，因此不是實盤成交獲利率。</p></details>${link}`;
+    return `<div class="history-replay-heading"><h3>本幣 15m 歷史勝率</h3><strong data-replay-rate>${esc(headline)}</strong></div><p>${esc(detail)}</p>${cohortHtml}<small>15m 可進訊號統計，不影響進場資格。</small><details><summary>歷史來源與限制</summary><p>${esc(interval)}</p><p>訊號期間（台灣時間）：${esc(period)}</p><p>逐個15m收線點重跑價格核心；同一Episode只算第一次可進。固定當時SL／TP1，再用後續已收線5m判定24小時內TP1或SL誰先到。</p><p>沒有完整歷史OI／CVD、實際Bid／Ask、深度與訂單簿；未扣手續費、滑價與資金費，因此不是實盤成交獲利率。</p></details>${link}`;
   }
 
   function card(item, preview = false) {
@@ -104,17 +103,17 @@
     const link = `<a class="history-replay-link" href="/history-scan?inst_id=${encodeURIComponent(instId)}">歷史 K 棒勝率 →</a>`;
     const coin = snapshot(instId);
     if (!data || data.schema_version !== VERSION) {
-      return `<section class="history-replay-card preflight-history-rate" aria-label="15m進場前更新歷史K棒勝率"><div class="history-replay-heading"><h3>歷史 K 棒勝率｜本幣 15m</h3><strong>載入中</strong></div><p>只讀既有單幣 所選歷史區間結果；本次進場前更新不會重跑歷史 K 棒。</p>${link}</section>`;
+      return `<section class="history-replay-card preflight-history-rate" aria-label="15m進場前更新歷史K棒勝率"><div class="history-replay-heading"><h3>歷史 K 棒勝率｜本幣 15m</h3><strong>載入中</strong></div><p>讀取既有歷史結果；本次不重跑。</p>${link}</section>`;
     }
     if (!coin) {
-      return `<section class="history-replay-card preflight-history-rate" aria-label="15m進場前更新歷史K棒勝率"><div class="history-replay-heading"><h3>歷史 K 棒勝率｜本幣 15m</h3><strong>尚未更新</strong></div><p>${esc(instId)} 尚無已完成的單幣歷史結果；進場前更新不會自動啟動歷史掃描。</p>${link}</section>`;
+      return `<section class="history-replay-card preflight-history-rate" aria-label="15m進場前更新歷史K棒勝率"><div class="history-replay-heading"><h3>歷史 K 棒勝率｜本幣 15m</h3><strong>尚未更新</strong></div><p>${esc(instId)} 尚無歷史勝率；本次不自動回測。</p>${link}</section>`;
     }
     if (coin.compatible === false || coin.status === 'VERSION_CHANGED') {
-      return `<section class="history-replay-card preflight-history-rate" aria-label="15m進場前更新歷史K棒勝率"><div class="history-replay-heading"><h3>歷史 K 棒勝率｜本幣 15m</h3><strong>版本已變更</strong></div><p>舊回放不混用；如需新勝率請手動更新歷史 K 棒。</p>${link}</section>`;
+      return `<section class="history-replay-card preflight-history-rate" aria-label="15m進場前更新歷史K棒勝率"><div class="history-replay-heading"><h3>歷史 K 棒勝率｜本幣 15m</h3><strong>版本已變更</strong></div><p>請手動更新歷史勝率。</p>${link}</section>`;
     }
     if (!terminal.has(coin.status)) {
       const label = coin.status === 'PAUSED' ? '歷史更新已暫停' : coin.status === 'INTERRUPTED' ? '歷史更新中斷' : coin.status === 'ERROR' ? '歷史更新失敗' : '歷史更新中';
-      return `<section class="history-replay-card preflight-history-rate" aria-label="15m進場前更新歷史K棒勝率"><div class="history-replay-heading"><h3>歷史 K 棒勝率｜本幣 15m</h3><strong>${esc(label)}</strong></div><p>${esc(instId)}｜沿用目前已存歷史資料；進場前更新不會另開歷史回放。</p>${link}</section>`;
+      return `<section class="history-replay-card preflight-history-rate" aria-label="15m進場前更新歷史K棒勝率"><div class="history-replay-heading"><h3>歷史 K 棒勝率｜本幣 15m</h3><strong>${esc(label)}</strong></div><p>${esc(instId)}｜歷史資料處理中。</p>${link}</section>`;
     }
     const overall = coin.overall || {};
     const n = counts(overall);
@@ -123,7 +122,7 @@
     let detail = `${instId}｜近 ${periodLabel(coin.days || 7)} 15m｜可進訊號 ${n.total} 筆｜已判定 ${n.resolved} 筆`;
     if (n.resolved) detail += `：TP1 ${n.wins}｜SL ${n.losses}`;
     if (overall.tier) detail += `｜${overall.tier}`;
-    return `<section class="history-replay-card preflight-history-rate" aria-label="15m進場前更新歷史K棒勝率"><div class="history-replay-heading"><h3>歷史 K 棒勝率｜本幣 15m</h3><strong data-preflight-history-rate>${esc(headline)}</strong></div><p>${esc(detail)}</p><small>沿用最近一次已完成的單幣歷史回放；按進場前更新只更新現在行情，不重跑歷史 K 棒。</small>${link}</section>`;
+    return `<section class="history-replay-card preflight-history-rate" aria-label="15m進場前更新歷史K棒勝率"><div class="history-replay-heading"><h3>歷史 K 棒勝率｜本幣 15m</h3><strong data-preflight-history-rate>${esc(headline)}</strong></div><p>${esc(detail)}</p><small>進場前更新只讀這份結果，不重跑。</small>${link}</section>`;
   }
 
   function refreshCards() {
@@ -141,9 +140,9 @@
       const link = coinLink(instId);
       let html;
       if (!data || data.schema_version !== VERSION) {
-        html = `<div class="history-replay-heading"><h3>本幣 15m 歷史勝率</h3><strong>尚未載入</strong></div><p>新版只使用這顆幣自己的 3天／7天／30天／3／6／9／12個月的 15m 可進場訊號。</p>${link}`;
+        html = `<div class="history-replay-heading"><h3>本幣 15m 歷史勝率</h3><strong>尚未載入</strong></div><p>讀取本幣歷史資料中。</p>${link}`;
       } else if (!coin) {
-        html = `<div class="history-replay-heading"><h3>本幣 15m 歷史勝率</h3><strong>尚未更新</strong></div><p>${esc(instId)} 還沒有單幣歷史資料；不再套用其他幣的勝率。</p>${link}`;
+        html = `<div class="history-replay-heading"><h3>本幣 15m 歷史勝率</h3><strong>尚未更新</strong></div><p>${esc(instId)} 尚無歷史勝率。</p>${link}`;
       } else {
         const overall = coin.overall || {};
         const n = counts(overall);
