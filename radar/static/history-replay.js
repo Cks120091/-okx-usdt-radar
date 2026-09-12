@@ -7,9 +7,12 @@
   const esc = value => String(value ?? '').replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
   const finite = value => value !== null && value !== undefined && typeof value !== 'boolean' && Number.isFinite(Number(value)) ? Number(value) : null;
   const periodLabel = days => ({3:'3天',7:'7天',14:'14天',30:'30天'})[Number(days || 7)] || `${Number(days || 7)}天`;
+  const SINGLE_SCAN_RETURN_KEY = 'okx-radar-history-single-scan-return-v1';
+  const SINGLE_SCAN_RETURN_MAX_AGE_MS = 30 * 60 * 1000;
   let data = null;
   let fetching = false;
   let organizing = false;
+  let restoringSingleScan = false;
   const scenarioByInst = new Map();
 
   function scenarioFor(item) {
@@ -113,6 +116,69 @@
       tier: sampleTier(resolved),
       label: scenario.label,
     };
+  }
+
+  function rememberSingleScanReturn(event) {
+    const link = event.target.closest?.('a.history-replay-link');
+    if (!link || !link.closest('#singleScanContent')) return;
+    if (event.button !== 0 || event.metaKey || event.ctrlKey || event.shiftKey || event.altKey) return;
+    const panel = link.closest('.history-replay-card');
+    let instId = String(panel?.dataset?.replayInst || '').trim().toUpperCase();
+    if (!instId) {
+      try { instId = String(new URL(link.href, location.origin).searchParams.get('inst_id') || '').trim().toUpperCase(); }
+      catch (_) { instId = ''; }
+    }
+    if (!instId) return;
+    const title = String(document.querySelector('#singleScanTitle')?.textContent || '');
+    const scenario = scenarioByInst.get(instId) || null;
+    const payload = {
+      source:'single_scan',
+      inst_id:instId,
+      horizon:title.includes('4H') ? 'LONG' : 'SHORT',
+      direction:['LONG','SHORT'].includes(scenario?.direction) ? scenario.direction : '',
+      saved_at:Date.now(),
+    };
+    try { sessionStorage.setItem(SINGLE_SCAN_RETURN_KEY, JSON.stringify(payload)); }
+    catch (_) {}
+  }
+
+  function restoreSingleScanReturn() {
+    if (document.body?.dataset?.historyPage === 'true' || restoringSingleScan) return;
+    let payload = null;
+    try {
+      const raw = sessionStorage.getItem(SINGLE_SCAN_RETURN_KEY);
+      if (!raw) return;
+      payload = JSON.parse(raw);
+    } catch (_) {
+      try { sessionStorage.removeItem(SINGLE_SCAN_RETURN_KEY); } catch (_) {}
+      return;
+    }
+    const age = Date.now() - Number(payload?.saved_at || 0);
+    const instId = String(payload?.inst_id || '').trim().toUpperCase();
+    if (payload?.source !== 'single_scan' || !instId || age < 0 || age > SINGLE_SCAN_RETURN_MAX_AGE_MS) {
+      try { sessionStorage.removeItem(SINGLE_SCAN_RETURN_KEY); } catch (_) {}
+      return;
+    }
+    const dialog = document.querySelector('#singleScanDialog');
+    if (!dialog) return;
+    if (dialog.open) {
+      try { sessionStorage.removeItem(SINGLE_SCAN_RETURN_KEY); } catch (_) {}
+      return;
+    }
+    restoringSingleScan = true;
+    try { sessionStorage.removeItem(SINGLE_SCAN_RETURN_KEY); } catch (_) {}
+    const input = document.querySelector('#globalSearch');
+    if (input) input.value = instId.replace(/-USDT-SWAP$/, '');
+    const proxy = document.createElement('button');
+    proxy.type = 'button';
+    proxy.hidden = true;
+    proxy.dataset.singleId = instId;
+    proxy.dataset.singleHorizon = payload.horizon === 'LONG' ? 'LONG' : 'SHORT';
+    if (['LONG','SHORT'].includes(payload.direction)) proxy.dataset.singleDirection = payload.direction;
+    document.body.appendChild(proxy);
+    proxy.click();
+    proxy.remove();
+    setTimeout(() => { restoringSingleScan = false; }, 0);
   }
 
   function coinLink(instId) {
@@ -358,12 +424,15 @@
   }
 
   window.HistoryReplay = {card, preflight, refresh, refreshCards, keyFor, scenarioFor, similarScenario, snapshot, organizeSignalCards, organizePreflightPage, organizeSingleScanDialog};
+  document.addEventListener('click', rememberSingleScanReturn, true);
   const boot = () => {
     installLayoutObservers();
     refresh();
+    setTimeout(restoreSingleScanReturn, 0);
   };
   if (document.readyState === 'loading') document.addEventListener('DOMContentLoaded', boot, {once:true});
   else boot();
+  window.addEventListener('pageshow', () => setTimeout(restoreSingleScanReturn, 0));
   setInterval(() => {
     const onHistoryPage = document.body?.dataset?.historyPage === 'true';
     const running = data && active.has(data.status);
