@@ -5,10 +5,10 @@
   const $ = id => document.getElementById(id);
   const active = new Set(['QUEUED','RUNNING','WAITING_LIVE_SCAN']);
   const labels = {
-    IDLE:'尚未建立本幣歷史資料', QUEUED:'準備更新', RUNNING:'15m 歷史更新中',
+    IDLE:'尚未建立本幣歷史資料', QUEUED:'準備更新', RUNNING:'15m Trigger 歷史更新中',
     WAITING_LIVE_SCAN:'即時掃描優先，歷史暫候', PAUSED:'歷史已暫停', INTERRUPTED:'歷史中斷，可續跑',
-    ERROR:'歷史更新失敗', COMPLETE:'15m 歷史更新完成', PARTIAL_COMPLETE:'更新完成，但部分窗口不足',
-    VERSION_CHANGED:'版本／設定已變更，請重新更新'
+    ERROR:'歷史更新失敗', COMPLETE:'15m Trigger 歷史更新完成', PARTIAL_COMPLETE:'更新完成，但部分窗口不足',
+    VERSION_CHANGED:'樣本口徑／設定已變更，請重新更新'
   };
 
   function normalize(raw) {
@@ -56,21 +56,21 @@
     $('progress').value = Math.min(done, total);
 
     const overall = coin?.overall || {};
-    const totalSignals = Number(overall.total || 0);
-    const initialSignals = Number(coin?.initial_signals ?? coin?.initial_overall?.total ?? totalSignals);
-    const reentrySignals = Number(coin?.reentry_signals ?? coin?.reentry_overall?.total ?? 0);
+    const triggerSamples = Number(overall.total || coin?.trigger_signals || 0);
     const resolved = Number(overall.resolved || 0);
     const wins = Number(overall.wins || 0);
     const losses = Number(overall.losses || 0);
+    const timeout = Number(overall.timeout || 0);
+    const unknown = Number(overall.unknown || 0);
     const rate = overall.rate_pct;
     if (coin && ['COMPLETE','PARTIAL_COMPLETE'].includes(coin.status)) {
-      $('counts').textContent = `${periodLabel(coin.days)}｜勝率 ${rate === null || rate === undefined ? '—' : Number(rate).toFixed(1) + '%'}｜有效機會 ${totalSignals}（首進 ${initialSignals}／再進 ${reentrySignals}）｜已判定 ${resolved}｜TP1 ${wins}／SL ${losses}｜${overall.tier || '樣本統計中'}`;
+      $('counts').textContent = `${periodLabel(coin.days)}｜TP1先達率 ${rate === null || rate === undefined ? '—' : Number(rate).toFixed(1) + '%'}｜Trigger樣本 ${triggerSamples}｜已判定 ${resolved}｜TP1 ${wins}／SL ${losses}｜未判定 ${timeout + unknown}｜${overall.tier || '樣本統計中'}`;
     } else if (sameActive) {
       $('counts').textContent = `${periodLabel(latest.days || Number($('days').value))}｜處理區段 ${done}/${total}`;
     } else if (coin) {
       $('counts').textContent = labels[coin.status] || coin.status;
     } else {
-      $('counts').textContent = valid ? '尚未做過這顆幣的 15m 歷史更新。' : '輸入幣種後即可更新。';
+      $('counts').textContent = valid ? '尚未做過這顆幣的 15m Trigger 歷史更新。' : '輸入幣種後即可更新。';
     }
 
     $('current').textContent = globalBusy && activeInst ? `目前處理：${activeInst}` : '';
