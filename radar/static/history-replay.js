@@ -275,9 +275,9 @@
   if (document.readyState === 'loading') document.addEventListener('DOMContentLoaded', boot, {once:true});
   else boot();
   setInterval(() => {
-    if (document.visibilityState !== 'visible') return;
     const onHistoryPage = document.body?.dataset?.historyPage === 'true';
     const running = data && active.has(data.status);
+    if (!onHistoryPage && document.visibilityState !== 'visible') return;
     if (onHistoryPage || running) refresh();
   }, 5000);
 })();
