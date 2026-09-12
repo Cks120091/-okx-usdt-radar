@@ -28,19 +28,43 @@ jobs:
           python scripts/apply_ui_clarity_compact_patch.py
           python - <<'PY'
           from pathlib import Path
-          test = Path('tests/test_ui_compact.py')
-          text = test.read_text(encoding='utf-8')
+
+          pages = Path('radar/static/pages.html')
+          pages_text = pages.read_text(encoding='utf-8')
+          pages_text = pages_text.replace(
+              '<p>只更新目前進場條件；方向與原 Entry／SL／TP 不變。</p>',
+              '<p>更新現價、進場距離、成交條件、續走力道與歷史 OI 持倉動向；不改寫方向或原 Entry／SL／TP</p>',
+              1,
+          )
+          pages.write_text(pages_text, encoding='utf-8')
+
+          compact_test = Path('tests/test_ui_compact.py')
+          text = compact_test.read_text(encoding='utf-8')
+          text = text.replace(
+              'self.assertIn("只更新目前進場條件；方向與原 Entry／SL／TP 不變。", text)',
+              'self.assertIn("更新現價、進場距離、成交條件、續走力道與歷史 OI 持倉動向；不改寫方向或原 Entry／SL／TP", text)',
+          )
           text = text.replace(
               'self.assertIn("進場前更新只讀這份結果，不重跑。", text)',
               'self.assertIn("不重跑", text)',
           )
-          test.write_text(text, encoding='utf-8')
+          compact_test.write_text(text, encoding='utf-8')
+
+          stats_test = Path('tests/test_card_statistics.py')
+          stats = stats_test.read_text(encoding='utf-8')
+          old = "quickLookPanel(item)+(window.HistoryReplay?.card(item,isPreviewItem(item))||'')+historicalStatsPanel(item)+decisionPanelBody(item)"
+          new = "decisionPanelBody(item)+quickLookPanel(item)+(window.HistoryReplay?.card(item,isPreviewItem(item))||'')+historicalStatsPanel(item)"
+          if old not in stats:
+              raise SystemExit('tests/test_card_statistics.py: old panel-order assertion not found')
+          stats_test.write_text(stats.replace(old, new, 1), encoding='utf-8')
+
           for name in (
               'radar/static/pages.html',
               'radar/static/history-scan.html',
               'radar/static/history-replay.js',
               'radar/static/history-replay.css',
               'tests/test_ui_compact.py',
+              'tests/test_card_statistics.py',
           ):
               p = Path(name)
               body = p.read_text(encoding='utf-8')
@@ -60,6 +84,6 @@ jobs:
         run: |
           git config user.name "Cks120091"
           git config user.email "k7v4srb5rc@privaterelay.appleid.com"
-          git add radar/static/pages.html radar/static/history-scan.html radar/static/history-replay.js radar/static/history-replay.css tests/test_ui_compact.py
+          git add radar/static/pages.html radar/static/history-scan.html radar/static/history-replay.js radar/static/history-replay.css tests/test_ui_compact.py tests/test_card_statistics.py
           git commit -m "Apply compact UI clarity"
           git push origin HEAD:ui-clarity-compact
