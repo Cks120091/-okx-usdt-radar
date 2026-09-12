@@ -1,17 +1,17 @@
-<!doctype html><html lang="zh-Hant"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>單幣15m歷史勝率｜OKX 雷達</title><link rel="stylesheet" href="/history-replay.css"><script src="/history-replay.js"></script></head>
+<!doctype html><html lang="zh-Hant"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>單幣15m Trigger歷史勝率｜OKX 雷達</title><link rel="stylesheet" href="/history-replay.css"><script src="/history-replay.js"></script></head>
 <body class="history-replay-page" data-history-page="true"><main class="history-replay-shell">
 <a class="history-back" href="/">← 回到雷達</a>
-<header class="history-page-head"><h1>單幣 15m 歷史勝率</h1><p>只留常用區間：3 / 7 / 14 / 30 日。選幣後手動更新。</p></header>
+<header class="history-page-head"><h1>單幣 15m Trigger 歷史勝率</h1><p>樣本只取 Trigger 第一次成立當下；期間保留 3 / 7 / 14 / 30 日。</p></header>
 <section class="history-main-panel" aria-live="polite">
-<div class="history-main-head"><div><span class="history-eyebrow">本幣歷史回放</span><h2 id="status">讀取狀態…</h2></div><p id="selected">請輸入幣種</p></div>
-<div class="history-replay-actions"><div class="history-field"><label for="inst">幣種</label><input id="inst" type="text" inputmode="text" autocomplete="off" placeholder="例如 BTC 或 BTC-USDT-SWAP"></div><div class="history-field"><label for="days">期間</label><select id="days"><option value="3">3 日</option><option value="7" selected>7 日</option><option value="14">14 日</option><option value="30">30 日</option></select></div><button id="start" class="history-primary-action" disabled>更新本幣勝率</button></div>
+<div class="history-main-head"><div><span class="history-eyebrow">本幣 Trigger 回放</span><h2 id="status">讀取狀態…</h2></div><p id="selected">請輸入幣種</p></div>
+<div class="history-replay-actions"><div class="history-field"><label for="inst">幣種</label><input id="inst" type="text" inputmode="text" autocomplete="off" placeholder="例如 BTC 或 BTC-USDT-SWAP"></div><div class="history-field"><label for="days">期間</label><select id="days"><option value="3">3 日</option><option value="7" selected>7 日</option><option value="14">14 日</option><option value="30">30 日</option></select></div><button id="start" class="history-primary-action" disabled>更新 Trigger 勝率</button></div>
 <progress id="progress" max="1" value="0"></progress>
 <div class="history-result-box"><p id="counts">尚未取得資料</p><div class="history-meta-row"><span id="current"></span><span id="period"></span></div><p id="error" class="history-warning"></p></div>
 <div class="history-secondary-actions"><button id="pause" disabled>暫停</button><button id="resume" disabled>續跑</button></div>
 </section>
 <details class="history-tools"><summary>說明、完整度與資料管理</summary><div class="history-tools-grid">
-<div class="history-tool-card"><h3>怎麼算</h3><p>Episode 第一次可進算首進；之後必須連續至少 4 根 15m 不可進，再重新可進，才算有效再進。</p><p>每筆固定當時 Entry／SL／TP1，再用後續已收線 5m 判定 24 小時內 TP1 或 SL 誰先到。</p><p>14 / 30 日會以 7 日區段保存進度；中斷後可接續。</p></div>
-<div class="history-tool-card"><h3>資料完整度</h3><div id="excluded">—</div><p>不含完整歷史 OI／CVD、Bid／Ask、深度、訂單簿、手續費、滑價與資金費；4H／長線不使用。</p></div>
+<div class="history-tool-card"><h3>怎麼算</h3><p>每個 Signal Episode 只在第一次正式 Trigger 成立的 15m 收線取 1 筆樣本。</p><p>後續回踩、正式可進場、再進或持續確認都只代表這個 Trigger 被確認／執行，不另外增加樣本。</p><p>每筆固定 Trigger 當下價格與當時 SL／TP1，再用後續已收線 5m 判定 24 小時內 TP1 或 SL 誰先到；勝率只用 TP1 與 SL 已判定樣本計算。</p><p>14 / 30 日會以 7 日區段保存進度；中斷後可接續。</p></div>
+<div class="history-tool-card"><h3>資料完整度</h3><div id="excluded">—</div><p>Timeout／Unknown 不硬算勝敗。不含完整歷史 OI／CVD、Bid／Ask、深度、訂單簿、手續費、滑價與資金費；4H／長線不使用。</p></div>
 <div class="history-tool-card"><h3>資料管理</h3><p id="storage">—</p><div class="history-tool-actions"><button id="delete" disabled>清除此幣</button><button id="deleteAll" class="history-danger-button" disabled>清除全部</button></div><p class="history-foot">只清除歷史研究資料，不會刪正式訊號、即時雷達或交易計畫。</p></div>
 </div></details>
 </main><script src="/history-scan.js"></script></body></html>
