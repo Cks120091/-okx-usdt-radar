@@ -4,6 +4,11 @@ The worker is user-triggered only.  It never starts from the home page, never
 places orders and never writes the live signal/statistics databases.  Finished
 coin snapshots are cached in a separate research SQLite database so a normal
 single-coin refresh can read them without replaying seven days every time.
+
+Long ranges are processed in bounded seven-day chunks.  Every completed chunk
+is persisted before the next one starts, so a 60-minute pause, service restart
+or explicit user pause can resume from the remaining chunks instead of
+restarting an entire 30/90/180/270/365-day replay.
 """
 from __future__ import annotations
 
@@ -43,6 +48,7 @@ from .history_single_replay import (
 )
 
 MAX_WALL_SECONDS = 3600
+HISTORY_CHUNK_DAYS = 7
 MAX_DATABASE_BYTES = 32 * 1024 * 1024
 MAX_CACHED_COINS = 50
 ACTIVE = {"QUEUED", "RUNNING", "WAITING_LIVE_SCAN"}
@@ -61,6 +67,21 @@ def _connect(path: Path) -> Iterator[sqlite3.Connection]:
             yield connection
     finally:
         connection.close()
+
+
+def _chunk_ranges(start_ms: int, end_ms: int) -> list[tuple[int, int]]:
+    """Split one requested signal window into contiguous resumable chunks."""
+    if not 0 < int(start_ms) < int(end_ms):
+        raise ValueError("invalid history chunk range")
+    chunk_ms = HISTORY_CHUNK_DAYS * DAY
+    output: list[tuple[int, int]] = []
+    cursor = int(start_ms)
+    end_ms = int(end_ms)
+    while cursor < end_ms:
+        stop = min(end_ms, cursor + chunk_ms)
+        output.append((cursor, stop))
+        cursor = stop
+    return output
 
 
 def _init(path: Path) -> None:
@@ -97,6 +118,17 @@ def _init(path: Path) -> None:
               result TEXT NOT NULL,
               PRIMARY KEY(job_id, inst_id)
             );
+            CREATE TABLE IF NOT EXISTS history_chunks_v1 (
+              job_id TEXT NOT NULL,
+              inst_id TEXT NOT NULL,
+              start_ms INTEGER NOT NULL,
+              end_ms INTEGER NOT NULL,
+              status TEXT NOT NULL,
+              result TEXT NOT NULL,
+              PRIMARY KEY(job_id, inst_id, start_ms)
+            );
+            CREATE INDEX IF NOT EXISTS idx_history_chunks_job
+              ON history_chunks_v1(job_id, inst_id, start_ms);
             """
         )
 
@@ -155,9 +187,37 @@ def _all_latest(path: Path) -> list[dict[str, Any]]:
     return output
 
 
+def _merge_chunk_results(inst_id: str, results: list[dict[str, Any]]) -> dict[str, Any] | None:
+    """Merge successful non-overlapping chunk outputs into one aggregate input."""
+    successful = [result for result in results if result.get("status") == "OK"]
+    if not successful:
+        return None
+    samples: list[dict[str, Any]] = []
+    for result in successful:
+        samples.extend(result.get("samples", []))
+    samples.sort(key=lambda item: int(item.get("entry_ms") or 0))
+    return {
+        "inst_id": inst_id,
+        "status": "OK",
+        "evaluated": sum(int(result.get("evaluated", 0)) for result in successful),
+        "missing_windows": sum(int(result.get("missing_windows", 0)) for result in successful),
+        "eligible_windows": sum(int(result.get("eligible_windows", 0)) for result in successful),
+        "episodes": sum(int(result.get("episodes", 0)) for result in successful),
+        "initial_signals": sum(int(result.get("initial_signals", 0)) for result in successful),
+        "reentry_signals": sum(int(result.get("reentry_signals", 0)) for result in successful),
+        "actionable_signals": len(samples),
+        "entry_attempts": len(samples),
+        "samples": samples,
+    }
+
+
 def _rebuild(path: Path, job: str, complete: bool) -> None:
     with _connect(path) as connection:
-        rows = connection.execute(
+        chunk_rows = connection.execute(
+            "SELECT start_ms,end_ms,status,result FROM history_chunks_v1 "
+            "WHERE job_id=? ORDER BY start_ms", (job,)
+        ).fetchall()
+        legacy_rows = connection.execute(
             "SELECT result FROM history_symbols_v1 WHERE job_id=?", (job,)
         ).fetchall()
         meta = connection.execute(
@@ -166,35 +226,62 @@ def _rebuild(path: Path, job: str, complete: bool) -> None:
         ).fetchone()
     if meta is None:
         return
-    results = [json.loads(row["result"]) for row in rows]
-    failed = sum(result.get("status") != "OK" for result in results)
+
+    failure_results: list[dict[str, Any]] = []
+    if chunk_rows:
+        chunk_results = [json.loads(row["result"]) for row in chunk_rows]
+        failure_results = [result for result in chunk_results if result.get("status") != "OK"]
+        merged = _merge_chunk_results(str(meta["inst_id"]), chunk_results)
+        results = [merged] if merged is not None else []
+        done = len(chunk_rows)
+        failed = len(failure_results)
+    else:
+        results = [json.loads(row["result"]) for row in legacy_rows]
+        failure_results = [result for result in results if result.get("status") != "OK"]
+        done = len(results)
+        failed = len(failure_results)
+
     expected = max(1, (meta["end_ms"] - meta["start_ms"]) // CORE)
     successful = next(
         (
             result
             for result in results
-            if result.get("status") == "OK" and result.get("inst_id") == meta["inst_id"]
+            if result and result.get("status") == "OK" and result.get("inst_id") == meta["inst_id"]
         ),
         None,
     )
     evaluated = int(successful.get("evaluated", 0)) if successful else 0
     coverage = min(1.0, evaluated / expected)
-    covered = successful is not None and coverage >= 0.95
-    summary = aggregate(results, complete=bool(complete and covered), days=int(meta["days"]))
+    finished_all = done >= int(meta["total"])
+    covered = bool(complete and finished_all and failed == 0 and successful is not None and coverage >= 0.95)
+    summary = aggregate(results, complete=covered, days=int(meta["days"]))
     excluded = []
-    if successful is None:
+    if complete and successful is None:
         reason = "尚未完成本幣歷史回放"
-        if results:
-            reason = str(results[0].get("error") or results[0].get("status") or reason)
+        if failure_results:
+            reason = str(failure_results[0].get("error") or failure_results[0].get("status") or reason)
         excluded.append(
             {
                 "inst_id": meta["inst_id"],
-                "status": results[0].get("status", "ERROR") if results else "PENDING",
+                "status": failure_results[0].get("status", "ERROR") if failure_results else "PENDING",
                 "reason": reason,
                 "evaluated": evaluated,
             }
         )
-    elif not covered:
+    elif complete and failed:
+        reason = str(
+            failure_results[0].get("error")
+            or f"{failed} 個歷史區段失敗；按續跑只會重試失敗區段"
+        )
+        excluded.append(
+            {
+                "inst_id": meta["inst_id"],
+                "status": "CHUNK_ERROR",
+                "reason": reason,
+                "evaluated": evaluated,
+            }
+        )
+    elif complete and not covered:
         excluded.append(
             {
                 "inst_id": meta["inst_id"],
@@ -208,11 +295,14 @@ def _rebuild(path: Path, job: str, complete: bool) -> None:
         covered_symbols=1 if covered else 0,
         covered_inst_ids=[meta["inst_id"]] if covered else [],
         excluded=excluded,
+        chunk_days=HISTORY_CHUNK_DAYS,
+        chunks_done=done,
+        chunks_total=int(meta["total"]),
     )
     _update(
         path,
         job,
-        done=len(results),
+        done=done,
         failed=failed,
         summary=json.dumps(summary, ensure_ascii=False),
     )
@@ -243,12 +333,14 @@ def _delete_jobs_for_coin(path: Path, inst_id: str) -> None:
             )
         ]
         for job_id in ids:
+            connection.execute("DELETE FROM history_chunks_v1 WHERE job_id=?", (job_id,))
             connection.execute("DELETE FROM history_symbols_v1 WHERE job_id=?", (job_id,))
         connection.execute("DELETE FROM history_jobs_v1 WHERE inst_id=?", (inst_id,))
 
 
 def _delete_all_jobs(path: Path) -> None:
     with _connect(path) as connection:
+        connection.execute("DELETE FROM history_chunks_v1")
         connection.execute("DELETE FROM history_symbols_v1")
         connection.execute("DELETE FROM history_jobs_v1")
 
@@ -261,6 +353,7 @@ def _prune(path: Path) -> None:
         ).fetchall()
         stale = [row[0] for row in rows[MAX_CACHED_COINS:]]
         for job_id in stale:
+            connection.execute("DELETE FROM history_chunks_v1 WHERE job_id=?", (job_id,))
             connection.execute("DELETE FROM history_symbols_v1 WHERE job_id=?", (job_id,))
             connection.execute("DELETE FROM history_jobs_v1 WHERE id=?", (job_id,))
 
@@ -289,7 +382,7 @@ class HistoryManager:
                 row["id"],
                 status="INTERRUPTED",
                 control="PAUSE",
-                error="服務曾重啟；本幣已完成資料保留，請按續跑。",
+                error="服務曾重啟；已完成的歷史區段保留，請按續跑接著處理。",
             )
 
     def _snapshot(self, row: dict[str, Any]) -> dict[str, Any]:
@@ -342,7 +435,7 @@ class HistoryManager:
                     self.path,
                     row["id"],
                     status="INTERRUPTED",
-                    error="本幣歷史工作程序停止；已完成資料保留，可續跑。",
+                    error="本幣歷史工作程序停止；已完成區段保留，可續跑剩餘區段。",
                 )
                 row = _latest(self.path)
 
@@ -364,9 +457,10 @@ class HistoryManager:
                 "failed": 0,
                 "compatible": True,
                 "holding_hours": 24,
-                "scope": "單幣15m短線歷史勝率；可選3天、7天、30天、3／6／9／12個月；4H／長線卡完全不使用此功能。",
+                "scope": "單幣15m短線歷史勝率；長區間每7天保存一段，可續跑；4H／長線卡完全不使用此功能。",
                 "assumptions": (
-                    "每個15m收線點重跑價格核心；同一Episode只取第一次達到可進場的收線點。"
+                    "每個15m收線點重跑價格核心；Episode先統計首次可進，之後須連續至少4根15m不可進再重新可進才算有效再進。"
+                    "長區間以連續7天區段回放，每段自帶1天Episode暖機並保存完成結果。"
                     "固定當時SL／TP1，使用後續已收線5m判定最多24小時；未扣費，且不含完整歷史OI／CVD、"
                     "實際Bid／Ask、深度或訂單簿。"
                 ),
@@ -386,9 +480,10 @@ class HistoryManager:
             base["note"] = NOTE
             base["coins"] = coins
             base["storage_bytes"] = self.path.stat().st_size if self.path.exists() else 0
-            base["scope"] = "單幣15m短線歷史勝率；可選3天、7天、30天、3／6／9／12個月；4H／長線卡完全不使用此功能。"
+            base["scope"] = "單幣15m短線歷史勝率；長區間每7天保存一段，可續跑；4H／長線卡完全不使用此功能。"
             base["assumptions"] = (
-                "每個15m收線點重跑價格核心；同一Episode只取第一次達到可進場的收線點。"
+                "每個15m收線點重跑價格核心；Episode先統計首次可進，之後須連續至少4根15m不可進再重新可進才算有效再進。"
+                "長區間以連續7天區段回放，每段自帶1天Episode暖機並保存完成結果。"
                 "固定當時SL／TP1，使用後續已收線5m判定最多24小時；未扣費，且不含完整歷史OI／CVD、"
                 "實際Bid／Ask、深度或訂單簿。"
             )
@@ -525,12 +620,14 @@ class HistoryManager:
             now = int(time.time() * 1000)
             end = (now // CORE * CORE) - DAY - STEP
             end = end // CORE * CORE
+            start = end - requested_days * DAY
+            chunks = _chunk_ranges(start, end)
             job = uuid.uuid4().hex
             with _connect(self.path) as connection:
                 connection.execute(
                     """INSERT INTO history_jobs_v1
                     (id,created_ms,fingerprint,settings,inst_id,days,start_ms,end_ms,status,total)
-                    VALUES(?,?,?,?,?,?,?,?, 'QUEUED',1)""",
+                    VALUES(?,?,?,?,?,?,?,?, 'QUEUED',?)""",
                     (
                         job,
                         now,
@@ -538,8 +635,9 @@ class HistoryManager:
                         json.dumps(self.settings),
                         inst_id,
                         requested_days,
-                        end - requested_days * DAY,
+                        start,
                         end,
+                        len(chunks),
                     ),
                 )
             self._spawn(job)
@@ -597,9 +695,9 @@ def run_job(path: Path, job: str) -> None:
                     "SELECT control,live_busy FROM history_jobs_v1 WHERE id=?", (job,)
                 ).fetchone()
             if control is None or control["control"] == "PAUSE":
-                raise Interrupted("使用者暫停；已完成進度保留。")
+                raise Interrupted("使用者暫停；已完成區段保留，續跑會接剩餘區段。")
             if time.monotonic() - started >= MAX_WALL_SECONDS:
-                raise Interrupted("單次工作已達60分鐘保護上限，按續跑可接續；不是已完成。")
+                raise Interrupted("單次工作已達60分鐘保護上限；已完成區段保留，按續跑接剩餘區段。")
             if not control["live_busy"]:
                 break
             _update(
@@ -628,15 +726,10 @@ def run_job(path: Path, job: str) -> None:
             if instrument is None:
                 raise ValueError(f"OKX目前沒有可用的 {meta['inst_id']} USDT永續合約")
             saved = [asdict(instrument)]
-            _update(path, job, total=1, instruments=json.dumps(saved))
+            _update(path, job, instruments=json.dumps(saved))
 
-        with _connect(path) as connection:
-            done = {
-                row[0]
-                for row in connection.execute(
-                    "SELECT inst_id FROM history_symbols_v1 WHERE job_id=?", (job,)
-                )
-            }
+        chunks = _chunk_ranges(int(meta["start_ms"]), int(meta["end_ms"]))
+        _update(path, job, total=len(chunks))
         cfg = config_for_replay(settings)
         limits = {
             "4H": cfg.candle_limit_4h,
@@ -644,78 +737,109 @@ def run_job(path: Path, job: str) -> None:
             "15m": cfg.candle_limit_15m,
             "5m": max(288, cfg.candle_limit_5m),
         }
+
         for raw in saved:
-            if raw["inst_id"] in done:
-                continue
-            checkpoint()
-            if path.stat().st_size > MAX_DATABASE_BYTES:
-                raise Interrupted("單幣歷史暫存達32MB保護上限；請清除不需要的研究資料。")
             instrument = Instrument(**raw)
-            _update(path, job, current_symbol=instrument.inst_id)
-            try:
-                histories: dict[str, Any] = {}
-                for tf, interval in INTERVALS.items():
-                    begin = meta["start_ms"] - DAY - (limits[tf] + 2) * interval
-                    finish = (
-                        meta["end_ms"] + DAY + STEP
-                        if tf == "5m"
-                        else meta["end_ms"]
+            with _connect(path) as connection:
+                completed_chunks = {
+                    int(row[0])
+                    for row in connection.execute(
+                        "SELECT start_ms FROM history_chunks_v1 "
+                        "WHERE job_id=? AND inst_id=? AND status='OK'",
+                        (job, instrument.inst_id),
                     )
-                    histories[tf] = fetch_history(
-                        client,
-                        instrument.inst_id,
-                        tf,
-                        begin,
-                        finish,
+                }
+            _update(path, job, current_symbol=instrument.inst_id)
+            for chunk_start, chunk_end in chunks:
+                if chunk_start in completed_chunks:
+                    continue
+                checkpoint()
+                if path.stat().st_size > MAX_DATABASE_BYTES:
+                    raise Interrupted("單幣歷史暫存達32MB保護上限；請清除不需要的研究資料。")
+                try:
+                    histories: dict[str, Any] = {}
+                    for tf, interval in INTERVALS.items():
+                        begin = chunk_start - DAY - (limits[tf] + 2) * interval
+                        finish = (
+                            chunk_end + DAY + STEP
+                            if tf == "5m"
+                            else chunk_end
+                        )
+                        histories[tf] = fetch_history(
+                            client,
+                            instrument.inst_id,
+                            tf,
+                            begin,
+                            finish,
+                            checkpoint,
+                        )
+                    if any(not rows for rows in histories.values()):
+                        raise ValueError("必要週期歷史為空")
+                    result = replay_symbol(
+                        instrument,
+                        histories,
+                        chunk_start,
+                        chunk_end,
+                        settings,
                         checkpoint,
                     )
-                if any(not rows for rows in histories.values()):
-                    raise ValueError("必要週期歷史為空")
-                result = replay_symbol(
-                    instrument,
-                    histories,
-                    meta["start_ms"],
-                    meta["end_ms"],
-                    settings,
-                    checkpoint,
-                )
-            except Interrupted:
-                raise
-            except (Exception, MemoryError) as exc:
-                result = {
-                    "inst_id": instrument.inst_id,
-                    "status": "ERROR",
-                    "samples": [],
-                    "error": (type(exc).__name__ + ": " + str(exc))[:240],
-                }
-            with _connect(path) as connection:
-                connection.execute(
-                    "INSERT OR REPLACE INTO history_symbols_v1 VALUES(?,?,?,?)",
-                    (
-                        job,
-                        instrument.inst_id,
-                        result["status"],
-                        json.dumps(result, ensure_ascii=False),
-                    ),
-                )
-            _rebuild(path, job, complete=False)
+                except Interrupted:
+                    raise
+                except (Exception, MemoryError) as exc:
+                    result = {
+                        "inst_id": instrument.inst_id,
+                        "status": "ERROR",
+                        "samples": [],
+                        "error": (type(exc).__name__ + ": " + str(exc))[:240],
+                    }
+                result["chunk_start_ms"] = chunk_start
+                result["chunk_end_ms"] = chunk_end
+                with _connect(path) as connection:
+                    connection.execute(
+                        "INSERT OR REPLACE INTO history_chunks_v1 "
+                        "(job_id,inst_id,start_ms,end_ms,status,result) VALUES(?,?,?,?,?,?)",
+                        (
+                            job,
+                            instrument.inst_id,
+                            chunk_start,
+                            chunk_end,
+                            result["status"],
+                            json.dumps(result, ensure_ascii=False),
+                        ),
+                    )
+                _rebuild(path, job, complete=False)
 
         _rebuild(path, job, complete=True)
         with _connect(path) as connection:
             row = connection.execute(
-                "SELECT summary FROM history_jobs_v1 WHERE id=?", (job,)
+                "SELECT summary,failed,done,total FROM history_jobs_v1 WHERE id=?", (job,)
             ).fetchone()
-        excluded = json.loads(row["summary"]).get("excluded", []) if row else []
-        _update(
-            path,
-            job,
-            status="PARTIAL_COMPLETE" if excluded else "COMPLETE",
-            current_symbol="",
-            heartbeat_ms=int(time.time() * 1000),
-        )
+        summary = json.loads(row["summary"]) if row else {}
+        excluded = summary.get("excluded", [])
+        failed = int(row["failed"]) if row else 0
+        if failed:
+            _update(
+                path,
+                job,
+                status="ERROR",
+                error=f"{failed} 個歷史區段失敗；已完成區段保留，按續跑只重試失敗區段。",
+                current_symbol="",
+                heartbeat_ms=int(time.time() * 1000),
+            )
+        else:
+            _update(
+                path,
+                job,
+                status="PARTIAL_COMPLETE" if excluded else "COMPLETE",
+                error="",
+                current_symbol="",
+                heartbeat_ms=int(time.time() * 1000),
+            )
     except Interrupted as exc:
+        _rebuild(path, job, complete=False)
         _update(path, job, status="PAUSED", error=str(exc), current_symbol="")
     except (Exception, MemoryError) as exc:
+        _rebuild(path, job, complete=False)
         _update(
             path,
             job,
