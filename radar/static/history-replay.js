@@ -6,7 +6,7 @@
   const terminal = new Set(['COMPLETE', 'PARTIAL_COMPLETE']);
   const esc = value => String(value ?? '').replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
   const finite = value => value !== null && value !== undefined && typeof value !== 'boolean' && Number.isFinite(Number(value)) ? Number(value) : null;
-  const periodLabel = days => ({3:'3天',7:'7天',30:'30天',90:'3個月',180:'6個月',270:'9個月',365:'12個月'})[Number(days || 7)] || `${Number(days || 7)}天`;
+  const periodLabel = days => ({3:'3天',7:'7天',14:'14天',30:'30天'})[Number(days || 7)] || `${Number(days || 7)}天`;
   let data = null;
   let fetching = false;
 
@@ -48,138 +48,103 @@
   }
 
   function coinLink(instId) {
-    return `<a class="history-replay-link" href="/history-scan?inst_id=${encodeURIComponent(instId)}">更新歷史勝率 →</a>`;
+    return `<a class="history-replay-link" href="/history-scan?inst_id=${encodeURIComponent(instId)}">更新勝率 →</a>`;
   }
 
-  function textFor(item) {
-    const instId = String(item?.inst_id || '').toUpperCase();
-    const link = coinLink(instId);
-    const coin = snapshot(instId);
-    const key = keyFor(item);
-    if (!data || data.schema_version !== VERSION) {
-      return `<div class="history-replay-heading"><h3>本幣 15m 歷史勝率</h3><strong>尚未載入</strong></div><p>讀取本幣歷史資料中。</p>${link}`;
-    }
-    if (!coin) {
-      return `<div class="history-replay-heading"><h3>本幣 15m 歷史勝率</h3><strong>尚未更新</strong></div><p>${esc(instId)} 尚無歷史勝率。</p>${link}`;
-    }
-    if (coin.compatible === false || coin.status === 'VERSION_CHANGED') {
-      return `<div class="history-replay-heading"><h3>本幣 15m 歷史勝率</h3><strong>版本已變更</strong></div><p>請重新更新 ${esc(instId)}。</p>${link}`;
-    }
-    if (!terminal.has(coin.status)) {
-      const label = coin.status === 'WAITING_LIVE_SCAN' ? '即時掃描優先，歷史暫候' : coin.status === 'PAUSED' ? '歷史更新已暫停' : coin.status === 'INTERRUPTED' ? '歷史更新中斷，可續跑' : coin.status === 'ERROR' ? '歷史更新失敗' : '歷史更新中';
-      return `<div class="history-replay-heading"><h3>本幣 15m 歷史勝率</h3><strong>${esc(label)}</strong></div><p>${esc(instId)}｜最近 ${esc(periodLabel(coin.days || 7))}｜處理 ${esc(coin.done || 0)}/${esc(coin.total || 1)}</p>${link}`;
-    }
-
-    const overall = coin.overall || {};
-    const overallCounts = counts(overall);
-    const split = opportunitySplit(coin, overallCounts.total);
-    const rate = finite(overall.rate_pct);
-    const headline = rate === null ? (overallCounts.total ? '尚無已判定結果' : '沒有進場機會') : `${rate.toFixed(1)}%`;
-    const tier = String(overall.tier || (overallCounts.resolved ? '短期樣本' : ''));
-    const coverage = finite(overall.coverage_pct);
-    let detail = `${instId}｜近 ${periodLabel(coin.days || 7)} 15m｜有效進場機會 ${overallCounts.total} 筆（首進 ${split.initial}｜再進 ${split.reentry}）｜已判定 ${overallCounts.resolved} 筆`;
-    if (overallCounts.resolved) detail += `：TP1 ${overallCounts.wins}｜SL ${overallCounts.losses}`;
-    if (overallCounts.timeout || overallCounts.unknown) detail += `｜Timeout ${overallCounts.timeout}｜不明 ${overallCounts.unknown}`;
-    if (tier) detail += `｜${tier}`;
-
-    let cohortHtml = '';
-    const cohort = key ? coin.groups?.[key] : null;
-    if (cohort) {
-      const c = counts(cohort);
-      const cohortRate = finite(cohort.rate_pct);
-      cohortHtml = `<p><b>目前同類情境：</b>${cohortRate === null ? '尚無已判定結果' : cohortRate.toFixed(1) + '%'}｜進場機會 ${c.total} 筆｜已判定 ${c.resolved} 筆${c.resolved ? `｜TP1 ${c.wins}／SL ${c.losses}` : ''}</p>`;
-    } else if (key && overallCounts.total) {
-      cohortHtml = '<p><b>目前同類情境：</b>這次本幣回放沒有相同情境樣本。</p>';
-    }
-
-    const interval = Array.isArray(overall.interval_pct) && overall.interval_pct.length === 2 ? `Wilson 95% 描述區間 ${overall.interval_pct[0]}%～${overall.interval_pct[1]}%。` : '';
-    const period = coin.start_ms && coin.end_ms ? `${new Date(coin.start_ms).toLocaleString('zh-TW',{timeZone:'Asia/Taipei'})} ～ ${new Date(coin.end_ms).toLocaleString('zh-TW',{timeZone:'Asia/Taipei'})}` : '—';
-    return `<div class="history-replay-heading"><h3>本幣 15m 歷史勝率</h3><strong data-replay-rate>${esc(headline)}</strong></div><p>${esc(detail)}</p>${cohortHtml}<small>15m 有效進場機會統計，不影響進場資格。</small><details><summary>歷史來源與限制</summary><p>${esc(interval)}</p><p>訊號期間（台灣時間）：${esc(period)}</p><p>逐個15m收線點重跑價格核心；每個Episode先算第一次可進。若之後連續至少4根15m（1小時）不可進，再重新回到可進，才另算一次有效再進。每筆固定當時SL／TP1，再用後續已收線5m判定24小時內TP1或SL誰先到。</p><p>沒有完整歷史OI／CVD、實際Bid／Ask、深度與訂單簿；未扣手續費、滑價與資金費，因此不是實盤成交獲利率。</p></details>${link}`;
-  }
-
-  function card(item, preview = false) {
-    if (preview || item?.radar_horizon !== 'SHORT') return '';
-    const instId = String(item?.inst_id || '').toUpperCase();
-    if (!instId) return '';
-    return `<section class="history-replay-card" aria-label="本幣15m歷史勝率" data-replay-inst="${esc(instId)}" data-replay-key="${esc(encodeURIComponent(keyFor(item) || ''))}">${textFor(item)}</section>`;
-  }
-
-  function preflight(instId) {
-    instId = String(instId || '').toUpperCase();
-    if (!instId) return '';
-    const link = `<a class="history-replay-link" href="/history-scan?inst_id=${encodeURIComponent(instId)}">歷史 K 棒勝率 →</a>`;
-    const coin = snapshot(instId);
-    if (!data || data.schema_version !== VERSION) {
-      return `<section class="history-replay-card preflight-history-rate" aria-label="15m進場前更新歷史K棒勝率"><div class="history-replay-heading"><h3>歷史 K 棒勝率｜本幣 15m</h3><strong>載入中</strong></div><p>讀取既有歷史結果；本次不重跑。</p>${link}</section>`;
-    }
-    if (!coin) {
-      return `<section class="history-replay-card preflight-history-rate" aria-label="15m進場前更新歷史K棒勝率"><div class="history-replay-heading"><h3>歷史 K 棒勝率｜本幣 15m</h3><strong>尚未更新</strong></div><p>${esc(instId)} 尚無歷史勝率；本次不自動回測。</p>${link}</section>`;
-    }
-    if (coin.compatible === false || coin.status === 'VERSION_CHANGED') {
-      return `<section class="history-replay-card preflight-history-rate" aria-label="15m進場前更新歷史K棒勝率"><div class="history-replay-heading"><h3>歷史 K 棒勝率｜本幣 15m</h3><strong>版本已變更</strong></div><p>請手動更新歷史勝率。</p>${link}</section>`;
-    }
-    if (!terminal.has(coin.status)) {
-      const label = coin.status === 'PAUSED' ? '歷史更新已暫停' : coin.status === 'INTERRUPTED' ? '歷史更新中斷' : coin.status === 'ERROR' ? '歷史更新失敗' : '歷史更新中';
-      return `<section class="history-replay-card preflight-history-rate" aria-label="15m進場前更新歷史K棒勝率"><div class="history-replay-heading"><h3>歷史 K 棒勝率｜本幣 15m</h3><strong>${esc(label)}</strong></div><p>${esc(instId)}｜歷史資料處理中。</p>${link}</section>`;
-    }
+  function completedMarkup(instId, coin, heading = '本幣 15m 歷史勝率') {
     const overall = coin.overall || {};
     const n = counts(overall);
     const split = opportunitySplit(coin, n.total);
     const rate = finite(overall.rate_pct);
     const headline = rate === null ? (n.total ? '尚無已判定結果' : '沒有進場機會') : `${rate.toFixed(1)}%`;
-    let detail = `${instId}｜近 ${periodLabel(coin.days || 7)} 15m｜有效進場機會 ${n.total} 筆（首進 ${split.initial}｜再進 ${split.reentry}）｜已判定 ${n.resolved} 筆`;
-    if (n.resolved) detail += `：TP1 ${n.wins}｜SL ${n.losses}`;
-    if (overall.tier) detail += `｜${overall.tier}`;
-    return `<section class="history-replay-card preflight-history-rate" aria-label="15m進場前更新歷史K棒勝率"><div class="history-replay-heading"><h3>歷史 K 棒勝率｜本幣 15m</h3><strong data-preflight-history-rate>${esc(headline)}</strong></div><p>${esc(detail)}</p><small>進場前更新只讀這份結果，不重跑。</small>${link}</section>`;
+    const tier = String(overall.tier || (n.resolved ? '短期樣本' : ''));
+    const interval = Array.isArray(overall.interval_pct) && overall.interval_pct.length === 2
+      ? `Wilson 95% 描述區間 ${overall.interval_pct[0]}%～${overall.interval_pct[1]}%。`
+      : '';
+    const period = coin.start_ms && coin.end_ms
+      ? `${new Date(coin.start_ms).toLocaleString('zh-TW',{timeZone:'Asia/Taipei'})} ～ ${new Date(coin.end_ms).toLocaleString('zh-TW',{timeZone:'Asia/Taipei'})}`
+      : '—';
+    const unresolved = n.timeout || n.unknown ? `｜Timeout ${n.timeout}｜不明 ${n.unknown}` : '';
+    return `<div class="history-replay-heading"><h3>${esc(heading)}</h3><strong data-replay-rate>${esc(headline)}</strong></div>
+      <div class="history-replay-metrics">
+        <div><span>期間</span><b>${esc(periodLabel(coin.days || 7))}</b></div>
+        <div><span>有效機會</span><b>${n.total}</b></div>
+        <div><span>首進 / 再進</span><b>${split.initial} / ${split.reentry}</b></div>
+        <div><span>TP1 / SL</span><b>${n.wins} / ${n.losses}</b></div>
+      </div>
+      <p class="history-replay-status-line">已判定 ${n.resolved} 筆${tier ? `｜${esc(tier)}` : ''}${unresolved}</p>
+      <details><summary>統計說明</summary><div class="history-replay-details"><p>${esc(interval)}</p><p>訊號期間（台灣）：${esc(period)}</p><p>同一 Episode 連續可進不重複計數；失去可進至少 4 根 15m 後重新可進，才算有效再進。</p><p>未扣手續費、滑價與資金費；沒有完整歷史 OI／CVD、Bid／Ask、深度與訂單簿，因此不是實盤成交獲利率。</p></div></details>
+      ${coinLink(instId)}`;
+  }
+
+  function markupFor(instId, coin, heading = '本幣 15m 歷史勝率') {
+    if (!data || data.schema_version !== VERSION) {
+      return `<div class="history-replay-heading"><h3>${esc(heading)}</h3><strong>載入中</strong></div><p>讀取歷史資料中。</p>${coinLink(instId)}`;
+    }
+    if (!coin) {
+      return `<div class="history-replay-heading"><h3>${esc(heading)}</h3><strong>尚未更新</strong></div><p>${esc(instId)} 尚無歷史勝率。</p>${coinLink(instId)}`;
+    }
+    if (coin.compatible === false || coin.status === 'VERSION_CHANGED') {
+      return `<div class="history-replay-heading"><h3>${esc(heading)}</h3><strong>需重新更新</strong></div><p>歷史算法或設定已變更。</p>${coinLink(instId)}`;
+    }
+    if (!terminal.has(coin.status)) {
+      const label = coin.status === 'WAITING_LIVE_SCAN' ? '即時掃描優先，歷史暫候' : coin.status === 'PAUSED' ? '已暫停，可續跑' : coin.status === 'INTERRUPTED' ? '已中斷，可續跑' : coin.status === 'ERROR' ? '更新失敗' : '更新中';
+      return `<div class="history-replay-heading"><h3>${esc(heading)}</h3><strong>${esc(label)}</strong></div><div class="history-replay-metrics compact"><div><span>期間</span><b>${esc(periodLabel(coin.days || 7))}</b></div><div><span>進度</span><b>${esc(coin.done || 0)} / ${esc(coin.total || 1)}</b></div></div>${coinLink(instId)}`;
+    }
+    return completedMarkup(instId, coin, heading);
+  }
+
+  function organizeSignalCards() {
+    document.querySelectorAll('.history-stats-panel').forEach(panel => {
+      panel.hidden = true;
+      panel.setAttribute('aria-hidden', 'true');
+    });
+    document.querySelectorAll('.signal-card').forEach(cardEl => {
+      let grid = cardEl.querySelector(':scope > .decision-front-grid');
+      const decision = cardEl.querySelector(':scope > .decision-panel');
+      const directQuick = cardEl.querySelector(':scope > .quicklook-panel');
+      const directHistory = cardEl.querySelector(':scope > .history-replay-card');
+      const quick = directQuick || grid?.querySelector(':scope > .quicklook-panel');
+      const history = directHistory || grid?.querySelector(':scope > .history-replay-card');
+      if (!quick && !history) return;
+      if (!grid) {
+        grid = document.createElement('div');
+        grid.className = 'decision-front-grid';
+        if (decision) cardEl.insertBefore(grid, decision);
+        else cardEl.insertBefore(grid, cardEl.firstChild?.nextSibling || null);
+      }
+      if (quick && quick.parentElement !== grid) grid.appendChild(quick);
+      if (history && history.parentElement !== grid) grid.appendChild(history);
+      grid.classList.toggle('single', !(quick && history));
+    });
+  }
+
+  function card(item, preview = false) {
+    queueMicrotask(organizeSignalCards);
+    if (preview || item?.radar_horizon !== 'SHORT') return '';
+    const instId = String(item?.inst_id || '').toUpperCase();
+    if (!instId) return '';
+    return `<section class="history-replay-card" aria-label="本幣15m歷史勝率" data-replay-inst="${esc(instId)}">${markupFor(instId, snapshot(instId))}</section>`;
+  }
+
+  function preflight(instId) {
+    instId = String(instId || '').toUpperCase();
+    if (!instId) return '';
+    return `<section class="history-replay-card preflight-history-rate" aria-label="本幣15m歷史勝率" data-replay-inst="${esc(instId)}">${markupFor(instId, snapshot(instId), '本幣 15m 歷史勝率')}</section>`;
   }
 
   function refreshCards() {
     for (const panel of document.querySelectorAll('.history-replay-card')) {
-      let key = '';
-      try { key = decodeURIComponent(panel.dataset.replayKey || ''); } catch (_) {}
-      const synthetic = {
-        inst_id: panel.dataset.replayInst || '',
-        radar_horizon: 'SHORT',
-      };
-      // Existing cards already carry a cohort key. Re-render directly from it
-      // instead of reconstructing trade fields that are not stored in dataset.
-      const instId = String(synthetic.inst_id || '').toUpperCase();
-      const coin = snapshot(instId);
-      const link = coinLink(instId);
-      let html;
-      if (!data || data.schema_version !== VERSION) {
-        html = `<div class="history-replay-heading"><h3>本幣 15m 歷史勝率</h3><strong>尚未載入</strong></div><p>讀取本幣歷史資料中。</p>${link}`;
-      } else if (!coin) {
-        html = `<div class="history-replay-heading"><h3>本幣 15m 歷史勝率</h3><strong>尚未更新</strong></div><p>${esc(instId)} 尚無歷史勝率。</p>${link}`;
-      } else {
-        const overall = coin.overall || {};
-        const n = counts(overall);
-        const split = opportunitySplit(coin, n.total);
-        const rate = finite(overall.rate_pct);
-        if (coin.compatible === false || coin.status === 'VERSION_CHANGED') {
-          html = `<div class="history-replay-heading"><h3>本幣 15m 歷史勝率</h3><strong>版本已變更</strong></div><p>請重新更新 ${esc(instId)}。</p>${link}`;
-        } else if (!terminal.has(coin.status)) {
-          const label = coin.status === 'PAUSED' ? '歷史更新已暫停' : coin.status === 'INTERRUPTED' ? '歷史更新中斷，可續跑' : coin.status === 'ERROR' ? '歷史更新失敗' : coin.status === 'WAITING_LIVE_SCAN' ? '即時掃描優先，歷史暫候' : '歷史更新中';
-          html = `<div class="history-replay-heading"><h3>本幣 15m 歷史勝率</h3><strong>${esc(label)}</strong></div><p>${esc(instId)}｜最近 ${esc(periodLabel(coin.days || 7))}</p>${link}`;
-        } else {
-          const headline = rate === null ? (n.total ? '尚無已判定結果' : '沒有進場機會') : `${rate.toFixed(1)}%`;
-          let detail = `${instId}｜近 ${periodLabel(coin.days || 7)} 15m｜有效進場機會 ${n.total} 筆（首進 ${split.initial}｜再進 ${split.reentry}）｜已判定 ${n.resolved} 筆`;
-          if (n.resolved) detail += `：TP1 ${n.wins}｜SL ${n.losses}`;
-          if (overall.tier) detail += `｜${overall.tier}`;
-          const cohort = key ? coin.groups?.[key] : null;
-          let same = '';
-          if (cohort) {
-            const c = counts(cohort), cr = finite(cohort.rate_pct);
-            same = `<p><b>目前同類情境：</b>${cr === null ? '尚無已判定結果' : cr.toFixed(1) + '%'}｜進場機會 ${c.total} 筆｜已判定 ${c.resolved} 筆</p>`;
-          }
-          html = `<div class="history-replay-heading"><h3>本幣 15m 歷史勝率</h3><strong data-replay-rate>${esc(headline)}</strong></div><p>${esc(detail)}</p>${same}<small>只用本幣15m有效進場機會；非本單預測，不改進場資格。</small>${link}`;
-        }
-      }
+      const instId = String(panel.dataset.replayInst || '').toUpperCase();
+      if (!instId) continue;
+      const heading = panel.classList.contains('preflight-history-rate') ? '本幣 15m 歷史勝率' : '本幣 15m 歷史勝率';
+      const html = markupFor(instId, snapshot(instId), heading);
       if (panel._historyMarkup !== html) {
         panel._historyMarkup = html;
         panel.innerHTML = html;
       }
     }
+    organizeSignalCards();
   }
 
   async function refresh() {
@@ -200,7 +165,7 @@
     }
   }
 
-  window.HistoryReplay = {card, preflight, refresh, refreshCards, keyFor, snapshot};
+  window.HistoryReplay = {card, preflight, refresh, refreshCards, keyFor, snapshot, organizeSignalCards};
   const boot = () => refresh();
   if (document.readyState === 'loading') document.addEventListener('DOMContentLoaded', boot, {once:true});
   else boot();
