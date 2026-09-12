@@ -5,10 +5,10 @@
   const $ = id => document.getElementById(id);
   const active = new Set(['QUEUED','RUNNING','WAITING_LIVE_SCAN']);
   const labels = {
-    IDLE:'尚未建立本幣歷史資料', QUEUED:'準備本幣歷史更新', RUNNING:'本幣15m歷史更新中',
-    WAITING_LIVE_SCAN:'即時掃描優先，歷史暫候', PAUSED:'本幣歷史已暫停', INTERRUPTED:'本幣歷史中斷，可續跑',
-    ERROR:'本幣歷史更新失敗', COMPLETE:'本幣15m歷史更新完成', PARTIAL_COMPLETE:'本幣歷史完成，但部分窗口不足',
-    VERSION_CHANGED:'版本／設定已變更，請重新更新本幣'
+    IDLE:'尚未建立本幣歷史資料', QUEUED:'準備更新', RUNNING:'15m 歷史更新中',
+    WAITING_LIVE_SCAN:'即時掃描優先，歷史暫候', PAUSED:'歷史已暫停', INTERRUPTED:'歷史中斷，可續跑',
+    ERROR:'歷史更新失敗', COMPLETE:'15m 歷史更新完成', PARTIAL_COMPLETE:'更新完成，但部分窗口不足',
+    VERSION_CHANGED:'版本／設定已變更，請重新更新'
   };
 
   function normalize(raw) {
@@ -35,7 +35,7 @@
 
   function periodLabel(days) {
     const n = Number(days || 7);
-    return ({3:'3天',7:'7天',30:'30天',90:'3個月',180:'6個月',270:'9個月',365:'12個月'})[n] || `${n}天`;
+    return ({3:'3日',7:'7日',14:'14日',30:'30日'})[n] || `${n}日`;
   }
 
   function render(data) {
@@ -47,7 +47,7 @@
     const sameActive = !!inst && activeInst === inst;
     const valid = !!inst;
     const state = coin?.status || (sameActive ? latest.status : 'IDLE');
-    $('selected').textContent = valid ? `目前幣種：${inst}` : '請輸入幣種，例如 BTC 或 BTC-USDT-SWAP。';
+    $('selected').textContent = valid ? inst : '請輸入幣種，例如 BTC';
     $('status').textContent = labels[state] || '讀取中';
 
     const done = coin?.done ?? (sameActive ? latest?.done : 0) ?? 0;
@@ -64,18 +64,18 @@
     const losses = Number(overall.losses || 0);
     const rate = overall.rate_pct;
     if (coin && ['COMPLETE','PARTIAL_COMPLETE'].includes(coin.status)) {
-      $('counts').textContent = `${inst}｜近 ${periodLabel(coin.days)}｜15m有效進場機會 ${totalSignals} 筆（首進 ${initialSignals}｜有效再進 ${reentrySignals}）｜已判定 ${resolved} 筆｜TP1 ${wins}｜SL ${losses}${rate === null || rate === undefined ? '' : `｜TP1先達率 ${Number(rate).toFixed(1)}%`}｜${overall.tier || '樣本統計中'}`;
+      $('counts').textContent = `${periodLabel(coin.days)}｜勝率 ${rate === null || rate === undefined ? '—' : Number(rate).toFixed(1) + '%'}｜有效機會 ${totalSignals}（首進 ${initialSignals}／再進 ${reentrySignals}）｜已判定 ${resolved}｜TP1 ${wins}／SL ${losses}｜${overall.tier || '樣本統計中'}`;
     } else if (sameActive) {
-      $('counts').textContent = `${inst}｜近 ${periodLabel(latest.days || Number($('days').value))}｜處理 ${done}/${total}`;
+      $('counts').textContent = `${periodLabel(latest.days || Number($('days').value))}｜處理區段 ${done}/${total}`;
     } else if (coin) {
-      $('counts').textContent = `${inst}｜${labels[coin.status] || coin.status}`;
+      $('counts').textContent = labels[coin.status] || coin.status;
     } else {
-      $('counts').textContent = valid ? `${inst} 尚未做過單幣15m歷史更新。` : '尚未選擇幣種。';
+      $('counts').textContent = valid ? '尚未做過這顆幣的 15m 歷史更新。' : '輸入幣種後即可更新。';
     }
 
-    $('current').textContent = globalBusy && activeInst ? `伺服器目前處理：${activeInst}` : '';
-    $('period').textContent = coin?.start_ms ? `訊號期間（台灣）：${fmtTime(coin.start_ms)} ～ ${fmtTime(coin.end_ms)}` : '';
-    $('storage').textContent = `單幣歷史資料庫：約 ${((latest?.storage_bytes || 0) / 1048576).toFixed(2)} MB（上限32MB）。`;
+    $('current').textContent = globalBusy && activeInst ? `目前處理：${activeInst}` : '';
+    $('period').textContent = coin?.start_ms ? `期間：${fmtTime(coin.start_ms)} ～ ${fmtTime(coin.end_ms)}` : '';
+    $('storage').textContent = `歷史資料庫約 ${((latest?.storage_bytes || 0) / 1048576).toFixed(2)} MB／32 MB`;
     $('error').textContent = sameActive ? (latest?.error || '') : (coin?.error || (globalBusy && activeInst && activeInst !== inst ? `${activeInst} 正在更新；一次只跑一顆幣。` : ''));
 
     $('excluded').replaceChildren();
@@ -83,7 +83,7 @@
     if (!excluded.length) $('excluded').textContent = coin ? '沒有已列出的歷史缺漏。' : '尚無本幣歷史資料。';
     for (const row of excluded) {
       const p = document.createElement('p');
-      p.textContent = `${row.inst_id || inst}：${row.reason || row.status}（已核對15m窗口 ${row.evaluated || 0}）`;
+      p.textContent = `${row.reason || row.status}（已核對 15m 窗口 ${row.evaluated || 0}）`;
       $('excluded').append(p);
     }
 
@@ -108,8 +108,8 @@
     if (clearAll) {
       const count = Object.keys(latest?.coins || {}).length;
       if (!count) return;
-      if (!confirm(`確定清除目前儲存的 ${count} 顆幣全部歷史 K 線勝率資料？`)) return;
-      if (!confirm('最後確認：清除後所有單幣歷史勝率都要重新手動更新。仍要全部清除嗎？')) return;
+      if (!confirm(`確定清除目前儲存的 ${count} 顆幣全部歷史資料？`)) return;
+      if (!confirm('最後確認：清除後各幣都要重新手動更新。仍要全部清除嗎？')) return;
     }
     busy = true;
     render(latest);
