@@ -1,6 +1,10 @@
 from tests import legacy_strategy_cases as _legacy
 from radar.strategy import _entry_eligibility
 
+for _name in dir(_legacy):
+    if not _name.startswith("__"):
+        globals()[_name] = getattr(_legacy, _name)
+
 
 class StrategyTests(_legacy.StrategyTests):
     def test_old_episode_cannot_reopen_from_live_price_without_closed_retest(self):
