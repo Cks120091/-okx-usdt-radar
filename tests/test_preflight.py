@@ -1,6 +1,10 @@
 from tests import legacy_preflight_cases as _legacy
 from radar.preflight import build_preflight_payload
 
+for _name in dir(_legacy):
+    if not _name.startswith("__"):
+        globals()[_name] = getattr(_legacy, _name)
+
 
 class PreflightTests(_legacy.PreflightTests):
     def test_adverse_side_hides_artificial_live_rr_without_mutating_trigger(self):
