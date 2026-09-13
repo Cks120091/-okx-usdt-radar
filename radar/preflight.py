@@ -15,6 +15,14 @@ _SOFT_CODES = {
     "RISK_REWARD",
     "EXECUTION_COST",
 }
+_ADVISORY_CODES = {
+    "RR_INSUFFICIENT": "RR_ADVISORY",
+    "RISK_REWARD": "RR_ADVISORY",
+    "EXECUTION_COST_TOO_HIGH": "EXECUTION_COST_ADVISORY",
+    "EXECUTION_COST": "EXECUTION_COST_ADVISORY",
+    "STOP_LOSS": "STOP_WIDTH_ADVISORY",
+    "ANOMALY": "DISORDER_CONTEXT",
+}
 
 
 def _explicit_anomaly(signal) -> bool:
@@ -36,9 +44,8 @@ def build_preflight_payload(*args, **kwargs):
     retained: list[str] = []
     for code in blockers:
         soft = code in _SOFT_CODES
-        # STOP_LOSS here is the old decision-layer stop-distance check, not an
-        # actual crossed stop.  A real crossed stop has already made lifecycle
-        # INVALIDATED before this post-processing step.
+        # STOP_LOSS here means the decision-layer stop *width* check. A real
+        # crossed stop has already changed lifecycle to INVALIDATED above.
         if code == "STOP_LOSS" and lifecycle.get("status") == "ACTIVE":
             soft = True
         if (
@@ -52,10 +59,18 @@ def build_preflight_payload(*args, **kwargs):
 
     verdict["hard_blockers"] = retained
     verdict["advisory_blockers"] = softened
-    if softened:
-        verdict["risk_warnings"] = list(
-            dict.fromkeys([*verdict.get("risk_warnings", []), *softened])
-        )
+    original_warnings = [
+        str(code).strip().upper()
+        for code in verdict.get("risk_warnings", [])
+        if str(code).strip()
+    ]
+    softened_set = set(softened)
+    risk_warnings = [
+        _ADVISORY_CODES.get(code, code) if code in softened_set else code
+        for code in original_warnings
+    ]
+    risk_warnings.extend(_ADVISORY_CODES.get(code, code) for code in softened)
+    verdict["risk_warnings"] = list(dict.fromkeys(risk_warnings))
 
     can_reopen = bool(
         verdict.get("status") == "HARD_GATE_BLOCKED"
@@ -65,22 +80,22 @@ def build_preflight_payload(*args, **kwargs):
         and verdict.get("situation") == "IN_ENTRY_AREA"
     )
     if can_reopen:
-        verdict.update(
-            {
-                "status": "ENTRY_READY",
-                "label": "目前可進｜附風險提醒",
-                "reason": (
-                    "價格位於原 Entry Zone，必要成交與失效條件未阻擋；"
-                    "R:R／SL 寬度／交易成本占風險改列提醒，不再單獨封鎖。"
-                ),
-                "actionable": True,
-            }
-        )
+        verdict.update({
+            "status": "ENTRY_READY",
+            "label": "目前可進｜附風險提醒",
+            "reason": (
+                "價格位於原 Entry Zone，必要成交與失效條件未阻擋；"
+                "R:R／SL 寬度／交易成本占風險改列提醒，不再單獨封鎖。"
+            ),
+            "actionable": True,
+            "new_entry_allowed": True,
+        })
 
     confirmation_advisory = bool(
         verdict.get("status") == "ENTRY_READY"
         and live.get("reentry_confirmation_required") is True
         and live.get("closed_retest_confirmed") is not True
+        and live.get("entry_ready_once") is not True
     )
     if confirmation_advisory:
         live["reentry_confirmation_advisory"] = True
@@ -89,14 +104,13 @@ def build_preflight_payload(*args, **kwargs):
         live.setdefault("reentry_confirmation_advisory", False)
 
     if verdict.get("status") == "ENTRY_READY" and not retained:
-        plan_state.update(
-            {
-                "status": "ACTIVE",
-                "old_plan_reusable_for_new_entry": True,
-                "new_entry_status": "READY",
-                "new_entry_allowed": True,
-            }
-        )
+        verdict["new_entry_allowed"] = True
+        plan_state.update({
+            "status": "ACTIVE",
+            "old_plan_reusable_for_new_entry": True,
+            "new_entry_status": "READY",
+            "new_entry_allowed": True,
+        })
 
     payload["verdict"] = verdict
     payload["signal_lifecycle"] = lifecycle
