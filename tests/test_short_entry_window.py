@@ -1,6 +1,9 @@
 from tests import legacy_short_entry_window_cases as _legacy
 from radar.decision import build_decision_context
 
+for _name in dir(_legacy):
+    if not _name.startswith("__"):
+        globals()[_name] = getattr(_legacy, _name)
 
 DurableWindowTests = _legacy.DurableWindowTests
 EntryWindowTests = _legacy.EntryWindowTests
