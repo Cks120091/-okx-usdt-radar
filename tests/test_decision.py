@@ -1,6 +1,10 @@
 from tests import legacy_decision_cases as _legacy
 from radar.decision import build_decision_context
 
+for _name in dir(_legacy):
+    if not _name.startswith("__"):
+        globals()[_name] = getattr(_legacy, _name)
+
 
 class DecisionContextTests(_legacy.DecisionContextTests):
     def test_epsilon_beyond_each_hard_gate_limit_vetoes_entry(self):
