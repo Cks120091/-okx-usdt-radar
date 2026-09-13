@@ -10,6 +10,7 @@ class FusionBalancePolicyTests(unittest.TestCase):
         strategy = (ROOT / "radar/strategy.py").read_text(encoding="utf-8")
         decision = (ROOT / "radar/decision.py").read_text(encoding="utf-8")
         preflight = (ROOT / "radar/preflight.py").read_text(encoding="utf-8")
+        preflight_core = (ROOT / "radar/_preflight_core.py").read_text(encoding="utf-8")
         story = (ROOT / "radar/market_story.py").read_text(encoding="utf-8")
         self.assertIn("FUSION_BALANCED_V1", strategy)
         self.assertIn("FUSION_BALANCED_V1", decision)
@@ -18,10 +19,11 @@ class FusionBalancePolicyTests(unittest.TestCase):
         self.assertIn("RISK_REWARD", decision)
         self.assertIn("STOP_LOSS", decision)
         self.assertIn("EXECUTION_COST", decision)
-        self.assertIn("SPREAD_TOO_HIGH", preflight)
-        self.assertIn("SLIPPAGE_TOO_HIGH", preflight)
-        self.assertIn("LIQUIDITY_TOO_LOW", preflight)
-        self.assertIn("OPPOSITE_SIGNAL", preflight)
+        self.assertIn("RR_ADVISORY", preflight)
+        self.assertIn("EXECUTION_COST_ADVISORY", preflight)
+        for code in ("SPREAD_TOO_HIGH", "SLIPPAGE_TOO_HIGH", "LIQUIDITY_TOO_LOW", "OPPOSITE_SIGNAL"):
+            self.assertIn(code, preflight_core)
+            self.assertNotIn(f'"{code}": "', preflight)
         self.assertNotIn("fusion_long_score", story)
 
     def test_fusion_replaces_duplicate_momentum_veto_only(self):
