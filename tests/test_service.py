@@ -1,5 +1,9 @@
 from tests import legacy_service_cases as _legacy
 
+for _name in dir(_legacy):
+    if not _name.startswith("__"):
+        globals()[_name] = getattr(_legacy, _name)
+
 
 class RuntimeSafetyTests(_legacy.RuntimeSafetyTests):
     def test_single_scan_and_preflight_share_one_same_direction_decision(self):
