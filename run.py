@@ -12,7 +12,13 @@ from radar.api import OKXPublicClient
 from radar.config import AppConfig
 from radar.reporting import report_markdown
 from radar.scanner import MarketScanner, ScannerConfig
-from radar.service import RadarRuntime, serve
+import radar.service as radar_service
+from radar.service_entry_policy import apply_service_entry_policy
+
+
+apply_service_entry_policy(radar_service)
+RadarRuntime = radar_service.RadarRuntime
+serve = radar_service.serve
 
 
 def build_runtime(config: AppConfig) -> RadarRuntime:
