@@ -1,4 +1,4 @@
-const SHELL_CACHE = "okx-radar-shell-v4.8-history-clear-all-1";
+const SHELL_CACHE = "okx-radar-shell-v4.9-snapshot-entry-labels-1";
 const SHELL_ASSETS = ["/", "/manifest.webmanifest", "/radar-icon.svg"];
 
 self.addEventListener("install", event => {

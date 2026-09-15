@@ -161,7 +161,7 @@ def main():
             assert not errors, errors
             context.close(); print(f'PASS {width}x{height}', flush=True)
         browser.close()
-    print('Layout regression passed: blocked/ready/wait/missed/closed/precision cards; 7 viewports; independent modal scroll; no navigation overlap. Synthetic data only.')
+    print('Layout regression passed: blocked/pending/retest/new-trigger/closed/precision cards; 7 viewports; independent modal scroll; no navigation overlap. Synthetic data only.')
 
 
 if __name__ == '__main__':

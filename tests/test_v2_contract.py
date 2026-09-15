@@ -80,12 +80,14 @@ class V33ContractTests(unittest.TestCase):
         self.assertIn("早期訊號", html)
         self.assertIn("完整確認", html)
         self.assertIn("15m 早期", html)
-        self.assertIn("目前可進", html)
+        self.assertIn("⚡ 已觸發訊號", html)
+        self.assertIn("待進場確認", html)
         self.assertIn("等待回踩", html)
-        self.assertIn("已錯過", html)
+        self.assertIn("等待新訊號", html)
+        self.assertIn("風控受阻", html)
         self.assertIn("entry_eligibility", html)
         self.assertIn("長線訊號", html)
-        self.assertIn("4H 長線目前可進", html)
+        self.assertIn("4H 長線待進場確認", html)
         self.assertIn("longEarlySignals", html)
         self.assertIn("longReadySignals", html)
         self.assertIn("longWaitRetest", html)
@@ -121,7 +123,7 @@ class V33ContractTests(unittest.TestCase):
         self.assertIn("上一輪快照會繼續顯示", html)
         self.assertIn("function isExpiredSnapshot(item)", html)
         self.assertIn("⏱ 資料已過期", html)
-        self.assertIn("資料已過期｜原快照", html)
+        self.assertIn("這是逾期快照，只供回看；請重新掃描。", html)
         self.assertIn("幣種掃描", html)
         self.assertIn("/api/instrument/scan", html)
         self.assertIn("價格・OI・CVD 多週期判讀", html)
@@ -146,7 +148,7 @@ class V33ContractTests(unittest.TestCase):
         self.assertIn('<body data-active-group="home">', html)
         self.assertIn('body:not([data-active-group="home"]) .command-deck', html)
         self.assertIn("document.body.dataset.activeGroup=group", html)
-        self.assertIn("okx-radar-shell-v4.8-history-clear-all-1", service_worker)
+        self.assertIn("okx-radar-shell-v4.9-snapshot-entry-labels-1", service_worker)
         self.assertIn("市場方向 · 24H 全市場平均 RSI", html)
         self.assertIn("bias.market_average_rsi", html)
         self.assertIn("rsi24.market_rsi_24h_label", html)
@@ -225,11 +227,11 @@ class V33ContractTests(unittest.TestCase):
             "async function pollUntilComplete", 1
         )[0]
         self.assertNotIn("state.report=null", start_scan)
-        self.assertIn("目前最值得看", html)
-        self.assertIn("依可進狀態與交易品質排列", html)
+        self.assertIn("已觸發訊號", html)
+        self.assertIn("依訊號狀態與交易品質排列", html)
         self.assertIn("訊號準備度", html)
         self.assertIn("尚未觸發", html)
-        self.assertIn("可進 · ${watchCount} 觀察", html)
+        self.assertIn("已觸發 · ${watchCount} 接近", html)
         self.assertIn("function itemCurrentEntryReady(item)", html)
         self.assertIn("function itemWasEntryReady(item)", html)
         self.assertIn("OI（未平倉量）異動雷達", html)
@@ -263,7 +265,7 @@ class V33ContractTests(unittest.TestCase):
         self.assertIn("訊號含義", html)
         self.assertIn("失效條件", html)
         self.assertNotIn("失效與方向", html)
-        self.assertIn("等待價格回到最佳進場點位", html)
+        self.assertIn("等待價格回到可進參考區間", html)
         self.assertIn("CONTINUATION:'趨勢延續'", html)
         self.assertIn("status==='ENTRY_READY'", html)
         self.assertIn("status==='WAIT_RETEST'", html)
@@ -274,7 +276,7 @@ class V33ContractTests(unittest.TestCase):
         self.assertIn("function signalTriggerTime(item)", html)
         self.assertIn("訊號觸發時間（台灣 UTC+8）", html)
         self.assertNotIn("status!=='ENTRY_READY'&&status!=='MISSED_ENTRY'", html)
-        self.assertIn("okx-radar-shell-v4.8-history-clear-all-1", service_worker)
+        self.assertIn("okx-radar-shell-v4.9-snapshot-entry-labels-1", service_worker)
         self.assertIn("$('#preflightRefresh').addEventListener('click',loadPreflight)", html)
         self.assertIn("${decisionPanel(item)}", html)
         self.assertNotIn("showPreflight", html)
@@ -342,14 +344,14 @@ class V33ContractTests(unittest.TestCase):
         self.assertIn("7R", html)
         self.assertIn("最高 8R", html)
         self.assertNotIn("<canvas", html)
-        self.assertIn("最佳進場點位", html)
-        self.assertIn("已觸發・有效中", html)
-        self.assertIn("現在能否進場", html)
+        self.assertIn("可進參考區間", html)
+        self.assertIn("⚡ 已觸發訊號｜有效中", html)
+        self.assertIn("進場快照｜不是即時報價", html)
         self.assertIn("尚未進場", html)
         self.assertIn("已經進場", html)
         self.assertIn("等待回踩」不是出場指令", html)
         self.assertIn("容許回測", html)
-        self.assertIn("現在位置與進場資格", html)
+        self.assertIn("本次更新位置與進場檢查", html)
         self.assertIn("原始進出場價格（固定，不被本次更新改寫）", html)
         self.assertIn("交易品質變化（不是勝率）", html)
         self.assertIn("Spread（買賣價差）", html)
@@ -448,7 +450,7 @@ class V33ContractTests(unittest.TestCase):
         self.assertIn("function setHomeReportEmpty", html)
         self.assertIn('body.home-report-empty[data-active-tab="overview"] #overview', html)
         self.assertIn('body[data-active-tab="manual"] .search-tools', html)
-        self.assertIn("目前可進優先 · 同狀態品質高 → 低", html)
+        self.assertIn("已觸發訊號 · 依進場確認狀態與品質排序", html)
         self.assertIn("NEW:'新訊號週期'", html)
         self.assertIn("calc((100vw - var(--layout-max) + 28px)/2)", html)
         self.assertIn("function preflightPositionMetric(data)", html)
@@ -484,11 +486,11 @@ class V33ContractTests(unittest.TestCase):
         )[0]
         self.assertIn("itemCurrentEntryReady(item)", rankings)
         self.assertIn("&&!isExpiredSnapshot(item)&&!itemReadOnlyReason(item)", rankings)
-        self.assertIn("readyCount=rows.filter(isReady).length", rankings)
-        self.assertIn("entryStatus=itemEntryStatus(item)", rankings)
-        self.assertIn("?'先不要進'", rankings)
-        self.assertIn("?'等回踩／確認'", rankings)
-        self.assertIn("?'已錯過｜勿追價'", rankings)
+        self.assertIn("triggeredCount=rows.filter(item=>item?.trigger_id).length", rankings)
+        self.assertIn("formal=Boolean(item?.trigger_id)", rankings)
+        self.assertIn("snapshot=formal?itemSnapshotEntryState(item):null", rankings)
+        self.assertIn("const state=formal?snapshot.label:'接近觸發'", rankings)
+        self.assertIn("${triggeredCount} 已觸發 · ${watchCount} 接近", rankings)
 
         continuation = html.split("function preflightContinuation(data)", 1)[1].split(
             "function preflightCapitalFlow", 1
@@ -528,10 +530,10 @@ class V33ContractTests(unittest.TestCase):
         )[0]
         self.assertLess(
             preflight.index("原始進出場價格（固定，不被本次更新改寫）"),
-            preflight.index("現在位置與進場資格"),
+            preflight.index("本次更新位置與進場檢查"),
         )
         self.assertLess(
-            preflight.index("現在位置與進場資格"),
+            preflight.index("本次更新位置與進場檢查"),
             preflight.index("${preflightAuxiliary(data)}"),
         )
         self.assertLess(
@@ -644,15 +646,15 @@ class V33ContractTests(unittest.TestCase):
         self.assertIn("liveReady=activeShort.filter(itemCurrentEntryReady)", report)
         self.assertNotIn("itemWasEntryReady", report)
         self.assertIn(
-            "'目前沒有允許新進場的 15m 訊號。',shortReadOnlyReason",
+            "'目前沒有待進場確認的 15m 訊號。',shortReadOnlyReason",
             report,
         )
-        self.assertIn("'目前沒有長線訊號。',longReadOnlyReason", report)
+        self.assertIn("'目前沒有 4H 長線已觸發訊號。',longReadOnlyReason", report)
         self.assertIn(
             "renderContextCoverage(report,shortTransient||longTransient,preview)", report
         )
         self.assertIn(
-            "early=liveReady.filter(x=>x.signal_stage==='EARLY_SIGNAL').sort(signalSortComparator)",
+            "early=activeShort.filter(x=>!isPreviewItem(x)&&x.signal_stage==='EARLY_SIGNAL').sort(signalSortComparator)",
             report,
         )
         self.assertIn("allShort=[...activeShort].sort(signalSortComparator)", report)
@@ -669,7 +671,7 @@ class V33ContractTests(unittest.TestCase):
         self.assertIn("liveLongReady=activeLong.filter(itemCurrentEntryReady)", report)
         self.assertIn("longReady=[...liveLongReady].sort(signalSortComparator)", report)
         self.assertIn(
-            "longEarly=liveLongReady.filter(x=>x.signal_stage==='EARLY_SIGNAL').sort(signalSortComparator)",
+            "longEarly=activeLong.filter(x=>!isPreviewItem(x)&&x.signal_stage==='EARLY_SIGNAL').sort(signalSortComparator)",
             report,
         )
         self.assertIn(
@@ -680,7 +682,7 @@ class V33ContractTests(unittest.TestCase):
             "longMissed=activeLong.filter(x=>!isPreviewItem(x)&&itemEntryStatus(x)==='MISSED_ENTRY').sort(signalSortComparator)",
             report,
         )
-        self.assertGreaterEqual(html.count("品質高 → 低"), 10)
+        self.assertGreaterEqual(html.count("依進場確認狀態與品質排序"), 2)
 
         comparator = html.split("function signalSortComparator(a,b){", 1)[1].split(
             "function renderContextCoverage", 1
@@ -722,7 +724,8 @@ class V33ContractTests(unittest.TestCase):
         self.assertIn("finalDecision=isRecord(decisionContext.final)", decision_panel)
         self.assertIn("hardGate=isRecord(decisionContext.hard_gate)", decision_panel)
         self.assertIn("decisionAlertHtml(item,status)", decision_panel)
-        self.assertIn("先不要進場｜風險條件未通過", decision_panel)
+        self.assertIn("snapshot=itemSnapshotEntryState(item)", decision_panel)
+        self.assertIn("風控受阻｜先更新再判斷", html)
         self.assertIn("preflightActions(item.inst_id,horizon,item,false)", decision_panel)
         self.assertIn("signalTradeGrid(item", decision_panel)
         self.assertIn("preview:true", decision_panel)
@@ -846,9 +849,9 @@ class V33ContractTests(unittest.TestCase):
             active_decision.index("${signalTradeGrid(item)}"),
         )
         self.assertIn("signal-status-line", render_signals)
-        self.assertIn("現在能否進場", decision_panel)
-        self.assertIn("目前可買價（Ask）", decision_panel)
-        self.assertIn("目前可賣價（Bid）", decision_panel)
+        self.assertIn("進場快照｜不是即時報價", decision_panel)
+        self.assertIn("掃描快照 Ask（買入參考）", decision_panel)
+        self.assertIn("掃描快照 Bid（賣出參考）", decision_panel)
         self.assertIn("續走力道", continuation)
         self.assertNotIn("最高等級門檻", continuation)
         self.assertNotIn("加成", continuation)
@@ -1101,7 +1104,7 @@ class V33ContractTests(unittest.TestCase):
         self.assertNotIn("hour12:false", time_helpers)
         self.assertIn("normalized=`${normalized}Z`", time_helpers)
         self.assertIn("year:'numeric'", time_helpers)
-        self.assertIn("最新行情時間（台灣 UTC+8）", html)
+        self.assertIn("本次更新快照時間（台灣 UTC+8）", html)
         self.assertIn("持倉資料截止：${esc(taiwanMinute(asOf))}（台灣 UTC+8）", html)
         self.assertNotIn("<br>取得時間：", html)
 
@@ -1156,7 +1159,7 @@ class V33ContractTests(unittest.TestCase):
         self.assertIn("舊 Entry／SL／TP 不會復活", html)
         self.assertIn("舊交易計畫已結束", html)
         self.assertIn("signalTradeGrid(item,{prefix:'原始 ',original:true})", html)
-        self.assertIn("okx-radar-shell-v4.8-history-clear-all-1", worker)
+        self.assertIn("okx-radar-shell-v4.9-snapshot-entry-labels-1", worker)
 
     def test_market_scan_has_no_github_schedule(self):
         root = Path(__file__).parents[1]

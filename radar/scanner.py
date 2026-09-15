@@ -1238,8 +1238,8 @@ class MarketScanner:
             )
         elif normalized_mode == "SHORT":
             message = (
-                f"15m 掃描完成：早期可進 {early_short}、目前可進 {ready_short}、"
-                f"等待回踩 {wait_short}、已錯過 {missed_short}。"
+                f"15m 掃描完成：早期訊號 {early_short}、待進場確認 {ready_short}、"
+                f"等待回踩 {wait_short}、等待新訊號 {missed_short}。"
                 if short_signals
                 else "15m 掃描完成：目前無新鮮進場訊號；系統未降低 Trigger 標準。"
             )
@@ -1251,8 +1251,8 @@ class MarketScanner:
             )
         else:
             message = (
-                f"全市場掃描完成：15m 早期可進 {early_short}、目前可進 {ready_short}、"
-                f"等待回踩 {wait_short}、已錯過 {missed_short}；4H 訊號 {len(long_signals)}。"
+                f"全市場掃描完成：15m 早期訊號 {early_short}、待進場確認 {ready_short}、"
+                f"等待回踩 {wait_short}、等待新訊號 {missed_short}；4H 已觸發訊號 {len(long_signals)}。"
                 if short_signals or long_signals
                 else "全市場掃描完成：目前無新鮮進場訊號；系統未降低 Trigger 標準。"
             )

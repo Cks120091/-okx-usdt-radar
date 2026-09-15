@@ -14,6 +14,27 @@ class CompactUiTests(unittest.TestCase):
         self.assertIn("Compact clarity pass:", text)
         self.assertIn("更新現價、進場距離、成交條件、續走力道與歷史 OI 持倉動向；不改寫方向或原 Entry／SL／TP", text)
 
+    def test_trigger_lifecycle_is_separate_from_snapshot_entry_state(self):
+        text = (ROOT / "radar/static/pages.html").read_text(encoding="utf-8")
+        report = text.split("function renderReport(report){", 1)[1].split(
+            "function renderOverview(report)", 1
+        )[0]
+
+        self.assertIn('class="badge triggered-signal-b">⚡ 已觸發訊號', text)
+        self.assertIn("待進場確認", text)
+        self.assertIn("等待回踩", text)
+        self.assertIn("等待新訊號", text)
+        self.assertIn("風控受阻", text)
+        self.assertIn("進場快照｜不是即時報價", text)
+        self.assertIn("ENTRY｜可進參考區間", text)
+        self.assertIn("固定計畫價，不代表價格現在已到", text)
+        self.assertIn("String(activeShort.length)", report)
+        self.assertIn("String(activeLong.length)", report)
+        self.assertIn("renderOverview({...report,signals:activeShort})", report)
+        self.assertNotIn(">目前可進<", text)
+        self.assertNotIn(">已錯過<", text)
+        self.assertNotIn("現在能否進場", text)
+
     def test_history_page_groups_secondary_information_behind_one_details_block(self):
         text = (ROOT / "radar/static/history-scan.html").read_text(encoding="utf-8")
         self.assertIn('<details class="history-tools"><summary>說明、完整度與資料管理</summary>', text)

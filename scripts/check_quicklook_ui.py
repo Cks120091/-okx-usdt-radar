@@ -49,20 +49,20 @@ def main():
     long.update(radar_horizon='LONG', direction='SHORT', trigger_id='quicklook-long')
     long['timeframe_states'] = {'4H': {'direction': 'SHORT', 'label': '做空早期訊號'}, '1H': {'direction': 'SHORT', 'label': '偏空'}, '1D': {'direction': 'LONG', 'label': '偏多'}}
     cases = [
-        ('ready', ready, '可進', '順勢續走做多', '支持｜'),
-        ('intraday-short', intraday, '可進', '多頭回踩內短空', '支持｜'),
-        ('intraday-long', mirror, '可進', '空頭反彈內短多', '支持｜'),
-        ('blocked', existing[0], '先不要', None, '資料不足'),
-        ('wait', existing[2], '等回踩', None, '資料不足'),
-        ('missed', existing[3], '禁止追價', None, '資料不足'),
+        ('ready', ready, '待進場確認', '順勢續走做多', '支持｜'),
+        ('intraday-short', intraday, '待進場確認', '多頭回踩內短空', '支持｜'),
+        ('intraday-long', mirror, '待進場確認', '空頭反彈內短多', '支持｜'),
+        ('blocked', existing[0], '風控受阻', None, '資料不足'),
+        ('wait', existing[2], '等待回踩', None, '資料不足'),
+        ('missed', existing[3], '等待新訊號', None, '資料不足'),
         ('closed', existing[4], '已結束', None, '歷史資料'),
-        ('missing', missing, '可進', None, '資料不足'),
-        ('conflict', conflict, '可進', None, '有反證'),
-        ('neutral', neutral, '可進', None, '中性'),
+        ('missing', missing, '待進場確認', None, '資料不足'),
+        ('conflict', conflict, '待進場確認', None, '有反證'),
+        ('neutral', neutral, '待進場確認', None, '中性'),
         ('stale', stale, '先不要｜資料過期', None, '待更新'),
         ('scanning', scanning, '先不要｜掃描中', None, '待更新'),
         ('unknown', unknown, '先不要', None, '支持｜'),
-        ('long', long, '可進', '逆 1D 波段空', '支持｜'),
+        ('long', long, '待進場確認', '逆 1D 波段空', '支持｜'),
     ]
     single['short']['item'] = intraday
     html = (ROOT/'radar/static/pages.html').read_text()
