@@ -1,4 +1,4 @@
-const SHELL_CACHE = "okx-radar-shell-v4.13-preflight-live-price";
+const SHELL_CACHE = "okx-radar-shell-v4.14-preflight-button-price";
 const SHELL_ASSETS = ["/", "/manifest.webmanifest", "/radar-icon.svg"];
 
 self.addEventListener("install", event => {

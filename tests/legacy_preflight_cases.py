@@ -320,8 +320,14 @@ class PreflightTests(unittest.TestCase):
             def __init__(self):
                 self.calls = []
 
-            def preflight_dict(self, inst_id, horizon, expected_trigger_id=None):
-                self.calls.append((inst_id, horizon, expected_trigger_id))
+            def preflight_dict(
+                self,
+                inst_id,
+                horizon,
+                expected_trigger_id=None,
+                force_refresh=False,
+            ):
+                self.calls.append((inst_id, horizon, expected_trigger_id, force_refresh))
                 if expected_trigger_id == "trigger-mismatch":
                     raise PreflightError(
                         HTTPStatus.CONFLICT,
@@ -379,7 +385,7 @@ class PreflightTests(unittest.TestCase):
         get_handler = object.__new__(handler_class)
         get_handler.path = (
             "/api/preflight?inst_id=AAA-USDT-SWAP&horizon=SHORT"
-            "&expected_trigger_id=trigger-get"
+            "&expected_trigger_id=trigger-get&force_refresh=1"
         )
         get_responses = []
         get_handler._send_json = lambda status, payload: get_responses.append(
@@ -414,9 +420,9 @@ class PreflightTests(unittest.TestCase):
         self.assertEqual(
             runtime.calls,
             [
-                ("AAA-USDT-SWAP", "SHORT", "trigger-get"),
-                ("AAA-USDT-SWAP", "LONG", "trigger-post"),
-                ("AAA-USDT-SWAP", "SHORT", "trigger-mismatch"),
+                ("AAA-USDT-SWAP", "SHORT", "trigger-get", True),
+                ("AAA-USDT-SWAP", "LONG", "trigger-post", False),
+                ("AAA-USDT-SWAP", "SHORT", "trigger-mismatch", False),
             ],
         )
         self.assertEqual(get_responses[0][0].value, 200)
@@ -1622,6 +1628,30 @@ class PreflightTests(unittest.TestCase):
             self.assertTrue(second["cached"])
             self.assertEqual(client.ticker_calls, 1)
             self.assertEqual(client.context_calls, 1)
+
+    def test_manual_preflight_refresh_bypasses_cache_and_fetches_button_time_price(self):
+        with tempfile.TemporaryDirectory() as directory:
+            item = make_signal()
+            client = PreflightClient()
+            runtime = RadarRuntime(
+                PreflightScanner(client),
+                AppConfig(data_dir=directory),
+            )
+            runtime._latest = make_report(item)
+
+            first = runtime.preflight_dict(item.inst_id, "SHORT")
+            client.price = 101.1
+            refreshed = runtime.preflight_dict(
+                item.inst_id,
+                "SHORT",
+                force_refresh=True,
+            )
+
+            self.assertFalse(first["cached"])
+            self.assertFalse(refreshed["cached"])
+            self.assertEqual(refreshed["live"]["price"], 101.11)
+            self.assertEqual(client.ticker_calls, 2)
+            self.assertEqual(client.context_calls, 2)
 
     def test_crossing_stop_returns_invalidated_without_deleting_trigger(self):
         with tempfile.TemporaryDirectory() as directory:

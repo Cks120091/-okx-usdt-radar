@@ -3615,6 +3615,7 @@ class RadarRuntime:
         inst_id: str,
         horizon: str,
         expected_trigger_id: str | None = None,
+        force_refresh: bool = False,
     ) -> dict[str, Any]:
         """Refresh execution conditions for one stored signal only.
 
@@ -3668,7 +3669,9 @@ class RadarRuntime:
             self._assert_preflight_signal_available(signal)
             repository = getattr(self.scanner, "repository", None)
             cache_key = (report_generated_at, normalized_horizon, normalized_id)
-            cached = self._cached_preflight_locked(cache_key)
+            if force_refresh:
+                self._preflight_cache.pop(cache_key, None)
+            cached = None if force_refresh else self._cached_preflight_locked(cache_key)
             if cached is not None and str(cached.get("trigger_id") or "") == trigger_id:
                 return cached
             if cached is not None:
@@ -3690,7 +3693,9 @@ class RadarRuntime:
                     captured_trigger_id=trigger_id,
                     expected_trigger_id=normalized_expected_trigger,
                 )
-                cached = self._cached_preflight_locked(cache_key)
+                if force_refresh:
+                    self._preflight_cache.pop(cache_key, None)
+                cached = None if force_refresh else self._cached_preflight_locked(cache_key)
                 if (
                     cached is not None
                     and str(cached.get("trigger_id") or "") == trigger_id
@@ -5006,6 +5011,10 @@ def serve(runtime: RadarRuntime, host: str, port: int) -> None:
                         query.get("inst_id", [""])[0],
                         query.get("horizon", [""])[0],
                         expected_trigger_id,
+                        force_refresh=(
+                            query.get("force_refresh", ["0"])[0].strip().lower()
+                            in {"1", "true", "yes"}
+                        ),
                     )
                 except PreflightError as exc:
                     self._send_json(exc.status, exc.response_payload())

@@ -870,7 +870,7 @@
       <button id="preflightBack" class="preflight-back" type="button">‹ 返回</button>
       <div class="preflight-heading">
         <h1 id="preflightTitle" tabindex="-1">進場檢查</h1>
-        <p>更新現價、與總掃描價格的差異、進場距離、成交條件、續走力道與歷史 OI 持倉動向；不改寫方向或原 Entry／SL／TP</p>
+        <p>重新抓取按下進場前更新時的最新價格、進場距離、成交條件、續走力道與歷史 OI 持倉動向；不改寫方向或原 Entry／SL／TP</p>
       </div>
     </header>
     <main class="preflight-shell">
@@ -1624,7 +1624,7 @@
     }
     function preflightPlainGuide(data){
       const verdict=data.verdict||{},lifecycle=data.signal_lifecycle||{},original=preflightOriginalPlan(data),live=data.live||{},direction=directionName[data.direction]||data.direction,frame=data.horizon==='LONG'?'4H 長線':'15m 短線',isLong=data.direction==='LONG',entry=`${price(original.entry_low,original)}～${price(original.entry_high,original)}`,stop=price(original.stop_loss,original),target=price(original.take_profit_1,original),status=verdict.status||'UNKNOWN',situation=verdict.situation||'UNKNOWN',adverse=metricNumber(live.adverse_atr);
-      const meaning=lifecycle.note||`${frame}${direction} Trigger（價格觸發）已成立；目前只更新現價、與總掃描價格的差異、距離、R:R（風險報酬比）與成交條件，不改寫原計畫。`;
+      const meaning=lifecycle.note||`${frame}${direction} Trigger（價格觸發）已成立；目前只重新抓取本次進場前更新價格、距離、R:R（風險報酬比）與成交條件，不改寫原計畫。`;
       let notEntered='先不要進場，稍後再更新確認。',alreadyEntered=`原交易計畫仍以 SL（止損）${stop} 與 TP1（第一止盈目標）${target} 管理；系統不知道你是否實際持倉。`;
       if(situation==='CLOSED_UNKNOWN'){notEntered='交易計畫已關閉且結果未知；禁止使用舊 Entry、SL 或 TP，等待全新 Trigger。';alreadyEntered='系統無法確認 TP／SL 先後，也無法確認你的實際持倉；舊計畫已關閉，不可再作為持倉管理依據。'}
       else if(situation==='NO_FORMAL_TRIGGER'||situation==='DATA_UNAVAILABLE'||status==='DATA_UNAVAILABLE'){notEntered='最新多週期收盤未重新確認原 Trigger，目前禁止使用舊 Entry 新進場。';alreadyEntered=`舊訊號尚未觸及失效條件；若已持倉，仍依原 SL（止損）${stop}／TP（止盈）管理，並留意最新證據已弱化。`}
@@ -1642,7 +1642,7 @@
       return `<div class="preflight-explainer"><div class="preflight-guide-heading">現在怎麼做</div><div class="preflight-guide-row preflight-guide-action"><b>尚未進場</b><span>${tech(notEntered)}</span></div><div class="preflight-guide-row preflight-guide-position"><b>若已經進場（系統無法確認）</b><span>${tech(alreadyEntered)}</span></div><details class="judgement-details"><summary>判定依據（簡要）</summary><div class="judgement-rows"><div class="judgement-row"><b>訊號含義</b><span>${tech(meaning)}</span></div><div class="judgement-row warning"><b>失效條件</b><span>${tech(invalidation)}</span></div></div></details></div>`
     }
     function renderPreflight(data){
-      const verdict=data.verdict||{},lifecycle=data.signal_lifecycle||{status:'ACTIVE'},presentation=preflightPresentation(data),original=preflightOriginalPlan(data),live=data.live||{},execution=data.execution||{},liquidity=execution.liquidity_policy||{},quality=data.data_quality||{},warnings=data.warnings||[],direction=directionName[data.direction]||data.direction,isNewPlan=data.reanalysis?.status==='NEW_ENTRY_OPPORTUNITY',positionMetric=preflightPositionMetric(data),riskMetric=preflightRiskMetric(data),archived=preflightResponseTerminal(data),detailsOpen='',scanPriceLabel=`${data.horizon==='LONG'?'4H':'15m'} 總掃描價格`,executionPriceLabel=live.price_source==='BEST_ASK'?'進場前更新現價｜Ask（買入參考）':live.price_source==='BEST_BID'?'進場前更新現價｜Bid（賣出參考）':'進場前更新現價';
+      const verdict=data.verdict||{},lifecycle=data.signal_lifecycle||{status:'ACTIVE'},presentation=preflightPresentation(data),original=preflightOriginalPlan(data),live=data.live||{},execution=data.execution||{},liquidity=execution.liquidity_policy||{},quality=data.data_quality||{},warnings=data.warnings||[],direction=directionName[data.direction]||data.direction,isNewPlan=data.reanalysis?.status==='NEW_ENTRY_OPPORTUNITY',positionMetric=preflightPositionMetric(data),riskMetric=preflightRiskMetric(data),archived=preflightResponseTerminal(data),detailsOpen='',executionPriceLabel=live.price_source==='BEST_ASK'?'本次進場前更新價格｜Ask（買入參考）':live.price_source==='BEST_BID'?'本次進場前更新價格｜Bid（賣出參考）':'本次進場前更新價格';
       $('#preflightTitle').textContent=`${displaySymbol(data.inst_id)} · ${data.horizon_label}`;
       $('#preflightContent').innerHTML=`
         <section class="preflight-verdict ${preflightClass(verdict.status,verdict.situation,lifecycle.status)}">
@@ -1651,7 +1651,7 @@
           <h2>${esc(presentation.label)}</h2>
           <p>${esc(presentation.detail)}</p>
           ${isNewPlan?'<p class="preflight-guide-note"><b>這是重新分析後產生的全新 Trigger（價格觸發）與交易計畫；舊計畫沒有被沿用。</b></p>':''}
-          <div class="preflight-live-price"><span>${esc(executionPriceLabel)}</span><b>${price(live.price,original)}</b><small>${esc(scanPriceLabel)} ${price(original.price,original)} · 相差 <strong class="${changeClass(live.price_change_from_scan_pct)}">${signed(live.price_change_from_scan_pct)}</strong></small></div>
+          <div class="preflight-live-price"><span>${esc(executionPriceLabel)}</span><b>${price(live.price,original)}</b><small>按下更新時重新向 OKX 取得 · 快照時間（台灣 UTC+8）${esc(taiwanTime(live.sampled_at))}</small></div>
           <div class="preflight-stamp">訊號觸發時間（台灣 UTC+8）：${esc(taiwanTime(original.triggered_at))}<br>本次更新快照時間（台灣 UTC+8）：${esc(taiwanTime(live.sampled_at))} · 不是持續即時報價 · 觸發約 ${num(live.trigger_age_bars,0)} 根 ${data.horizon==='LONG'?'4H':'15m'} K</div>
         </section>
         ${preflightRiskAdvice(data)}
@@ -1710,16 +1710,16 @@
     window.addEventListener('history-replay-status',refreshPreflightHistoryRate);
     function preflightTerminalKind(data){const statuses=[data?.verdict?.status,data?.verdict?.situation,data?.signal_lifecycle?.status,data?.plan_state?.status].map(value=>String(value||'').toUpperCase());if(statuses.includes('CLOSED_UNKNOWN'))return 'CLOSED_UNKNOWN';if(statuses.some(value=>['PLAN_INVALIDATED','INVALIDATED','STOP_LOSS'].includes(value)))return 'STOP_LOSS';if(statuses.some(value=>['COMPLETED','TARGET_REACHED','TAKE_PROFIT'].includes(value)))return 'TAKE_PROFIT';return data?.signal_lifecycle?.terminal===true?'CLOSED_UNKNOWN':''}
     function preflightResponseTerminal(data){return Boolean(preflightTerminalKind(data))}
-    async function loadPreflight(){
+    async function loadPreflight(forceRefresh=false){
       if(!state.preflight)return;
       const instId=state.preflight.instId,horizon=normalizedHorizon(state.preflight.horizon,false),triggerId=String(state.preflight.triggerId||''),loadingKey=`${instId}|${horizon}|${triggerId}`;
       if(!triggerId){$('#preflightContent').innerHTML='<div class="empty preflight-error">這張卡缺少 Trigger ID，已停止進場前更新。請回到訊號頁重新選擇。</div>';$('#preflightAnnouncer').textContent='進場更新失敗：缺少 Trigger ID';return}
       if(state.preflightLoading&&state.preflightLoadingKey===loadingKey)return;
       if(state.preflightAbort)state.preflightAbort.abort();
       const token=++state.preflightRequestSeq,controller=typeof AbortController==='function'?new AbortController():null;state.preflightAbort=controller;state.preflightLoading=true;state.preflightLoadingKey=loadingKey;state.preflight.terminal=false;state.preflight.episodeMismatch=false;
-      const button=$('#preflightRefresh'),content=$('#preflightContent');button.disabled=true;button.textContent='正在更新進場條件與持倉動向…';content.setAttribute('aria-busy','true');$('#preflightAnnouncer').textContent='正在更新進場判定、成交資料與持倉動向';content.innerHTML=`<div class="empty">正在更新這一個訊號的現價、與總掃描價格的差異、成交條件、原方向續走力道與歷史 OI 持倉動向；不重新掃描多週期 K 線，也不改寫方向、Entry、SL 或 TP。</div>`;
+      const button=$('#preflightRefresh'),content=$('#preflightContent');button.disabled=true;button.textContent='正在重新取得最新價格…';content.setAttribute('aria-busy','true');$('#preflightAnnouncer').textContent='正在重新取得進場前更新價格、成交資料與持倉動向';content.innerHTML=`<div class="empty">正在向 OKX 重新取得按下進場前更新時的最新價格、成交條件、原方向續走力道與歷史 OI 持倉動向；不使用第一次總掃描價格，也不重新掃描多週期 K 線或改寫方向、Entry、SL、TP。</div>`;
       try{
-        const query=new URLSearchParams({inst_id:instId,horizon,expected_trigger_id:triggerId}),data=await api(`/api/preflight?${query}`,{signal:controller?.signal});
+        const query=new URLSearchParams({inst_id:instId,horizon,expected_trigger_id:triggerId,force_refresh:forceRefresh?'1':'0'}),data=await api(`/api/preflight?${query}`,{signal:controller?.signal});
         if(!preflightRequestIsCurrent(token,instId,horizon,triggerId))return;
         if(String(data?.trigger_id||'')!==triggerId){const mismatch=new Error('這張卡的 Trigger 已更新；為避免錯查另一筆交易計畫，已停止顯示結果。');mismatch.code='TRIGGER_MISMATCH';throw mismatch}
         renderPreflight(data);refreshPreflightHistoryRate();Promise.resolve(window.HistoryReplay?.refresh?.()).then(()=>{if(preflightRequestIsCurrent(token,instId,horizon,triggerId))refreshPreflightHistoryRate()}).catch(()=>{});
@@ -1736,7 +1736,7 @@
         if(!preflightRequestIsCurrent(token,instId,horizon,triggerId))return;
         $('#preflightContent').innerHTML=`<div class="empty preflight-error"><b>${episodeMismatch?'這張卡已不是目前訊號':'目前無法完成進場前更新'}</b><br>${tech(error.message||error)}<br><small>原始 Trigger（價格觸發）沒有被修改，也不會改查其他訊號。</small></div>`;$('#preflightAnnouncer').textContent=`進場更新失敗：${error.message||error}`;
       }finally{
-        if(token===state.preflightRequestSeq){content.setAttribute('aria-busy','false');state.preflightAbort=null;state.preflightLoading=false;state.preflightLoadingKey=null;if(state.preflight?.instId===instId&&state.preflight?.horizon===horizon&&state.preflight?.triggerId===triggerId){const locked=state.preflight.terminal||state.preflight.episodeMismatch;button.disabled=Boolean(locked);button.textContent=state.preflight.terminal?'交易計畫已結束':state.preflight.episodeMismatch?'請回訊號頁選擇新卡':'更新進場判定與持倉動向'}}
+        if(token===state.preflightRequestSeq){content.setAttribute('aria-busy','false');state.preflightAbort=null;state.preflightLoading=false;state.preflightLoadingKey=null;if(state.preflight?.instId===instId&&state.preflight?.horizon===horizon&&state.preflight?.triggerId===triggerId){const locked=state.preflight.terminal||state.preflight.episodeMismatch;button.disabled=Boolean(locked);button.textContent=state.preflight.terminal?'交易計畫已結束':state.preflight.episodeMismatch?'請回訊號頁選擇新卡':'重新取得最新價與持倉動向'}}
       }
     }
     function setAppInert(enabled){['.skip-link','.top','#filterShell','.shell','.primary-nav','#scanAction'].forEach(selector=>{const element=$(selector);if(element)element.inert=enabled})}
@@ -1795,7 +1795,7 @@
     $('#singleScanClose').addEventListener('click',()=>$('#singleScanDialog').close());
     $('#singleScanDialog').addEventListener('close',()=>{singleScanSequence++;if(singleScanReturnFocus?.isConnected)singleScanReturnFocus.focus()});
     $('#preflightBack').addEventListener('click',closePreflight);
-    $('#preflightRefresh').addEventListener('click',loadPreflight);
+    $('#preflightRefresh').addEventListener('click',()=>loadPreflight(true));
     document.addEventListener('keydown',event=>{if($('#dataDetailDialog').open||$('#singleScanDialog').open)return;trapPreflightFocus(event);if(event.key==='Escape'&&!$('#preflightPage').hidden){event.preventDefault();closePreflight()}});
     window.addEventListener('popstate',event=>{if(event.state?.preflight){const {instId,horizon,triggerId}=event.state;if(instId&&horizon&&triggerId&&$('#preflightPage').hidden)openPreflight(instId,horizon,triggerId,{pushHistory:false,rememberFocus:false});return}hidePreflight()});
     activateTab('overview',false);refreshSessions();bootstrap();setTimeout(refreshFreshness,15000);

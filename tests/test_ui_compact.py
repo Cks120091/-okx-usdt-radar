@@ -12,16 +12,16 @@ class CompactUiTests(unittest.TestCase):
         self.assertNotIn("摘要，不新增判定", text)
         self.assertNotIn("（僅供輔助）", text)
         self.assertIn("Compact clarity pass:", text)
-        self.assertIn("更新現價、與總掃描價格的差異、進場距離、成交條件、續走力道與歷史 OI 持倉動向；不改寫方向或原 Entry／SL／TP", text)
+        self.assertIn("重新抓取按下進場前更新時的最新價格、進場距離、成交條件、續走力道與歷史 OI 持倉動向；不改寫方向或原 Entry／SL／TP", text)
         preflight = text.split("function renderPreflight(data){", 1)[1].split(
             "function preflightTerminalKind", 1
         )[0]
-        self.assertIn("15m'} 總掃描價格", preflight)
-        self.assertIn("進場前更新現價｜Ask（買入參考）", preflight)
-        self.assertIn("進場前更新現價｜Bid（賣出參考）", preflight)
+        self.assertNotIn("scanPriceLabel", preflight)
+        self.assertNotIn("live.price_change_from_scan_pct", preflight)
+        self.assertIn("本次進場前更新價格｜Ask（買入參考）", preflight)
+        self.assertIn("本次進場前更新價格｜Bid（賣出參考）", preflight)
         self.assertIn('class="preflight-live-price"', preflight)
-        self.assertIn("相差 <strong", preflight)
-        self.assertIn("live.price_change_from_scan_pct", preflight)
+        self.assertIn("按下更新時重新向 OKX 取得", preflight)
         self.assertIn("price(live.price,original)", preflight)
         self.assertIn("executionPriceLabel", preflight)
         self.assertLess(

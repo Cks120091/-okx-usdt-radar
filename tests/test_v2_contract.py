@@ -151,7 +151,7 @@ class V33ContractTests(unittest.TestCase):
         self.assertIn('<body data-active-group="home">', html)
         self.assertIn('body:not([data-active-group="home"]) .command-deck', html)
         self.assertIn("document.body.dataset.activeGroup=group", html)
-        self.assertIn("okx-radar-shell-v4.13-preflight-live-price", service_worker)
+        self.assertIn("okx-radar-shell-v4.14-preflight-button-price", service_worker)
         self.assertIn("市場方向 · 24H 全市場平均 RSI", html)
         self.assertIn("bias.market_average_rsi", html)
         self.assertIn("rsi24.market_rsi_24h_label", html)
@@ -255,7 +255,7 @@ class V33ContractTests(unittest.TestCase):
         self.assertIn("更新進場判定與持倉動向", html)
         self.assertIn("進場檢查", html)
         self.assertIn("/api/preflight", html)
-        self.assertIn("更新現價、與總掃描價格的差異、進場距離、成交條件、續走力道與歷史 OI 持倉動向；不改寫方向或原 Entry／SL／TP", html)
+        self.assertIn("重新抓取按下進場前更新時的最新價格、進場距離、成交條件、續走力道與歷史 OI 持倉動向；不改寫方向或原 Entry／SL／TP", html)
         self.assertIn("原始 Trigger（價格觸發）沒有被修改", html)
         self.assertIn("data-preflight-id", html)
         self.assertIn("data-preflight-trigger-id", html)
@@ -279,8 +279,8 @@ class V33ContractTests(unittest.TestCase):
         self.assertIn("function signalTriggerTime(item)", html)
         self.assertIn("訊號觸發時間（台灣 UTC+8）", html)
         self.assertNotIn("status!=='ENTRY_READY'&&status!=='MISSED_ENTRY'", html)
-        self.assertIn("okx-radar-shell-v4.13-preflight-live-price", service_worker)
-        self.assertIn("$('#preflightRefresh').addEventListener('click',loadPreflight)", html)
+        self.assertIn("okx-radar-shell-v4.14-preflight-button-price", service_worker)
+        self.assertIn("$('#preflightRefresh').addEventListener('click',()=>loadPreflight(true))", html)
         self.assertIn("${decisionPanel(item)}", html)
         self.assertNotIn("showPreflight", html)
         self.assertIn("function preflightActions(instId,horizon='BOTH'", html)
@@ -905,7 +905,7 @@ class V33ContractTests(unittest.TestCase):
         self.assertIn("activePreflightSignal(instId,'SHORT')", preflight_actions)
         self.assertIn("activePreflightSignal(instId,'LONG')", preflight_actions)
         self.assertIn("buttons.join('')", preflight_actions)
-        load_preflight = html.split("async function loadPreflight(){", 1)[1].split(
+        load_preflight = html.split("async function loadPreflight(forceRefresh=false){", 1)[1].split(
             "function openPreflight", 1
         )[0]
         self.assertIn("expected_trigger_id:triggerId", load_preflight)
@@ -1174,7 +1174,7 @@ class V33ContractTests(unittest.TestCase):
         self.assertIn("舊 Entry／SL／TP 不會復活", html)
         self.assertIn("舊交易計畫已結束", html)
         self.assertIn("signalTradeGrid(item,{prefix:'原始 ',original:true})", html)
-        self.assertIn("okx-radar-shell-v4.13-preflight-live-price", worker)
+        self.assertIn("okx-radar-shell-v4.14-preflight-button-price", worker)
 
     def test_market_scan_has_no_github_schedule(self):
         root = Path(__file__).parents[1]
