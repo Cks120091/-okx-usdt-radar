@@ -7,26 +7,28 @@ for _name in dir(_legacy):
 
 
 class DecisionContextTests(_legacy.DecisionContextTests):
+    def test_trigger_without_a_trade_plan_has_unknown_confirmation(self):
+        item = _legacy.complete_signal()
+        for key in ("entry_low", "entry_high", "stop_loss", "take_profit_1"):
+            item.pop(key)
+
+        result = build_decision_context(item)
+
+        self.assertEqual(result["continuation_confirmation"]["key"], "UNKNOWN")
+        self.assertIn("trade_plan", result["hard_gate"]["blockers"])
+        self.assertEqual(result["final"]["status"], "HARD_GATE_BLOCKED")
+        self.assertFalse(result["final"]["new_entry_allowed"])
+
     def test_epsilon_beyond_each_hard_gate_limit_vetoes_entry(self):
-        hard_cases = {
+        advisory_cases = {
             "liquidity": lambda item: item.update({"quote_volume_24h": 1_999_999.99}),
             "spread": lambda item: item.update({"spread_pct": 0.100001}),
             "slippage": lambda item: item["market_metrics"].update({"buy_slippage_pct": 0.150001}),
-            "chase": lambda item: item["entry_eligibility"].update({"chase_atr": 1.8001}),
-        }
-        for blocker, mutate in hard_cases.items():
-            with self.subTest(hard=blocker):
-                item = _legacy.complete_signal(); mutate(item)
-                result = build_decision_context(item)
-                self.assertIn(blocker, result["hard_gate"]["blockers"])
-                self.assertFalse(result["final"]["new_entry_allowed"])
-
-        soft_cases = {
             "execution_cost": lambda item: (item["market_metrics"].update({"execution_cost_to_risk_pct": 15.0001}), item["execution_quality"].update({"execution_cost_to_risk_pct": 15.0001})),
             "risk_reward": lambda item: (item.update({"risk_reward": 1.7999}), item["entry_eligibility"].update({"remaining_rr": 1.7999})),
             "stop_loss": lambda item: item["market_metrics"].update({"technical_stop_pct": 5.0001}),
         }
-        for key, mutate in soft_cases.items():
+        for key, mutate in advisory_cases.items():
             with self.subTest(advisory=key):
                 item = _legacy.complete_signal(); mutate(item)
                 result = build_decision_context(item)
@@ -34,6 +36,12 @@ class DecisionContextTests(_legacy.DecisionContextTests):
                 self.assertEqual(result["final"]["status"], "ENTER")
                 self.assertTrue(result["final"]["new_entry_allowed"])
                 self.assertTrue(result["hard_gate"]["warnings"])
+
+        item = _legacy.complete_signal()
+        item["entry_eligibility"].update({"chase_atr": 1.8001})
+        result = build_decision_context(item)
+        self.assertIn("chase", result["hard_gate"]["blockers"])
+        self.assertFalse(result["final"]["new_entry_allowed"])
 
     def test_execution_cost_uses_warning_band_before_hard_limit(self):
         item = _legacy.complete_signal()
@@ -60,8 +68,160 @@ class DecisionContextTests(_legacy.DecisionContextTests):
         item = _legacy.complete_signal()
         item["entry_eligibility"]["hard_blockers"] = ["SPREAD_TOO_HIGH", "EXECUTION_COST_TOO_HIGH"]
         result = build_decision_context(item)
-        self.assertEqual(result["hard_gate"]["status"], "BLOCKED")
-        self.assertIn("SPREAD_TOO_HIGH", result["hard_gate"]["blockers"])
+        self.assertEqual(result["hard_gate"]["status"], "PASSED")
+        self.assertNotIn("SPREAD_TOO_HIGH", result["hard_gate"]["blockers"])
         self.assertNotIn("EXECUTION_COST_TOO_HIGH", result["hard_gate"]["blockers"])
+        self.assertTrue(any("SPREAD_TOO_HIGH" in text for text in result["hard_gate"]["warnings"]))
         self.assertTrue(any("EXECUTION_COST_TOO_HIGH" in text for text in result["hard_gate"]["warnings"]))
+        self.assertTrue(result["final"]["new_entry_allowed"])
+
+    def test_volume_hysteresis_uses_exact_member_and_nonmember_boundaries(self):
+        cases = (
+            (False, 1_999_999.0, 2_000_000.0, True),
+            (False, 2_000_000.0, 2_000_000.0, False),
+            (True, 1_499_999.0, 1_500_000.0, True),
+            (True, 1_500_000.0, 1_500_000.0, False),
+        )
+        for member, volume, effective_min, warned in cases:
+            with self.subTest(member=member, volume=volume):
+                item = _legacy.complete_signal()
+                item["quote_volume_24h"] = volume
+                item["data_quality"]["universe_volume_policy"] = _legacy.volume_policy(
+                    member=member,
+                    volume=volume,
+                )
+                result = build_decision_context(item)
+                check = next(
+                    row for row in result["hard_gate"]["checks"]
+                    if row["key"] == "liquidity"
+                )
+                self.assertEqual(result["hard_gate"]["liquidity_policy"]["member"], member)
+                self.assertEqual(result["hard_gate"]["thresholds"]["min_quote_volume_24h"], effective_min)
+                self.assertEqual(check["status"] == "BLOCKED", warned)
+                self.assertFalse(check["hard"])
+                self.assertTrue(result["final"]["new_entry_allowed"])
+
+    def test_untrusted_member_policy_cannot_lower_new_symbol_entry_line(self):
+        item = _legacy.complete_signal()
+        item["quote_volume_24h"] = 1_500_000.0
+        item["data_quality"]["universe_volume_policy"] = _legacy.volume_policy(
+            member=True,
+            volume=1_500_000.0,
+            trusted=False,
+        )
+        result = build_decision_context(item)
+        self.assertFalse(result["hard_gate"]["liquidity_policy"]["member"])
+        self.assertEqual(result["hard_gate"]["thresholds"]["min_quote_volume_24h"], 2_000_000.0)
+        self.assertNotIn("liquidity", result["hard_gate"]["blockers"])
+        self.assertTrue(any("24H 成交額低於" in warning for warning in result["hard_gate"]["warnings"]))
+        self.assertTrue(result["final"]["new_entry_allowed"])
+
+    def test_unavailable_publication_volume_never_uses_candidate_fallback(self):
+        item = _legacy.complete_signal()
+        item["quote_volume_24h"] = 99_000_000.0
+        item["data_quality"]["universe_volume_policy"] = _legacy.volume_policy(
+            member=True,
+            volume=None,
+            status="UNAVAILABLE",
+        )
+        result = build_decision_context(item)
+        check = next(
+            row for row in result["hard_gate"]["checks"]
+            if row["key"] == "liquidity"
+        )
+        self.assertIsNone(result["hard_gate"]["liquidity_policy"]["volume_usdt"])
+        self.assertEqual(check["status"], "UNKNOWN")
+        self.assertFalse(check["hard"])
+        self.assertEqual(result["final"]["status"], "ENTER")
+        self.assertTrue(result["final"]["new_entry_allowed"])
+
+    def test_known_high_slippage_blocks_even_when_other_side_is_missing(self):
+        item = _legacy.complete_signal()
+        item["market_metrics"]["buy_slippage_pct"] = 0.20
+        del item["market_metrics"]["sell_slippage_pct"]
+        result = build_decision_context(item)
+        check = next(
+            row for row in result["hard_gate"]["checks"]
+            if row["key"] == "slippage"
+        )
+        self.assertEqual(check["status"], "BLOCKED")
+        self.assertFalse(check["hard"])
+        self.assertEqual(result["hard_gate"]["status"], "PASSED")
+        self.assertEqual(result["final"]["status"], "ENTER")
+        self.assertTrue(result["final"]["new_entry_allowed"])
+
+    def test_slippage_uses_direct_threshold_not_quality_score(self):
+        item = _legacy.complete_signal()
+        item["market_metrics"]["buy_slippage_pct"] = 0.20
+        item["execution_quality"]["score"] = 95
+        result = build_decision_context(item)
+        check = next(
+            row for row in result["hard_gate"]["checks"]
+            if row["key"] == "slippage"
+        )
+        self.assertEqual(check["status"], "BLOCKED")
+        self.assertFalse(check["hard"])
+        self.assertNotIn("slippage", result["hard_gate"]["blockers"])
+        self.assertTrue(result["final"]["new_entry_allowed"])
+
+    def test_thresholds_parameter_changes_limit_without_changing_priority(self):
+        item = _legacy.complete_signal()
+        item["spread_pct"] = 0.08
+        normal = build_decision_context(item)
+        strict = build_decision_context(item, {"max_spread_pct": 0.05})
+        self.assertEqual(normal["final"]["status"], "ENTER")
+        strict_check = next(
+            row for row in strict["hard_gate"]["checks"]
+            if row["key"] == "spread"
+        )
+        self.assertEqual(strict_check["status"], "BLOCKED")
+        self.assertFalse(strict_check["hard"])
+        self.assertEqual(strict["final"]["status"], "ENTER")
+        self.assertTrue(strict["final"]["new_entry_allowed"])
+
+    def test_missed_entry_position_keeps_priority_over_risk_warning(self):
+        item = _legacy.complete_signal()
+        item["entry_eligibility"].update({
+            "status": "MISSED_ENTRY",
+            "label": "已錯過｜禁止追價",
+            "reason": "價格已離開最佳進場區。",
+            "chase_atr": 1.27,
+            "remaining_rr": 2.0,
+            "actionable": False,
+            "new_entry_allowed": False,
+        })
+        item["spread_pct"] = 0.2
+        result = build_decision_context(item)
+        self.assertIn("entry_permission", result["hard_gate"]["blockers"])
+        self.assertNotIn("spread", result["hard_gate"]["blockers"])
+        self.assertTrue(any("Spread" in warning for warning in result["hard_gate"]["warnings"]))
+        self.assertEqual(result["final"]["status"], "NO_CHASE")
         self.assertFalse(result["final"]["new_entry_allowed"])
+
+    def test_blocking_anomaly_vetoes_an_otherwise_valid_signal(self):
+        item = _legacy.complete_signal()
+        item["market_metrics"].update({
+            "anomaly_state": "LIQUIDITY_WITHDRAWAL",
+            "anomaly_label": "深度突然消失",
+        })
+        result = build_decision_context(item)
+        check = next(
+            row for row in result["hard_gate"]["checks"]
+            if row["key"] == "anomaly"
+        )
+        self.assertEqual(check["status"], "BLOCKED")
+        self.assertFalse(check["hard"])
+        self.assertNotIn("anomaly", result["hard_gate"]["blockers"])
+        self.assertEqual(result["final"]["status"], "ENTER")
+        self.assertTrue(result["final"]["new_entry_allowed"])
+
+    def test_spread_hard_gate_takes_priority_over_context_conflict(self):
+        item = _legacy.complete_signal()
+        item["conflicts"] = ["4H 背景反向，屬逆勢 Trigger"]
+        item["spread_pct"] = 0.2
+        result = build_decision_context(item)
+        self.assertFalse(result["conflict"]["blocks_entry"])
+        self.assertNotIn("spread", result["hard_gate"]["blockers"])
+        self.assertTrue(any("Spread" in warning for warning in result["hard_gate"]["warnings"]))
+        self.assertEqual(result["final"]["status"], "ENTER")
+        self.assertTrue(result["final"]["new_entry_allowed"])

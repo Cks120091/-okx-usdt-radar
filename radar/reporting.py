@@ -62,8 +62,8 @@ def report_markdown(report: RadarReport) -> str:
     }
     direction_names = {"LONG": "做多", "SHORT": "做空", "NEUTRAL": "中性"}
     stage_names = {
-        "EARLY": "早期訊號",
-        "EARLY_SIGNAL": "早期訊號",
+        "EARLY": "早期",
+        "EARLY_SIGNAL": "早期",
         "CONFIRMED": "完整確認",
         "TRENDING": "趨勢進行中",
         "REENTRY": "回踩再發動",

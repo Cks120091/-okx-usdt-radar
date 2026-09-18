@@ -1,4 +1,4 @@
-const SHELL_CACHE = "okx-radar-shell-v4.9-snapshot-entry-labels-1";
+const SHELL_CACHE = "okx-radar-shell-v4.12-signal-triggered-brand";
 const SHELL_ASSETS = ["/", "/manifest.webmanifest", "/radar-icon.svg"];
 
 self.addEventListener("install", event => {
@@ -40,7 +40,7 @@ self.addEventListener("push", event => {
   } catch (_) {
     payload = {};
   }
-  const title = String(payload.title || "OKX 雷達掃描完成");
+  const title = String(payload.title || "大雞雞訊號掃描完成");
   const body = String(payload.body || "最新市場報告已完成，點擊查看結果。");
   const historyCompletion = String(payload.kind || "") === "HISTORY_COMPLETION";
   let target = "/";

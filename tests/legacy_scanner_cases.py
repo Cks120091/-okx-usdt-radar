@@ -3001,6 +3001,7 @@ class ScannerTests(unittest.TestCase):
                 super().__init__()
                 self.instruments = [self.instruments[0]]
                 self.history_calls = []
+                self.taker_calls = []
                 self.failed_history_periods = set()
 
             def get_usdt_swap_instrument(self, inst_id):
@@ -3046,6 +3047,20 @@ class ScannerTests(unittest.TestCase):
                     for index, candle in enumerate(series)
                 ]
 
+            def get_contract_taker_history(self, inst_id, period="5m", limit=60):
+                self.taker_calls.append((inst_id, period, limit))
+                series = aligned_five_minute_candles(120)[-limit:]
+                return [
+                    {
+                        "ts": candle.ts,
+                        "buy": candle.quote_volume * 0.65,
+                        "sell": candle.quote_volume * 0.35,
+                        "unit": "USDT",
+                        "inst_id": inst_id,
+                    }
+                    for candle in series
+                ]
+
         class BothHorizonEngine:
             @staticmethod
             def _result(horizon):
@@ -3084,6 +3099,10 @@ class ScannerTests(unittest.TestCase):
                 ("AAA-USDT-SWAP", "1H", 30),
             ],
         )
+        self.assertEqual(
+            client.taker_calls,
+            [("AAA-USDT-SWAP", "5m", 60)],
+        )
         short = analysis.short_result.market_state.market_metrics[
             "continuation_lookback"
         ]
@@ -3115,10 +3134,15 @@ class ScannerTests(unittest.TestCase):
             "CONTINUATION_LOOKBACK_V1",
         )
         self.assertEqual(continuation["core_votes"]["OI"]["state"], "SUPPORT")
+        self.assertEqual(
+            continuation["core_votes"]["TAKER_CVD"]["state"],
+            "SUPPORT",
+        )
         self.assertEqual(analysis.short_result.signal.entry_low, "99")
         self.assertEqual(analysis.short_result.signal.stop_loss, "97")
 
         client.history_calls.clear()
+        client.taker_calls.clear()
         report = scanner.scan_once(scan_mode="FULL")
         self.assertEqual(
             client.history_calls,
@@ -3128,10 +3152,20 @@ class ScannerTests(unittest.TestCase):
             ],
         )
         self.assertEqual(
+            client.taker_calls,
+            [("AAA-USDT-SWAP", "5m", 60)],
+        )
+        self.assertEqual(
             report.signals[0].decision_context["continuation_confirmation"][
                 "observer"
             ]["source_mode"],
             "HISTORICAL_CLOSED_BARS",
+        )
+        self.assertEqual(
+            report.signals[0].decision_context["continuation_confirmation"][
+                "core_votes"
+            ]["TAKER_CVD"]["state"],
+            "SUPPORT",
         )
 
         context_failure_client = HistoricalOIClient()

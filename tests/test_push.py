@@ -95,7 +95,7 @@ class WebPushTests(unittest.TestCase):
 
         notifier = WebPushNotifier(sender=sender, subject="mailto:radar@example.com")
         payload = {
-            "title": "OKX 雷達掃描完成",
+            "title": "大雞雞訊號掃描完成",
             "body": "最新市場報告已完成，點擊查看結果。",
             "url": "/",
             "status": "SUCCESS",

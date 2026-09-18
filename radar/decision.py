@@ -11,11 +11,25 @@ for _name in dir(_core):
 _original_hard_gate = _core._hard_gate
 _original_anomalies = _core._anomalies
 _original_conflict_layer = _core._conflict_layer
+_original_build_decision_context = _core.build_decision_context
 
-# These remain visible risk/quality warnings, but no longer veto an otherwise
-# valid Entry Zone.  Actual invalidation, opposite Trigger, liquidity, spread,
-# measured slippage, severe chase and required data remain hard gates.
+# Risk/quality checks remain visible, but they no longer veto an otherwise
+# valid Entry Zone.  Only the price contract itself remains binding here:
+# invalidation, a formal opposite Trigger, missing required core/live-price
+# data, a missing trade plan, or an Entry Window that is not open.
 _SOFT_GATE_KEYS = {
+    "ANOMALY",
+    "ANOMALOUS_MARKET",
+    "LIQUIDITY",
+    "LIQUIDITY_TOO_LOW",
+    "QUOTE_VOLUME_DATA_UNAVAILABLE",
+    "SPREAD",
+    "SPREAD_TOO_HIGH",
+    "SLIPPAGE",
+    "SLIPPAGE_TOO_HIGH",
+    "EXECUTION_DATA_UNAVAILABLE",
+    "DEEP_DATA_UNAVAILABLE",
+    "SAFETY_INTEGRITY",
     "RISK_REWARD",
     "STOP_LOSS",
     "EXECUTION_COST",
@@ -23,17 +37,56 @@ _SOFT_GATE_KEYS = {
     "EXECUTION_COST_TOO_HIGH",
 }
 
+_ADVISORY_SAFETY_KEYS = {
+    "ANOMALY",
+    "ANOMALOUS_MARKET",
+    "LIQUIDITY",
+    "LIQUIDITY_TOO_LOW",
+    "UNIVERSE_LIQUIDITY",
+    "UNIVERSE_SPREAD",
+    "SPREAD",
+    "SPREAD_TOO_HIGH",
+    "SLIPPAGE",
+    "SLIPPAGE_TOO_HIGH",
+    "EXECUTION_DEPTH",
+    "EXECUTION_COST",
+    "EXECUTION_COST_TOO_HIGH",
+    "RISK_REWARD",
+    "RR_INSUFFICIENT",
+    "STOP_LOSS",
+    "DEEP_DATA_AVAILABLE",
+    "CONTEXT_DATA",
+    "OPEN_INTEREST",
+}
+
 
 def _rebalance_hard_gate(payload):
     result = dict(payload or {})
     checks = [dict(row) for row in result.get("checks", [])]
+    softened_original_reasons: set[str] = set()
     for row in checks:
         key = str(row.get("key") or "").strip().upper()
-        if key not in _SOFT_GATE_KEYS:
+        safety_values = {
+            str(value).strip().upper()
+            for value in list(row.get("value") or [])
+            if str(value).strip()
+        } if key == "SAFETY_CHECKS" and isinstance(row.get("value"), list) else set()
+        advisory_safety_group = bool(
+            key == "SAFETY_CHECKS"
+            and safety_values
+            and safety_values.issubset(_ADVISORY_SAFETY_KEYS)
+        )
+        if key == "STOP_LOSS" and row.get("status") == "UNKNOWN":
+            # A known-but-wide stop is advice.  No usable Entry/SL geometry is
+            # a missing formal plan, so it must remain a necessary condition.
+            continue
+        if key not in _SOFT_GATE_KEYS and not advisory_safety_group:
             continue
         row["hard"] = False
         if row.get("status") in {"BLOCKED", "UNKNOWN"}:
             reason = str(row.get("reason") or "").strip()
+            if reason:
+                softened_original_reasons.add(reason)
             suffix = "僅列風險提醒，不單獨封鎖進場。"
             row["reason"] = f"{reason} {suffix}".strip()
 
@@ -68,17 +121,30 @@ def _rebalance_hard_gate(payload):
             )[:6],
             "warnings": _core._unique(
                 [
-                    *list(result.get("warnings", []) or []),
+                    *[
+                        str(reason)
+                        for reason in list(result.get("warnings", []) or [])
+                        if str(reason) not in softened_original_reasons
+                    ],
                     *[str(row.get("reason") or "") for row in advisory],
                 ]
             )[:8],
-            "policy": "FUSION_BALANCED_V1",
+            "policy": "ADVISORY_RISK_V1",
+            "risk_checks_advisory_only": True,
         }
     )
     return result
 
 
 def _hard_gate(*args, **kwargs):
+    item = kwargs.get("item")
+    if item is not None and kwargs.get("plan_present"):
+        formal_plan_present = all(
+            _core._number(_core._read(item, key, None)) is not None
+            for key in ("entry_low", "entry_high", "stop_loss", "take_profit_1")
+        )
+        if not formal_plan_present:
+            kwargs = {**kwargs, "plan_present": False}
     return _rebalance_hard_gate(_original_hard_gate(*args, **kwargs))
 
 
@@ -153,7 +219,26 @@ _core._hard_gate = _hard_gate
 _core._anomalies = _anomalies
 _core._conflict_layer = _conflict_layer
 
-# build_decision_context is defined in the retained module and resolves these
-# globals at call time, so the patched policy applies without touching Trigger
-# generation or any trade-plan geometry.
-build_decision_context = _core.build_decision_context
+def build_decision_context(*args, **kwargs):
+    # The retained builder resolves the patched globals at call time.  Normalize
+    # only its presentation labels; Trigger and trade-plan geometry stay intact.
+    payload = _original_build_decision_context(*args, **kwargs)
+    final = dict(payload.get("final", {}) or {})
+    status = str(final.get("status") or "").upper()
+    if status == "ENTER":
+        final["label"] = (
+            "掃描條件通過｜附風險建議"
+            if list(final.get("risk_warnings", []) or [])
+            or list(payload.get("hard_gate", {}).get("warnings", []) or [])
+            else "掃描條件通過"
+        )
+    elif status == "HARD_GATE_BLOCKED":
+        final["label"] = "必要條件未成立｜先更新確認"
+        wait = dict(final.get("wait_reason", {}) or {})
+        wait["label"] = "等待必要條件重新成立"
+        final["wait_reason"] = wait
+    elif status == "DATA_UNAVAILABLE":
+        final["label"] = "必要資料不足｜先更新確認"
+    payload["final"] = final
+    payload["policy"] = "ADVISORY_RISK_V1"
+    return payload

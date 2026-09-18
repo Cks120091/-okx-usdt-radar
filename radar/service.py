@@ -49,6 +49,199 @@ _OBSERVER_SETTLE_DELAY_MS = 2_000
 _OBSERVER_START_WINDOW_MS = 8_000
 
 
+# Risk and execution-quality observations stay visible in the single-coin
+# refresh, but they are advice only.  These aliases also cover cached payloads
+# written before the advisory-only policy existed.
+_ADVISORY_RISK_CODES = {
+    "ANOMALY",
+    "ANOMALOUS_MARKET",
+    "MARKET_ANOMALY_ADVISORY",
+    "LIQUIDITY",
+    "LIQUIDITY_TOO_LOW",
+    "LIQUIDITY_ADVISORY",
+    "QUOTE_VOLUME_DATA_UNAVAILABLE",
+    "LIQUIDITY_DATA_ADVISORY",
+    "SPREAD",
+    "SPREAD_TOO_HIGH",
+    "SPREAD_ADVISORY",
+    "SLIPPAGE",
+    "SLIPPAGE_TOO_HIGH",
+    "SLIPPAGE_ADVISORY",
+    "EXECUTION_DEPTH",
+    "EXECUTION_DATA_UNAVAILABLE",
+    "EXECUTION_ESTIMATE_UNAVAILABLE",
+    "EXECUTION_DATA_ADVISORY",
+    "EXECUTION_COST",
+    "EXECUTION_COST_TOO_HIGH",
+    "EXECUTION_COST_ADVISORY",
+    "RISK_REWARD",
+    "RR",
+    "RR_INSUFFICIENT",
+    "RR_ADVISORY",
+    "STOP_LOSS",
+    "STOP_WIDTH_ADVISORY",
+    "DEEP_DATA_AVAILABLE",
+    "DEEP_DATA_UNAVAILABLE",
+    "DEEP_DATA_ADVISORY",
+    "CONTEXT_DATA",
+    "OPEN_INTEREST",
+    "SAFETY_INTEGRITY",
+    "UPSTREAM_RISK_ADVISORY",
+    "UPSTREAM_DATA_ADVISORY",
+}
+
+_ADVISORY_SAFETY_KEYS = {
+    *{value.lower() for value in _ADVISORY_RISK_CODES},
+    "depth",
+    "order_book",
+    "order_book_depth",
+    "universe_liquidity",
+    "universe_spread",
+}
+
+_ADVISORY_MISSING_SOURCES = {
+    "deep_data",
+    "execution_depth",
+    "funding",
+    "open_interest",
+    "order_book",
+    "order_book_depth",
+    "quote_volume",
+    "quote_volume_24h",
+    "taker",
+    "ticker_quote_volume_24h",
+}
+
+_BINDING_DATA_CODES = {
+    "CORE_DATA_UNAVAILABLE",
+    "DATA_QUALITY",
+    "DATA_UNAVAILABLE",
+    "ENTRY_INPUT_MISSING",
+    "LIVE_PRICE_UNAVAILABLE",
+    "REQUIRED_DATA_UNAVAILABLE",
+    "SIGNAL_DATA_UNAVAILABLE",
+    "STORED_PLAN_DATA_UNAVAILABLE",
+    "TRADE_PLAN",
+}
+
+_BINDING_DIRECTION_CODES = {
+    "OPPOSITE_SIGNAL",
+    "OPPOSITE_WARNING",
+}
+
+
+def _policy_code(value: Any) -> str:
+    return re.sub(r"[^A-Z0-9]+", "_", str(value or "").strip().upper()).strip("_")
+
+
+def _is_advisory_risk_code(value: Any) -> bool:
+    code = _policy_code(value)
+    return bool(code) and (
+        code in _ADVISORY_RISK_CODES or code.endswith("_ADVISORY")
+    )
+
+
+def _safety_check_is_advisory(check: dict[str, Any]) -> bool:
+    key = str(check.get("key") or "").strip().lower()
+    if key == "stop_loss" and check.get("passed") is None:
+        return False
+    return key in _ADVISORY_SAFETY_KEYS
+
+
+def _split_advisory_risk_codes(values: Any) -> tuple[list[str], list[str]]:
+    advisory: list[str] = []
+    binding: list[str] = []
+    for value in list(values or []):
+        text = str(value).strip()
+        if not text:
+            continue
+        (advisory if _is_advisory_risk_code(text) else binding).append(text)
+    return list(dict.fromkeys(advisory)), list(dict.fromkeys(binding))
+
+
+def _normalize_preflight_advisories(
+    verdict: dict[str, Any],
+    lifecycle: dict[str, Any],
+    plan: dict[str, Any],
+) -> None:
+    """Remove legacy risk-only vetoes without weakening core requirements."""
+
+    raw_blockers = list(dict.fromkeys(list(verdict.get("hard_blockers", []) or [])))
+    advisory_blockers, binding_blockers = _split_advisory_risk_codes(raw_blockers)
+    warnings = list(verdict.get("risk_warnings", []) or [])
+    advisory_warnings, binding_warnings = _split_advisory_risk_codes(warnings)
+    verdict["hard_blockers"] = binding_blockers
+    verdict["advisory_blockers"] = list(
+        dict.fromkeys(
+            [
+                *list(verdict.get("advisory_blockers", []) or []),
+                *advisory_blockers,
+            ]
+        )
+    )
+    verdict["risk_warnings"] = list(
+        dict.fromkeys([*warnings, *advisory_blockers])
+    )
+
+    status = str(verdict.get("status") or "").upper()
+    situation = str(verdict.get("situation") or "").upper()
+    lifecycle_status = str(lifecycle.get("status") or "ACTIVE").upper()
+    plan_status = str(plan.get("status") or "ACTIVE").upper()
+    warning_codes = {_policy_code(value) for value in binding_warnings}
+    has_binding_warning = bool(
+        warning_codes & (_BINDING_DATA_CODES | _BINDING_DIRECTION_CODES)
+    )
+    has_advisory_reason = bool(
+        advisory_blockers or advisory_warnings or status == "ANOMALY"
+    )
+    can_reopen = bool(
+        status in {"ANOMALY", "DATA_UNAVAILABLE", "HARD_GATE_BLOCKED"}
+        and has_advisory_reason
+        and not binding_blockers
+        and not has_binding_warning
+        and situation == "IN_ENTRY_AREA"
+        and lifecycle_status == "ACTIVE"
+        and lifecycle.get("terminal") is not True
+        and plan_status
+        not in {
+            "CLOSED",
+            "COMPLETED",
+            "INVALIDATED",
+            "MISSED",
+            "PLAN_INVALIDATED",
+            "TARGET_REACHED",
+        }
+        and plan.get("terminal") is not True
+        and plan.get("new_trigger_required") is not True
+        and plan.get("direction_still_valid") is not False
+    )
+    if not can_reopen:
+        return
+
+    verdict.update(
+        {
+            "status": "ENTRY_READY",
+            "label": "掃描條件通過｜附風險建議",
+            "reason": (
+                "訊號、原計畫、必要資料與價格位置均成立；"
+                "流動性、價差、滑價、成交成本、R:R 與其他風險數據只列建議。"
+            ),
+            "actionable": True,
+            "new_entry_allowed": True,
+            "risk_advisory_only": True,
+        }
+    )
+    plan.update(
+        {
+            "status": "ACTIVE",
+            "old_plan_reusable": True,
+            "old_plan_reusable_for_new_entry": True,
+            "new_entry_status": "READY",
+            "new_entry_allowed": True,
+        }
+    )
+
+
 def _preflight_continuation_state(value: dict[str, Any]) -> dict[str, Any]:
     key = str(value.get("key") or "UNKNOWN").upper()
     if key not in {"CONFIRMED", "FORMING", "WEAK", "CONFLICT", "UNKNOWN"}:
@@ -315,35 +508,98 @@ def _latest_confirmation(result: Any, original_direction: str) -> dict[str, Any]
     decision = dict(getattr(item, "decision_context", {}) or {}) if item else {}
     hard_gate = dict(decision.get("hard_gate", {}) or {})
     final = dict(decision.get("final", {}) or {})
+    entry_eligibility = (
+        dict(getattr(item, "entry_eligibility", {}) or {}) if item else {}
+    )
+    entry_contract_allows = bool(
+        final.get("new_entry_allowed") is True
+        or entry_eligibility.get("new_entry_allowed") is True
+        or entry_eligibility.get("actionable") is True
+    )
+    safety_checks = list(getattr(item, "safety_checks", []) or []) if item else []
     failed_risk_checks = [
         str(check.get("key") or check.get("label") or "risk_warning")
-        for check in list(getattr(item, "safety_checks", []) or [])
-        if check.get("passed") is False
-    ] if item is not None else []
+        for check in safety_checks
+        if check.get("passed") in {False, None}
+    ]
     failed_hard_checks = [
         str(check.get("key") or check.get("label") or "risk_block")
-        for check in list(getattr(item, "safety_checks", []) or [])
-        if check.get("passed") is False and bool(check.get("hard", True))
-    ] if item is not None else []
+        for check in safety_checks
+        if check.get("passed") is False
+        and bool(check.get("hard", True))
+        and not _safety_check_is_advisory(check)
+    ]
     unknown_hard_checks = [
         str(check.get("key") or check.get("label") or "risk_unknown")
-        for check in list(getattr(item, "safety_checks", []) or [])
-        if check.get("passed") is None and bool(check.get("hard", True))
-    ] if item is not None else []
+        for check in safety_checks
+        if check.get("passed") is None
+        and bool(check.get("hard", True))
+        and not _safety_check_is_advisory(check)
+    ]
     hard_gate_status = str(hard_gate.get("status") or "").upper()
-    hard_gate_blockers = [
+    raw_hard_gate_blockers = [
         str(value) for value in list(hard_gate.get("blockers", []) or [])
     ]
-    hard_gate_unknowns = [
+    raw_hard_gate_unknowns = [
         str(value) for value in list(hard_gate.get("unknowns", []) or [])
     ]
+    advisory_gate_blockers, hard_gate_blockers = _split_advisory_risk_codes(
+        raw_hard_gate_blockers
+    )
+    advisory_gate_unknowns, hard_gate_unknowns = _split_advisory_risk_codes(
+        raw_hard_gate_unknowns
+    )
+    if not failed_hard_checks and "safety_checks" in {
+        value.strip().lower() for value in hard_gate_blockers
+    }:
+        hard_gate_blockers = [
+            value
+            for value in hard_gate_blockers
+            if value.strip().lower() != "safety_checks"
+        ]
+        advisory_gate_blockers.append("safety_checks")
+    if not unknown_hard_checks and "safety_checks" in {
+        value.strip().lower() for value in hard_gate_unknowns
+    }:
+        hard_gate_unknowns = [
+            value
+            for value in hard_gate_unknowns
+            if value.strip().lower() != "safety_checks"
+        ]
+        advisory_gate_unknowns.append("safety_checks")
+    has_explicit_gate_reason = bool(
+        raw_hard_gate_blockers or raw_hard_gate_unknowns
+    )
+    opaque_gate_block = bool(
+        (
+            hard_gate.get("blocked") is True
+            or hard_gate_status in {"BLOCKED", "HARD_GATE_BLOCKED"}
+        )
+        and not raw_hard_gate_blockers
+    )
+    opaque_gate_unknown = bool(
+        (
+            hard_gate.get("unknown") is True
+            or hard_gate_status in {
+                "DATA_UNAVAILABLE",
+                "PARTIAL",
+                "UNAVAILABLE",
+                "UNKNOWN",
+            }
+            or hard_gate.get("passed") is False
+            or hard_gate.get("new_entry_allowed") is False
+        )
+        and not has_explicit_gate_reason
+    )
     risk_warning_codes = list(
         dict.fromkeys(
             [
-                *hard_gate_blockers,
-                *hard_gate_unknowns,
+                *raw_hard_gate_blockers,
+                *raw_hard_gate_unknowns,
                 *failed_risk_checks,
-                *unknown_hard_checks,
+                *advisory_gate_blockers,
+                *advisory_gate_unknowns,
+                *(["ANOMALY"] if hard_gate_status == "ANOMALY" else []),
             ]
         )
     )
@@ -372,30 +628,25 @@ def _latest_confirmation(result: Any, original_direction: str) -> dict[str, Any]
             else "DIRECTION_NOT_RECONFIRMED"
         )
     elif (
-        hard_gate.get("blocked") is True
-        or hard_gate_status
-        in {"ANOMALY", "BLOCKED", "HARD_GATE_BLOCKED", "OPPOSITE_SIGNAL"}
+        opaque_gate_block
+        or hard_gate_status == "OPPOSITE_SIGNAL"
         or hard_gate_blockers
         or failed_hard_checks
     ):
         status = "HARD_GATE_BLOCKED"
-        label = "風險條件未通過"
-        message = "最新掃描的風險條件未通過；舊計畫保留，但禁止新進場。"
+        label = "必要條件未成立"
+        message = "最新掃描的必要條件未成立；舊計畫保留，但目前不可新進場。"
         confirmation_blockers.extend(
             hard_gate_blockers or failed_hard_checks or ["HARD_GATE_BLOCKED"]
         )
     elif (
-        hard_gate.get("unknown") is True
-        or hard_gate_status
-        in {"DATA_UNAVAILABLE", "PARTIAL", "UNAVAILABLE", "UNKNOWN"}
+        opaque_gate_unknown
         or hard_gate_unknowns
         or unknown_hard_checks
-        or hard_gate.get("passed") is False
-        or hard_gate.get("new_entry_allowed") is False
     ):
         status = "DATA_UNAVAILABLE"
-        label = "最新安全資料不足"
-        message = "最新掃描無法完整核對風險條件；資料恢復前禁止新進場。"
+        label = "最新必要資料不足"
+        message = "最新掃描缺少必要價格或核心資料；資料恢復前不可新進場。"
         confirmation_blockers.extend(
             hard_gate_unknowns or unknown_hard_checks or ["DATA_UNAVAILABLE"]
         )
@@ -407,7 +658,7 @@ def _latest_confirmation(result: Any, original_direction: str) -> dict[str, Any]
     elif (
         formal
         and direction == original_direction
-        and final.get("new_entry_allowed") is True
+        and entry_contract_allows
     ):
         status = "REVALIDATED"
         label = "原方向重新確認"
@@ -457,46 +708,67 @@ def _latest_confirmation(result: Any, original_direction: str) -> dict[str, Any]
 def _preflight_data_quality_unavailable(data_quality: dict[str, Any]) -> bool:
     """Return whether a preflight is missing a required entry input.
 
-    New payloads split required ticker inputs from optional Order Book depth.
-    Legacy payloads did not make that distinction, so their PARTIAL status or
-    generic missing list remains fail-closed.
+    Live price/Bid/Ask and core signal inputs remain binding.  Quote volume,
+    Order Book depth, OI, Taker and other risk-quality context are advisory,
+    including in legacy payloads that used to call them required.
     """
 
     quality = dict(data_quality or {})
     status = str(quality.get("status") or "").upper()
+    if quality.get("ticker_available") is False:
+        return True
+    required = {
+        str(value).strip()
+        for value in list(quality.get("required_missing_sources", []) or [])
+        if str(value).strip()
+    }
+    optional = {
+        str(value).strip()
+        for value in list(quality.get("optional_missing_sources", []) or [])
+        if str(value).strip()
+    }
+    missing = {
+        str(value).strip()
+        for value in list(quality.get("missing_sources", []) or [])
+        if str(value).strip()
+    }
+    blocking_required = {
+        value
+        for value in required
+        if _policy_code(value).lower() not in _ADVISORY_MISSING_SOURCES
+    }
+    advisory_missing = {
+        value
+        for value in missing
+        if _policy_code(value).lower() in _ADVISORY_MISSING_SOURCES
+    }
+    if "required_missing_sources" in quality:
+        if blocking_required:
+            return True
+        # An explicitly split payload may remain PARTIAL only when every
+        # generic omission is optional or a known advisory data source.
+        unknown_missing = missing - optional - advisory_missing
+        if unknown_missing:
+            return True
+        return bool(
+            status
+            in {"DATA_UNAVAILABLE", "UNAVAILABLE", "UNKNOWN", "ERROR", "FAILED"}
+            and not (required or missing)
+        )
     if status in {"DATA_UNAVAILABLE", "UNAVAILABLE", "UNKNOWN", "ERROR", "FAILED"}:
         return True
-    if (
-        quality.get("ticker_available") is False
-        or quality.get("quote_volume_available") is False
-    ):
-        return True
-    if "required_missing_sources" in quality:
-        required = {
-            str(value).strip()
-            for value in list(quality.get("required_missing_sources", []) or [])
-            if str(value).strip()
-        }
-        if required:
-            return True
-        optional = {
-            str(value).strip()
-            for value in list(quality.get("optional_missing_sources", []) or [])
-            if str(value).strip()
-        }
-        missing = {
-            str(value).strip()
-            for value in list(quality.get("missing_sources", []) or [])
-            if str(value).strip()
-        }
-        # An explicitly split payload may remain PARTIAL only when every
-        # generic missing source is also identified as optional. Unknown or
-        # malformed omissions stay fail-closed.
-        return bool(missing - optional)
-    return bool(
-        status == "PARTIAL"
-        or list(quality.get("missing_sources", []) or [])
-    )
+    if missing:
+        return bool(missing - advisory_missing)
+    if status == "PARTIAL":
+        # Legacy payloads with explicit optional-quality flags are understood;
+        # an otherwise unexplained PARTIAL state remains fail-closed.
+        optional_gap_known = bool(
+            quality.get("quote_volume_available") is False
+            or quality.get("order_book_available") is False
+            or quality.get("execution_depth_complete") is False
+        )
+        return not optional_gap_known
+    return False
 
 
 def _merge_preflight_confirmation(
@@ -509,6 +781,7 @@ def _merge_preflight_confirmation(
     verdict = merged.setdefault("verdict", {})
     lifecycle = merged.setdefault("signal_lifecycle", {})
     plan = merged.setdefault("plan_state", {})
+    _normalize_preflight_advisories(verdict, lifecycle, plan)
     status = str(confirmation.get("status") or "UNKNOWN").upper()
     if status in {"OPPOSITE_WARNING", "CONFIRMED_REVERSAL"}:
         # Backward compatibility for cached V3.4 responses.  The old Episode
@@ -525,8 +798,11 @@ def _merge_preflight_confirmation(
             }
         )
 
-    confirmation_blockers = list(
+    raw_confirmation_blockers = list(
         dict.fromkeys(list(confirmation.get("hard_blockers", []) or []))
+    )
+    advisory_confirmation_blockers, confirmation_blockers = (
+        _split_advisory_risk_codes(raw_confirmation_blockers)
     )
     soft_confirmation_blockers = {"DIRECTION_NOT_RECONFIRMED", "HIGH_NOISE"}
     confirmation_hard_blockers = [
@@ -534,16 +810,51 @@ def _merge_preflight_confirmation(
         for value in confirmation_blockers
         if value not in soft_confirmation_blockers
     ]
+    raw_confirmation_warnings = list(confirmation.get("risk_warnings", []) or [])
+    advisory_confirmation_warnings, binding_confirmation_warnings = (
+        _split_advisory_risk_codes(raw_confirmation_warnings)
+    )
     legacy_risk_codes = list(
         dict.fromkeys(
             [
-                *list(confirmation.get("risk_warnings", []) or []),
-                *confirmation_blockers,
+                *raw_confirmation_warnings,
+                *raw_confirmation_blockers,
+                *advisory_confirmation_blockers,
             ]
         )
     )
     confirmation["hard_blockers"] = confirmation_blockers
     confirmation["risk_warnings"] = legacy_risk_codes
+
+    risk_only_confirmation = bool(
+        status in {"ANOMALY", "DATA_UNAVAILABLE", "HARD_GATE_BLOCKED"}
+        and (
+            status == "ANOMALY"
+            or advisory_confirmation_blockers
+            or advisory_confirmation_warnings
+        )
+        and not confirmation_hard_blockers
+        and not {
+            _policy_code(value) for value in binding_confirmation_warnings
+        }
+        & (_BINDING_DATA_CODES | _BINDING_DIRECTION_CODES)
+        and str(verdict.get("status") or "").upper() == "ENTRY_READY"
+        and verdict.get("actionable") is True
+    )
+    if risk_only_confirmation:
+        status = "REVALIDATED"
+        confirmation.update(
+            {
+                "status": status,
+                "label": "原方向重新確認｜附風險建議",
+                "message": (
+                    "最新訊號與價格條件仍成立；流動性、價差、滑價、"
+                    "成交成本與其他風險資料只列建議，不阻止進場。"
+                ),
+                "new_entry_allowed": True,
+                "risk_advisory_only": True,
+            }
+        )
 
     verdict_status = str(verdict.get("status") or "DATA_UNAVAILABLE").upper()
     verdict_situation = str(verdict.get("situation") or "").upper()
@@ -570,33 +881,38 @@ def _merge_preflight_confirmation(
     positional_entry_closed = (
         verdict_status == "MISSED_ENTRY" or plan_status == "MISSED"
     )
-    verdict_blockers = list(
+    raw_verdict_blockers = list(
         dict.fromkeys(list(verdict.get("hard_blockers", []) or []))
     )
+    advisory_verdict_blockers, verdict_blockers = _split_advisory_risk_codes(
+        raw_verdict_blockers
+    )
+    verdict["hard_blockers"] = verdict_blockers
+    verdict["advisory_blockers"] = list(
+        dict.fromkeys(
+            [
+                *list(verdict.get("advisory_blockers", []) or []),
+                *advisory_verdict_blockers,
+            ]
+        )
+    )
+    verdict["risk_warnings"] = list(
+        dict.fromkeys(
+            [
+                *list(verdict.get("risk_warnings", []) or []),
+                *advisory_verdict_blockers,
+            ]
+        )
+    )
     verdict_risk_codes = {
-        str(value).strip().upper()
+        _policy_code(value)
         for value in list(verdict.get("risk_warnings", []) or [])
         if str(value).strip()
     }
-    data_warning_codes = {
-        "DATA_UNAVAILABLE",
-        "EXECUTION_DATA_UNAVAILABLE",
-        "SIGNAL_DATA_UNAVAILABLE",
-        "STORED_PLAN_DATA_UNAVAILABLE",
-        "UPSTREAM_DATA_UNAVAILABLE",
-    }
-    hard_warning_codes = {
-        "ANOMALY",
-        "EXECUTION_COST_TOO_HIGH",
-        "OPPOSITE_WARNING",
-        "OPPOSITE_SIGNAL",
-        "RR_INSUFFICIENT",
-        "SLIPPAGE_TOO_HIGH",
-        "SPREAD_TOO_HIGH",
-        "UPSTREAM_HARD_GATE_BLOCKED",
-    }
+    data_warning_codes = _BINDING_DATA_CODES
+    hard_warning_codes = _BINDING_DIRECTION_CODES
     confirmation_risk_codes = {
-        str(value).strip().upper()
+        _policy_code(value)
         for value in legacy_risk_codes
         if str(value).strip()
     }
@@ -613,16 +929,16 @@ def _merge_preflight_confirmation(
         or bool(confirmation_risk_codes & data_warning_codes)
     )
     known_hard_block = bool(
-        status in {"ANOMALY", "HARD_GATE_BLOCKED", "OPPOSITE_SIGNAL"}
-        or verdict_status in {"ANOMALY", "HARD_GATE_BLOCKED", "OPPOSITE_SIGNAL"}
+        status in {"HARD_GATE_BLOCKED", "OPPOSITE_SIGNAL"}
+        or verdict_status in {"HARD_GATE_BLOCKED", "OPPOSITE_SIGNAL"}
         or verdict_situation
-        in {"ANOMALY", "HARD_GATE_BLOCKED", "OPPOSITE_SIGNAL"}
+        in {"HARD_GATE_BLOCKED", "OPPOSITE_SIGNAL"}
         or lifecycle_status
-        in {"ANOMALY", "BLOCKED", "HARD_GATE_BLOCKED", "OPPOSITE_SIGNAL"}
+        in {"BLOCKED", "HARD_GATE_BLOCKED", "OPPOSITE_SIGNAL"}
         or plan_status
-        in {"ANOMALY", "BLOCKED", "HARD_GATE_BLOCKED", "OPPOSITE_SIGNAL"}
+        in {"BLOCKED", "HARD_GATE_BLOCKED", "OPPOSITE_SIGNAL"}
         or plan_new_entry_status
-        in {"ANOMALY", "BLOCKED", "HARD_GATE_BLOCKED", "OPPOSITE_SIGNAL"}
+        in {"BLOCKED", "HARD_GATE_BLOCKED", "OPPOSITE_SIGNAL"}
         or (verdict_blockers and not verdict_data_unavailable)
         or bool(verdict_risk_codes & hard_warning_codes)
         or bool(confirmation_risk_codes & hard_warning_codes)
@@ -673,7 +989,6 @@ def _merge_preflight_confirmation(
         or verdict_data_unavailable
     )
     binding_confirmation = status in {
-        "ANOMALY",
         "DATA_UNAVAILABLE",
         "HARD_GATE_BLOCKED",
         "OPPOSITE_SIGNAL",
@@ -693,7 +1008,7 @@ def _merge_preflight_confirmation(
             not verdict_data_unavailable
             and (
                 known_hard_block
-                or status in {"ANOMALY", "HARD_GATE_BLOCKED", "OPPOSITE_SIGNAL"}
+                or status in {"HARD_GATE_BLOCKED", "OPPOSITE_SIGNAL"}
             )
         )
         verdict.update(
@@ -795,58 +1110,89 @@ def _canonical_single_decision(
     verdict = dict(preflight.get("verdict", {}) or {})
     lifecycle = dict(preflight.get("signal_lifecycle", {}) or {})
     plan = dict(preflight.get("plan_state", {}) or {})
+    _normalize_preflight_advisories(verdict, lifecycle, plan)
     status = str(verdict.get("status", "DATA_UNAVAILABLE")).upper()
     situation = str(verdict.get("situation", "")).upper()
     lifecycle_status = str(lifecycle.get("status", "")).upper()
     plan_status = str(plan.get("status", "")).upper()
     plan_new_entry_status = str(plan.get("new_entry_status") or "").upper()
     direction = str(preflight.get("direction") or final.get("direction") or "NEUTRAL")
-    verdict_blockers = list(
+    raw_verdict_blockers = list(
         dict.fromkeys(list(verdict.get("hard_blockers", []) or []))
     )
+    advisory_verdict_blockers, verdict_blockers = _split_advisory_risk_codes(
+        raw_verdict_blockers
+    )
+    verdict["hard_blockers"] = verdict_blockers
+    verdict["advisory_blockers"] = list(
+        dict.fromkeys(
+            [
+                *list(verdict.get("advisory_blockers", []) or []),
+                *advisory_verdict_blockers,
+            ]
+        )
+    )
     verdict_risk_codes = {
-        str(value).strip().upper()
+        _policy_code(value)
         for value in list(verdict.get("risk_warnings", []) or [])
         if str(value).strip()
     }
-    data_warning_codes = {
-        "DATA_UNAVAILABLE",
-        "EXECUTION_DATA_UNAVAILABLE",
-        "SIGNAL_DATA_UNAVAILABLE",
-        "STORED_PLAN_DATA_UNAVAILABLE",
-        "UPSTREAM_DATA_UNAVAILABLE",
-    }
-    hard_warning_codes = {
-        "ANOMALY",
-        "EXECUTION_COST_TOO_HIGH",
-        "OPPOSITE_WARNING",
-        "OPPOSITE_SIGNAL",
-        "RR_INSUFFICIENT",
-        "SLIPPAGE_TOO_HIGH",
-        "SPREAD_TOO_HIGH",
-        "UPSTREAM_HARD_GATE_BLOCKED",
-    }
+    data_warning_codes = _BINDING_DATA_CODES
+    hard_warning_codes = _BINDING_DIRECTION_CODES
     confirmation_payload = dict(confirmation or {})
     confirmation_status = str(
         confirmation_payload.get("status") or ""
     ).upper()
     if confirmation_status in {"OPPOSITE_WARNING", "CONFIRMED_REVERSAL"}:
         confirmation_status = "OPPOSITE_SIGNAL"
-    confirmation_blockers = list(
+    raw_confirmation_blockers = list(
         dict.fromkeys(
             list(confirmation_payload.get("hard_blockers", []) or [])
         )
+    )
+    advisory_confirmation_blockers, confirmation_blockers = (
+        _split_advisory_risk_codes(raw_confirmation_blockers)
     )
     confirmation_hard_blockers = [
         value
         for value in confirmation_blockers
         if value not in {"DIRECTION_NOT_RECONFIRMED", "HIGH_NOISE"}
     ]
+    raw_confirmation_warnings = list(
+        confirmation_payload.get("risk_warnings", []) or []
+    )
+    advisory_confirmation_warnings, binding_confirmation_warnings = (
+        _split_advisory_risk_codes(raw_confirmation_warnings)
+    )
     confirmation_risk_codes = {
-        str(value).strip().upper()
-        for value in list(confirmation_payload.get("risk_warnings", []) or [])
+        _policy_code(value)
+        for value in [*raw_confirmation_warnings, *raw_confirmation_blockers]
         if str(value).strip()
     }
+    confirmation_binding_warning_codes = {
+        _policy_code(value) for value in binding_confirmation_warnings
+    }
+    if (
+        confirmation_status
+        in {"ANOMALY", "DATA_UNAVAILABLE", "HARD_GATE_BLOCKED"}
+        and (
+            confirmation_status == "ANOMALY"
+            or advisory_confirmation_blockers
+            or advisory_confirmation_warnings
+        )
+        and not confirmation_hard_blockers
+        and not confirmation_binding_warning_codes
+        & (_BINDING_DATA_CODES | _BINDING_DIRECTION_CODES)
+        and status == "ENTRY_READY"
+        and verdict.get("actionable") is True
+    ):
+        confirmation_status = "REVALIDATED"
+        confirmation_payload["status"] = confirmation_status
+        confirmation_payload["hard_blockers"] = []
+        confirmation_payload["new_entry_allowed"] = True
+        confirmation_payload["risk_advisory_only"] = True
+        confirmation_blockers = []
+        confirmation_hard_blockers = []
     confirmation_present = bool(confirmation_payload)
     confirmation_allows_entry = bool(
         confirmation_status == "REVALIDATED"
@@ -910,18 +1256,18 @@ def _canonical_single_decision(
         or bool(confirmation_risk_codes & data_warning_codes)
     )
     hard_gate_blocked = bool(
-        status in {"ANOMALY", "HARD_GATE_BLOCKED", "OPPOSITE_SIGNAL"}
-        or situation in {"ANOMALY", "HARD_GATE_BLOCKED", "OPPOSITE_SIGNAL"}
+        status in {"HARD_GATE_BLOCKED", "OPPOSITE_SIGNAL"}
+        or situation in {"HARD_GATE_BLOCKED", "OPPOSITE_SIGNAL"}
         or lifecycle_status
-        in {"ANOMALY", "BLOCKED", "HARD_GATE_BLOCKED", "OPPOSITE_SIGNAL"}
+        in {"BLOCKED", "HARD_GATE_BLOCKED", "OPPOSITE_SIGNAL"}
         or plan_status
-        in {"ANOMALY", "BLOCKED", "HARD_GATE_BLOCKED", "OPPOSITE_SIGNAL"}
+        in {"BLOCKED", "HARD_GATE_BLOCKED", "OPPOSITE_SIGNAL"}
         or plan_new_entry_status
-        in {"ANOMALY", "BLOCKED", "HARD_GATE_BLOCKED", "OPPOSITE_SIGNAL"}
+        in {"BLOCKED", "HARD_GATE_BLOCKED", "OPPOSITE_SIGNAL"}
         or (verdict_blockers and not data_unavailable)
         or bool(verdict_risk_codes & hard_warning_codes)
         or confirmation_status
-        in {"ANOMALY", "BLOCKED", "HARD_GATE_BLOCKED", "OPPOSITE_SIGNAL"}
+        in {"BLOCKED", "HARD_GATE_BLOCKED", "OPPOSITE_SIGNAL"}
         or bool(confirmation_risk_codes & hard_warning_codes)
         or (confirmation_hard_blockers and not data_unavailable)
     )
@@ -987,9 +1333,9 @@ def _canonical_single_decision(
     labels = {
         "INVALIDATED": "交易計畫已失效｜等待全新 Trigger",
         "COMPLETED": "目標已達｜本次交易計畫完成",
-        "ENTER": "目前可進｜附風險提醒",
-        "HARD_GATE_BLOCKED": "風險條件未通過｜禁止新進場",
-        "DATA_UNAVAILABLE": "資料不足｜禁止新進場",
+        "ENTER": "掃描條件通過｜附風險建議",
+        "HARD_GATE_BLOCKED": "必要條件未成立｜先更新確認",
+        "DATA_UNAVAILABLE": "必要資料不足｜先更新確認",
         "NO_CHASE": "方向仍可追蹤｜禁止追價",
         "NO_EDGE": "風險報酬不值得",
         "WAIT": str(verdict.get("label") or "目前等待確認"),
@@ -1005,7 +1351,7 @@ def _canonical_single_decision(
         "INVALIDATED": ("NEW_TRIGGER_REQUIRED", "等待新的 Trigger／REENTRY"),
         "COMPLETED": ("TARGET_REACHED", "本次機會已完成｜等待全新 Trigger"),
         "DATA_UNAVAILABLE": ("DATA_MISSING", "等待最新完整資料"),
-        "HARD_GATE_BLOCKED": ("HARD_GATE_BLOCKED", "等待風險條件恢復或重新確認"),
+        "HARD_GATE_BLOCKED": ("HARD_GATE_BLOCKED", "等待必要條件重新成立"),
         "NO_CHASE": ("PRICE_TOO_FAR", "等待回到合理進場區或新事件"),
         "NO_EDGE": ("RISK_REWARD", "等待新的合理交易計畫"),
         "WAIT": (str(situation or "ENTRY_CONFIRMATION"), labels["WAIT"]),
@@ -1230,7 +1576,7 @@ def _project_horizon_read_only(
                 "STALE": "資料已過期｜禁止依此進場",
                 "ERROR": "更新失敗｜顯示上一輪資料",
                 "SCANNING": "掃描中｜顯示上一輪資料",
-                "CORE_PREVIEW": "核心預覽｜等待完整風控",
+                "CORE_PREVIEW": "核心預覽｜等待完整掃描",
             }.get(reason, "唯讀資料｜禁止進場")
             final["status"] = read_only_status
             final["label"] = read_only_label
@@ -4144,7 +4490,7 @@ class RadarRuntime:
             and report.status != "DATA_INCOMPLETE"
         )
         payload = {
-            "title": "OKX 雷達掃描完成" if success else "OKX 雷達掃描未完成",
+            "title": "大雞雞訊號掃描完成" if success else "大雞雞訊號掃描未完成",
             "body": (
                 "最新市場報告已完成，點擊查看結果。"
                 if success

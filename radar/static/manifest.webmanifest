@@ -1,7 +1,7 @@
 {
-  "name": "OKX Radar V3.4",
-  "short_name": "OKX 雷達",
-  "description": "OKX USDT 永續長短線 Market Story 雷達",
+  "name": "大雞雞訊號 V3.4",
+  "short_name": "大雞雞訊號",
+  "description": "OKX USDT 永續長短線訊號雷達",
   "start_url": "/",
   "scope": "/",
   "display": "standalone",

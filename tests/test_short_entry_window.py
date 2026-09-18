@@ -13,7 +13,10 @@ WindowIntegrationTests = _legacy.WindowIntegrationTests
 class ShortContextPolicyTests(_legacy.ShortContextPolicyTests):
     def test_risk_gates_still_block_against_background(self):
         item = _legacy.complete_signal(); item['conflicts']=['4H 背景明顯反向']; item['spread_pct']=.3
-        self.assertFalse(build_decision_context(item)['final']['new_entry_allowed'])
+        spread = build_decision_context(item)
+        self.assertTrue(spread['final']['new_entry_allowed'])
+        self.assertNotIn('spread', spread['hard_gate']['blockers'])
+        self.assertTrue(any('Spread' in warning for warning in spread['hard_gate']['warnings']))
 
         item = _legacy.complete_signal(); item['conflicts']=['4H 背景明顯反向']; item['risk_reward']=.5; item['entry_eligibility']['remaining_rr']=.5
         rr = build_decision_context(item)

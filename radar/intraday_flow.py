@@ -15,6 +15,14 @@ from .models import Candle
 INTERVAL_MS = 300_000
 VERSION = "INTRADAY_FLOW_V1"
 WINDOWS = (("15m", 3), ("1H", 12), ("4H", 48))
+# Experimental display heuristics, not calibrated probabilities or entry gates.
+SEGMENT_OI_THRESHOLDS = {3: .1, 6: .2, 36: .5}
+INDEPENDENT_SEGMENTS = (
+    ("latest_15m", "最近15m", 3, 0),
+    ("previous_15m", "前一段15m", 3, 3),
+    ("earlier_30m", "再前30m", 6, 6),
+    ("earlier_3h", "前3H", 36, 12),
+)
 
 
 def _number(value: Any, *, positive: bool = False) -> float | None:
@@ -25,6 +33,16 @@ def _number(value: Any, *, positive: bool = False) -> float | None:
     except (ValueError, TypeError, OverflowError):
         return None
     return value if math.isfinite(value) and (value > 0 if positive else value >= 0) else None
+
+
+def _signed_number(value: Any) -> float | None:
+    if isinstance(value, bool):
+        return None
+    try:
+        value = float(value)
+    except (ValueError, TypeError, OverflowError):
+        return None
+    return value if math.isfinite(value) else None
 
 
 def _points(rows: Sequence[Mapping[str, Any]], fields: tuple[str, ...]) -> dict[int, tuple[float | None, ...]]:
@@ -65,9 +83,17 @@ def _window(end: int, bars: int, candles: dict[int, Candle], oi: dict, taker: di
         index = next((i for i in (0, 1) if all(_number(oi[ts][i], positive=True) is not None for ts in oi_stamps)), None)
         if index is not None:
             initial, final = oi[start][index], oi[end][index]
+            steps = [oi[ts + INTERVAL_MS][index] - oi[ts][index] for ts in stamps]
+            gross = sum(abs(step) for step in steps)
             result["oi"] = {"status": "OK", "unit": "contracts" if index == 0 else "base",
                 "start": initial, "end": final, "change": final - initial,
-                "change_pct": (final / initial - 1) * 100}
+                "change_pct": (final / initial - 1) * 100,
+                "persistence": {"total_bars": bars,
+                    "increasing_bars": sum(step > 0 for step in steps),
+                    "decreasing_bars": sum(step < 0 for step in steps),
+                    "required_bars": math.ceil(bars * 2 / 3),
+                    "largest_step_share_pct": max(map(abs, steps)) / gross * 100 if gross else 0,
+                    "single_spike": bool(gross and max(map(abs, steps)) / gross >= .8)}}
     if all(ts in taker and all(value is not None for value in taker[ts]) for ts in stamps):
         # Verify that exchange volume buckets really match these price buckets.
         # A shifted timestamp convention or incomplete payload stays unavailable.
@@ -104,6 +130,104 @@ def _window(end: int, bars: int, candles: dict[int, Candle], oi: dict, taker: di
     return result
 
 
+def _segment_reading(row: Mapping[str, Any], bars: int = 3) -> dict[str, Any]:
+    price = row.get("price", {}) if isinstance(row.get("price"), Mapping) else {}
+    oi = row.get("oi", {}) if isinstance(row.get("oi"), Mapping) else {}
+    cvd = row.get("cvd", {}) if isinstance(row.get("cvd"), Mapping) else {}
+    move = _signed_number(price.get("change_pct")) if price.get("status") == "OK" else None
+    quantity = _signed_number(oi.get("change_pct")) if oi.get("status") == "OK" else None
+    imbalance = _signed_number(cvd.get("imbalance_pct")) if cvd.get("status") == "OK" else None
+    threshold = SEGMENT_OI_THRESHOLDS[bars]
+    persistence = oi.get("persistence", {})
+    base = {"price_change_pct": move, "oi_change_pct": quantity,
+            "start_ms": row.get("start_ms"), "end_ms": row.get("end_ms"),
+            "oi_threshold_pct": threshold, "threshold_method": "EXPERIMENTAL_FIXED_BY_DURATION",
+            "oi_persistence": persistence,
+            "imbalance_pct": imbalance, "direction": "NEUTRAL"}
+    if None in (move, quantity, imbalance):
+        return {**base, "status": "INSUFFICIENT", "label": "資料不足"}
+    if quantity > threshold and ((move > .05 and imbalance > 10) or (move < -.05 and imbalance < -10)) and (
+        not persistence or persistence.get("single_spike")
+        or persistence.get("increasing_bars", 0) < persistence.get("required_bars", 1)
+    ):
+        return {**base, "status": "PARTIAL", "label": "增倉集中單根，持續性未確認" if persistence.get("single_spike") else "增倉持續性未確認"}
+    if move > .05 and quantity > threshold:
+        if imbalance > 10:
+            return {**base, "status": "CONFIRMED", "direction": "LONG", "label": "新多資金支持"}
+        if imbalance < -10:
+            return {**base, "status": "CONFLICT", "label": "增倉上漲，但主動賣出占優"}
+        return {**base, "status": "PARTIAL", "direction": "LONG", "label": "增倉上漲，買方尚未明顯占優"}
+    if move < -.05 and quantity > threshold:
+        if imbalance < -10:
+            return {**base, "status": "CONFIRMED", "direction": "SHORT", "label": "新空資金支持"}
+        if imbalance > 10:
+            return {**base, "status": "CONFLICT", "label": "增倉下跌，但主動買入占優"}
+        return {**base, "status": "PARTIAL", "direction": "SHORT", "label": "增倉下跌，賣方尚未明顯占優"}
+    if move > .05 and quantity < -threshold:
+        return {**base, "status": "POSITION_CLOSING", "label": "減倉上漲，偏向空單回補"}
+    if move < -.05 and quantity < -threshold:
+        return {**base, "status": "POSITION_CLOSING", "label": "減倉下跌，偏向多單平倉"}
+    if imbalance < -10 and move >= -.05:
+        return {**base, "status": "ABSORPTION", "label": "主動賣出未有效壓低，可能有承接"}
+    if imbalance > 10 and move <= .05:
+        return {**base, "status": "ABSORPTION", "label": "主動買入未有效推高，反推有限"}
+    return {**base, "status": "NEUTRAL", "label": "方向尚未形成一致"}
+
+
+def _cross_confirmation(segments: Mapping[str, Mapping[str, Any]]) -> dict[str, Any]:
+    readings = {key: {"window_label": label, **_segment_reading(segments.get(key, {}), bars)}
+                for key, label, bars, _ in INDEPENDENT_SEGMENTS}
+    available = [row for row in readings.values() if row["status"] != "INSUFFICIENT"]
+    latest = readings["latest_15m"]
+    older = [readings[key] for key in ("previous_15m", "earlier_30m", "earlier_3h")]
+    confirmed_older = [row for row in older if row["status"] == "CONFIRMED"]
+    result = {"level": "INSUFFICIENT", "label": "資料不足", "direction": "NEUTRAL",
+              "summary": "非重疊區間不足，暫不判斷資金一致度。",
+              "available_segments": len(available), "supporting_segments": 0,
+              "total_segments": len(INDEPENDENT_SEGMENTS),
+              "data_status": "COMPLETE" if len(available) == len(INDEPENDENT_SEGMENTS) else "PARTIAL",
+              "opposing_segments": 0, "segments": readings,
+              "permission": "CONTEXT_ONLY_NEVER_CHANGES_TRIGGER_OR_ENTRY"}
+    if latest["status"] == "INSUFFICIENT":
+        return result
+    if latest["status"] == "CONFIRMED":
+        direction = latest["direction"]
+        same = [row for row in confirmed_older if row["direction"] == direction]
+        opposite = [row for row in confirmed_older if row["direction"] != direction]
+        result.update(direction=direction, supporting_segments=1 + len(same),
+                      opposing_segments=len(opposite))
+        side = "新多" if direction == "LONG" else "新空"
+        if opposite:
+            result.update(level="CONFLICT", label="方向衝突",
+                          summary=f"最近15m支持{side}，但較早區間出現反向資金；只作轉向提醒。")
+        elif len(same) >= 2:
+            result.update(level="HIGH", label="高",
+                          summary=f"最近15m與至少兩個較早非重疊區間一致，{side}資金延續較完整。")
+        elif len(same) == 1:
+            result.update(level="MEDIUM", label="中",
+                          summary=f"最近15m與一個較早非重疊區間支持{side}，仍需價格延續確認。")
+        else:
+            result.update(level="LOW", label="低",
+                          summary=f"目前只有最近15m支持{side}，較早區間尚未確認。")
+        return result
+    if latest["status"] in {"CONFLICT", "ABSORPTION"}:
+        result.update(level="CONFLICT", label="方向衝突",
+                      summary=f"最近15m出現{latest['label']}，價格與主動成交尚未互相確認。")
+        return result
+    older_long = sum(row["direction"] == "LONG" for row in confirmed_older)
+    older_short = sum(row["direction"] == "SHORT" for row in confirmed_older)
+    if max(older_long, older_short) >= 2:
+        direction = "LONG" if older_long > older_short else "SHORT"
+        side = "新多" if direction == "LONG" else "新空"
+        result.update(level="LOW", label="低", direction=direction,
+                      supporting_segments=max(older_long, older_short),
+                      opposing_segments=min(older_long, older_short),
+                      summary=f"較早區間支持{side}，但最近15m尚未確認，不把背景當成眼前訊號。")
+    else:
+        result.update(level="LOW", label="低", summary="最近15m尚未形成新多或新空的一致組合。")
+    return result
+
+
 def summarize_intraday_flow(inst_id: str, candles: Sequence[Candle], oi_history: Sequence[Mapping[str, Any]],
                             taker_history: Sequence[Mapping[str, Any]], *, observed_at_ms: int) -> dict[str, Any]:
     """One fixed as-of for all rolling windows. Late/gapped sources stay missing."""
@@ -137,6 +261,9 @@ def summarize_intraday_flow(inst_id: str, candles: Sequence[Candle], oi_history:
     if end - common_end <= INTERVAL_MS:
         end = common_end
     rows = {name: _window(end, count, closed, oi, taker) for name, count in WINDOWS}
+    segments = {name: _window(end - offset * INTERVAL_MS, count, closed, oi, taker)
+                for name, _, count, offset in INDEPENDENT_SEGMENTS}
+    confirmation = _cross_confirmation(segments)
     previous = _window(end - 3 * INTERVAL_MS, 3, closed, oi, taker)
     latest, hourly = rows["15m"], rows["1H"]
     summary = latest["interpretation"]
@@ -166,9 +293,12 @@ def summarize_intraday_flow(inst_id: str, candles: Sequence[Candle], oi_history:
                          "atr_5m": sum(ranges) / len(ranges),
                          "method": "CLOSED_5M_TRUE_RANGE_MEAN_14"}
     return {"closed_structure": structure, "schema_version": VERSION, "inst_id": inst_id, "source": "OKX_CONTRACT_HISTORY",
-        "as_of_ms": end, "observed_at_ms": observed_at_ms, "windows": rows, "previous_15m": previous,
+        "as_of_ms": end, "observed_at_ms": observed_at_ms, "windows": rows,
+        "independent_segments": segments, "cross_confirmation": confirmation,
+        "previous_15m": previous,
         "change_vs_previous_15m": comparison, "summary": summary,
         "permission": "CONTEXT_ONLY_NEVER_CREATES_OR_CANCELS_TRIGGER",
         "notes": ["最近15m／1H／4H是重疊回看窗口，不是三張獨立多空票。",
+                  "資金一致度改用最近15m、前一段15m、再前30m、前3H四個非重疊區間。",
                   "OI比較張數或幣數，不把美元估值變動當淨資金流入。",
                   "CVD為區間主動成交差額，不是App累積指標絕對值；缺少完整歷史不補值。"]}

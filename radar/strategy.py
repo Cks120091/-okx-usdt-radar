@@ -79,7 +79,7 @@ def _entry_eligibility(*args, **kwargs):
     if confirmation_only_wait:
         result.update({
             "status": "ENTRY_READY",
-            "label": "目前可進｜回踩確認列為加分",
+            "label": "掃描條件通過｜回踩確認列為加分",
             "reason": (
                 "價格已回到原 Entry Zone，正式 Trigger 與原 SL／TP 仍有效；"
                 "新的收線 retest／reclaim 改列品質確認，不再單獨封鎖新進場。"

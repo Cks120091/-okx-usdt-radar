@@ -8,6 +8,7 @@ from radar.continuation import (
     summarize_closed_lookback_samples,
     summarize_continuation_samples,
 )
+from radar.scanner import MarketScanner
 
 
 def observer_samples(
@@ -637,6 +638,60 @@ class CapitalFlowLookbackTests(unittest.TestCase):
 
 
 class ClosedLookbackTests(unittest.TestCase):
+    def test_exact_taker_history_is_attached_to_fixed_closed_window(self):
+        samples = closed_lookback_samples(3)
+        history = [
+            {
+                "ts": sample["bucket_start_ms"],
+                "buy": 100.0,
+                "sell": 50.0,
+                "unit": "USDT",
+                "inst_id": "AAA-USDT-SWAP",
+            }
+            for sample in samples
+        ]
+
+        attached = MarketScanner._attach_taker_lookback_samples(
+            samples,
+            history,
+            "AAA-USDT-SWAP",
+        )
+        result = summarize_closed_lookback_samples(attached, "SHORT", "LONG")
+        taker = result["windows"]["10m"]["domains"]["TAKER_CVD"]
+
+        self.assertTrue(all(row["trades_coverage"] == "COMPLETE" for row in attached))
+        self.assertEqual(taker["state"], "SUPPORT")
+        self.assertGreater(taker["directional_cvd"], 0)
+
+    def test_taker_duplicate_or_volume_mismatch_stays_unknown(self):
+        samples = closed_lookback_samples(3)
+        history = [
+            {
+                "ts": sample["bucket_start_ms"],
+                "buy": 100.0,
+                "sell": 50.0,
+                "unit": "USDT",
+                "inst_id": "AAA-USDT-SWAP",
+            }
+            for sample in samples
+        ]
+        history.append({**history[-1], "buy": 101.0})
+        history[0] = {**history[0], "buy": 9_999.0}
+
+        attached = MarketScanner._attach_taker_lookback_samples(
+            samples,
+            history,
+            "AAA-USDT-SWAP",
+        )
+        result = summarize_closed_lookback_samples(attached, "SHORT", "LONG")
+
+        self.assertEqual(attached[0]["trades_coverage"], "UNKNOWN")
+        self.assertEqual(attached[-1]["trades_coverage"], "UNKNOWN")
+        self.assertEqual(
+            result["windows"]["10m"]["domains"]["TAKER_CVD"]["state"],
+            "UNKNOWN",
+        )
+
     def test_short_uses_two_points_for_fast_and_three_for_primary(self):
         fast = summarize_closed_lookback_samples(
             closed_lookback_samples(2),

@@ -77,19 +77,22 @@ class V33ContractTests(unittest.TestCase):
         self.assertIn("method:'POST'", html)
         self.assertIn("bootstrap()", html)
         self.assertIn("全市場掃描（15m＋4H）", html)
-        self.assertIn("早期訊號", html)
+        self.assertIn("EARLY_SIGNAL:'早期'", html)
+        self.assertNotIn("EARLY_SIGNAL:'早期訊號'", html)
         self.assertIn("完整確認", html)
-        self.assertIn("15m 早期", html)
-        self.assertIn("⚡ 已觸發訊號", html)
-        self.assertIn("待進場確認", html)
+        self.assertIn("15m 訊號已觸發", html)
+        self.assertIn("⚡ 訊號已觸發", html)
+        self.assertNotIn("待進場確認", html)
         self.assertIn("等待回踩", html)
         self.assertIn("等待新訊號", html)
-        self.assertIn("風控受阻", html)
+        self.assertNotIn("風控受阻", html)
+        self.assertIn("風險建議｜不阻止進場", html)
+        self.assertIn("必要條件未成立", html)
         self.assertIn("entry_eligibility", html)
         self.assertIn("長線訊號", html)
-        self.assertIn("4H 長線待進場確認", html)
-        self.assertIn("longEarlySignals", html)
-        self.assertIn("longReadySignals", html)
+        self.assertIn("4H 長線訊號已觸發", html)
+        self.assertNotIn("longEarlySignals", html)
+        self.assertNotIn("longReadySignals", html)
         self.assertIn("longWaitRetest", html)
         self.assertIn("longMissedSignals", html)
         self.assertIn("補充中", html)
@@ -148,7 +151,7 @@ class V33ContractTests(unittest.TestCase):
         self.assertIn('<body data-active-group="home">', html)
         self.assertIn('body:not([data-active-group="home"]) .command-deck', html)
         self.assertIn("document.body.dataset.activeGroup=group", html)
-        self.assertIn("okx-radar-shell-v4.9-snapshot-entry-labels-1", service_worker)
+        self.assertIn("okx-radar-shell-v4.12-signal-triggered-brand", service_worker)
         self.assertIn("市場方向 · 24H 全市場平均 RSI", html)
         self.assertIn("bias.market_average_rsi", html)
         self.assertIn("rsi24.market_rsi_24h_label", html)
@@ -165,8 +168,8 @@ class V33ContractTests(unittest.TestCase):
         self.assertIn("plan.adaptive_market_plan", html)
         self.assertIn("plan.market_plan_sources", html)
         self.assertIn("Trigger 後固定原始計畫", html)
-        self.assertIn("<title>OKX 雷達 V3.4</title>", html)
-        self.assertIn("OKX 雷達 <span>V3.4</span>", html)
+        self.assertIn("<title>大雞雞訊號 V3.4</title>", html)
+        self.assertIn("大雞雞訊號 <span>V3.4</span>", html)
         self.assertNotIn('data-tab="pendingSignals"', html)
         self.assertNotIn('data-tab="longPendingSignals"', html)
         self.assertNotIn('id="pendingSignalsBox"', html)
@@ -227,8 +230,8 @@ class V33ContractTests(unittest.TestCase):
             "async function pollUntilComplete", 1
         )[0]
         self.assertNotIn("state.report=null", start_scan)
-        self.assertIn("已觸發訊號", html)
-        self.assertIn("依訊號狀態與交易品質排列", html)
+        self.assertIn("訊號已觸發", html)
+        self.assertIn("所有已觸發階段統一排列", html)
         self.assertIn("訊號準備度", html)
         self.assertIn("尚未觸發", html)
         self.assertIn("已觸發 · ${watchCount} 接近", html)
@@ -276,7 +279,7 @@ class V33ContractTests(unittest.TestCase):
         self.assertIn("function signalTriggerTime(item)", html)
         self.assertIn("訊號觸發時間（台灣 UTC+8）", html)
         self.assertNotIn("status!=='ENTRY_READY'&&status!=='MISSED_ENTRY'", html)
-        self.assertIn("okx-radar-shell-v4.9-snapshot-entry-labels-1", service_worker)
+        self.assertIn("okx-radar-shell-v4.12-signal-triggered-brand", service_worker)
         self.assertIn("$('#preflightRefresh').addEventListener('click',loadPreflight)", html)
         self.assertIn("${decisionPanel(item)}", html)
         self.assertNotIn("showPreflight", html)
@@ -345,7 +348,7 @@ class V33ContractTests(unittest.TestCase):
         self.assertIn("最高 8R", html)
         self.assertNotIn("<canvas", html)
         self.assertIn("可進參考區間", html)
-        self.assertIn("⚡ 已觸發訊號｜有效中", html)
+        self.assertIn("⚡ 訊號已觸發｜有效中", html)
         self.assertIn("進場快照｜不是即時報價", html)
         self.assertIn("尚未進場", html)
         self.assertIn("已經進場", html)
@@ -450,7 +453,7 @@ class V33ContractTests(unittest.TestCase):
         self.assertIn("function setHomeReportEmpty", html)
         self.assertIn('body.home-report-empty[data-active-tab="overview"] #overview', html)
         self.assertIn('body[data-active-tab="manual"] .search-tools', html)
-        self.assertIn("已觸發訊號 · 依進場確認狀態與品質排序", html)
+        self.assertIn("所有已觸發訊號都在這裡；階段標示在卡片頂端", html)
         self.assertIn("NEW:'新訊號週期'", html)
         self.assertIn("calc((100vw - var(--layout-max) + 28px)/2)", html)
         self.assertIn("function preflightPositionMetric(data)", html)
@@ -522,7 +525,8 @@ class V33ContractTests(unittest.TestCase):
         self.assertIn("return Boolean(preflightTerminalKind(data))", html)
         self.assertIn("OI／成交流只作續走力道輔助", html)
         self.assertIn("此頁僅供輔助，不改變正式方向", html)
-        self.assertIn("不能繞過成交額門檻", html)
+        self.assertIn("未達成交額建議線時會醒目提示流動性風險", html)
+        self.assertIn("但不替使用者禁止進場", html)
         self.assertNotIn("不受全市場成交額緩衝帶限制", html)
 
         preflight = html.split("function renderPreflight(data){", 1)[1].split(
@@ -643,22 +647,22 @@ class V33ContractTests(unittest.TestCase):
             "function renderContextCoverage(report,transient=null,preview=false){", 1
         )[1].split("function reportRenderFingerprint", 1)[0]
         self.assertIn("transient==='ERROR'?'更新失敗':'掃描中'", coverage)
-        self.assertIn("liveReady=activeShort.filter(itemCurrentEntryReady)", report)
+        self.assertNotIn("liveReady=activeShort.filter(itemCurrentEntryReady)", report)
         self.assertNotIn("itemWasEntryReady", report)
         self.assertIn(
-            "'目前沒有待進場確認的 15m 訊號。',shortReadOnlyReason",
+            "'本輪沒有 15m 訊號已觸發。',shortReadOnlyReason",
             report,
         )
-        self.assertIn("'目前沒有 4H 長線已觸發訊號。',longReadOnlyReason", report)
+        self.assertIn("'目前沒有 4H 長線訊號已觸發。',longReadOnlyReason", report)
         self.assertIn(
             "renderContextCoverage(report,shortTransient||longTransient,preview)", report
         )
         self.assertIn(
-            "early=activeShort.filter(x=>!isPreviewItem(x)&&x.signal_stage==='EARLY_SIGNAL').sort(signalSortComparator)",
+            "earlyCount=activeShort.filter(x=>!isPreviewItem(x)&&x.signal_stage==='EARLY_SIGNAL').length",
             report,
         )
         self.assertIn("allShort=[...activeShort].sort(signalSortComparator)", report)
-        self.assertIn("ready=[...liveReady].sort(signalSortComparator)", report)
+        self.assertIn("confirmedCount=activeShort.filter", report)
         self.assertIn(
             "waiting=activeShort.filter(x=>!isPreviewItem(x)&&itemWaitingForEntry(x)).sort(signalSortComparator)",
             report,
@@ -668,10 +672,10 @@ class V33ContractTests(unittest.TestCase):
             report,
         )
         self.assertIn("allLong=[...activeLong].sort(signalSortComparator)", report)
-        self.assertIn("liveLongReady=activeLong.filter(itemCurrentEntryReady)", report)
-        self.assertIn("longReady=[...liveLongReady].sort(signalSortComparator)", report)
+        self.assertNotIn("liveLongReady=activeLong.filter(itemCurrentEntryReady)", report)
+        self.assertIn("longConfirmedCount=activeLong.filter", report)
         self.assertIn(
-            "longEarly=activeLong.filter(x=>!isPreviewItem(x)&&x.signal_stage==='EARLY_SIGNAL').sort(signalSortComparator)",
+            "longEarlyCount=activeLong.filter(x=>!isPreviewItem(x)&&x.signal_stage==='EARLY_SIGNAL').length",
             report,
         )
         self.assertIn(
@@ -682,7 +686,7 @@ class V33ContractTests(unittest.TestCase):
             "longMissed=activeLong.filter(x=>!isPreviewItem(x)&&itemEntryStatus(x)==='MISSED_ENTRY').sort(signalSortComparator)",
             report,
         )
-        self.assertGreaterEqual(html.count("依進場確認狀態與品質排序"), 2)
+        self.assertGreaterEqual(html.count("階段標示在卡片頂端"), 2)
 
         comparator = html.split("function signalSortComparator(a,b){", 1)[1].split(
             "function renderContextCoverage", 1
@@ -724,8 +728,10 @@ class V33ContractTests(unittest.TestCase):
         self.assertIn("finalDecision=isRecord(decisionContext.final)", decision_panel)
         self.assertIn("hardGate=isRecord(decisionContext.hard_gate)", decision_panel)
         self.assertIn("decisionAlertHtml(item,status)", decision_panel)
+        self.assertIn("decisionBlockingHtml(item)", decision_panel)
         self.assertIn("snapshot=itemSnapshotEntryState(item)", decision_panel)
-        self.assertIn("風控受阻｜先更新再判斷", html)
+        self.assertIn("必要條件未成立｜先更新確認", html)
+        self.assertIn("風險建議｜不阻止進場", html)
         self.assertIn("preflightActions(item.inst_id,horizon,item,false)", decision_panel)
         self.assertIn("signalTradeGrid(item", decision_panel)
         self.assertIn("preview:true", decision_panel)
@@ -736,6 +742,7 @@ class V33ContractTests(unittest.TestCase):
         )
         self.assertNotIn("instrumentButton", decision_panel)
         self.assertIn("status==='HARD_GATE_BLOCKED'", decision_panel)
+        self.assertIn("function decisionBlockingItems(item)", html)
         self.assertIn("function decisionAlertItems(item)", html)
         self.assertIn("decisionExecutionNoticeHtml(item)", decision_panel)
         self.assertIn("function decisionExecutionNoticeHtml(item)", html)
@@ -746,10 +753,16 @@ class V33ContractTests(unittest.TestCase):
         alert_items = html.split("function decisionAlertItems(item)", 1)[1].split(
             "function decisionAlertHtml", 1
         )[0]
-        self.assertIn("status||'').toUpperCase()==='BLOCKED'", alert_items)
-        self.assertIn("check?.hard!==false", alert_items)
-        self.assertIn("gate.reasons.slice(0,blockerCount)", alert_items)
+        self.assertIn("['BLOCKED','UNKNOWN'].includes", alert_items)
+        self.assertIn("check?.hard===false", alert_items)
+        self.assertIn("riskKeys.has", alert_items)
+        self.assertIn("gate.warnings", alert_items)
         self.assertNotIn("conflict.items", alert_items)
+        blocking_items = html.split("function decisionBlockingItems(item)", 1)[1].split(
+            "function decisionAlertItems", 1
+        )[0]
+        self.assertIn("check?.hard!==false", blocking_items)
+        self.assertIn("gate.reasons", blocking_items)
         execution_notice = html.split(
             "function decisionExecutionNoticeHtml(item)", 1
         )[1].split("function decisionPanel", 1)[0]
@@ -1121,7 +1134,7 @@ class V33ContractTests(unittest.TestCase):
         shell_assets = worker.split("SHELL_ASSETS", 1)[1].split("];", 1)[0]
         self.assertNotIn("/api/", shell_assets)
         self.assertIn('"display": "standalone"', manifest)
-        self.assertIn('"name": "OKX Radar V3.4"', manifest)
+        self.assertIn('"name": "大雞雞訊號 V3.4"', manifest)
         self.assertNotIn("V3.4 Context", manifest)
 
     def test_signal_episode_cards_use_current_entry_state_and_are_independently_keyed(self):
@@ -1135,8 +1148,8 @@ class V33ContractTests(unittest.TestCase):
         )[0]
         self.assertNotIn("itemWasEntryReady", display_status)
         self.assertIn("itemEntryStatus(item)", display_status)
-        self.assertIn("liveReady=activeShort.filter(itemCurrentEntryReady)", html)
-        self.assertIn("liveLongReady=activeLong.filter(itemCurrentEntryReady)", html)
+        self.assertNotIn("liveReady=activeShort.filter(itemCurrentEntryReady)", html)
+        self.assertNotIn("liveLongReady=activeLong.filter(itemCurrentEntryReady)", html)
         self.assertIn("closed_signals", html)
         self.assertIn("long_closed_signals", html)
         self.assertIn('data-group="closed"', html)
@@ -1159,7 +1172,7 @@ class V33ContractTests(unittest.TestCase):
         self.assertIn("舊 Entry／SL／TP 不會復活", html)
         self.assertIn("舊交易計畫已結束", html)
         self.assertIn("signalTradeGrid(item,{prefix:'原始 ',original:true})", html)
-        self.assertIn("okx-radar-shell-v4.9-snapshot-entry-labels-1", worker)
+        self.assertIn("okx-radar-shell-v4.12-signal-triggered-brand", worker)
 
     def test_market_scan_has_no_github_schedule(self):
         root = Path(__file__).parents[1]

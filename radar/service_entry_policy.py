@@ -16,8 +16,8 @@ def _stable_episode_can_reuse_entry(
     requirement that an on-demand full refresh must emit another same-direction
     formal Trigger after the stored Episode and the live Entry contract have
     already passed. Durable Entry Window departure, invalidation, opposite
-    signals, hard execution gates and required-data failures remain binding
-    because those states do not arrive here as an actionable ENTRY_READY plan.
+    signals and required core/live-price failures remain binding. Execution
+    quality and risk metrics are advisory and do not veto ENTRY_READY.
     """
 
     if str(confirmation.get("status") or "").upper() != "ORIGINAL_DIRECTION_STABLE":

@@ -2261,7 +2261,7 @@ def _stage_label(stage: str, direction: str) -> str:
     return {
         "WATCH": "觀望",
         "NEAR_TRIGGER": "接近觸發",
-        "EARLY_SIGNAL": f"{name}｜早期訊號",
+        "EARLY_SIGNAL": f"{name}｜早期",
         "CONFIRMED": f"{name}｜完整確認",
         "TRENDING": "趨勢進行中",
         "REENTRY": "回踩再發動",

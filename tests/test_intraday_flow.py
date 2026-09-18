@@ -48,6 +48,107 @@ class IntradayFlowTests(unittest.TestCase):
         self.assertEqual(result['change_vs_previous_15m']['status'], 'OK')
         self.assertIn('CONTEXT_ONLY', result['permission'])
 
+    def test_independent_segments_cover_four_hours_without_overlap(self):
+        result = self.run_flow()
+        segments = result['independent_segments']
+        expected = {
+            'latest_15m': (END-15*60_000, END),
+            'previous_15m': (END-30*60_000, END-15*60_000),
+            'earlier_30m': (END-60*60_000, END-30*60_000),
+            'earlier_3h': (END-4*60*60_000, END-60*60_000),
+        }
+        for key, bounds in expected.items():
+            self.assertEqual((segments[key]['start_ms'], segments[key]['end_ms']), bounds)
+        self.assertEqual(segments['earlier_3h']['end_ms'], segments['earlier_30m']['start_ms'])
+        self.assertEqual(segments['earlier_30m']['end_ms'], segments['previous_15m']['start_ms'])
+        self.assertEqual(segments['previous_15m']['end_ms'], segments['latest_15m']['start_ms'])
+
+    def test_consistent_price_oi_and_taker_marks_high_new_short_support(self):
+        result = self.run_flow()['cross_confirmation']
+        self.assertEqual(result['level'], 'HIGH')
+        self.assertEqual(result['direction'], 'SHORT')
+        self.assertEqual(result['supporting_segments'], 4)
+        self.assertEqual(result['opposing_segments'], 0)
+        self.assertEqual(result['segments']['latest_15m']['label'], '新空資金支持')
+        self.assertIn('CONTEXT_ONLY', result['permission'])
+
+    def test_latest_reversal_against_older_segments_is_conflict_not_fake_agreement(self):
+        candles, oi, flow = flow_fixture()
+        for index, close in zip(range(-4, -1), (104.8, 105.2, 105.6)):
+            bar = candles[index]
+            candles[index] = replace(bar, open=close-.1, high=close+.2, low=close-.2, close=close)
+            flow[index] = {**flow[index], 'sell': 300, 'buy': 700}
+        result = self.run_flow(candles, oi, flow)['cross_confirmation']
+        self.assertEqual(result['level'], 'CONFLICT')
+        self.assertEqual(result['direction'], 'LONG')
+        self.assertGreaterEqual(result['opposing_segments'], 1)
+        self.assertIn('較早區間', result['summary'])
+
+    def test_one_complete_segment_never_becomes_high_consistency(self):
+        _, oi, _ = flow_fixture()
+        result = self.run_flow(oi=oi[-4:])['cross_confirmation']
+        self.assertEqual(result['available_segments'], 1)
+        self.assertEqual(result['level'], 'LOW')
+        self.assertEqual(result['supporting_segments'], 1)
+
+    def test_segment_thresholds_and_completeness_are_explicit(self):
+        result = self.run_flow()['cross_confirmation']
+        self.assertEqual(result['data_status'], 'COMPLETE')
+        self.assertEqual(result['total_segments'], 4)
+        for key, threshold in [('latest_15m', .1), ('previous_15m', .1),
+                               ('earlier_30m', .2), ('earlier_3h', .5)]:
+            row = result['segments'][key]
+            self.assertEqual(row['oi_threshold_pct'], threshold)
+            self.assertLess(row['start_ms'], row['end_ms'])
+            self.assertEqual(row['threshold_method'], 'EXPERIMENTAL_FIXED_BY_DURATION')
+
+    def test_single_oi_spike_is_not_confirmed_support(self):
+        _, oi, _ = flow_fixture()
+        for row, value in zip(oi[-4:], [1057, 1057, 1057, 1060]):
+            row['oi'] = value
+        result = self.run_flow(oi=oi)['cross_confirmation']
+        latest = result['segments']['latest_15m']
+        self.assertEqual(latest['status'], 'PARTIAL')
+        self.assertTrue(latest['oi_persistence']['single_spike'])
+        self.assertEqual(latest['oi_persistence']['increasing_bars'], 1)
+        self.assertNotEqual(result['level'], 'HIGH')
+
+    def test_two_of_three_increases_can_confirm_without_single_spike(self):
+        _, oi, _ = flow_fixture()
+        for row, value in zip(oi[-4:], [1057, 1059, 1058, 1060]):
+            row['oi'] = value
+        latest = self.run_flow(oi=oi)['cross_confirmation']['segments']['latest_15m']
+        self.assertEqual(latest['status'], 'CONFIRMED')
+        self.assertEqual(latest['oi_persistence']['increasing_bars'], 2)
+        self.assertFalse(latest['oi_persistence']['single_spike'])
+
+    def test_flat_oi_has_no_spike_or_division_by_zero(self):
+        _, oi, _ = flow_fixture()
+        for row in oi:
+            row['oi'] = 1000
+        latest = self.run_flow(oi=oi)['cross_confirmation']['segments']['latest_15m']
+        self.assertEqual(latest['oi_persistence']['largest_step_share_pct'], 0)
+        self.assertFalse(latest['oi_persistence']['single_spike'])
+        self.assertNotEqual(latest['status'], 'CONFIRMED')
+
+    def test_missing_oi_has_no_fabricated_persistence(self):
+        _, oi, _ = flow_fixture()
+        oi.pop(-2)
+        result = self.run_flow(oi=oi)['cross_confirmation']
+        self.assertEqual(result['data_status'], 'PARTIAL')
+        self.assertEqual(result['available_segments'], 3)
+        self.assertEqual(result['segments']['latest_15m']['oi_persistence'], {})
+        self.assertEqual(result['level'], 'INSUFFICIENT')
+
+    def test_longer_segment_does_not_use_15m_threshold(self):
+        _, oi, _ = flow_fixture()
+        for i, row in enumerate(oi):
+            row['oi'] = 1000 + i * .04
+        result = self.run_flow(oi=oi)['cross_confirmation']['segments']['earlier_3h']
+        self.assertGreater(result['oi_change_pct'], .1)
+        self.assertLess(result['oi_change_pct'], .5)
+        self.assertNotEqual(result['status'], 'CONFIRMED')
+
     def test_no_quantity_does_not_fall_back_to_usd(self):
         _, oi, _ = flow_fixture()
         for p in oi:

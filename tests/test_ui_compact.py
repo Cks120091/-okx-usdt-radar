@@ -20,11 +20,20 @@ class CompactUiTests(unittest.TestCase):
             "function renderOverview(report)", 1
         )[0]
 
-        self.assertIn('class="badge triggered-signal-b">⚡ 已觸發訊號', text)
-        self.assertIn("待進場確認", text)
+        self.assertIn('class="badge triggered-signal-b">⚡ 訊號已觸發', text)
+        self.assertIn("EARLY_SIGNAL:'早期'", text)
+        self.assertNotIn("EARLY_SIGNAL:'早期訊號'", text)
+        self.assertNotIn("待進場確認", text)
+        self.assertIn("${stageBadge(item)}", text)
+        self.assertNotIn('id="earlySignals"', text)
+        self.assertNotIn('id="signals"', text)
+        self.assertNotIn('id="longEarlySignals"', text)
+        self.assertNotIn('id="longReadySignals"', text)
         self.assertIn("等待回踩", text)
         self.assertIn("等待新訊號", text)
-        self.assertIn("風控受阻", text)
+        self.assertNotIn("風控受阻", text)
+        self.assertIn("風險建議｜不阻止進場", text)
+        self.assertIn("必要條件未成立", text)
         self.assertIn("進場快照｜不是即時報價", text)
         self.assertIn("ENTRY｜可進參考區間", text)
         self.assertIn("固定計畫價，不代表價格現在已到", text)
@@ -34,6 +43,18 @@ class CompactUiTests(unittest.TestCase):
         self.assertNotIn(">目前可進<", text)
         self.assertNotIn(">已錯過<", text)
         self.assertNotIn("現在能否進場", text)
+
+    def test_oi_and_taker_use_independent_segments_for_consistency(self):
+        text = (ROOT / "radar/static/pages.html").read_text(encoding="utf-8")
+        self.assertIn("非重疊區間交叉確認", text)
+        self.assertIn("資料完整度：", text)
+        self.assertIn("共同資料截至：", text)
+        self.assertIn("OI 試驗門檻", text)
+        self.assertIn("oi_persistence", text)
+        self.assertIn("資金一致度：", text)
+        self.assertIn("四段非重疊，不代表統計獨立", text)
+        self.assertIn("不代表實際開倉方向、勝率或進場許可", text)
+        self.assertIn("function flowConfirmationDetail(flow)", text)
 
     def test_history_page_groups_secondary_information_behind_one_details_block(self):
         text = (ROOT / "radar/static/history-scan.html").read_text(encoding="utf-8")

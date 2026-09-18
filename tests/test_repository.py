@@ -283,6 +283,42 @@ class SignalRepositoryTests(unittest.TestCase):
         ).fetchone()[0]
         self.assertEqual(count, 1)
 
+    def test_trigger_created_on_second_scan_appears_once(self):
+        raw = signal_fixture("SECOND-SCAN-USDT-SWAP")
+        waiting_state = replace(
+            state_fixture(raw, raw.data_timestamp),
+            status="NEAR_TRIGGER",
+            actionable=False,
+        )
+        first = self.repository.reconcile(
+            [],
+            [waiting_state],
+            "2026-08-20T00:00:00+00:00",
+            "SHORT",
+        )
+        second = self.repository.reconcile(
+            [raw],
+            [state_fixture(raw, raw.data_timestamp)],
+            "2026-08-20T00:15:00+00:00",
+            "SHORT",
+        )
+        repeated = self.repository.reconcile(
+            [raw],
+            [state_fixture(raw, raw.data_timestamp)],
+            "2026-08-20T00:16:00+00:00",
+            "SHORT",
+        )
+
+        self.assertEqual(first, [])
+        self.assertEqual(len(second), 1)
+        self.assertTrue(second[0].trigger_id)
+        self.assertEqual(repeated[0].trigger_id, second[0].trigger_id)
+        count = self.repository._connection.execute(
+            "SELECT COUNT(*) FROM signals WHERE inst_id=?",
+            (raw.inst_id,),
+        ).fetchone()[0]
+        self.assertEqual(count, 1)
+
     def test_duplicate_raw_candidates_are_applied_in_core_time_order(self):
         raw = signal_fixture("RAW-ORDER-USDT-SWAP")
         first_ts = raw.data_timestamp + 900_000

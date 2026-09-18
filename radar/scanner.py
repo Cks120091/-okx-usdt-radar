@@ -63,6 +63,13 @@ class PublicDataClient(Protocol):
         limit: int = 20,
     ) -> list[dict[str, int | float]]: ...
 
+    def get_contract_taker_history(
+        self,
+        inst_id: str,
+        period: str = "5m",
+        limit: int = 60,
+    ) -> list[dict[str, Any]]: ...
+
     def get_market_context(
         self,
         inst_id: str,
@@ -647,6 +654,11 @@ class MarketScanner:
         source_success = Counter()
         source_missing = Counter()
         oi_history_loader = getattr(self.client, "get_open_interest_history", None)
+        taker_history_loader = getattr(
+            self.client,
+            "get_contract_taker_history",
+            None,
+        )
 
         if callable(context_loader) and callable(context_applier) and context_target_ids:
             self._progress(
@@ -699,6 +711,30 @@ class MarketScanner:
                             local_errors.append("歷史 OI 與已收線 5m K 線無法對齊")
                     except Exception as exc:
                         local_errors.append(f"歷史 OI: {exc}")
+                    if lookback_samples and callable(taker_history_loader):
+                        try:
+                            taker_history = self._single_scan_call(
+                                taker_history_loader,
+                                inst_id,
+                                "5m",
+                                60,
+                                _retry_limit=0,
+                                _timeout_limit=3.0,
+                            )
+                            lookback_samples = self._attach_taker_lookback_samples(
+                                lookback_samples,
+                                taker_history,
+                                inst_id,
+                            )
+                            if not any(
+                                row.get("trades_coverage") == "COMPLETE"
+                                for row in lookback_samples
+                            ):
+                                local_errors.append(
+                                    "歷史 Taker／CVD 與已收線 5m K 線無法核對"
+                                )
+                        except Exception as exc:
+                            local_errors.append(f"歷史 Taker／CVD: {exc}")
                     try:
                         capital_history = oi_history_loader(
                             inst_id,
@@ -1214,11 +1250,6 @@ class MarketScanner:
             "no_fake_fallback": True,
         }
         historical = self.repository.performance()
-        early_short = sum(
-            item.signal_stage == "EARLY_SIGNAL"
-            and item.entry_eligibility.get("status") == "ENTRY_READY"
-            for item in short_signals
-        )
         ready_short = sum(
             item.entry_eligibility.get("status") == "ENTRY_READY"
             for item in short_signals
@@ -1238,21 +1269,23 @@ class MarketScanner:
             )
         elif normalized_mode == "SHORT":
             message = (
-                f"15m 掃描完成：早期訊號 {early_short}、待進場確認 {ready_short}、"
+                f"15m 掃描完成：訊號已觸發 {len(short_signals)}、"
+                f"掃描條件通過 {ready_short}、"
                 f"等待回踩 {wait_short}、等待新訊號 {missed_short}。"
                 if short_signals
                 else "15m 掃描完成：目前無新鮮進場訊號；系統未降低 Trigger 標準。"
             )
         elif normalized_mode == "LONG":
             message = (
-                f"4H 掃描完成：正式長線訊號 {len(long_signals)}。"
+                f"4H 掃描完成：訊號已觸發 {len(long_signals)}。"
                 if long_signals
                 else "4H 掃描完成：目前無新鮮長線進場訊號；系統未降低 Trigger 標準。"
             )
         else:
             message = (
-                f"全市場掃描完成：15m 早期訊號 {early_short}、待進場確認 {ready_short}、"
-                f"等待回踩 {wait_short}、等待新訊號 {missed_short}；4H 已觸發訊號 {len(long_signals)}。"
+                f"全市場掃描完成：15m 訊號已觸發 {len(short_signals)}、"
+                f"掃描條件通過 {ready_short}、等待回踩 {wait_short}、"
+                f"等待新訊號 {missed_short}；4H 訊號已觸發 {len(long_signals)}。"
                 if short_signals or long_signals
                 else "全市場掃描完成：目前無新鮮進場訊號；系統未降低 Trigger 標準。"
             )
@@ -1512,6 +1545,11 @@ class MarketScanner:
         oi_loader = getattr(self.client, "get_open_interest_for", None)
         bulk_oi_loader = getattr(self.client, "get_open_interest_usd", None)
         oi_history_loader = getattr(self.client, "get_open_interest_history", None)
+        taker_history_loader = getattr(
+            self.client,
+            "get_contract_taker_history",
+            None,
+        )
         context_loader = getattr(self.client, "get_market_context", None)
         context_applier = getattr(self.engine, "apply_market_context", None)
 
@@ -1524,6 +1562,7 @@ class MarketScanner:
         lookback_samples: list[dict[str, Any]] = []
         capital_samples: list[dict[str, Any]] = []
         history: list[dict[str, Any]] = []
+        taker_history: list[dict[str, Any]] = []
         loaded_context: MarketContext | None = None
         try:
             if callable(oi_loader):
@@ -1577,6 +1616,25 @@ class MarketScanner:
                     )
             except Exception as exc:
                 advisory_errors.append(f"歷史 OI 持倉資料：{exc}")
+
+        if callable(taker_history_loader):
+            try:
+                taker_history = self._single_scan_call(
+                    taker_history_loader,
+                    inst_id,
+                    "5m",
+                    60,
+                    _retry_limit=0,
+                    _timeout_limit=3.0,
+                )
+                if lookback_samples:
+                    lookback_samples = self._attach_taker_lookback_samples(
+                        lookback_samples,
+                        taker_history,
+                        inst_id,
+                    )
+            except Exception as exc:
+                advisory_errors.append(f"歷史 Taker／CVD：{exc}")
 
         if callable(context_loader) and callable(context_applier):
             try:
@@ -1851,7 +1909,12 @@ class MarketScanner:
             long_result=finalized_long,
             analyzed_at=analyzed_at,
             errors=list(dict.fromkeys([*errors, *advisory_errors])),
-            cross_timeframe=self._intraday_flow(inst_id, timing, history),
+            cross_timeframe=self._intraday_flow(
+                inst_id,
+                timing,
+                history,
+                taker_history,
+            ),
         )
 
     @staticmethod
@@ -2010,6 +2073,11 @@ class MarketScanner:
             timing = bundle["1H"]
 
         oi_history_loader = getattr(self.client, "get_open_interest_history", None)
+        taker_history_loader = getattr(
+            self.client,
+            "get_contract_taker_history",
+            None,
+        )
         if callable(oi_history_loader):
             if not lookback_candles:
                 try:
@@ -2044,6 +2112,24 @@ class MarketScanner:
             except Exception:
                 # Capital flow is also advisory-only and fails closed through
                 # an INSUFFICIENT summary, never through the snapshot OI.
+                pass
+        if lookback_samples and callable(taker_history_loader):
+            try:
+                taker_history = self._single_scan_call(
+                    taker_history_loader,
+                    inst_id,
+                    "5m",
+                    60,
+                    _retry_limit=0,
+                    _timeout_limit=3.0,
+                )
+                lookback_samples = self._attach_taker_lookback_samples(
+                    lookback_samples,
+                    taker_history,
+                    inst_id,
+                )
+            except Exception:
+                # Taker/CVD remains UNKNOWN and cannot remove the price plan.
                 pass
 
         context = MarketContext(
@@ -2635,6 +2721,94 @@ class MarketScanner:
         return samples
 
     @staticmethod
+    def _attach_taker_lookback_samples(
+        samples: list[dict[str, Any]],
+        history: list[dict[str, Any]],
+        inst_id: str,
+    ) -> list[dict[str, Any]]:
+        """Attach only complete, exact 5m Taker buckets to OI/price samples.
+
+        Taker Buy/Sell and CVD share one vote.  A bucket is accepted only when
+        its instrument, unit, timestamp and total quote volume agree with the
+        matching completed candle.  Gaps and contradictory duplicates remain
+        UNKNOWN instead of being filled from a snapshot or candle colour.
+        """
+
+        interval_ms = MarketScanner._bar_interval_ms["5m"]
+        by_start: dict[int, tuple[float, float]] = {}
+        conflicts: set[int] = set()
+        for row in history:
+            if not isinstance(row, dict):
+                continue
+            if row.get("inst_id") != inst_id or row.get("unit") != "USDT":
+                continue
+            try:
+                timestamp = int(row.get("ts"))
+            except (TypeError, ValueError, OverflowError):
+                continue
+            buy = _finite_number(row.get("buy"))
+            sell = _finite_number(row.get("sell"))
+            if (
+                timestamp <= 0
+                or timestamp % interval_ms
+                or buy is None
+                or sell is None
+                or buy < 0
+                or sell < 0
+            ):
+                continue
+            value = (buy, sell)
+            if timestamp in by_start and by_start[timestamp] != value:
+                by_start.pop(timestamp, None)
+                conflicts.add(timestamp)
+                continue
+            if timestamp not in conflicts:
+                by_start[timestamp] = value
+
+        attached: list[dict[str, Any]] = []
+        def exact_integer(value: object) -> int | None:
+            number = _finite_number(value)
+            return int(number) if number is not None and number == int(number) else None
+
+        for source in samples:
+            sample = dict(source)
+            source_timestamps = dict(sample.get("source_timestamps", {}) or {})
+            sample["source_timestamps"] = source_timestamps
+            sample["trades_coverage"] = "UNKNOWN"
+            start = exact_integer(sample.get("bucket_start_ms"))
+            end = exact_integer(sample.get("bucket_end_ms"))
+            candle_start = exact_integer(sample.get("candle_ts"))
+            quote_volume = _finite_number(sample.get("quote_volume"))
+            values = by_start.get(start) if start is not None else None
+            if (
+                values is None
+                or end != start + interval_ms
+                or candle_start != start
+                or quote_volume is None
+                or quote_volume <= 0
+            ):
+                attached.append(sample)
+                continue
+            buy, sell = values
+            total = buy + sell
+            if total <= 0 or abs(total - quote_volume) > max(
+                1e-6,
+                quote_volume * 0.02,
+            ):
+                attached.append(sample)
+                continue
+            sample.update(
+                {
+                    "taker_buy_volume": buy,
+                    "taker_sell_volume": sell,
+                    "trades_coverage": "COMPLETE",
+                }
+            )
+            source_timestamps["trades"] = start
+            attached.append(sample)
+        return attached
+
+    @staticmethod
     def _attach_continuation_lookback(
         result: AnalysisResult,
         samples: list[dict[str, Any]],
@@ -2672,17 +2846,23 @@ class MarketScanner:
             candidate_signal=updated_candidate,
         )
 
-    def _intraday_flow(self, inst_id, candles, history) -> dict[str, Any]:
+    def _intraday_flow(
+        self,
+        inst_id,
+        candles,
+        history,
+        taker_history: list[dict[str, Any]] | None = None,
+    ) -> dict[str, Any]:
         loader = getattr(self.client, "get_contract_taker_history", None)
-        taker = []
-        if callable(loader):
+        taker = taker_history
+        if taker is None and callable(loader):
             try:
                 taker = self._single_scan_call(loader, inst_id, "5m", 60,
                                                _retry_limit=0, _timeout_limit=3.0)
             except Exception:
                 # Auxiliary failure must not hide the price plan or block publication.
                 taker = []
-        return summarize_intraday_flow(inst_id, candles, history, taker,
+        return summarize_intraday_flow(inst_id, candles, history, taker or [],
                                        observed_at_ms=int(time.time() * 1000))
 
     def refresh_continuation_for_signal(self, signal: Signal) -> dict[str, Any]:
@@ -2713,6 +2893,25 @@ class MarketScanner:
         except Exception:
             history = []
         samples = self._build_closed_oi_lookback_samples(candles, history)
+        taker_history: list[dict[str, Any]] = []
+        taker_loader = getattr(self.client, "get_contract_taker_history", None)
+        if callable(taker_loader):
+            try:
+                taker_history = self._single_scan_call(
+                    taker_loader,
+                    signal.inst_id,
+                    "5m",
+                    60,
+                    _retry_limit=0,
+                    _timeout_limit=3.0,
+                )
+                samples = self._attach_taker_lookback_samples(
+                    samples,
+                    taker_history,
+                    signal.inst_id,
+                )
+            except Exception:
+                taker_history = []
         try:
             capital_candles = self._cached_or_fresh_candles(
                 signal.inst_id,
@@ -2748,7 +2947,12 @@ class MarketScanner:
         refreshed = replace(signal, market_metrics=metrics)
         decision = build_decision_context(refreshed, self.config)
         result = dict(decision.get("continuation_confirmation") or {})
-        result["cross_timeframe"] = self._intraday_flow(signal.inst_id, candles, history)
+        result["cross_timeframe"] = self._intraday_flow(
+            signal.inst_id,
+            candles,
+            history,
+            taker_history,
+        )
         return result
 
     @staticmethod
@@ -2955,9 +3159,9 @@ class MarketScanner:
             quote_volume = _finite_number(ticker.quote_volume_24h)
             if quote_volume is None or quote_volume < 0:
                 failures[inst_id] = (
-                    "發布前最新 Ticker 缺少有效 24H USDT 成交額，禁止沿用 K 線成交量"
+                    "發布前最新 Ticker 缺少有效 24H USDT 成交額；"
+                    "保留最新 Bid／Ask，流動性只列風險建議"
                 )
-                continue
             refreshed_ts_value = _finite_number(ticker.ts)
             refreshed_ts = (
                 int(refreshed_ts_value)
@@ -3012,13 +3216,9 @@ class MarketScanner:
             if ticker is not None
             else None
         )
-        if ticker is not None and (quote_volume is None or quote_volume < 0):
-            failure = failure or (
-                "發布前最新 Ticker 缺少有效 24H USDT 成交額，禁止沿用 K 線成交量"
-            )
-            ticker = None
+        volume_available = quote_volume is not None and quote_volume >= 0
 
-        if ticker is not None and quote_volume is not None:
+        if ticker is not None:
             sampled_at = int(ticker.ts or 0)
             now_ms = int(time.time() * 1_000)
             ticker_age_ms = (
@@ -3058,20 +3258,36 @@ class MarketScanner:
                     "publication_ticker_status": "AVAILABLE",
                     "publication_ticker_ts": sampled_at,
                     "publication_ticker_age_ms": ticker_age_ms,
-                    "missing_sources": missing_sources,
+                    "missing_sources": _unique_strings(
+                        [
+                            *missing_sources,
+                            *([] if volume_available else ["publication_quote_volume"]),
+                        ]
+                    ),
                     "universe_volume_policy": self._candidate_volume_policy(
                         item.inst_id,
-                        quote_volume,
+                        quote_volume if volume_available else None,
                         source="PUBLICATION_TICKER",
-                        volume_status="AVAILABLE",
+                        volume_status=(
+                            "AVAILABLE" if volume_available else "UNAVAILABLE"
+                        ),
                     ),
                 }
             )
             data_quality.pop("publication_ticker_error", None)
+            if volume_available:
+                data_quality.pop("publication_volume_warning", None)
+            else:
+                data_quality["publication_volume_warning"] = failure or (
+                    "發布前最新 Ticker 缺少有效 24H USDT 成交額；"
+                    "流動性只列風險建議"
+                )
             return replace(
                 item,
                 spread_pct=round(ticker.spread_pct, 4),
-                quote_volume_24h=float(quote_volume),
+                quote_volume_24h=(
+                    float(quote_volume) if volume_available else None
+                ),
                 market_metrics=metrics,
                 data_quality=data_quality,
             )
@@ -4320,8 +4536,6 @@ class MarketScanner:
         signals = signals[: min(max(self.config.max_signals, 0), 20)]
         completed_at = datetime.now(timezone.utc).isoformat()
         signals = self._apply_lifecycle(signals, completed_at)
-        early_count = sum(item.signal_stage == "EARLY_SIGNAL" for item in signals)
-        confirmed_count = len(signals) - early_count
         watchlist = [
             item
             for item in market_states
@@ -4340,7 +4554,7 @@ class MarketScanner:
         regime_counts = Counter(item.regime for item in market_states)
         status = "SIGNALS_FOUND" if signals else "NO_QUALIFIED_SIGNAL"
         message = (
-            f"完整掃描完成：{early_count} 個早期訊號、{confirmed_count} 個完整確認，另列出 {len(watchlist)} 個接近觸發候選。"
+            f"完整掃描完成：訊號已觸發 {len(signals)} 個，另列出 {len(watchlist)} 個接近觸發候選。"
             if signals
             else f"完整掃描完成：本輪 0 個進場訊號；另列出 {len(watchlist)} 個接近觸發候選，不代表可以直接進場。"
         )
