@@ -1,4 +1,4 @@
-const SHELL_CACHE = "okx-radar-shell-v4.12-signal-triggered-brand";
+const SHELL_CACHE = "okx-radar-shell-v4.13-preflight-live-price";
 const SHELL_ASSETS = ["/", "/manifest.webmanifest", "/radar-icon.svg"];
 
 self.addEventListener("install", event => {
@@ -7,12 +7,19 @@ self.addEventListener("install", event => {
 });
 
 self.addEventListener("activate", event => {
-  event.waitUntil(
-    caches.keys().then(keys => Promise.all(
-      keys.filter(key => key !== SHELL_CACHE).map(key => caches.delete(key))
-    ))
-  );
-  self.clients.claim();
+  event.waitUntil((async () => {
+    const keys = await caches.keys();
+    const oldShellKeys = keys.filter(
+      key => key.startsWith("okx-radar-shell-") && key !== SHELL_CACHE
+    );
+    await Promise.all(keys.filter(key => key !== SHELL_CACHE).map(key => caches.delete(key)));
+    await self.clients.claim();
+    if (!oldShellKeys.length) return;
+    const windows = await self.clients.matchAll({type: "window", includeUncontrolled: true});
+    await Promise.all(windows.map(client => (
+      "navigate" in client ? client.navigate(client.url) : Promise.resolve()
+    )));
+  })());
 });
 
 self.addEventListener("fetch", event => {

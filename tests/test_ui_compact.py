@@ -19,10 +19,15 @@ class CompactUiTests(unittest.TestCase):
         self.assertIn("15m'} 總掃描價格", preflight)
         self.assertIn("進場前更新現價｜Ask（買入參考）", preflight)
         self.assertIn("進場前更新現價｜Bid（賣出參考）", preflight)
-        self.assertIn("現價相較總掃描價格", preflight)
+        self.assertIn('class="preflight-live-price"', preflight)
+        self.assertIn("相差 <strong", preflight)
         self.assertIn("live.price_change_from_scan_pct", preflight)
         self.assertIn("price(live.price,original)", preflight)
         self.assertIn("executionPriceLabel", preflight)
+        self.assertLess(
+            preflight.index('class="preflight-live-price"'),
+            preflight.index("原始進出場價格（固定，不被本次更新改寫）"),
+        )
 
     def test_trigger_lifecycle_is_separate_from_snapshot_entry_state(self):
         text = (ROOT / "radar/static/pages.html").read_text(encoding="utf-8")
