@@ -255,7 +255,7 @@ class V33ContractTests(unittest.TestCase):
         self.assertIn("更新進場判定與持倉動向", html)
         self.assertIn("進場檢查", html)
         self.assertIn("/api/preflight", html)
-        self.assertIn("更新現價、進場距離、成交條件、續走力道與歷史 OI 持倉動向；不改寫方向或原 Entry／SL／TP", html)
+        self.assertIn("更新現價、與總掃描價格的差異、進場距離、成交條件、續走力道與歷史 OI 持倉動向；不改寫方向或原 Entry／SL／TP", html)
         self.assertIn("原始 Trigger（價格觸發）沒有被修改", html)
         self.assertIn("data-preflight-id", html)
         self.assertIn("data-preflight-trigger-id", html)

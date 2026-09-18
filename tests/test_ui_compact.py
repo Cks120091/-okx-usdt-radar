@@ -12,7 +12,17 @@ class CompactUiTests(unittest.TestCase):
         self.assertNotIn("摘要，不新增判定", text)
         self.assertNotIn("（僅供輔助）", text)
         self.assertIn("Compact clarity pass:", text)
-        self.assertIn("更新現價、進場距離、成交條件、續走力道與歷史 OI 持倉動向；不改寫方向或原 Entry／SL／TP", text)
+        self.assertIn("更新現價、與總掃描價格的差異、進場距離、成交條件、續走力道與歷史 OI 持倉動向；不改寫方向或原 Entry／SL／TP", text)
+        preflight = text.split("function renderPreflight(data){", 1)[1].split(
+            "function preflightTerminalKind", 1
+        )[0]
+        self.assertIn("15m'} 總掃描價格", preflight)
+        self.assertIn("進場前更新現價｜Ask（買入參考）", preflight)
+        self.assertIn("進場前更新現價｜Bid（賣出參考）", preflight)
+        self.assertIn("現價相較總掃描價格", preflight)
+        self.assertIn("live.price_change_from_scan_pct", preflight)
+        self.assertIn("price(live.price,original)", preflight)
+        self.assertIn("executionPriceLabel", preflight)
 
     def test_trigger_lifecycle_is_separate_from_snapshot_entry_state(self):
         text = (ROOT / "radar/static/pages.html").read_text(encoding="utf-8")
