@@ -216,49 +216,52 @@ def _conflict_layer(item, direction, groups):
 
 
 
-def _short_direction_alignment(item, direction):
-    """Require the completed 1H context to agree with a SHORT 15m Trigger.
+def _timeframe_direction_alignment(item, direction):
+    """Require the direction timeframe to agree with the formal Trigger.
 
-    4H remains background only.  The existing hidden fusion consolidates the
-    correlated EMA/RSI/MACD family, so this gate does not double-count them.
-    Missing fusion telemetry is left as UNKNOWN for compatibility with older
-    persisted/test payloads; live V3.4 scanner payloads publish it.
+    SHORT: completed 1H direction + 15m Trigger; 4H is background.
+    LONG: completed 1D direction + 4H Trigger; 1H is timing context.
+    The hidden fusion consolidates correlated EMA/RSI/MACD observations.
     """
     horizon = str(_core._read(item, "radar_horizon", "SHORT")).upper()
-    if horizon != "SHORT" or direction not in {"LONG", "SHORT"}:
+    if horizon not in {"SHORT", "LONG"} or direction not in {"LONG", "SHORT"}:
         return {"required": False, "passed": True, "state": "NOT_APPLICABLE"}
 
+    direction_tf = "1H" if horizon == "SHORT" else "1D"
+    trigger_tf = "15m" if horizon == "SHORT" else "4H"
     metrics = _core._mapping(_core._read(item, "market_metrics", {}))
     raw = _core._mapping(metrics.get("raw_indicators", {}))
-    frame = _core._mapping(raw.get("1H", {}))
+    frame = _core._mapping(raw.get(direction_tf, {}))
     long_score = _core._number(frame.get("fusion_long_score"))
     if long_score is None:
         return {
             "required": True,
             "passed": None,
             "state": "UNKNOWN",
-            "timeframe": "1H",
-            "reason": "1H 方向資料不足；保留舊資料相容性，最新掃描需重新取得 1H 方向。",
+            "timeframe": direction_tf,
+            "trigger_timeframe": trigger_tf,
+            "reason": f"{direction_tf} 方向資料不足；最新掃描需重新取得方向確認。",
         }
 
-    one_hour_direction = (
+    timeframe_direction = (
         "LONG" if long_score >= 55.0
         else "SHORT" if long_score <= 45.0
         else "NEUTRAL"
     )
-    passed = one_hour_direction == direction
+    passed = timeframe_direction == direction
     return {
         "required": True,
         "passed": passed,
         "state": "ALIGNED" if passed else "NOT_ALIGNED",
-        "timeframe": "1H",
-        "one_hour_direction": one_hour_direction,
+        "timeframe": direction_tf,
+        "trigger_timeframe": trigger_tf,
+        "timeframe_direction": timeframe_direction,
         "trigger_direction": direction,
         "long_score": round(long_score, 1),
         "reason": (
-            f"1H {('偏多' if direction == 'LONG' else '偏空')}與 15m Trigger 同向。"
+            f"{direction_tf} {('偏多' if direction == 'LONG' else '偏空')}與 {trigger_tf} Trigger 同向。"
             if passed
-            else f"1H 目前為 {one_hour_direction}，未與 15m {direction} Trigger 同向。"
+            else f"{direction_tf} 目前為 {timeframe_direction}，未與 {trigger_tf} {direction} Trigger 同向。"
         ),
     }
 
@@ -302,24 +305,25 @@ def build_decision_context(*args, **kwargs):
     item = kwargs.get("item") if "item" in kwargs else (args[0] if args else None)
     final = dict(payload.get("final", {}) or {})
     direction = str(final.get("direction") or "").upper()
-    alignment = _short_direction_alignment(item, direction) if item is not None else {"required": False, "passed": True}
+    alignment = _timeframe_direction_alignment(item, direction) if item is not None else {"required": False, "passed": True}
     oi_resonance = _oi_resonance(item, direction) if item is not None else {"state": "UNCONFIRMED", "label": "OI 尚待確認"}
 
-    # New SHORT contract: 1H chooses the permitted side and the 15m formal
-    # Trigger chooses timing.  4H remains context.  Only live payloads with the
-    # 1H fusion telemetry are gated; older stored payloads remain readable.
+    # Direction/trigger contract: SHORT uses 1H -> 15m; LONG uses 1D -> 4H.
+    # 4H is SHORT background; 1H is LONG timing context.
     if (
         str(final.get("status") or "").upper() == "ENTER"
         and alignment.get("required") is True
         and alignment.get("passed") is False
     ):
+        direction_tf = str(alignment.get("timeframe") or "方向週期")
+        trigger_tf = str(alignment.get("trigger_timeframe") or "Trigger")
         final.update({
             "status": "WAIT",
-            "label": "週期方向不同步｜等待 1H × 15m 同向",
+            "label": f"週期方向不同步｜等待 {direction_tf} × {trigger_tf} 同向",
             "new_entry_allowed": False,
             "wait_reason": {
-                "code": "ONE_HOUR_DIRECTION_ALIGNMENT",
-                "label": str(alignment.get("reason") or "等待 1H 與 15m Trigger 同向"),
+                "code": "TIMEFRAME_DIRECTION_ALIGNMENT",
+                "label": str(alignment.get("reason") or f"等待 {direction_tf} 與 {trigger_tf} Trigger 同向"),
             },
             "reasons": _core._unique([
                 str(alignment.get("reason") or ""),
@@ -348,5 +352,5 @@ def build_decision_context(*args, **kwargs):
     elif status == "DATA_UNAVAILABLE":
         final["label"] = "必要資料不足｜先更新確認"
     payload["final"] = final
-    payload["policy"] = "SHORT_1H_15M_ALIGNMENT_V1"
+    payload["policy"] = "MTF_DIRECTION_ALIGNMENT_V1"
     return payload
