@@ -350,26 +350,13 @@ def build_decision_context(*args, **kwargs):
     oi_resonance = _oi_resonance(item, direction) if item is not None else {"state": "UNCONFIRMED", "label": "OI 尚待確認"}
     maturity = _swing_maturity(item, direction) if item is not None else {"required": False, "passed": True}
 
-    # Direction can be correct while the leg is already too mature to chase.
-    if (
-        str(final.get("status") or "").upper() == "ENTER"
-        and maturity.get("required") is True
-        and maturity.get("passed") is False
-    ):
-        final.update({
-            "status": "WAIT",
-            "label": "行情已走一段｜等待回踩後新 Trigger",
-            "new_entry_allowed": False,
-            "wait_reason": {
-                "code": "SWING_MATURITY_EXTENDED",
-                "label": str(maturity.get("reason") or "行情已延伸，等待新的回踩／反彈 Trigger。"),
-            },
-            "reasons": _core._unique([
-                str(maturity.get("reason") or ""),
-                *list(final.get("reasons", []) or []),
-            ])[:3],
-        })
+    # Maturity is advisory only: expose late-leg risk without cancelling a
+    # valid price Trigger.  The user still sees that the move has already run.
     final["swing_maturity"] = maturity
+    if maturity.get("required") is True and maturity.get("passed") is False:
+        warnings = list(final.get("risk_warnings", []) or [])
+        warnings.append(str(maturity.get("reason") or "行情已走一段，追價風險較高。"))
+        final["risk_warnings"] = _core._unique(warnings)[:3]
 
     # Direction/trigger contract: SHORT uses 1H -> 15m; LONG uses 1D -> 4H.
     # 4H is SHORT background; 1H is LONG timing context.
