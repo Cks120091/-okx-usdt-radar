@@ -8,7 +8,7 @@ ROOT = Path(__file__).parents[1]
 class CompactUiTests(unittest.TestCase):
     def test_main_card_prioritizes_decision_and_removes_repeated_microcopy(self):
         text = (ROOT / "radar/static/pages.html").read_text(encoding="utf-8")
-        self.assertIn("function decisionPanel(item){return decisionPanelBody(item)+quickLookPanel(item)", text)
+        self.assertIn("function decisionPanel(item){return decisionPanelBody(item)+compactCoreCard(item)", text)
         self.assertNotIn("摘要，不新增判定", text)
         self.assertNotIn("（僅供輔助）", text)
         self.assertIn("Compact clarity pass:", text)
