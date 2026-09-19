@@ -311,9 +311,10 @@ def test_mature_short_leg_waits_for_new_retest_trigger():
     ]
     item["trigger_type"] = "BREAKOUT"
     result = build_decision_context(item)
-    assert result["final"]["status"] == "WAIT"
-    assert result["final"]["wait_reason"]["code"] == "SWING_MATURITY_EXTENDED"
+    assert result["final"]["status"] == "ENTER"
+    assert result["final"]["new_entry_allowed"] is True
     assert result["final"]["swing_maturity"]["state"] == "MATURE"
+    assert any("行情已走一段" in row for row in result["final"]["risk_warnings"])
 
 
 def test_fresh_continuation_has_wider_maturity_allowance():
