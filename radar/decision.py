@@ -266,6 +266,47 @@ def _timeframe_direction_alignment(item, direction):
     }
 
 
+
+def _swing_maturity(item, direction):
+    """Reject a new entry when the current core leg is already mature."""
+    if direction not in {"LONG", "SHORT"}:
+        return {"required": False, "passed": True, "state": "NOT_APPLICABLE"}
+    metrics = _core._mapping(_core._read(item, "market_metrics", {}))
+    story = _core._mapping(_core._read(item, "market_story", {}))
+    raw = _core._mapping(story.get("raw", {}))
+    path = metrics.get("_core_path", [])
+    atr = _core._number(raw.get("core_atr"))
+    price = (_core._number(metrics.get("entry_execution_price"))
+             or _core._number(metrics.get("last_price"))
+             or _core._number(raw.get("core_close")))
+    if atr is None or atr <= 0 or price is None or not isinstance(path, list):
+        return {"required": True, "passed": None, "state": "UNKNOWN", "reason": "波段成熟度資料不足。"}
+    rows = []
+    for row in path[-20:]:
+        if not isinstance(row, (list, tuple)) or len(row) != 4:
+            continue
+        high, low = _core._number(row[1]), _core._number(row[2])
+        if high is not None and low is not None and high >= low > 0:
+            rows.append((high, low))
+    if len(rows) < 8:
+        return {"required": True, "passed": None, "state": "UNKNOWN", "reason": "波段成熟度樣本不足。"}
+    anchor = min(low for _, low in rows) if direction == "LONG" else max(high for high, _ in rows)
+    extension_atr = (price - anchor) / atr if direction == "LONG" else (anchor - price) / atr
+    trigger_type = str(_core._read(item, "trigger_type", "") or _core._mapping(story.get("trigger", {})).get("type", "")).upper()
+    stage = str(_core._read(item, "signal_stage", "")).upper()
+    fresh_retest = trigger_type in {"CONTINUATION", "REENTRY"} or stage == "REENTRY"
+    limit = 4.0 if fresh_retest else 3.0
+    passed = extension_atr <= limit
+    side = "低點" if direction == "LONG" else "高點"
+    suffix = "仍在可接受範圍。" if passed else "行情已走一段，不建立新的追價型進場；等待回踩／反彈後重新形成 Trigger。"
+    return {
+        "required": True, "passed": passed,
+        "state": "ACCEPTABLE" if passed else "MATURE",
+        "extension_atr": round(extension_atr, 2), "limit_atr": limit,
+        "anchor_price": anchor, "fresh_retest": fresh_retest,
+        "reason": f"波段自近期{side}已走 {extension_atr:.2f} ATR，{suffix}",
+    }
+
 def _oi_resonance(item, direction):
     """Publish OI as a quality-confirmation layer, never as a standalone Trigger."""
     metrics = _core._mapping(_core._read(item, "market_metrics", {}))
@@ -307,6 +348,28 @@ def build_decision_context(*args, **kwargs):
     direction = str(final.get("direction") or "").upper()
     alignment = _timeframe_direction_alignment(item, direction) if item is not None else {"required": False, "passed": True}
     oi_resonance = _oi_resonance(item, direction) if item is not None else {"state": "UNCONFIRMED", "label": "OI 尚待確認"}
+    maturity = _swing_maturity(item, direction) if item is not None else {"required": False, "passed": True}
+
+    # Direction can be correct while the leg is already too mature to chase.
+    if (
+        str(final.get("status") or "").upper() == "ENTER"
+        and maturity.get("required") is True
+        and maturity.get("passed") is False
+    ):
+        final.update({
+            "status": "WAIT",
+            "label": "行情已走一段｜等待回踩後新 Trigger",
+            "new_entry_allowed": False,
+            "wait_reason": {
+                "code": "SWING_MATURITY_EXTENDED",
+                "label": str(maturity.get("reason") or "行情已延伸，等待新的回踩／反彈 Trigger。"),
+            },
+            "reasons": _core._unique([
+                str(maturity.get("reason") or ""),
+                *list(final.get("reasons", []) or []),
+            ])[:3],
+        })
+    final["swing_maturity"] = maturity
 
     # Direction/trigger contract: SHORT uses 1H -> 15m; LONG uses 1D -> 4H.
     # 4H is SHORT background; 1H is LONG timing context.
