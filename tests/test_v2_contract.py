@@ -517,7 +517,7 @@ class V33ContractTests(unittest.TestCase):
         self.assertIn("${preflightContinuation(data)}", preflight_auxiliary)
         self.assertIn("${preflightCapitalFlow(data)}", preflight_auxiliary)
         self.assertIn("dataPageButton", preflight_auxiliary)
-        self.assertIn("intradayFlowPanel(flow)", preflight_auxiliary)
+        self.assertIn("intradayFlowPanel(flow,data?.direction||'NEUTRAL')", preflight_auxiliary)
         self.assertIn("exitReviewPanel(data.exit_review", preflight_auxiliary)
         self.assertIn('id="dataDetailDialog"', html)
         self.assertIn("function preflightTerminalKind(data)", html)
