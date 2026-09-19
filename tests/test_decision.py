@@ -225,3 +225,49 @@ class DecisionContextTests(_legacy.DecisionContextTests):
         self.assertTrue(any("Spread" in warning for warning in result["hard_gate"]["warnings"]))
         self.assertEqual(result["final"]["status"], "ENTER")
         self.assertTrue(result["final"]["new_entry_allowed"])
+
+    def test_short_entry_requires_1h_and_15m_direction_alignment(self):
+        item = _legacy.complete_signal()
+        item["radar_horizon"] = "SHORT"
+        item["market_metrics"]["raw_indicators"] = {
+            "1H": {"fusion_long_score": 60.0},
+            "15m": {"fusion_long_score": 68.0},
+        }
+        aligned = build_decision_context(item)
+        self.assertEqual(aligned["final"]["status"], "ENTER")
+        self.assertTrue(aligned["final"]["new_entry_allowed"])
+        self.assertEqual(aligned["final"]["timeframe_alignment"]["state"], "ALIGNED")
+
+        item["market_metrics"]["raw_indicators"]["1H"]["fusion_long_score"] = 40.0
+        opposed = build_decision_context(item)
+        self.assertEqual(opposed["final"]["status"], "WAIT")
+        self.assertFalse(opposed["final"]["new_entry_allowed"])
+        self.assertEqual(opposed["final"]["wait_reason"]["code"], "ONE_HOUR_DIRECTION_ALIGNMENT")
+
+    def test_4h_does_not_veto_short_entry_when_1h_and_15m_align(self):
+        item = _legacy.complete_signal()
+        item["radar_horizon"] = "SHORT"
+        item["market_metrics"]["raw_indicators"] = {
+            "4H": {"fusion_long_score": 25.0},
+            "1H": {"fusion_long_score": 61.0},
+            "15m": {"fusion_long_score": 66.0},
+        }
+        result = build_decision_context(item)
+        self.assertEqual(result["final"]["status"], "ENTER")
+        self.assertTrue(result["final"]["new_entry_allowed"])
+
+    def test_oi_resonance_is_quality_confirmation_not_standalone_trigger(self):
+        item = _legacy.complete_signal()
+        item["radar_horizon"] = "SHORT"
+        item["market_metrics"]["raw_indicators"] = {
+            "1H": {"fusion_long_score": 60.0},
+            "15m": {"fusion_long_score": 65.0},
+        }
+        item["market_metrics"]["continuation_lookback"] = {
+            "capital_flow": _legacy.fixed_capital_flow_summary()
+        }
+        result = build_decision_context(item)
+        self.assertEqual(result["final"]["oi_resonance"]["state"], "RESONANCE")
+        self.assertFalse(result["final"]["oi_resonance"]["standalone_trigger"])
+        self.assertTrue(result["final"]["new_entry_allowed"])
+
