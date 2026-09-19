@@ -292,3 +292,45 @@ def test_long_entry_requires_1d_and_4h_direction_alignment():
     assert opposed["final"]["status"] == "WAIT"
     assert opposed["final"]["new_entry_allowed"] is False
     assert opposed["final"]["wait_reason"]["code"] == "TIMEFRAME_DIRECTION_ALIGNMENT"
+
+
+def test_mature_short_leg_waits_for_new_retest_trigger():
+    item = _legacy.complete_signal()
+    item["radar_horizon"] = "SHORT"
+    item["direction"] = "LONG"
+    item["market_metrics"]["raw_indicators"] = {
+        "1H": {"fusion_long_score": 62.0},
+        "15m": {"fusion_long_score": 66.0},
+    }
+    item["market_story"]["raw"]["core_atr"] = 1.0
+    item["market_metrics"]["last_price"] = 105.0
+    item["market_metrics"]["entry_execution_price"] = 105.0
+    item["market_metrics"]["_core_path"] = [
+        [i * 900000, 101.0 + i * 0.1, 100.0 + i * 0.1, 100.5 + i * 0.1]
+        for i in range(12)
+    ]
+    item["trigger_type"] = "BREAKOUT"
+    result = build_decision_context(item)
+    assert result["final"]["status"] == "WAIT"
+    assert result["final"]["wait_reason"]["code"] == "SWING_MATURITY_EXTENDED"
+    assert result["final"]["swing_maturity"]["state"] == "MATURE"
+
+
+def test_fresh_continuation_has_wider_maturity_allowance():
+    item = _legacy.complete_signal()
+    item["radar_horizon"] = "SHORT"
+    item["direction"] = "LONG"
+    item["market_metrics"]["raw_indicators"] = {
+        "1H": {"fusion_long_score": 62.0},
+        "15m": {"fusion_long_score": 66.0},
+    }
+    item["market_story"]["raw"]["core_atr"] = 1.0
+    item["market_metrics"]["last_price"] = 103.5
+    item["market_metrics"]["entry_execution_price"] = 103.5
+    item["market_metrics"]["_core_path"] = [
+        [i * 900000, 101.0 + i * 0.1, 100.0 + i * 0.1, 100.5 + i * 0.1]
+        for i in range(12)
+    ]
+    item["trigger_type"] = "CONTINUATION"
+    result = build_decision_context(item)
+    assert result["final"]["swing_maturity"]["passed"] is True
