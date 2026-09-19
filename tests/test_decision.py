@@ -267,7 +267,7 @@ class DecisionContextTests(_legacy.DecisionContextTests):
             "capital_flow": _legacy.fixed_capital_flow_summary()
         }
         result = build_decision_context(item)
-        self.assertEqual(result["final"]["oi_resonance"]["state"], "RESONANCE")
-        self.assertFalse(result["final"]["oi_resonance"]["standalone_trigger"])
+        self.assertEqual(result["oi_resonance"]["state"], "RESONANCE")
+        self.assertFalse(result["oi_resonance"]["standalone_trigger"])
         self.assertTrue(result["final"]["new_entry_allowed"])
 
