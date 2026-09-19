@@ -328,7 +328,10 @@ def build_decision_context(*args, **kwargs):
         })
 
     final["timeframe_alignment"] = alignment
-    final["oi_resonance"] = oi_resonance
+    # Keep OI observer outside the canonical final decision object so enriching
+    # advisory OI data cannot mutate the decision contract.  UI/API consumers
+    # can read it from the top-level decision context.
+    payload["oi_resonance"] = oi_resonance
     status = str(final.get("status") or "").upper()
     if status == "ENTER":
         final["label"] = (
