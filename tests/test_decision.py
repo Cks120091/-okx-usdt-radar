@@ -242,7 +242,7 @@ class DecisionContextTests(_legacy.DecisionContextTests):
         opposed = build_decision_context(item)
         self.assertEqual(opposed["final"]["status"], "WAIT")
         self.assertFalse(opposed["final"]["new_entry_allowed"])
-        self.assertEqual(opposed["final"]["wait_reason"]["code"], "ONE_HOUR_DIRECTION_ALIGNMENT")
+        self.assertEqual(opposed["final"]["wait_reason"]["code"], "TIMEFRAME_DIRECTION_ALIGNMENT")
 
     def test_4h_does_not_veto_short_entry_when_1h_and_15m_align(self):
         item = _legacy.complete_signal()
@@ -271,3 +271,24 @@ class DecisionContextTests(_legacy.DecisionContextTests):
         self.assertFalse(result["oi_resonance"]["standalone_trigger"])
         self.assertTrue(result["final"]["new_entry_allowed"])
 
+
+
+# Long radar mirrors the short direction/trigger contract.
+def test_long_entry_requires_1d_and_4h_direction_alignment():
+    item = _legacy.complete_signal()
+    item["radar_horizon"] = "LONG"
+    item["market_metrics"]["raw_indicators"] = {
+        "1D": {"fusion_long_score": 62.0},
+        "4H_TRIGGER": {"fusion_long_score": 65.0},
+        "1H_TIMING": {"fusion_long_score": 30.0},
+    }
+    aligned = build_decision_context(item)
+    assert aligned["final"]["status"] == "ENTER"
+    assert aligned["final"]["new_entry_allowed"] is True
+    assert aligned["final"]["timeframe_alignment"]["timeframe"] == "1D"
+
+    item["market_metrics"]["raw_indicators"]["1D"]["fusion_long_score"] = 40.0
+    opposed = build_decision_context(item)
+    assert opposed["final"]["status"] == "WAIT"
+    assert opposed["final"]["new_entry_allowed"] is False
+    assert opposed["final"]["wait_reason"]["code"] == "TIMEFRAME_DIRECTION_ALIGNMENT"
