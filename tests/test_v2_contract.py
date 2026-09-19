@@ -840,7 +840,7 @@ class V33ContractTests(unittest.TestCase):
         self.assertNotIn("${entryBadge(item)}", render_signals)
         self.assertNotIn("${continuationStrip(item)}", render_signals)
         self.assertIn("${currentEntryBadge(item)}", render_signals)
-        self.assertIn("${decisionAuxiliary(item)}", decision_panel)
+        self.assertNotIn("${decisionAuxiliary(item)}", decision_panel)
         decision_auxiliary = html.split("function decisionAuxiliary(item)", 1)[1].split(
             "function horizonBadge", 1
         )[0]
@@ -851,10 +851,8 @@ class V33ContractTests(unittest.TestCase):
         self.assertIn("${continuationStrip(item)}", full_auxiliary)
         self.assertIn("${capitalFlowStrip(item)}", full_auxiliary)
         active_decision = decision_panel.split("const entry=item.entry_eligibility||{}", 1)[1]
-        self.assertLess(
-            active_decision.index("${signalTradeGrid(item)}"),
-            active_decision.index("${decisionAuxiliary(item)}"),
-        )
+        self.assertIn("${signalTradeGrid(item)}", active_decision)
+        self.assertIn("${primaryAction}", active_decision)
         self.assertLess(
             active_decision.index("${decisionAlertHtml(item,status)}")
             if "${decisionAlertHtml(item,status)}" in active_decision
