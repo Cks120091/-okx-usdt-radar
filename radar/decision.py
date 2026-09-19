@@ -215,6 +215,82 @@ def _conflict_layer(item, direction, groups):
     return result
 
 
+
+def _short_direction_alignment(item, direction):
+    """Require the completed 1H context to agree with a SHORT 15m Trigger.
+
+    4H remains background only.  The existing hidden fusion consolidates the
+    correlated EMA/RSI/MACD family, so this gate does not double-count them.
+    Missing fusion telemetry is left as UNKNOWN for compatibility with older
+    persisted/test payloads; live V3.4 scanner payloads publish it.
+    """
+    horizon = str(_core._read(item, "radar_horizon", "SHORT")).upper()
+    if horizon != "SHORT" or direction not in {"LONG", "SHORT"}:
+        return {"required": False, "passed": True, "state": "NOT_APPLICABLE"}
+
+    metrics = _core._mapping(_core._read(item, "market_metrics", {}))
+    raw = _core._mapping(metrics.get("raw_indicators", {}))
+    frame = _core._mapping(raw.get("1H", {}))
+    long_score = _core._number(frame.get("fusion_long_score"))
+    if long_score is None:
+        return {
+            "required": True,
+            "passed": None,
+            "state": "UNKNOWN",
+            "timeframe": "1H",
+            "reason": "1H 方向資料不足；保留舊資料相容性，最新掃描需重新取得 1H 方向。",
+        }
+
+    one_hour_direction = (
+        "LONG" if long_score >= 55.0
+        else "SHORT" if long_score <= 45.0
+        else "NEUTRAL"
+    )
+    passed = one_hour_direction == direction
+    return {
+        "required": True,
+        "passed": passed,
+        "state": "ALIGNED" if passed else "NOT_ALIGNED",
+        "timeframe": "1H",
+        "one_hour_direction": one_hour_direction,
+        "trigger_direction": direction,
+        "long_score": round(long_score, 1),
+        "reason": (
+            f"1H {('偏多' if direction == 'LONG' else '偏空')}與 15m Trigger 同向。"
+            if passed
+            else f"1H 目前為 {one_hour_direction}，未與 15m {direction} Trigger 同向。"
+        ),
+    }
+
+
+def _oi_resonance(item, direction):
+    """Publish OI as a quality-confirmation layer, never as a standalone Trigger."""
+    metrics = _core._mapping(_core._read(item, "market_metrics", {}))
+    lookback = _core._mapping(metrics.get("continuation_lookback", {}))
+    capital = _core._mapping(lookback.get("capital_flow", {}))
+    detected = capital.get("detected") is True
+    oi_direction = str(capital.get("headline_direction") or "NEUTRAL").upper()
+    aligned = bool(detected and oi_direction == direction)
+    opposite = bool(detected and oi_direction in {"LONG", "SHORT"} and oi_direction != direction)
+    state = "RESONANCE" if aligned else "OPPOSITE" if opposite else "UNCONFIRMED"
+    return {
+        "state": state,
+        "label": (
+            "關鍵方向 OI 共振"
+            if aligned
+            else "OI 出現反向增倉證據"
+            if opposite
+            else "OI 尚待確認"
+        ),
+        "trigger_direction": direction,
+        "oi_direction": oi_direction,
+        "detected": detected,
+        "strongest_window": capital.get("strongest_window"),
+        "headline_label": capital.get("headline_label"),
+        "role": "QUALITY_CONFIRMATION",
+        "standalone_trigger": False,
+    }
+
 _core._hard_gate = _hard_gate
 _core._anomalies = _anomalies
 _core._conflict_layer = _conflict_layer
@@ -223,7 +299,36 @@ def build_decision_context(*args, **kwargs):
     # The retained builder resolves the patched globals at call time.  Normalize
     # only its presentation labels; Trigger and trade-plan geometry stay intact.
     payload = _original_build_decision_context(*args, **kwargs)
+    item = kwargs.get("item") if "item" in kwargs else (args[0] if args else None)
     final = dict(payload.get("final", {}) or {})
+    direction = str(final.get("direction") or "").upper()
+    alignment = _short_direction_alignment(item, direction) if item is not None else {"required": False, "passed": True}
+    oi_resonance = _oi_resonance(item, direction) if item is not None else {"state": "UNCONFIRMED", "label": "OI 尚待確認"}
+
+    # New SHORT contract: 1H chooses the permitted side and the 15m formal
+    # Trigger chooses timing.  4H remains context.  Only live payloads with the
+    # 1H fusion telemetry are gated; older stored payloads remain readable.
+    if (
+        str(final.get("status") or "").upper() == "ENTER"
+        and alignment.get("required") is True
+        and alignment.get("passed") is False
+    ):
+        final.update({
+            "status": "WAIT",
+            "label": "週期方向不同步｜等待 1H × 15m 同向",
+            "new_entry_allowed": False,
+            "wait_reason": {
+                "code": "ONE_HOUR_DIRECTION_ALIGNMENT",
+                "label": str(alignment.get("reason") or "等待 1H 與 15m Trigger 同向"),
+            },
+            "reasons": _core._unique([
+                str(alignment.get("reason") or ""),
+                *list(final.get("reasons", []) or []),
+            ])[:3],
+        })
+
+    final["timeframe_alignment"] = alignment
+    final["oi_resonance"] = oi_resonance
     status = str(final.get("status") or "").upper()
     if status == "ENTER":
         final["label"] = (
@@ -240,5 +345,5 @@ def build_decision_context(*args, **kwargs):
     elif status == "DATA_UNAVAILABLE":
         final["label"] = "必要資料不足｜先更新確認"
     payload["final"] = final
-    payload["policy"] = "ADVISORY_RISK_V1"
+    payload["policy"] = "SHORT_1H_15M_ALIGNMENT_V1"
     return payload
