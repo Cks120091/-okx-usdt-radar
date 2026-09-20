@@ -1077,11 +1077,10 @@ class MarketScanner:
         long_signals = sorted(long_signals, key=self._signal_sort_key, reverse=True)[
             : min(max(self.config.max_signals, 0), 20)
         ]
-        # Enroll only final top-card candidates, never CORE_PREVIEW or raw signals.
-        statistics_items = self._card_statistics(
-            [*short_signals, *long_signals], statistics_states, completed_at)
-        short_signals = [item for item in statistics_items if item.radar_horizon == "SHORT"]
-        long_signals = [item for item in statistics_items if item.radar_horizon == "LONG"]
+        # Historical card win-rate sampling is intentionally disabled.
+        # Keep scan output focused on live signal and execution quality only.
+        short_signals = [replace(item, historical_performance={}) for item in short_signals]
+        long_signals = [replace(item, historical_performance={}) for item in long_signals]
         short_watchlist = self._watchlist(short_states)
         long_watchlist = self._watchlist(long_states)
         short_states.sort(key=lambda item: item.inst_id)
@@ -1839,8 +1838,6 @@ class MarketScanner:
                 # persist a genuinely reversed Episode.
                 signal = None
                 reason = "card_direction_locked_opposite"
-            self._card_statistics([], [result.market_state] if result.market_state else [],
-                                  analyzed_at, enroll_samples=False)
             raw_signal = signal
             reconciler = getattr(self.repository, "reconcile_instrument", None)
             if callable(reconciler):
