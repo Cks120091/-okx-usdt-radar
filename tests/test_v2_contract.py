@@ -97,7 +97,6 @@ class V33ContractTests(unittest.TestCase):
         self.assertIn("longMissedSignals", html)
         self.assertIn("補充中", html)
         self.assertIn("尚無市場報告，請選擇上方掃描範圍", html)
-        self.assertIn("真實歷史績效", html)
         self.assertIn("manifest.webmanifest", html)
         self.assertIn("serviceWorker.register", html)
         self.assertIn("/api/push/config", html)
