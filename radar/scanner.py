@@ -1395,18 +1395,6 @@ class MarketScanner:
         )
         return report
 
-    def _card_statistics(self, signals, states, observed_at, *, enroll_samples=True):
-        recorder = getattr(self.repository, "observe_card_statistics", None)
-        if not callable(recorder):
-            return list(signals)
-        try:
-            return recorder(signals, states, observed_at,
-                            card_statistics_fingerprint(self.config), enroll_samples=enroll_samples)
-        except Exception:
-            # Failure of optional statistics may not change a trading decision.
-            logging.getLogger(__name__).warning("Optional card statistics unavailable", exc_info=True)
-            return [replace(item, historical_performance={}) for item in signals]
-
     def _single_scan_call(
         self,
         function: Callable[..., Any],
@@ -2447,7 +2435,7 @@ class MarketScanner:
                 "preliminary": True,
                 "no_fake_fallback": True,
             },
-            historical_performance=self.repository.performance(),
+            historical_performance={},
             scan_mode="SHORT",
             short_completed_at=generated_at,
         )
