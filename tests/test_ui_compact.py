@@ -99,3 +99,10 @@ class CompactUiTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+def test_continuation_priority_is_visible_and_ranked_first():
+    page = _page_source()
+    assert "🔥 趨勢延續優先" in page
+    assert "CONTINUATION" in page
+    assert "continuationDiff" in page
