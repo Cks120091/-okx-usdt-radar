@@ -1,0 +1,1102 @@
+
+CASE test_final_publication_enrolls_once_preview_and_blocked_do_not (test_card_statistics.PublishedScannerStatisticsTests.test_final_publication_enrolls_once_preview_and_blocked_do_not)
+SOURCE /home/runner/work/-okx-usdt-radar/-okx-usdt-radar/tests/test_card_statistics.py:340
+    def test_final_publication_enrolls_once_preview_and_blocked_do_not(self):
+        import time
+        from dataclasses import replace
+        from tests.test_scanner import ContextFakeClient, qualified_signal, qualified_state
+        from radar.models import Ticker
+        from radar.scanner import MarketScanner, ScannerConfig
+        from radar.strategy import AnalysisResult
+        class Client(ContextFakeClient):
+            def __init__(self):
+                super().__init__()
+                self.instruments=self.instruments[:1]
+                self.last=100.0
+            def get_swap_tickers(self):
+                return {x.inst_id:Ticker(x.inst_id,self.last,self.last-.01,self.last+.01,
+                        int(time.time()*1000),20_000_000) for x in self.instruments}
+        class Engine:
+            def analyze(self,instrument,ticker,*args,**kwargs):
+                s=qualified_signal(instrument.inst_id)
+                s=replace(s,trigger_id='',lifecycle={'current_stage':'CONFIRMED','transition':'TECHNICAL_EVENT'},
+                          market_metrics={**s.market_metrics,'last_price':ticker.last})
+                return AnalysisResult(s,'qualified',qualified_state(s))
+        client=Client()
+        scanner=MarketScanner(client,ScannerConfig(workers=1,minimum_rr=1.5))
+        scanner.engine=Engine()
+        try:
+            def preview(report):
+                self.assertEqual(scanner.repository._connection.execute('SELECT COUNT(*) FROM card_statistics_v1').fetchone()[0],0)
+            report=scanner.scan_once(scan_mode='SHORT',preview=preview)
+            self.assertTrue(report.signals[0].actionable)
+            rows=scanner.repository._connection.execute('SELECT * FROM card_statistics_v1').fetchall()
+            self.assertEqual(len(rows),1)
+            self.assertAlmostEqual(rows[0]['entry'],100.01)
+            self.assertEqual(report.signals[0].historical_performance['schema_version'],'CARD_STATISTICS_V1')
+            self.assertIsNone(report.signals[0].historical_performance['rate_pct'])
+            client.last=104.0
+            report=scanner.scan_once(scan_mode='SHORT')
+            self.assertFalse(report.signals[0].actionable)
+            self.assertEqual(scanner.repository._connection.execute('SELECT COUNT(*) FROM card_statistics_v1').fetchone()[0],1)
+            self.assertAlmostEqual(scanner.repository._connection.execute('SELECT entry FROM card_statistics_v1').fetchone()[0],100.01)
+        finally:
+            scanner.repository.close()
+
+
+CASE test_epsilon_beyond_each_hard_gate_limit_vetoes_entry (test_decision.DecisionContextTests.test_epsilon_beyond_each_hard_gate_limit_vetoes_entry)
+SOURCE /home/runner/work/-okx-usdt-radar/-okx-usdt-radar/tests/test_decision.py:22
+    def test_epsilon_beyond_each_hard_gate_limit_vetoes_entry(self):
+        advisory_cases = {
+            "liquidity": lambda item: item.update({"quote_volume_24h": 1_999_999.99}),
+            "spread": lambda item: item.update({"spread_pct": 0.100001}),
+            "slippage": lambda item: item["market_metrics"].update({"buy_slippage_pct": 0.150001}),
+            "execution_cost": lambda item: (item["market_metrics"].update({"execution_cost_to_risk_pct": 15.0001}), item["execution_quality"].update({"execution_cost_to_risk_pct": 15.0001})),
+            "risk_reward": lambda item: (item.update({"risk_reward": 1.7999}), item["entry_eligibility"].update({"remaining_rr": 1.7999})),
+            "stop_loss": lambda item: item["market_metrics"].update({"technical_stop_pct": 5.0001}),
+        }
+        for key, mutate in advisory_cases.items():
+            with self.subTest(advisory=key):
+                item = _legacy.complete_signal(); mutate(item)
+                result = build_decision_context(item)
+                self.assertNotIn(key, result["hard_gate"]["blockers"])
+                self.assertEqual(result["final"]["status"], "ENTER")
+                self.assertTrue(result["final"]["new_entry_allowed"])
+                self.assertTrue(result["hard_gate"]["warnings"])
+
+        item = _legacy.complete_signal()
+        item["entry_eligibility"].update({"chase_atr": 1.8001})
+        result = build_decision_context(item)
+        self.assertIn("chase", result["hard_gate"]["blockers"])
+        self.assertFalse(result["final"]["new_entry_allowed"])
+
+
+CASE test_inactive_lifecycle_window_is_not_mislabeled_as_price_chase (test_decision.DecisionContextTests.test_inactive_lifecycle_window_is_not_mislabeled_as_price_chase)
+SOURCE /home/runner/work/-okx-usdt-radar/-okx-usdt-radar/tests/legacy_decision_cases.py:919
+    def test_inactive_lifecycle_window_is_not_mislabeled_as_price_chase(self):
+        item = complete_signal()
+        item["lifecycle"].update(
+            {
+                "current_stage": "TRENDING",
+                "transition": "UNCHANGED",
+                "terminal": False,
+            }
+        )
+        item["entry_eligibility"].update(
+            {
+                "status": "MISSED_ENTRY",
+                "label": "已錯過｜生命週期已離開進場階段",
+                "reason": "訊號仍保留作追蹤，但目前階段不再提供新進場。",
+                "chase_atr": 0.0,
+                "missed_chase_atr": 0.5,
+                "actionable": False,
+                "new_entry_allowed": False,
+            }
+        )
+
+        result = build_decision_context(item)
+
+        self.assertEqual(result["hard_gate"]["blockers"], ["entry_permission"])
+        self.assertEqual(result["final"]["status"], "WAIT")
+        self.assertEqual(
+            result["final"]["wait_reason"]["code"],
+            "ENTRY_WINDOW_CLOSED",
+        )
+        self.assertNotIn("追價", result["final"]["label"])
+        self.assertTrue(
+            any(
+                "不是價格追價判定" in reason
+                for reason in result["final"]["reasons"]
+            )
+        )
+        self.assertFalse(result["final"]["new_entry_allowed"])
+        self.assertTrue(result["final"]["trigger_preserved"])
+
+
+CASE test_legacy_episode_uses_numeric_quality_extension_as_chase_fallback (test_decision.DecisionContextTests.test_legacy_episode_uses_numeric_quality_extension_as_chase_fallback)
+SOURCE /home/runner/work/-okx-usdt-radar/-okx-usdt-radar/tests/legacy_decision_cases.py:687
+    def test_legacy_episode_uses_numeric_quality_extension_as_chase_fallback(self):
+        item = complete_signal()
+        item["entry_eligibility"].pop("chase_atr")
+        item["entry_quality"] = {
+            "key": "SEVERE_CHASE",
+            "label": "嚴重追價",
+            "extension_atr": 2.2,
+        }
+
+        result = build_decision_context(item)
+        chase = next(
+            check
+            for check in result["hard_gate"]["checks"]
+            if check["key"] == "chase"
+        )
+
+        self.assertEqual(chase["status"], "BLOCKED")
+        self.assertEqual(chase["value"]["source"], "entry_quality.extension_atr")
+        self.assertEqual(chase["value"]["chase_atr"], 2.2)
+        self.assertEqual(result["final"]["status"], "NO_CHASE")
+        self.assertFalse(result["final"]["new_entry_allowed"])
+
+
+CASE test_legacy_ready_status_is_vetoed_by_severe_live_chase (test_decision.DecisionContextTests.test_legacy_ready_status_is_vetoed_by_severe_live_chase)
+SOURCE /home/runner/work/-okx-usdt-radar/-okx-usdt-radar/tests/legacy_decision_cases.py:661
+    def test_legacy_ready_status_is_vetoed_by_severe_live_chase(self):
+        item = complete_signal()
+        item["entry_eligibility"].update(
+            {
+                "status": "ENTRY_READY",
+                "label": "目前可進｜仍在合理區",
+                "chase_atr": 2.1,
+            }
+        )
+
+        result = build_decision_context(item)
+        chase = next(
+            check
+            for check in result["hard_gate"]["checks"]
+            if check["key"] == "chase"
+        )
+
+        self.assertEqual(chase["status"], "BLOCKED")
+        self.assertEqual(chase["value"]["source"], "entry_eligibility.chase_atr")
+        self.assertEqual(chase["value"]["chase_atr"], 2.1)
+        self.assertEqual(chase["value"]["threshold_atr"], 1.8)
+        self.assertIn("2.10 ATR", chase["reason"])
+        self.assertEqual(result["final"]["status"], "NO_CHASE")
+        self.assertFalse(result["final"]["new_entry_allowed"])
+        self.assertFalse(result["hard_gate"]["advisory_only"])
+
+
+CASE test_missed_entry_below_severe_threshold_is_no_chase_not_severe_gate (test_decision.DecisionContextTests.test_missed_entry_below_severe_threshold_is_no_chase_not_severe_gate)
+SOURCE /home/runner/work/-okx-usdt-radar/-okx-usdt-radar/tests/legacy_decision_cases.py:581
+    def test_missed_entry_below_severe_threshold_is_no_chase_not_severe_gate(self):
+        item = complete_signal()
+        item["entry_eligibility"].update(
+            {
+                "status": "MISSED_ENTRY",
+                "label": "已錯過｜禁止追價",
+                "reason": "價格已離開最佳進場區。",
+                "chase_atr": 1.27,
+                "remaining_rr": 2.0,
+                "actionable": False,
+                "new_entry_allowed": False,
+            }
+        )
+
+        result = build_decision_context(item)
+        chase = next(
+            check
+            for check in result["hard_gate"]["checks"]
+            if check["key"] == "chase"
+        )
+
+        self.assertEqual(chase["status"], "PASSED")
+        self.assertEqual(chase["value"]["chase_atr"], 1.27)
+        self.assertNotIn("超過嚴重追價門檻", chase["reason"])
+        self.assertEqual(result["hard_gate"]["blockers"], ["entry_permission"])
+        self.assertEqual(result["final"]["status"], "NO_CHASE")
+        self.assertFalse(result["final"]["new_entry_allowed"])
+
+
+CASE test_missed_entry_position_keeps_priority_over_risk_warning (test_decision.DecisionContextTests.test_missed_entry_position_keeps_priority_over_risk_warning)
+SOURCE /home/runner/work/-okx-usdt-radar/-okx-usdt-radar/tests/test_decision.py:182
+    def test_missed_entry_position_keeps_priority_over_risk_warning(self):
+        item = _legacy.complete_signal()
+        item["entry_eligibility"].update({
+            "status": "MISSED_ENTRY",
+            "label": "已錯過｜禁止追價",
+            "reason": "價格已離開最佳進場區。",
+            "chase_atr": 1.27,
+            "remaining_rr": 2.0,
+            "actionable": False,
+            "new_entry_allowed": False,
+        })
+        item["spread_pct"] = 0.2
+        result = build_decision_context(item)
+        self.assertIn("entry_permission", result["hard_gate"]["blockers"])
+        self.assertNotIn("spread", result["hard_gate"]["blockers"])
+        self.assertTrue(any("Spread" in warning for warning in result["hard_gate"]["warnings"]))
+        self.assertEqual(result["final"]["status"], "NO_CHASE")
+        self.assertFalse(result["final"]["new_entry_allowed"])
+
+
+CASE test_missing_live_chase_with_nonsevere_legacy_value_is_unknown (test_decision.DecisionContextTests.test_missing_live_chase_with_nonsevere_legacy_value_is_unknown)
+SOURCE /home/runner/work/-okx-usdt-radar/-okx-usdt-radar/tests/legacy_decision_cases.py:709
+    def test_missing_live_chase_with_nonsevere_legacy_value_is_unknown(self):
+        item = complete_signal()
+        item["entry_eligibility"].pop("chase_atr")
+        item["entry_quality"] = {
+            "key": "ACCEPTABLE",
+            "label": "可以接受",
+            "extension_atr": 0.4,
+        }
+
+        result = build_decision_context(item)
+        chase = next(
+            check
+            for check in result["hard_gate"]["checks"]
+            if check["key"] == "chase"
+        )
+
+        self.assertEqual(chase["status"], "UNKNOWN")
+        self.assertEqual(chase["value"]["source"], "live_chase_unavailable")
+        self.assertIsNone(chase["value"]["chase_atr"])
+        self.assertEqual(chase["value"]["entry_quality_extension_atr"], 0.4)
+        self.assertIn("chase", result["hard_gate"]["unknowns"])
+        self.assertEqual(result["final"]["status"], "DATA_UNAVAILABLE")
+        self.assertFalse(result["final"]["new_entry_allowed"])
+
+
+CASE test_no_chase_preserves_trigger_and_is_not_invalidation (test_decision.DecisionContextTests.test_no_chase_preserves_trigger_and_is_not_invalidation)
+SOURCE /home/runner/work/-okx-usdt-radar/-okx-usdt-radar/tests/legacy_decision_cases.py:563
+    def test_no_chase_preserves_trigger_and_is_not_invalidation(self):
+        item = complete_signal()
+        item["entry_eligibility"].update(
+            {
+                "status": "MISSED_ENTRY",
+                "label": "已錯過｜禁止追價",
+                "reason": "價格已順向離開最佳進場區。",
+                "chase_atr": 2.1,
+            }
+        )
+
+        result = build_decision_context(item)
+
+        self.assertEqual(result["final"]["status"], "NO_CHASE")
+        self.assertTrue(result["final"]["trigger_preserved"])
+        self.assertFalse(result["final"]["new_entry_allowed"])
+        self.assertNotEqual(result["episode"]["status"], "INVALIDATED")
+
+
+CASE test_wait_retest_and_missed_entry_are_not_terminal_states (test_decision.DecisionContextTests.test_wait_retest_and_missed_entry_are_not_terminal_states) (entry_status='WAIT_RETEST')
+SOURCE /home/runner/work/-okx-usdt-radar/-okx-usdt-radar/tests/legacy_decision_cases.py:892
+    def test_wait_retest_and_missed_entry_are_not_terminal_states(self):
+        cases = (
+            ("WAIT_RETEST", "WAIT", "ENTRY_RETEST"),
+            ("MISSED_ENTRY", "WAIT", "ENTRY_WINDOW_CLOSED"),
+        )
+        for entry_status, expected_final, expected_wait_code in cases:
+            with self.subTest(entry_status=entry_status):
+                item = complete_signal()
+                item["entry_eligibility"].update(
+                    {
+                        "status": entry_status,
+                        "label": "等待更新判定",
+                        "actionable": False,
+                        "chase_atr": 0.2,
+                    }
+                )
+
+                result = build_decision_context(item)
+
+                self.assertEqual(result["final"]["status"], expected_final)
+                self.assertEqual(
+                    result["final"]["wait_reason"]["code"],
+                    expected_wait_code,
+                )
+                self.assertTrue(result["final"]["trigger_preserved"])
+                self.assertFalse(result["episode"]["terminal"])
+
+
+CASE test_wait_retest_and_missed_entry_are_not_terminal_states (test_decision.DecisionContextTests.test_wait_retest_and_missed_entry_are_not_terminal_states) (entry_status='MISSED_ENTRY')
+SOURCE /home/runner/work/-okx-usdt-radar/-okx-usdt-radar/tests/legacy_decision_cases.py:892
+    def test_wait_retest_and_missed_entry_are_not_terminal_states(self):
+        cases = (
+            ("WAIT_RETEST", "WAIT", "ENTRY_RETEST"),
+            ("MISSED_ENTRY", "WAIT", "ENTRY_WINDOW_CLOSED"),
+        )
+        for entry_status, expected_final, expected_wait_code in cases:
+            with self.subTest(entry_status=entry_status):
+                item = complete_signal()
+                item["entry_eligibility"].update(
+                    {
+                        "status": entry_status,
+                        "label": "等待更新判定",
+                        "actionable": False,
+                        "chase_atr": 0.2,
+                    }
+                )
+
+                result = build_decision_context(item)
+
+                self.assertEqual(result["final"]["status"], expected_final)
+                self.assertEqual(
+                    result["final"]["wait_reason"]["code"],
+                    expected_wait_code,
+                )
+                self.assertTrue(result["final"]["trigger_preserved"])
+                self.assertFalse(result["episode"]["terminal"])
+
+
+CASE test_adverse_side_hides_artificial_live_rr_without_mutating_trigger (test_preflight.PreflightTests.test_adverse_side_hides_artificial_live_rr_without_mutating_trigger)
+SOURCE /home/runner/work/-okx-usdt-radar/-okx-usdt-radar/tests/test_preflight.py:10
+    def test_adverse_side_hides_artificial_live_rr_without_mutating_trigger(self):
+        with _legacy.tempfile.TemporaryDirectory() as directory:
+            item = _legacy.make_signal()
+            original_entry = dict(item.entry_eligibility)
+            runtime = _legacy.RadarRuntime(
+                _legacy.PreflightScanner(_legacy.PreflightClient(price=98.1)),
+                _legacy.AppConfig(data_dir=directory),
+            )
+            runtime._latest = _legacy.make_report(item)
+            payload = runtime.preflight_dict(item.inst_id, "SHORT")
+            self.assertEqual(payload["verdict"]["status"], "WAIT_RETEST")
+            self.assertFalse(payload["verdict"]["actionable"])
+            self.assertIn("接近失效", payload["verdict"]["label"])
+            self.assertEqual(payload["verdict"]["situation"], "NEAR_INVALIDATION")
+            self.assertIn("EXECUTION_COST_ADVISORY", payload["verdict"]["risk_warnings"])
+            self.assertNotIn("EXECUTION_COST_TOO_HIGH", payload["verdict"]["hard_blockers"])
+            self.assertFalse(payload["plan_state"]["old_plan_reusable_for_new_entry"])
+            self.assertEqual(payload["signal_lifecycle"]["status"], "ACTIVE")
+            self.assertIsNone(payload["live"]["remaining_rr"])
+            self.assertFalse(payload["live"]["remaining_rr_applicable"])
+            self.assertEqual(item.entry_eligibility, original_entry)
+            self.assertTrue(payload["safety"]["stored_trigger_unchanged"])
+
+
+CASE test_either_opposite_flag_remains_binding_while_price_already_waits (test_preflight.PreflightTests.test_either_opposite_flag_remains_binding_while_price_already_waits) (flag='new_entry_suspended')
+SOURCE /home/runner/work/-okx-usdt-radar/-okx-usdt-radar/tests/legacy_preflight_cases.py:931
+    def test_either_opposite_flag_remains_binding_while_price_already_waits(self):
+        for flag in ("new_entry_suspended", "opposite_warning_only"):
+            with self.subTest(flag=flag):
+                signal = make_signal()
+                signal.market_story = {
+                    **signal.market_story,
+                    "trigger": {
+                        **signal.market_story["trigger"],
+                        flag: True,
+                    },
+                }
+                client = PreflightClient(price=99.4)
+
+                payload = build_preflight_payload(
+                    signal,
+                    client.get_ticker(signal.inst_id),
+                    client.get_execution_context(signal.inst_id),
+                    AppConfig(),
+                    report_generated_at=datetime.now(timezone.utc).isoformat(),
+                )
+
+                self.assertEqual(payload["verdict"]["status"], "WAIT_RETEST")
+                self.assertIn("OPPOSITE_SIGNAL", payload["verdict"]["hard_blockers"])
+                self.assertFalse(
+                    payload["plan_state"]["old_plan_reusable_for_new_entry"]
+                )
+                self.assertFalse(payload["plan_state"]["new_entry_allowed"])
+                self.assertTrue(
+                    payload["plan_state"]["existing_position_plan_active"]
+                )
+
+
+CASE test_either_opposite_flag_remains_binding_while_price_already_waits (test_preflight.PreflightTests.test_either_opposite_flag_remains_binding_while_price_already_waits) (flag='opposite_warning_only')
+SOURCE /home/runner/work/-okx-usdt-radar/-okx-usdt-radar/tests/legacy_preflight_cases.py:931
+    def test_either_opposite_flag_remains_binding_while_price_already_waits(self):
+        for flag in ("new_entry_suspended", "opposite_warning_only"):
+            with self.subTest(flag=flag):
+                signal = make_signal()
+                signal.market_story = {
+                    **signal.market_story,
+                    "trigger": {
+                        **signal.market_story["trigger"],
+                        flag: True,
+                    },
+                }
+                client = PreflightClient(price=99.4)
+
+                payload = build_preflight_payload(
+                    signal,
+                    client.get_ticker(signal.inst_id),
+                    client.get_execution_context(signal.inst_id),
+                    AppConfig(),
+                    report_generated_at=datetime.now(timezone.utc).isoformat(),
+                )
+
+                self.assertEqual(payload["verdict"]["status"], "WAIT_RETEST")
+                self.assertIn("OPPOSITE_SIGNAL", payload["verdict"]["hard_blockers"])
+                self.assertFalse(
+                    payload["plan_state"]["old_plan_reusable_for_new_entry"]
+                )
+                self.assertFalse(payload["plan_state"]["new_entry_allowed"])
+                self.assertTrue(
+                    payload["plan_state"]["existing_position_plan_active"]
+                )
+
+
+CASE test_existing_episode_needs_closed_retest_before_live_price_can_reopen_it (test_preflight.PreflightTests.test_existing_episode_needs_closed_retest_before_live_price_can_reopen_it)
+SOURCE /home/runner/work/-okx-usdt-radar/-okx-usdt-radar/tests/legacy_preflight_cases.py:757
+    def test_existing_episode_needs_closed_retest_before_live_price_can_reopen_it(self):
+        signal = make_signal()
+        signal.entry_eligibility = {
+            **signal.entry_eligibility,
+            "status": "WAIT_RETEST",
+            "actionable": False,
+            "new_entry_allowed": False,
+            "existing_episode": True,
+            "entry_ready_once": True,
+            "closed_retest_confirmed": False,
+        }
+        signal.lifecycle = {**signal.lifecycle, "entry_ready_once": True}
+        signal.decision_context = {
+            "hard_gate": {
+                "status": "BLOCKED",
+                "blocked": True,
+                "blockers": ["entry_permission"],
+            },
+            "final": {
+                "status": "HARD_GATE_BLOCKED",
+                "new_entry_allowed": False,
+            },
+        }
+        client = PreflightClient(price=100.0)
+
+        waiting = build_preflight_payload(
+            signal,
+            client.get_ticker(signal.inst_id),
+            client.get_execution_context(signal.inst_id),
+            AppConfig(),
+            report_generated_at=datetime.now(timezone.utc).isoformat(),
+        )
+
+        self.assertEqual(waiting["verdict"]["status"], "WAIT_RETEST")
+        self.assertFalse(waiting["verdict"]["actionable"])
+        self.assertNotIn(
+            "ENTRY_PERMISSION",
+            waiting["verdict"]["hard_blockers"],
+        )
+        self.assertTrue(waiting["live"]["reentry_confirmation_required"])
+        self.assertFalse(waiting["live"]["closed_retest_confirmed"])
+        self.assertFalse(
+            waiting["plan_state"]["old_plan_reusable_for_new_entry"]
+        )
+        self.assertTrue(waiting["plan_state"]["existing_position_plan_active"])
+
+        signal.entry_eligibility["closed_retest_confirmed"] = True
+        confirmed = build_preflight_payload(
+            signal,
+            client.get_ticker(signal.inst_id),
+            client.get_execution_context(signal.inst_id),
+            AppConfig(),
+            report_generated_at=datetime.now(timezone.utc).isoformat(),
+        )
+        self.assertEqual(confirmed["verdict"]["status"], "ENTRY_READY")
+        self.assertTrue(confirmed["verdict"]["actionable"])
+
+
+CASE test_favorable_move_beyond_entry_window_closes_only_new_entry (test_preflight.PreflightTests.test_favorable_move_beyond_entry_window_closes_only_new_entry)
+SOURCE /home/runner/work/-okx-usdt-radar/-okx-usdt-radar/tests/legacy_preflight_cases.py:1764
+    def test_favorable_move_beyond_entry_window_closes_only_new_entry(self):
+        with tempfile.TemporaryDirectory() as directory:
+            item = replace(
+                make_signal(),
+                direction="SHORT",
+                signal_stage="CONFIRMED",
+                entry_low="99.8",
+                entry_high="100.2",
+                stop_loss="102",
+                take_profit_1="92",
+                take_profit_2="90",
+            )
+            runtime = RadarRuntime(
+                PreflightScanner(PreflightClient(price=98.6)),
+                AppConfig(data_dir=directory),
+            )
+            runtime._latest = make_report(item)
+
+            payload = runtime.preflight_dict(item.inst_id, "SHORT")
+
+            self.assertEqual(payload["verdict"]["status"], "MISSED_ENTRY")
+            self.assertEqual(payload["verdict"]["situation"], "FAVORABLE_MISSED")
+            self.assertEqual(payload["signal_lifecycle"]["status"], "ACTIVE")
+            self.assertTrue(payload["plan_state"]["existing_position_plan_active"])
+            self.assertFalse(payload["plan_state"]["old_plan_reusable_for_new_entry"])
+            self.assertEqual(
+                payload["plan_state"]["direction_status"],
+                "ORIGINAL_BIAS_RETAINED",
+            )
+            self.assertIn("若已持倉", payload["plan_state"]["note"])
+
+
+CASE test_favorable_move_shows_active_trigger_and_waits_without_chasing (test_preflight.PreflightTests.test_favorable_move_shows_active_trigger_and_waits_without_chasing)
+SOURCE /home/runner/work/-okx-usdt-radar/-okx-usdt-radar/tests/legacy_preflight_cases.py:1737
+    def test_favorable_move_shows_active_trigger_and_waits_without_chasing(self):
+        with tempfile.TemporaryDirectory() as directory:
+            item = replace(
+                make_signal(),
+                direction="SHORT",
+                signal_stage="CONFIRMED",
+                entry_low="99.8",
+                entry_high="100.2",
+                stop_loss="102",
+                take_profit_1="92",
+                take_profit_2="90",
+            )
+            runtime = RadarRuntime(
+                PreflightScanner(PreflightClient(price=99.06)),
+                AppConfig(data_dir=directory),
+            )
+            runtime._latest = make_report(item)
+
+            payload = runtime.preflight_dict(item.inst_id, "SHORT")
+
+            self.assertEqual(payload["verdict"]["status"], "WAIT_RETEST")
+            self.assertEqual(payload["verdict"]["situation"], "FAVORABLE_AWAY")
+            self.assertIn("已離開最佳進場點", payload["verdict"]["label"])
+            self.assertEqual(payload["signal_lifecycle"]["label"], "已觸發・有效中")
+            self.assertTrue(payload["plan_state"]["existing_position_plan_active"])
+            self.assertFalse(payload["verdict"]["actionable"])
+
+
+CASE test_formal_opposite_signal_keeps_plan_but_blocks_new_entry (test_preflight.PreflightTests.test_formal_opposite_signal_keeps_plan_but_blocks_new_entry)
+SOURCE /home/runner/work/-okx-usdt-radar/-okx-usdt-radar/tests/legacy_preflight_cases.py:899
+    def test_formal_opposite_signal_keeps_plan_but_blocks_new_entry(self):
+        signal = make_signal()
+        signal.market_story = {
+            **signal.market_story,
+            "trigger": {
+                **signal.market_story["trigger"],
+                "opposite_warning_only": True,
+                "new_entry_suspended": True,
+                "opposite_candidate": {
+                    "direction": "SHORT",
+                    "type": "REVERSAL",
+                },
+            },
+        }
+        client = PreflightClient(price=100.0)
+
+        payload = build_preflight_payload(
+            signal,
+            client.get_ticker(signal.inst_id),
+            client.get_execution_context(signal.inst_id),
+            AppConfig(),
+            report_generated_at=datetime.now(timezone.utc).isoformat(),
+        )
+
+        self.assertEqual(payload["verdict"]["status"], "HARD_GATE_BLOCKED")
+        self.assertFalse(payload["verdict"]["actionable"])
+        self.assertIn("OPPOSITE_SIGNAL", payload["verdict"]["hard_blockers"])
+        self.assertIn("正式反向", payload["verdict"]["reason"])
+        self.assertFalse(payload["plan_state"]["new_entry_allowed"])
+        self.assertTrue(payload["plan_state"]["existing_position_plan_active"])
+        self.assertTrue(payload["safety"]["entry_veto_enabled"])
+
+
+CASE test_small_adverse_move_keeps_trigger_active_with_retest_tolerance (test_preflight.PreflightTests.test_small_adverse_move_keeps_trigger_active_with_retest_tolerance)
+SOURCE /home/runner/work/-okx-usdt-radar/-okx-usdt-radar/tests/legacy_preflight_cases.py:1719
+    def test_small_adverse_move_keeps_trigger_active_with_retest_tolerance(self):
+        with tempfile.TemporaryDirectory() as directory:
+            item = make_signal()
+            runtime = RadarRuntime(
+                PreflightScanner(PreflightClient(price=99.4)),
+                AppConfig(data_dir=directory),
+            )
+            runtime._latest = make_report(item)
+
+            payload = runtime.preflight_dict(item.inst_id, "SHORT")
+
+            self.assertEqual(payload["verdict"]["status"], "WAIT_RETEST")
+            self.assertEqual(payload["verdict"]["situation"], "ADVERSE_TOLERANCE")
+            self.assertIn("容許回測中", payload["verdict"]["label"])
+            self.assertEqual(payload["signal_lifecycle"]["label"], "已觸發・有效中")
+            self.assertTrue(payload["plan_state"]["existing_position_plan_active"])
+            self.assertEqual(payload["plan_state"]["new_entry_status"], "WAIT")
+
+
+CASE test_attach_decision_applies_canonical_chase_hard_gate (test_scanner.ScannerTests.test_attach_decision_applies_canonical_chase_hard_gate)
+SOURCE /home/runner/work/-okx-usdt-radar/-okx-usdt-radar/tests/legacy_scanner_cases.py:2736
+    def test_attach_decision_applies_canonical_chase_hard_gate(self):
+        scanner = MarketScanner(
+            FakeClient(),
+            ScannerConfig(min_quote_volume_24h=0),
+        )
+        signal = qualified_signal()
+        signal = replace(
+            signal,
+            entry_eligibility={
+                **signal.entry_eligibility,
+                "status": "ENTRY_READY",
+                "label": "目前可進｜仍在合理區",
+                "chase_atr": 2.1,
+            },
+        )
+
+        attached = scanner._attach_decision_context(signal)
+
+        self.assertEqual(
+            attached.decision_context["final"]["status"],
+            "NO_CHASE",
+        )
+        self.assertFalse(attached.actionable)
+        self.assertEqual(attached.entry_eligibility["status"], "ENTRY_READY")
+        self.assertFalse(attached.entry_eligibility["new_entry_allowed"])
+        self.assertEqual(attached.entry_eligibility["chase_atr"], 2.1)
+        self.assertIn("chase", attached.entry_eligibility["hard_blockers"])
+        self.assertTrue(attached.entry_eligibility["risk_warnings"])
+
+
+CASE test_market_scan_rechecks_entry_with_publication_ticker (test_scanner.ScannerTests.test_market_scan_rechecks_entry_with_publication_ticker)
+SOURCE /home/runner/work/-okx-usdt-radar/-okx-usdt-radar/tests/legacy_scanner_cases.py:1028
+    def test_market_scan_rechecks_entry_with_publication_ticker(self):
+        class MovingTickerClient(ContextFakeClient):
+            def __init__(self):
+                super().__init__()
+                self.instruments = self.instruments[:1]
+                self.last = 100.0
+                self.quote_volume = 20_000_000.0
+                self.base_ts = int(time.time() * 1_000) - 100
+                self.bulk_prices = []
+
+            def get_swap_tickers(self):
+                self.bulk_prices.append(self.last)
+                return {
+                    item.inst_id: Ticker(
+                        item.inst_id,
+                        self.last,
+                        self.last - 0.01,
+                        self.last + 0.01,
+                        self.base_ts + len(self.bulk_prices),
+                        self.quote_volume,
+                    )
+                    for item in self.instruments
+                }
+
+        class FreshEntryEngine:
+            def __init__(self):
+                self.analysis_prices = []
+
+            def analyze(self, instrument, ticker, *args, **kwargs):
+                self.analysis_prices.append(ticker.last)
+                signal = replace(
+                    qualified_signal(instrument.inst_id),
+                    trigger_id="",
+                    lifecycle={
+                        "current_stage": "CONFIRMED",
+                        "transition": "TECHNICAL_EVENT",
+                    },
+                    market_metrics={
+                        **qualified_signal(instrument.inst_id).market_metrics,
+                        "last_price": ticker.last,
+                    },
+                )
+                state = replace(
+                    qualified_state(signal),
+                    lifecycle={
+                        "current_stage": "CONFIRMED",
+                        "transition": "TECHNICAL_SNAPSHOT",
+                    },
+                )
+                return AnalysisResult(signal, "qualified", state)
+
+        client = MovingTickerClient()
+        engine = FreshEntryEngine()
+        scanner = MarketScanner(
+            client,
+            ScannerConfig(
+                workers=1,
+                min_quote_volume_24h=0,
+                minimum_rr=1.5,
+            ),
+        )
+        scanner.engine = engine
+
+        def move_price_after_preview(preview):
+            self.assertEqual(
+                preview.signals[0].market_metrics["last_price"],
+                100.0,
+            )
+            client.last = 104.0
+            client.quote_volume = 21_000_000.0
+
+        report = scanner.scan_once(
+            scan_mode="SHORT",
+            preview=move_price_after_preview,
+        )
+
+        self.assertEqual(engine.analysis_prices, [100.0])
+        self.assertEqual(client.bulk_prices, [100.0, 104.0])
+        signal = report.signals[0]
+        self.assertEqual(signal.market_metrics["last_price"], 104.0)
+        self.assertEqual(signal.quote_volume_24h, 21_000_000.0)
+        self.assertEqual(
+            signal.market_metrics["scan_start_ticker_ts"],
+            client.base_ts + 1,
+        )
+        self.assertEqual(
+            signal.market_metrics["ticker_sampled_at"],
+            client.base_ts + 2,
+        )
+        self.assertGreaterEqual(
+            signal.market_metrics["ticker_age_at_publish_ms"],
+            0,
+        )
+        self.assertLess(
+            signal.market_metrics["ticker_age_at_publish_ms"],
+            5_000,
+        )
+        self.assertEqual(signal.market_metrics["entry_execution_price"], 104.01)
+        self.assertEqual(
+            signal.market_metrics["entry_execution_price_source"],
+            "ASK",
+        )
+        self.assertEqual(signal.entry_eligibility["current_price"], 104.01)
+        self.assertEqual(
+            signal.entry_eligibility["current_price_source"],
+            "ASK",
+        )
+        self.assertEqual(signal.entry_eligibility["status"], "MISSED_ENTRY")
+        self.assertFalse(signal.entry_eligibility["new_entry_allowed"])
+        self.assertFalse(signal.actionable)
+        self.assertEqual(
+            signal.decision_context["final"]["status"],
+            "NO_CHASE",
+        )
+        liquidity_check = next(
+            item
+            for item in signal.decision_context["hard_gate"]["checks"]
+            if item["key"] == "liquidity"
+        )
+        self.assertEqual(liquidity_check["value"], 21_000_000.0)
+        self.assertEqual(
+            report.data_quality["publication_ticker_status"],
+            "AVAILABLE",
+        )
+        self.assertEqual(
+            report.data_quality["publication_ticker_refreshed_count"],
+            1,
+        )
+
+
+CASE test_single_scan_reuses_one_closed_oi_history_for_both_horizons (test_scanner.ScannerTests.test_single_scan_reuses_one_closed_oi_history_for_both_horizons)
+SOURCE /home/runner/work/-okx-usdt-radar/-okx-usdt-radar/tests/legacy_scanner_cases.py:2998
+    def test_single_scan_reuses_one_closed_oi_history_for_both_horizons(self):
+        class HistoricalOIClient(ContextFakeClient):
+            def __init__(self):
+                super().__init__()
+                self.instruments = [self.instruments[0]]
+                self.history_calls = []
+                self.taker_calls = []
+                self.failed_history_periods = set()
+
+            def get_usdt_swap_instrument(self, inst_id):
+                return self.instruments[0] if inst_id == self.instruments[0].inst_id else None
+
+            def get_ticker(self, inst_id):
+                return Ticker(
+                    inst_id,
+                    100.0,
+                    99.99,
+                    100.01,
+                    1_700_036_100_000,
+                    20_000_000,
+                )
+
+            def get_open_interest_for(self, inst_id):
+                return 5_000_000.0
+
+            def get_candles(self, inst_id, bar, limit=100):
+                self.candle_requests.append((inst_id, bar, limit))
+                if bar == "5m":
+                    return aligned_five_minute_candles(limit)
+                if bar == "1H":
+                    return aligned_hourly_candles(limit)
+                return candles(limit)
+
+            def get_open_interest_history(self, inst_id, period="5m", limit=20):
+                self.history_calls.append((inst_id, period, limit))
+                if period in self.failed_history_periods:
+                    raise RuntimeError(f"fixture {period} historical OI outage")
+                interval_ms = 3_600_000 if period == "1H" else 300_000
+                series = (
+                    aligned_hourly_candles(240)
+                    if period == "1H"
+                    else aligned_five_minute_candles(120)
+                )[-limit:]
+                return [
+                    {
+                        "ts": candle.ts + interval_ms,
+                        "oi": 10_000.0 + index * 25.0,
+                        "oiCcy": 100.0 + index * 0.25,
+                    }
+                    for index, candle in enumerate(series)
+                ]
+
+            def get_contract_taker_history(self, inst_id, period="5m", limit=60):
+                self.taker_calls.append((inst_id, period, limit))
+                series = aligned_five_minute_candles(120)[-limit:]
+                return [
+                    {
+                        "ts": candle.ts,
+                        "buy": candle.quote_volume * 0.65,
+                        "sell": candle.quote_volume * 0.35,
+                        "unit": "USDT",
+                        "inst_id": inst_id,
+                    }
+                    for candle in series
+                ]
+
+        class BothHorizonEngine:
+            @staticmethod
+            def _result(horizon):
+                signal = replace(
+                    qualified_signal(),
+                    radar_horizon=horizon,
+                    trigger_id=f"fixture-{horizon.lower()}",
+                )
+                return AnalysisResult(signal, "qualified", qualified_state(signal))
+
+            def analyze(self, *args, **kwargs):
+                return self._result("SHORT")
+
+            def analyze_long(self, *args, **kwargs):
+                return self._result("LONG")
+
+            def apply_market_context(self, result, *args, **kwargs):
+                return result
+
+        client = HistoricalOIClient()
+        scanner = MarketScanner(
+            client,
+            ScannerConfig(min_quote_volume_24h=0, universe_max_spread_pct=1.0),
+        )
+        scanner.engine = BothHorizonEngine()
+
+        analysis = scanner.scan_instrument(
+            "AAA-USDT-SWAP",
+            requested_horizon="BOTH",
+        )
+
+        self.assertEqual(
+            client.history_calls,
+            [
+                ("AAA-USDT-SWAP", "5m", 60),
+                ("AAA-USDT-SWAP", "1H", 30),
+            ],
+        )
+        self.assertEqual(
+            client.taker_calls,
+            [("AAA-USDT-SWAP", "5m", 60)],
+        )
+        short = analysis.short_result.market_state.market_metrics[
+            "continuation_lookback"
+        ]
+        long = analysis.long_result.market_state.market_metrics[
+            "continuation_lookback"
+        ]
+        self.assertTrue(short["windows"]["10m"]["ready"])
+        self.assertTrue(long["windows"]["60m"]["ready"])
+        self.assertEqual(short["as_of_close_ms"], long["as_of_close_ms"])
+        self.assertEqual(short["source_mode"], "HISTORICAL_CLOSED_BARS")
+        self.assertNotIn("samples", short)
+        short_capital = short["capital_flow"]
+        long_capital = long["capital_flow"]
+        self.assertEqual(
+            short_capital["algorithm_version"],
+            "CAPITAL_FLOW_LOOKBACK_V1",
+        )
+        self.assertTrue(short_capital["windows"]["4h"]["ready"])
+        self.assertEqual(
+            short_capital["as_of_close_ms"],
+            long_capital["as_of_close_ms"],
+        )
+        self.assertNotIn("samples", short_capital)
+        continuation = analysis.short_result.market_state.decision_context[
+            "continuation_confirmation"
+        ]
+        self.assertEqual(
+            continuation["observer"]["algorithm_version"],
+            "CONTINUATION_LOOKBACK_V1",
+        )
+        self.assertEqual(continuation["core_votes"]["OI"]["state"], "SUPPORT")
+        self.assertEqual(
+            continuation["core_votes"]["TAKER_CVD"]["state"],
+            "SUPPORT",
+        )
+        self.assertEqual(analysis.short_result.signal.entry_low, "99")
+        self.assertEqual(analysis.short_result.signal.stop_loss, "97")
+
+        client.history_calls.clear()
+        client.taker_calls.clear()
+        report = scanner.scan_once(scan_mode="FULL")
+        self.assertEqual(
+            client.history_calls,
+            [
+                ("AAA-USDT-SWAP", "5m", 20),
+                ("AAA-USDT-SWAP", "1H", 30),
+            ],
+        )
+        self.assertEqual(
+            client.taker_calls,
+            [("AAA-USDT-SWAP", "5m", 60)],
+        )
+        self.assertEqual(
+            report.signals[0].decision_context["continuation_confirmation"][
+                "observer"
+            ]["source_mode"],
+            "HISTORICAL_CLOSED_BARS",
+        )
+        self.assertEqual(
+            report.signals[0].decision_context["continuation_confirmation"][
+                "core_votes"
+            ]["TAKER_CVD"]["state"],
+            "SUPPORT",
+        )
+
+        context_failure_client = HistoricalOIClient()
+
+        def failed_context(*args, **kwargs):
+            raise RuntimeError("fixture market context outage")
+
+        context_failure_client.get_market_context = failed_context
+        context_failure_scanner = MarketScanner(
+            context_failure_client,
+            ScannerConfig(min_quote_volume_24h=0, universe_max_spread_pct=1.0),
+        )
+        context_failure_scanner.engine = BothHorizonEngine()
+        context_degraded = context_failure_scanner.scan_once(scan_mode="FULL")
+        self.assertEqual(len(context_degraded.signals), 1)
+        self.assertEqual(
+            context_degraded.signals[0]
+            .market_metrics["continuation_lookback"]["source_mode"],
+            "HISTORICAL_CLOSED_BARS",
+        )
+        self.assertIn("AAA-USDT-SWAP", context_degraded.context_failures)
+
+        client.history_calls.clear()
+        client.failed_history_periods = {"1H"}
+        degraded = scanner.scan_instrument(
+            "AAA-USDT-SWAP",
+            requested_horizon="SHORT",
+        )
+        self.assertEqual(
+            client.history_calls,
+            [
+                ("AAA-USDT-SWAP", "5m", 60),
+                ("AAA-USDT-SWAP", "1H", 30),
+            ],
+        )
+        self.assertEqual(degraded.short_result.signal.entry_low, "99")
+        self.assertEqual(degraded.short_result.signal.stop_loss, "97")
+        # This is the already-published Episode from the earlier FULL scan.
+        # Missing 1H history provides no new closed retest proof, so a live
+        # quote back inside Entry must not reopen it.
+        self.assertFalse(degraded.short_result.signal.actionable)
+        self.assertEqual(
+            degraded.short_result.signal.entry_eligibility["status"],
+            "WAIT_RETEST",
+        )
+        self.assertFalse(
+            any("歷史 OI 持倉資料" in message for message in degraded.context.failures)
+        )
+        self.assertTrue(
+            any("歷史 OI 持倉資料" in message for message in degraded.errors)
+        )
+        degraded_continuation = degraded.short_result.signal.decision_context[
+            "continuation_confirmation"
+        ]
+        self.assertEqual(degraded_continuation["core_votes"]["OI"]["state"], "SUPPORT")
+        self.assertEqual(
+            degraded_continuation["observer"]["capital_flow"]["status"],
+            "INSUFFICIENT",
+        )
+
+        client.history_calls.clear()
+        client.failed_history_periods = {"5m"}
+        capital_only = scanner.scan_instrument(
+            "AAA-USDT-SWAP",
+            requested_horizon="SHORT",
+        )
+        self.assertEqual(
+            client.history_calls,
+            [
+                ("AAA-USDT-SWAP", "5m", 60),
+                ("AAA-USDT-SWAP", "1H", 30),
+            ],
+        )
+        capital_only_confirmation = capital_only.short_result.signal.decision_context[
+            "continuation_confirmation"
+        ]
+        self.assertEqual(
+            capital_only_confirmation["observer"]["status"],
+            "INSUFFICIENT",
+        )
+        self.assertEqual(
+            capital_only_confirmation["observer"]["capital_flow"][
+                "algorithm_version"
+            ],
+            "CAPITAL_FLOW_LOOKBACK_V1",
+        )
+        self.assertTrue(
+            capital_only_confirmation["observer"]["capital_flow"]["windows"][
+                "4h"
+            ]["ready"]
+        )
+
+
+CASE test_wait_reason_is_not_misreported_as_price_outside_or_risk (tests.legacy_short_entry_window_cases.EntryWindowTests.test_wait_reason_is_not_misreported_as_price_outside_or_risk)
+SOURCE /home/runner/work/-okx-usdt-radar/-okx-usdt-radar/tests/legacy_short_entry_window_cases.py:171
+    def test_wait_reason_is_not_misreported_as_price_outside_or_risk(self):
+        item=complete_signal();item['entry_eligibility'].update(status='WAIT_RETEST',new_entry_allowed=False,
+            actionable=False,reentry_confirmation_required=True,closed_retest_confirmed=False,
+            label='已回到進場區｜等待收線重新確認',reason='價格在區間內；前一進場窗口已關閉。')
+        out=build_decision_context(item)
+        self.assertEqual(out['final']['status'],'WAIT')
+        self.assertIn('區間內',out['final']['wait_reason']['label'])
+        self.assertFalse(out['hard_gate']['blocked'])
+
+
+CASE test_preflight_departure_is_durable_then_return_stays_wait (tests.legacy_short_entry_window_cases.WindowIntegrationTests.test_preflight_departure_is_durable_then_return_stays_wait)
+SOURCE /home/runner/work/-okx-usdt-radar/-okx-usdt-radar/tests/legacy_short_entry_window_cases.py:257
+    def test_preflight_departure_is_durable_then_return_stays_wait(self):
+        payload={'verdict':{'status':'WAIT_RETEST','actionable':False},
+                 'plan_state':{'new_entry_allowed':False},'signal_lifecycle':{'terminal':False}}
+        _record_preflight_entry_window(self.repo,self.s,payload,NOW+1000)
+        old_report=_with_durable_entry_window(self.repo,self.s)
+        ticker=Ticker(self.s.inst_id,.3339,.3339,.3340,NOW+2000,30_000_000)
+        result=build_preflight_payload(old_report,ticker,MarketContext(self.s.inst_id,None,None,None,None,NOW+2000),
+            AppConfig(),report_generated_at=self.s.generated_at,now_ms=NOW+2000)
+        self.assertEqual(result['verdict']['status'],'WAIT_RETEST')
+
+
+CASE test_trigger_lifecycle_is_separate_from_snapshot_entry_state (test_ui_compact.CompactUiTests.test_trigger_lifecycle_is_separate_from_snapshot_entry_state)
+SOURCE /home/runner/work/-okx-usdt-radar/-okx-usdt-radar/tests/test_ui_compact.py:32
+    def test_trigger_lifecycle_is_separate_from_snapshot_entry_state(self):
+        text = (ROOT / "radar/static/pages.html").read_text(encoding="utf-8")
+        report = text.split("function renderReport(report){", 1)[1].split(
+            "function renderOverview(report)", 1
+        )[0]
+
+        self.assertIn('class="badge triggered-signal-b">⚡ 訊號已觸發', text)
+        self.assertIn("EARLY_SIGNAL:'早期'", text)
+        self.assertNotIn("EARLY_SIGNAL:'早期訊號'", text)
+        self.assertNotIn("待進場確認", text)
+        self.assertIn("${stageBadge(item)}", text)
+        self.assertNotIn('id="earlySignals"', text)
+        self.assertNotIn('id="signals"', text)
+        self.assertNotIn('id="longEarlySignals"', text)
+        self.assertNotIn('id="longReadySignals"', text)
+        self.assertIn("等待回踩", text)
+        self.assertIn("等待新訊號", text)
+        self.assertNotIn("風控受阻", text)
+        self.assertIn("風險建議｜不阻止進場", text)
+        self.assertIn("必要條件未成立", text)
+        self.assertIn("進場快照｜不是即時報價", text)
+        self.assertIn("ENTRY｜可進參考區間", text)
+        self.assertIn("固定計畫價，不代表價格現在已到", text)
+        self.assertIn("String(activeShort.length)", report)
+        self.assertIn("String(activeLong.length)", report)
+        self.assertIn("renderOverview({...report,signals:activeShort})", report)
+        self.assertNotIn(">目前可進<", text)
+        self.assertNotIn(">已錯過<", text)
+        self.assertNotIn("現在能否進場", text)
+
+
+CASE test_public_projection_preserves_safe_position_no_raw_history (test_entry_position_policy.EntryPositionPolicyTests.test_public_projection_preserves_safe_position_no_raw_history)
+SOURCE /home/runner/work/-okx-usdt-radar/-okx-usdt-radar/tests/test_entry_position_policy.py:67
+    def test_public_projection_preserves_safe_position_no_raw_history(self):
+        item=self.case();item['entry_eligibility'].update(status='WAIT_RETEST')
+        item['decision_context']=build_decision_context(item)
+        item['decision_context']['final']['entry_position']['raw_points']=['private']
+        out=public_candidate_payload(item)
+        position=out['decision_context']['final']['entry_position']
+        self.assertEqual(position['policy_version'],POLICY_VERSION)
+        self.assertNotIn('raw_points',position)
