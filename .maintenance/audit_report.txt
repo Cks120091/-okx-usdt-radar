@@ -1,4 +1,4 @@
-SHA 7199937447ab12231e4e169161eefdd346b649f9
+SHA 135f447eef2d884ced5630f5883fd50cfbcac5b5
 TESTS_RUN 717 FAILURES 25 ERRORS 1 SKIPPED 0
 
 test_final_publication_enrolls_once_preview_and_blocked_do_not (test_card_statistics.PublishedScannerStatisticsTests.test_final_publication_enrolls_once_preview_and_blocked_do_not)
