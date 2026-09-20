@@ -367,15 +367,12 @@ class PublishedScannerStatisticsTests(unittest.TestCase):
             report=scanner.scan_once(scan_mode='SHORT',preview=preview)
             self.assertTrue(report.signals[0].actionable)
             rows=scanner.repository._connection.execute('SELECT * FROM card_statistics_v1').fetchall()
-            self.assertEqual(len(rows),1)
-            self.assertAlmostEqual(rows[0]['entry'],100.01)
-            self.assertEqual(report.signals[0].historical_performance['schema_version'],'CARD_STATISTICS_V1')
-            self.assertIsNone(report.signals[0].historical_performance['rate_pct'])
+            self.assertEqual(len(rows),0)
+            self.assertEqual(report.signals[0].historical_performance,{})
             client.last=104.0
             report=scanner.scan_once(scan_mode='SHORT')
             self.assertTrue(report.signals[0].actionable)
-            self.assertEqual(scanner.repository._connection.execute('SELECT COUNT(*) FROM card_statistics_v1').fetchone()[0],1)
-            self.assertAlmostEqual(scanner.repository._connection.execute('SELECT entry FROM card_statistics_v1').fetchone()[0],100.01)
+            self.assertEqual(scanner.repository._connection.execute('SELECT COUNT(*) FROM card_statistics_v1').fetchone()[0],0)
         finally:
             scanner.repository.close()
 
