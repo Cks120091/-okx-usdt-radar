@@ -686,7 +686,6 @@
       <button class="filter-tab active" type="button" data-tab="anomalies" aria-controls="anomalies">OI 異動</button>
       <button class="filter-tab" type="button" data-tab="map" aria-controls="map">市場地圖</button>
       <button class="filter-tab" type="button" data-tab="history" aria-controls="history">訊號歷史</button>
-      <button class="filter-tab" type="button" data-tab="stats" aria-controls="stats">歷史績效</button>
       <a class="filter-tab" href="/history-scan">歷史K棒掃描</a>
       <button class="filter-tab" type="button" data-tab="manual" aria-controls="manual">使用手冊</button>
     </nav>
@@ -816,10 +815,6 @@
       <label class="sr-only" for="mapSearch">搜尋市場地圖幣種</label>
       <input id="mapSearch" class="search" type="search" placeholder="搜尋幣種，例如 BTC" autocomplete="off" aria-label="搜尋市場地圖幣種">
       <div id="mapBox"><div class="empty">等待最新掃描。</div></div>
-    </section>
-    <section id="stats" class="section">
-      <div class="section-title"><h2>真實歷史績效</h2><span>交易品質 ≠ 勝率</span></div>
-      <div id="statsBox"><div class="empty">尚未載入歷史樣本。</div></div>
     </section>
     <section id="history" class="section">
       <div class="section-title"><h2>訊號歷史</h2><span>短線與長線分開</span></div>
@@ -1199,7 +1194,7 @@
       if(longTransient)renderHorizonUnavailable('LONG',horizonTransientMessage(longTransient,'LONG'));else if(!longAvailable)renderHorizonUnavailable('LONG','尚未執行 4H 掃描；完成 4H 或全市場掃描後才會顯示長線資料。');else{renderSignals(allLong,'#longSignalsBox','目前沒有 4H 長線訊號已觸發。',longReadOnlyReason);renderSignals(longWaiting,'#longWaitRetestBox','目前沒有等待回踩的長線訊號。',longReadOnlyReason);renderSignals(longMissed,'#longMissedSignalsBox','目前沒有等待新訊號的長線舊進場窗口。',longReadOnlyReason);renderWatchlist(report.long_watchlist||[],'#longWatchBox',longReadOnlyReason)}
       renderSignals(allClosed,'#closedSignalsBox','目前沒有仍在保留期內的已結束交易計畫。');renderSignals(shortClosed,'#closedShortBox','目前沒有 15m 已結束交易計畫。');renderSignals(longClosed,'#closedLongBox','目前沒有 4H 已結束交易計畫。');
       if(preview){$('#scanNotice').classList.add('show');$('#scanMessage').textContent=activeScanMode==='SHORT'?'15m 初步候選已發布；原有 4H 結果保持不變，正在補齊深度與風險提醒':activeScanMode==='LONG'?'4H 初步候選已發布；原有 15m 結果保持不變，正在補齊深度與風險提醒':'15m 初步候選已發布；4H 與深度資料仍在掃描，完成後顯示正式結果'}
-      renderStats(report.historical_performance||{});state.reportRenderKey=renderKey;restoreReportUiState(savedUi);
+      state.reportRenderKey=renderKey;restoreReportUiState(savedUi);
     }
 
     function renderOverview(report){
@@ -1822,7 +1817,7 @@
     async function bootstrap(){try{if('serviceWorker' in navigator)await navigator.serviceWorker.register('/service-worker.js').catch(()=>null);await loadPushConfig();const status=await refreshStatus();if(status.has_report)await loadReport();else await loadHistory();if(status.system_status==='SCANNING')await pollUntilComplete()}catch(error){showConnectionError(error)}}
     async function refreshFreshness(){try{if(!state.polling){const status=await refreshStatus();if(status.system_status==='SCANNING'){await pollUntilComplete();return}const reportChanged=status.has_report&&(!state.report||status.latest_generated_at!==state.report.generated_at),observerChanged=status.has_report&&String(status.observer_updated_at||'')!==String(state.report?.observer_updated_at||''),reportBecameStale=status.system_status==='STALE'&&state.report?.runtime_status!=='STALE',horizonFreshnessChanged=['SHORT','LONG'].some(horizon=>{const current=state.report?.horizon_freshness?.[horizon]||{},latest=status.horizon_freshness?.[horizon]||{};return Boolean(current.available)!==Boolean(latest.available)||Boolean(current.expired)!==Boolean(latest.expired)||String(current.completed_at||'')!==String(latest.completed_at||'')}),terminalExpired=['closed_signals','long_closed_signals'].some(key=>(state.report?.[key]||[]).some(item=>isTerminalSignal(item)&&!terminalRetentionActive(item)));if(reportChanged||observerChanged||reportBecameStale||horizonFreshnessChanged)await loadReport({history:reportChanged||reportBecameStale||horizonFreshnessChanged});else if(terminalExpired){state.reportRenderKey=null;renderReport(state.report)}}}catch(error){showConnectionError(error)}finally{setTimeout(refreshFreshness,15000)}}
 
-    const tabGroups={overview:'home',fifteenAll:'fifteen',waitRetest:'fifteen',missedSignals:'fifteen',continuationReady:'fifteen',watchlist:'fifteen',longSignals:'long',longWaitRetest:'long',longMissedSignals:'long',longWatchlist:'long',closedSignals:'closed',closedShortSignals:'closed',closedLongSignals:'closed',anomalies:'more',map:'more',history:'more',stats:'more',manual:'more'};
+    const tabGroups={overview:'home',fifteenAll:'fifteen',waitRetest:'fifteen',missedSignals:'fifteen',continuationReady:'fifteen',watchlist:'fifteen',longSignals:'long',longWaitRetest:'long',longMissedSignals:'long',longWatchlist:'long',closedSignals:'closed',closedShortSignals:'closed',closedLongSignals:'closed',anomalies:'more',map:'more',history:'more',manual:'more'};
     function activateTab(id,scroll=true){const group=tabGroups[id]||'home';state.activeGroup=group;state.groupTabs[group]=id;document.body.dataset.activeGroup=group;document.body.dataset.activeTab=id;$('#filterShell').hidden=group==='home';$$('.primary-tab').forEach(x=>{const active=x.dataset.group===group;x.classList.toggle('active',active);if(active){x.setAttribute('aria-current','page');x.setAttribute('aria-controls',id)}else x.removeAttribute('aria-current')});$$('[data-group-filters]').forEach(x=>{x.hidden=x.dataset.groupFilters!==group});$$('.filter-tab').forEach(x=>{const active=x.dataset.tab===id;x.classList.toggle('active',active);if(active)x.setAttribute('aria-current','page');else x.removeAttribute('aria-current')});$$('.section').forEach(x=>x.classList.toggle('active',x.id===id));const activeFilter=$(`.filter-tab[data-tab="${id}"]`);if(activeFilter)requestAnimationFrame(()=>activeFilter.scrollIntoView({behavior:scroll?'smooth':'auto',block:'nearest',inline:'center'}));if(scroll)$('.shell').scrollTo({top:0,behavior:'smooth'})}
     $$('.primary-tab').forEach(button=>button.addEventListener('click',()=>activateTab(state.groupTabs[button.dataset.group]||button.dataset.defaultTab)));
     $$('.filter-tab[data-tab]').forEach(button=>button.addEventListener('click',()=>activateTab(button.dataset.tab)));
