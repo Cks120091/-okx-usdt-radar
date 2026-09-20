@@ -53,7 +53,7 @@ jobs:
           PY
       - name: Frontend behavioral tests
         run: |
-          if [ -f scripts/check_entry_position_ui.js ]; then node scripts/check_entry_position_ui.js; fi
+          python -m unittest tests.test_entry_position_policy.EntryPositionPolicyTests.test_real_js_renderers_for_active_wait_terminal_and_missing_data -v
           git diff --check
       - name: Publish tested changes to repair branch only
         run: |
