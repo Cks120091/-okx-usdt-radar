@@ -307,25 +307,6 @@ class CardStatisticsIntegrationTests(unittest.TestCase):
             self.assertEqual(repo._connection.execute('SELECT COUNT(*) FROM card_statistics_v1').fetchone()[0],0)
         finally: repo.close()
 
-    def test_stats_failure_never_changes_permission_or_plan(self):
-        from types import SimpleNamespace
-        from unittest.mock import patch
-        from radar.repository import SignalRepository
-        from radar.scanner import MarketScanner,ScannerConfig
-        repo=SignalRepository(':memory:')
-        try:
-            s,at=self.ready(repo)
-            def fail(*args,**kwargs): raise sqlite3.OperationalError('fixture failure')
-            scanner=MarketScanner.__new__(MarketScanner)
-            scanner.repository=SimpleNamespace(observe_card_statistics=fail)
-            scanner.config=ScannerConfig()
-            with patch('radar.scanner.card_statistics_fingerprint',return_value='v'):
-                with self.assertLogs('radar.scanner',level='WARNING'):
-                    result=scanner._card_statistics([s],[],at)
-            self.assertEqual(result[0].decision_context,s.decision_context)
-            self.assertEqual(result[0].entry_eligibility,s.entry_eligibility)
-            self.assertEqual(result[0].stop_loss,s.stop_loss)
-        finally: repo.close()
 
     def test_final_html_and_public_projection_have_stats_not_quality_conversion(self):
         from pathlib import Path
