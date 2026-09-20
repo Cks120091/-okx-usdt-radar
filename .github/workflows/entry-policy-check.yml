@@ -3,17 +3,81 @@ on:
   push:
     branches: [fix/signal-position-separation-20260920]
 permissions:
-  contents: read
+  contents: write
+concurrency:
+  group: isolated-entry-policy-verification
+  cancel-in-progress: true
 jobs:
   inspect:
+    if: github.ref == 'refs/heads/fix/signal-position-separation-20260920'
     runs-on: ubuntu-latest
-    timeout-minutes: 10
+    timeout-minutes: 15
     steps:
       - uses: actions/checkout@v6
-      - name: Export source for isolated verification
-        run: git archive HEAD -o source.zip
-      - uses: actions/upload-artifact@v4
         with:
-          name: entry-policy-source
-          path: source.zip
-          retention-days: 1
+          ref: fix/signal-position-separation-20260920
+      - uses: actions/setup-python@v6
+        with:
+          python-version: '3.12'
+      - name: Apply hash-verified source changes
+        run: |
+          python - <<'PY'
+          import base64,gzip,hashlib,json
+          from pathlib import Path
+          encoded=''.join(Path(f'.entry-repair/edits-{n}.b64').read_text().strip() for n in (1,2,3))
+          raw=gzip.decompress(base64.b64decode(encoded,validate=True))
+          assert hashlib.sha256(raw).hexdigest()=='3602253c554367bbe0bfebf2c5cac5320137066f995f33cfa7fdeeacd9f15e72'
+          edits=json.loads(raw)
+          for item in edits:
+              path=Path(item['path'])
+              assert not path.is_absolute() and '..' not in path.parts and path.parts[0] in {'radar','tests','scripts','docs'}
+              text=path.read_text() if path.exists() else ''
+              if hashlib.sha256(text.encode()).hexdigest()==item['after']:
+                  continue
+              assert hashlib.sha256(text.encode()).hexdigest()==item['before'],str(path)
+              for start,end,replacement in reversed(item['edits']):
+                  text=text[:start]+replacement+text[end:]
+              assert hashlib.sha256(text.encode()).hexdigest()==item['after'],str(path)
+              path.parent.mkdir(parents=True,exist_ok=True)
+              path.write_text(text)
+          print('Verified and applied',len(edits),'files')
+          PY
+      - name: Install runtime and browser-test dependencies
+        run: |
+          python -m pip install -r requirements.txt
+          python -m pip install playwright==1.55.0
+          python -m playwright install --with-deps chromium
+      - name: Compile source
+        run: python -m compileall -q radar run.py scripts tests
+      - name: Full offline regression suite
+        run: |
+          set -o pipefail
+          python -m unittest discover -s tests -v 2>&1 | tee /tmp/entry-policy-unittest.log
+      - name: Actual mobile-card browser regression
+        env:
+          RADAR_UI_CHECK_OUTPUT: /tmp/entry-policy-ui
+        run: |
+          set -o pipefail
+          python scripts/check_signal_position_browser.py 2>&1 | tee /tmp/entry-policy-browser.log
+      - name: Verify clean patch formatting
+        run: git diff --check
+      - name: Commit only verified application and tests to isolated branch
+        run: |
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git add radar tests scripts docs
+          if ! git diff --cached --quiet; then
+            git commit -m 'fix: separate signal validity from entry location across scan and preflight'
+            git push origin HEAD:refs/heads/fix/signal-position-separation-20260920
+          fi
+          git rev-parse HEAD | tee /tmp/entry-policy-tested-commit.txt
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: entry-policy-verification-results
+          path: |
+            /tmp/entry-policy-unittest.log
+            /tmp/entry-policy-browser.log
+            /tmp/entry-policy-tested-commit.txt
+            /tmp/entry-policy-ui
+          retention-days: 3
