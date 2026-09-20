@@ -3466,7 +3466,13 @@ class MarketScanner:
                 signal.entry_eligibility.get("status"),
                 0,
             )
+        continuation_priority = int(
+            str(signal.trigger_type or "").upper() == "CONTINUATION"
+            and final_status == "ENTER"
+            and str(signal.direction or "").upper() in {"LONG", "SHORT"}
+        )
         return (
+            continuation_priority,
             permission_priority,
             status_priority,
             execution_score,
