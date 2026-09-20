@@ -1353,16 +1353,14 @@ def _trigger_candidate(
         or pullback.get("active")
         or pullback.get("reference_price") is not None
     )
+    # Surface continuation preparation while the pullback is still forming.
+    # Re-acceleration evidence belongs to the later formal confirmation and
+    # must not be required just to show the setup to the user.
     continuation_ready = bool(
         bias_aligned
         and pullback_preparing
         and not compression_block
         and not continuation
-        and (
-            opponent_declining
-            or bool(momentum["partial"])
-            or bool(control["push_away"])
-        )
     )
     triggered = bool(reversal or breakout or continuation)
     trigger_type = "REVERSAL" if reversal else "BREAKOUT" if breakout else "CONTINUATION" if continuation else "NONE"
