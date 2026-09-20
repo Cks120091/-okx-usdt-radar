@@ -106,3 +106,12 @@ def test_continuation_priority_is_visible_and_ranked_first():
     assert "🔥 趨勢延續優先" in page
     assert "CONTINUATION" in page
     assert "continuationDiff" in page
+
+
+def test_pre_continuation_has_dedicated_interface_and_preflight():
+    page = _page_source()
+    assert 'id="continuationReady"' in page
+    assert 'id="continuationReadyBox"' in page
+    assert '👀 趨勢延續預備' in page
+    assert 'function renderContinuationReady' in page
+    assert 'preflightButton(item.inst_id' in page
