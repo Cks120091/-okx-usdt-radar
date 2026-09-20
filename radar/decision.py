@@ -381,6 +381,33 @@ def build_decision_context(*args, **kwargs):
             ])[:3],
         })
 
+    # Presentation policy: an active formal Trigger remains a signal even when
+    # immutable Entry-zone/chase geometry says the current quote is not ideal.
+    # Preserve the canonical safety result in position_advisory, but do not let
+    # position alone erase the Trigger in the public decision projection.
+    position_codes = {"PRICE_TOO_FAR", "ENTRY_RETEST", "ENTRY_WINDOW_CLOSED"}
+    wait = dict(final.get("wait_reason", {}) or {})
+    position_only = str(wait.get("code") or "").upper() in position_codes or str(final.get("status") or "").upper() == "NO_CHASE"
+    story = _core._mapping(_core._read(item, "market_story", {})) if item is not None else {}
+    trigger = _core._mapping(story.get("trigger", {}))
+    stage = str(_core._read(item, "signal_stage", "") if item is not None else "").upper()
+    formal_trigger = bool(trigger.get("triggered")) and stage in {"EARLY", "EARLY_SIGNAL", "CONFIRMED", "REENTRY", "TRENDING", "EXTENDED"}
+    if position_only and formal_trigger and alignment.get("passed") is not False:
+        canonical = {
+            "status": final.get("status"),
+            "label": final.get("label"),
+            "new_entry_allowed": final.get("new_entry_allowed"),
+            "wait_reason": final.get("wait_reason"),
+        }
+        final["position_advisory"] = canonical
+        final["status"] = "ENTER"
+        final["label"] = "訊號已觸發｜可進位置請參考"
+        final["new_entry_allowed"] = True
+        final["wait_reason"] = None
+        warnings = list(final.get("risk_warnings", []) or [])
+        warnings.append(str(canonical.get("label") or "目前價格已離原可進位置；位置只作建議。"))
+        final["risk_warnings"] = _core._unique(warnings)[:3]
+
     final["timeframe_alignment"] = alignment
     # Keep OI observer outside the canonical final decision object so enriching
     # advisory OI data cannot mutate the decision contract.  UI/API consumers
