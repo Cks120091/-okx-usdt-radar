@@ -1,0 +1,19 @@
+name: Entry policy verification
+on:
+  push:
+    branches: [fix/signal-position-separation-20260920]
+permissions:
+  contents: read
+jobs:
+  inspect:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v6
+      - name: Export source for isolated verification
+        run: git archive HEAD -o source.zip
+      - uses: actions/upload-artifact@v4
+        with:
+          name: entry-policy-source
+          path: source.zip
+          retention-days: 1
