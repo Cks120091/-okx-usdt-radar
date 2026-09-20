@@ -151,7 +151,7 @@ class V33ContractTests(unittest.TestCase):
         self.assertIn('<body data-active-group="home">', html)
         self.assertIn('body:not([data-active-group="home"]) .command-deck', html)
         self.assertIn("document.body.dataset.activeGroup=group", html)
-        self.assertIn("okx-radar-shell-v4.16-compact-legacy-funds", service_worker)
+        self.assertIn("okx-radar-shell-v4.17-signal-position-separated", service_worker)
         self.assertIn("市場方向 · 24H 全市場平均 RSI", html)
         self.assertIn("bias.market_average_rsi", html)
         self.assertIn("rsi24.market_rsi_24h_label", html)
@@ -279,7 +279,7 @@ class V33ContractTests(unittest.TestCase):
         self.assertIn("function signalTriggerTime(item)", html)
         self.assertIn("訊號觸發時間（台灣 UTC+8）", html)
         self.assertNotIn("status!=='ENTRY_READY'&&status!=='MISSED_ENTRY'", html)
-        self.assertIn("okx-radar-shell-v4.16-compact-legacy-funds", service_worker)
+        self.assertIn("okx-radar-shell-v4.17-signal-position-separated", service_worker)
         self.assertIn("$('#preflightRefresh').addEventListener('click',()=>loadPreflight(true))", html)
         self.assertIn("${decisionPanel(item)}", html)
         self.assertNotIn("showPreflight", html)
@@ -349,7 +349,7 @@ class V33ContractTests(unittest.TestCase):
         self.assertNotIn("<canvas", html)
         self.assertIn("可進參考區間", html)
         self.assertIn("⚡ 訊號已觸發｜有效中", html)
-        self.assertIn("進場快照｜不是即時報價", html)
+        self.assertIn("快照不是持續即時報價", html)
         self.assertIn("尚未進場", html)
         self.assertIn("已經進場", html)
         self.assertIn("等待回踩」不是出場指令", html)
@@ -480,9 +480,8 @@ class V33ContractTests(unittest.TestCase):
         decision = html.split("function decisionPanel(item)", 1)[1].split(
             "function timeframeGrid", 1
         )[0]
-        self.assertIn("isLoss?'stopped':'closed'", decision)
-        self.assertIn("交易計畫已關閉｜結果未知", decision)
-        self.assertIn("複製原始紀錄（不可沿用）", decision)
+        self.assertIn("terminal?'closed'", decision)
+        self.assertIn("計畫已關閉", decision)
 
         rankings = html.split("function renderRankings(signals,watchlist)", 1)[1].split(
             "function renderFavorites", 1
@@ -723,30 +722,22 @@ class V33ContractTests(unittest.TestCase):
         decision_panel = html.split("function decisionPanel(item", 1)[1].split(
             "function timeframeGrid", 1
         )[0]
-        self.assertIn("const entry=item.entry_eligibility||{}", decision_panel)
-        self.assertIn("decisionContext=itemDecisionContext(item)", decision_panel)
-        self.assertIn("finalDecision=isRecord(decisionContext.final)", decision_panel)
-        self.assertIn("hardGate=isRecord(decisionContext.hard_gate)", decision_panel)
-        self.assertIn("decisionAlertHtml(item,status)", decision_panel)
-        self.assertIn("decisionBlockingHtml(item)", decision_panel)
+        self.assertIn("const horizon=item.radar_horizon===", decision_panel)
+        self.assertIn("decision=itemDecisionContext(item)", decision_panel)
+        self.assertIn("final=decision.final||{}", decision_panel)
+        self.assertIn("position=final.position_advisory||{}", decision_panel)
         self.assertIn("snapshot=itemSnapshotEntryState(item)", decision_panel)
         self.assertIn("必要條件未成立｜先更新確認", html)
         self.assertIn("風險建議｜不阻止進場", html)
-        self.assertIn("preflightActions(item.inst_id,horizon,item,false)", decision_panel)
+        self.assertIn("preflightButton(item.inst_id,horizon,item,false)", decision_panel)
         self.assertIn("signalTradeGrid(item", decision_panel)
-        self.assertIn("preview:true", decision_panel)
+        self.assertIn("preview=isPreviewItem(item)", decision_panel)
         self.assertNotIn("finalDecisionPanel", decision_panel)
-        self.assertIn(
-            "copyAction=item.entry_low&&item.stop_loss&&item.take_profit_1?",
-            decision_panel,
-        )
         self.assertNotIn("instrumentButton", decision_panel)
-        self.assertIn("status==='HARD_GATE_BLOCKED'", decision_panel)
+        self.assertIn("final.status==='ENTER'&&final.new_entry_allowed===true", decision_panel)
         self.assertIn("function decisionBlockingItems(item)", html)
         self.assertIn("function decisionAlertItems(item)", html)
-        self.assertIn("decisionExecutionNoticeHtml(item)", decision_panel)
         self.assertIn("function decisionExecutionNoticeHtml(item)", html)
-        self.assertIn("decisionDirectionNoticeHtml(item)", decision_panel)
         self.assertIn("function decisionDirectionNoticeHtml(item)", html)
         self.assertIn("執行資料提醒｜不作為禁止條件", html)
         self.assertIn("滑價／成本暫時無法估算", html)
@@ -850,24 +841,22 @@ class V33ContractTests(unittest.TestCase):
         full_auxiliary = html.split("function decisionAuxiliaryFull(item)", 1)[1].split("function intradayFlowPanel", 1)[0]
         self.assertIn("${continuationStrip(item)}", full_auxiliary)
         self.assertIn("${capitalFlowStrip(item)}", full_auxiliary)
-        active_decision = decision_panel.split("const entry=item.entry_eligibility||{}", 1)[1]
-        self.assertIn("${signalTradeGrid(item)}", active_decision)
+        active_decision = decision_panel.split("const horizon=item.radar_horizon===", 1)[1]
+        self.assertIn("${signalTradeGrid(item,", active_decision)
         self.assertIn("${primaryAction}", active_decision)
-        self.assertLess(
-            active_decision.index("${decisionAlertHtml(item,status)}")
-            if "${decisionAlertHtml(item,status)}" in active_decision
-            else active_decision.index("alertHtml=decisionAlertHtml(item,status)"),
-            active_decision.index("${signalTradeGrid(item)}"),
-        )
+        self.assertLess(active_decision.index("${signalTradeGrid(item,"), active_decision.index("${primaryAction}"))
+        self.assertNotIn("<details", active_decision)
+        self.assertNotIn("planBasis(item)", active_decision)
+        self.assertIn("position.note", decision_panel)
         self.assertIn("signal-status-line", render_signals)
-        self.assertIn("進場快照｜不是即時報價", decision_panel)
+        self.assertIn("快照不是持續即時報價", decision_panel)
         self.assertIn("掃描快照 Ask（買入參考）", decision_panel)
         self.assertIn("掃描快照 Bid（賣出參考）", decision_panel)
         self.assertIn("續走力道", continuation)
         self.assertNotIn("最高等級門檻", continuation)
         self.assertNotIn("加成", continuation)
         self.assertNotIn('role="progressbar"', continuation)
-        self.assertIn("itemDataPage(item", render_signals)
+        self.assertNotIn("itemDataPage(item", render_signals)
         self.assertIn("details(item,true)", html.split("function itemDataPage(item",1)[1].split("function decisionAuxiliaryFull",1)[0])
         self.assertIn("function signalTradeGrid(item,options={})", html)
         self.assertIn("signal-plan-grid", html)
@@ -1165,14 +1154,14 @@ class V33ContractTests(unittest.TestCase):
         self.assertIn("item?.radar_horizon==='LONG'?24:5", html)
         self.assertIn("終局結果保留 5 小時", html)
         self.assertIn("終局結果保留 24 小時", html)
-        self.assertIn("已達止盈｜本次交易計畫完成", html)
-        self.assertIn("已達止損｜本次交易計畫結束", html)
+        self.assertIn("止盈已達｜計畫結束", html)
+        self.assertIn("止損已達｜訊號失效", html)
         self.assertIn('data-trigger-id="${esc(item.trigger_id||\'\')}"', html)
-        self.assertIn("等待新的 Trigger；舊 Entry／SL／TP 不會復活", html)
-        self.assertIn("舊 Entry／SL／TP 不會復活", html)
+        self.assertIn("舊計畫僅供紀錄，不可再次沿用", html)
+        self.assertIn("舊計畫僅供紀錄，不可再次沿用", html)
         self.assertIn("舊交易計畫已結束", html)
-        self.assertIn("signalTradeGrid(item,{prefix:'原始 ',original:true})", html)
-        self.assertIn("okx-radar-shell-v4.16-compact-legacy-funds", worker)
+        self.assertIn("signalTradeGrid(item,{original:Boolean(terminal),preview})", html)
+        self.assertRegex(worker, r'const SHELL_CACHE = "okx-radar-shell-v[0-9.]+-[a-z-]+";')
 
     def test_market_scan_has_no_github_schedule(self):
         root = Path(__file__).parents[1]

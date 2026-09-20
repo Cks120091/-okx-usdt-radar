@@ -92,6 +92,12 @@ def build_preflight_payload(
     # separate request and must not replace this final bid/ask pair.
     best_bid = _required_number(ticker.bid, "best_bid")
     best_ask = _required_number(ticker.ask, "best_ask")
+    if min(entry_low, entry_high, stop, target_1, target_2, market_last_price, best_bid, best_ask) <= 0 or best_ask < best_bid:
+        raise ValueError("無效的原交易計畫或最新 Bid/Ask")
+    valid_plan = (stop < entry_low <= entry_high < target_1 if signal.direction == "LONG"
+                  else target_1 < entry_low <= entry_high < stop if signal.direction == "SHORT" else False)
+    if not valid_plan:
+        raise ValueError("原交易計畫價格順序無效")
     current_price = best_ask if signal.direction == "LONG" else best_bid
     current_price_source = "BEST_ASK" if signal.direction == "LONG" else "BEST_BID"
     liquidity_policy = _preflight_liquidity_policy(signal, ticker, config)

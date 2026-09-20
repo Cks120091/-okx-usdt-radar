@@ -8,7 +8,7 @@ ROOT = Path(__file__).parents[1]
 class CompactUiTests(unittest.TestCase):
     def test_main_card_prioritizes_decision_and_removes_repeated_microcopy(self):
         text = (ROOT / "radar/static/pages.html").read_text(encoding="utf-8")
-        self.assertIn("function decisionPanel(item){return compactCoreCard(item)+decisionPanelBody(item)", text)
+        self.assertIn("function decisionPanel(item){return decisionPanelBody(item)", text)
         self.assertNotIn("摘要，不新增判定", text)
         self.assertNotIn("（僅供輔助）", text)
         self.assertIn("Compact clarity pass:", text)
@@ -49,9 +49,9 @@ class CompactUiTests(unittest.TestCase):
         self.assertNotIn("風控受阻", text)
         self.assertIn("風險建議｜不阻止進場", text)
         self.assertIn("必要條件未成立", text)
-        self.assertIn("進場快照｜不是即時報價", text)
-        self.assertIn("ENTRY｜可進參考區間", text)
-        self.assertIn("固定計畫價，不代表價格現在已到", text)
+        self.assertIn("快照不是持續即時報價", text)
+        self.assertIn("ENTRY｜可進位置（參考）", text)
+        self.assertIn("可進位置僅供參考；Entry／SL／TP 固定", text)
         self.assertIn("String(activeShort.length)", report)
         self.assertIn("String(activeLong.length)", report)
         self.assertIn("renderOverview({...report,signals:activeShort})", report)

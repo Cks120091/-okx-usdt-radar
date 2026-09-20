@@ -1133,11 +1133,11 @@ class ScannerTests(unittest.TestCase):
             "ASK",
         )
         self.assertEqual(signal.entry_eligibility["status"], "MISSED_ENTRY")
-        self.assertFalse(signal.entry_eligibility["new_entry_allowed"])
-        self.assertFalse(signal.actionable)
+        self.assertTrue(signal.entry_eligibility["new_entry_allowed"])
+        self.assertTrue(signal.actionable)
         self.assertEqual(
             signal.decision_context["final"]["status"],
-            "NO_CHASE",
+            "ENTER",
         )
         liquidity_check = next(
             item
@@ -2753,13 +2753,13 @@ class ScannerTests(unittest.TestCase):
 
         self.assertEqual(
             attached.decision_context["final"]["status"],
-            "NO_CHASE",
+            "ENTER",
         )
-        self.assertFalse(attached.actionable)
+        self.assertTrue(attached.actionable)
         self.assertEqual(attached.entry_eligibility["status"], "ENTRY_READY")
-        self.assertFalse(attached.entry_eligibility["new_entry_allowed"])
+        self.assertTrue(attached.entry_eligibility["new_entry_allowed"])
         self.assertEqual(attached.entry_eligibility["chase_atr"], 2.1)
-        self.assertIn("chase", attached.entry_eligibility["hard_blockers"])
+        self.assertNotIn("chase", attached.entry_eligibility["hard_blockers"])
         self.assertTrue(attached.entry_eligibility["risk_warnings"])
 
     def test_refresh_preserves_independent_upstream_hard_check(self):
@@ -3204,9 +3204,9 @@ class ScannerTests(unittest.TestCase):
         self.assertEqual(degraded.short_result.signal.entry_low, "99")
         self.assertEqual(degraded.short_result.signal.stop_loss, "97")
         # This is the already-published Episode from the earlier FULL scan.
-        # Missing 1H history provides no new closed retest proof, so a live
-        # quote back inside Entry must not reopen it.
-        self.assertFalse(degraded.short_result.signal.actionable)
+        # Optional OI history/retest observations cannot revoke its signal;
+        # the missing history must still remain visible in auxiliary data.
+        self.assertTrue(degraded.short_result.signal.actionable)
         self.assertEqual(
             degraded.short_result.signal.entry_eligibility["status"],
             "WAIT_RETEST",

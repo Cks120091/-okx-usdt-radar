@@ -5,6 +5,7 @@ from collections.abc import Mapping, Sequence
 from typing import Any
 
 from .continuation import LOOKBACK_ALGORITHM_VERSION
+from .position_advisory import ACTIVE_SIGNAL_STAGES, POSITION_CODES, POLICY_VERSION, position_advisory, current_quote
 
 
 DEFAULT_THRESHOLDS: dict[str, float] = {
@@ -138,7 +139,7 @@ def build_decision_context(
 
     return {
         "schema_version": "1.0",
-        "entry_policy_version": "SHORT_CONTEXT_WINDOW_V2",
+        "entry_policy_version": POLICY_VERSION,
         "hard_gate": hard_gate,
         "evidence": evidence,
         "market_context": market_context,
@@ -223,10 +224,13 @@ def _hard_gate(
     publication_unknown = bool(
         publication_status and publication_status not in _AVAILABLE
     )
+    explicit_quote = metrics.get("entry_execution_price", metrics.get("last_price", entry.get("current_price")))
+    quote_invalid = explicit_quote is not None and (current_quote(item) is None)
     data_unknown = bool(
-        core_status not in _AVAILABLE
+        quote_invalid or core_status not in _AVAILABLE
         or required_missing_sources
         or publication_unknown
+        or data_quality.get("closed_candle") is False
     )
     optional_missing_sources = [
         source
@@ -306,7 +310,8 @@ def _hard_gate(
             f"上游風險提醒：{blocker}",
             "BLOCKED",
             False,
-            f"上游已標記新進場阻擋條件：{blocker}。",
+            f"上游已標記條件：{blocker}。",
+            hard=blocker not in POSITION_CODES,
         )
 
     explicit_entry_permission = (
@@ -318,15 +323,11 @@ def _hard_gate(
         _add_check(
             checks,
             "entry_permission",
-            "上游目前位置允許新進場",
+            "目前價格位置（不影響訊號）",
             "BLOCKED",
             False,
             str(entry.get("reason") or "上游目前位置判定為不可進；原 Trigger 保留，但禁止建立新倉。"),
-            hard=not (
-                str(entry.get("status") or "").upper() == "WAIT_RETEST"
-                and entry.get("reentry_confirmation_required") is True
-                and entry.get("closed_retest_confirmed") is not True
-            ),
+            hard=False,  # Positional permission is a display-only observation.
         )
 
     quote_volume = _number(_read(item, "quote_volume_24h", None))
@@ -561,10 +562,11 @@ def _hard_gate(
     _add_check(
         checks,
         "chase",
-        "價格未構成嚴重追價",
+        "追價距離（僅供參考）",
         chase_status,
         chase_value,
         chase_reason,
+        hard=False,
     )
 
     blocked = [
@@ -1699,22 +1701,13 @@ def _final_layer(
     entry_status = str(entry.get("status") or "UNKNOWN").upper()
     entry_label = str(entry.get("label") or "")
     entry_reason = str(entry.get("reason") or "")
-    entry_chase_atr = _number(entry.get("chase_atr"))
-    missed_chase_limit = _number(entry.get("missed_chase_atr"))
-    explicit_no_chase = any(
-        token in f"{entry_label} {entry_reason}"
-        for token in ("追價", "離開最佳")
-    )
-    beyond_missed_limit = bool(
-        entry_chase_atr is not None
-        and missed_chase_limit is not None
-        and entry_chase_atr > missed_chase_limit
-    )
-    missed_entry_no_chase = entry_status == "MISSED_ENTRY" and (
-        explicit_no_chase or beyond_missed_limit
-    )
     stage = episode["source_stage"]
-    active_trigger = plan_present and stage in _FORMAL_STAGES and not target_completed
+    trigger = _mapping(_read(item, "trigger", None) or _mapping(_read(item, "market_story", {})).get("trigger", {}))
+    # Legacy records may omit the flag, but an explicit False is never a Trigger.
+    active_trigger = (plan_present and stage in ACTIVE_SIGNAL_STAGES
+                      and (trigger.get("triggered") is not False or trigger.get("active_episode_preserved") is True)
+                      and not target_completed)
+    position = position_advisory(item)
     has_risk_warnings = bool(
         hard_gate.get("warnings")
         or anomaly_warnings
@@ -1727,16 +1720,7 @@ def _final_layer(
     elif target_completed:
         status, label = "NO_EDGE", "本次目標已達｜不可重新追入"
         wait_code, wait_label = "NEW_TRIGGER_REQUIRED", "等待新的 Trigger／REENTRY"
-    elif missed_entry_no_chase:
-        status, label = "NO_CHASE", "已離開合理進場區｜禁止追價"
-        wait_code, wait_label = "PRICE_TOO_FAR", "等待新的進場機會"
-    elif entry_status == "MISSED_ENTRY":
-        status, label = "WAIT", "進場窗口已關閉｜禁止新進場"
-        wait_code, wait_label = (
-            "ENTRY_WINDOW_CLOSED",
-            "等待新的 Trigger／REENTRY",
-        )
-    elif not plan_present or direction == "NEUTRAL":
+    elif (not plan_present or direction == "NEUTRAL") and stage not in ACTIVE_SIGNAL_STAGES:
         if stage == "NEAR_TRIGGER":
             status, label = "WAIT", "訊號形成中｜等待正式 Trigger"
             wait_code, wait_label = "SIGNAL_FORMING", "等待價格觸發與收盤確認"
@@ -1747,13 +1731,6 @@ def _final_layer(
         if "anomaly" in blockers:
             status, label = "ANOMALY", "異常行情｜禁止新進場"
             wait_code, wait_label = "MARKET_ANOMALY", "等待市場恢復穩定"
-        elif "chase" in blockers:
-            status, label = "NO_CHASE", "已離開合理進場區｜禁止追價"
-            wait_code, wait_label = "PRICE_TOO_FAR", "等待新的進場機會"
-        elif blockers == {"entry_permission"} and entry_status == "WAIT_RETEST":
-            status, label = "WAIT", str(entry.get("label") or "等待回踩／重新確認")
-            wait_code = "ENTRY_RETEST"
-            wait_label = str(entry.get("reason") or "等待新的已收盤回踩確認")
         elif blockers == {"risk_reward"}:
             status, label = "NO_EDGE", "風險報酬不足｜禁止新進場"
             wait_code, wait_label = "RISK_REWARD", "等待風險報酬改善"
@@ -1764,21 +1741,16 @@ def _final_layer(
         status, label = "DATA_UNAVAILABLE", "資料不足｜禁止新進場"
         wait_code, wait_label = "DATA_MISSING", "等待最新完整資料"
     elif (
-        entry_status == "ENTRY_READY"
-        and active_trigger
-        and conflict["blocks_entry"]
+        active_trigger and conflict["blocks_entry"]
     ):
         status, label = "WAIT", "方向證據高度衝突｜暫不進場"
         wait_code, wait_label = "EVIDENCE_CONFLICT", "等待方向衝突降級"
-    elif entry_status == "ENTRY_READY" and active_trigger:
+    elif active_trigger:
         status, label = (
             "ENTER",
-            "目前可進｜附風險提醒" if has_risk_warnings else "目前可進",
+            "訊號已觸發｜附風險提醒" if has_risk_warnings else "訊號已觸發",
         )
         wait_code, wait_label = "NONE", ""
-    elif entry_status == "WAIT_RETEST":
-        status, label = "WAIT", str(entry.get("label") or "等待回踩／重新確認")
-        wait_code, wait_label = "ENTRY_RETEST", str(entry.get("reason") or "等待重新站回合理進場區")
     elif stage in {"NEAR_TRIGGER", "WATCH", "NONE", ""}:
         status, label = "WAIT", "訊號形成中｜等待正式 Trigger"
         wait_code, wait_label = "SIGNAL_FORMING", "等待價格觸發與收盤確認"
@@ -1791,7 +1763,7 @@ def _final_layer(
         reasons.extend(
             [
                 f"主方向：{_direction_label(direction)}",
-                entry_label or "價格仍在合理進場區",
+                position["note"],
             ]
         )
         reasons.append(f"方向品質：{quality['direction']['label']}")
@@ -1867,6 +1839,8 @@ def _final_layer(
         "direction": direction,
         "direction_label": _direction_label(direction),
         "new_entry_allowed": status == "ENTER" and hard_gate["passed"],
+        "signal_status": "TRIGGERED" if status == "ENTER" else status,
+        "position_advisory": position,
         "trigger_preserved": not terminal_invalidation,
         "reasons": reasons[:3],
         "wait_reason": (
@@ -2126,15 +2100,16 @@ def _stop_pct(item: Any, metrics: dict[str, Any]) -> float | None:
 
 
 def _plan_present(item: Any, trigger: dict[str, Any]) -> bool:
-    values = (
-        _read(item, "entry_low", None),
-        _read(item, "entry_high", None),
-        _read(item, "stop_loss", None),
-        _read(item, "take_profit_1", None),
-    )
-    if all(_number(value) is not None for value in values):
-        return True
-    return bool(trigger.get("triggered")) and _stage(item) in _FORMAL_STAGES
+    values = [_number(_read(item, key, None)) for key in
+              ("entry_low", "entry_high", "stop_loss", "take_profit_1")]
+    if any(value is None or value <= 0 for value in values):
+        return False
+    lo, hi, stop, target = values
+    if lo > hi:
+        return False
+    direction = _direction(item)
+    return (stop < lo <= hi < target if direction == "LONG"
+            else target < lo <= hi < stop if direction == "SHORT" else False)
 
 
 def _terminal_invalidation(
@@ -2160,6 +2135,13 @@ def _terminal_invalidation(
         "SL_HIT",
         "PREFLIGHT_STOP_CROSSED",
     }
+    price = current_quote(item)
+    stop = _number(_read(item, "stop_loss", None))
+    direction = _direction(item)
+    if price is not None and stop is not None and (
+        (direction == "LONG" and price <= stop) or (direction == "SHORT" and price >= stop)
+    ):
+        return True
     if values & invalid_tokens:
         return True
     target_tokens = {"TARGET_REACHED", "TP1_FIRST", "COMPLETED"}
@@ -2181,7 +2163,14 @@ def _target_completed(
         str(lifecycle.get("outcome", "")).upper(),
         str(entry.get("situation", "")).upper(),
     }
-    return bool(values & {"TARGET_REACHED", "TP1_FIRST", "COMPLETED"})
+    price = current_quote(item)
+    target = _number(_read(item, "take_profit_1", None))
+    direction = _direction(item)
+    return bool(values & {"TARGET_REACHED", "TP1_FIRST", "COMPLETED"}) or bool(
+        price is not None and target is not None and (
+            (direction == "LONG" and price >= target) or (direction == "SHORT" and price <= target)
+        )
+    )
 
 
 def _anomalies(

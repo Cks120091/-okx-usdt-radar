@@ -40,8 +40,8 @@ class DecisionContextTests(_legacy.DecisionContextTests):
         item = _legacy.complete_signal()
         item["entry_eligibility"].update({"chase_atr": 1.8001})
         result = build_decision_context(item)
-        self.assertIn("chase", result["hard_gate"]["blockers"])
-        self.assertFalse(result["final"]["new_entry_allowed"])
+        self.assertNotIn("chase", result["hard_gate"]["blockers"])
+        self.assertTrue(result["final"]["new_entry_allowed"])
 
     def test_execution_cost_uses_warning_band_before_hard_limit(self):
         item = _legacy.complete_signal()
@@ -192,11 +192,12 @@ class DecisionContextTests(_legacy.DecisionContextTests):
         })
         item["spread_pct"] = 0.2
         result = build_decision_context(item)
-        self.assertIn("entry_permission", result["hard_gate"]["blockers"])
+        self.assertNotIn("entry_permission", result["hard_gate"]["blockers"])
         self.assertNotIn("spread", result["hard_gate"]["blockers"])
         self.assertTrue(any("Spread" in warning for warning in result["hard_gate"]["warnings"]))
-        self.assertEqual(result["final"]["status"], "NO_CHASE")
-        self.assertFalse(result["final"]["new_entry_allowed"])
+        self.assertEqual(result["final"]["status"], "ENTER")
+        self.assertTrue(result["final"]["new_entry_allowed"])
+        self.assertFalse(result["final"]["position_advisory"]["affects_signal"])
 
     def test_blocking_anomaly_vetoes_an_otherwise_valid_signal(self):
         item = _legacy.complete_signal()

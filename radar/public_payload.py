@@ -621,6 +621,17 @@ def _public_decision_context(decision: Any) -> dict[str, Any]:
         _read(decision, "final", {}),
         ("status", "label", "direction", "direction_label", "new_entry_allowed", "trigger_preserved", "reasons", "wait_reason", "weakening_conditions", "invalidation_condition", "confidence", "warnings"),
     )
+    final = _read(decision, "final", {})
+    for name, fields in {
+        "position_advisory": ("policy", "role", "affects_signal", "state", "label", "note", "entry_low", "entry_high", "current_price", "gap_pct", "price_source", "legacy_position_status", "chase_atr", "adverse_atr"),
+        "timeframe_alignment": ("required", "passed", "state", "timeframe", "trigger_timeframe", "timeframe_direction", "trigger_direction", "long_score", "reason"),
+        "swing_maturity": ("required", "passed", "state", "extension_atr", "limit_atr", "anchor_price", "fresh_retest", "reason"),
+    }.items():
+        value = _read(final, name, None)
+        if isinstance(value, Mapping):
+            payload["final"][name] = _select(value, fields)
+    if _read(final, "signal_status", None) is not None:
+        payload["final"]["signal_status"] = _read(final, "signal_status")
     return payload
 
 
