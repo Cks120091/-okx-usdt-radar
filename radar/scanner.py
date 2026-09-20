@@ -2960,6 +2960,7 @@ class MarketScanner:
         stage_priority = {
             "EARLY_SIGNAL": 8,
             "REENTRY": 7,
+            "PRE_CONTINUATION": 7,
             "NEAR_TRIGGER": 6,
             "CONFIRMED": 5,
             "TRENDING": 4,
@@ -4086,13 +4087,14 @@ class MarketScanner:
         selected = [
             item
             for item in states
-            if item.status in ("NEAR_TRIGGER", "WATCH", "NO_FOLLOW_THROUGH")
+            if item.status in ("PRE_CONTINUATION", "NEAR_TRIGGER", "WATCH", "NO_FOLLOW_THROUGH")
             and item.direction in ("LONG", "SHORT")
             and item.status != "FILTERED"
             and self._passes_output_liquidity(item, False)
         ]
         selected.sort(
             key=lambda item: (
+                item.status == "PRE_CONTINUATION",
                 item.status == "NEAR_TRIGGER",
                 item.freshness == "NEW",
                 item.readiness_score,
