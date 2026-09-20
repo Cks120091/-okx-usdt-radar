@@ -1340,9 +1340,22 @@ def _trigger_candidate(
     )
     # PRE_CONTINUATION is watch-only: the trend and pullback setup exist, but
     # the formal continuation trigger still lacks its final re-acceleration.
+    # PRE_CONTINUATION must lead the formal continuation trigger.  Requiring
+    # pullback.reactivated here made the watch state arrive too late (or never
+    # appear), because reactivation is already one of the formal continuation
+    # requirements.  A preparation candidate therefore needs the higher-level
+    # bias, a real pullback/setup location, and at least one early re-acceleration
+    # clue; the final reactivation/push/defence-break remains reserved for the
+    # formal CONTINUATION trigger.
+    pullback_preparing = bool(
+        pullback.get("reactivated")
+        or pullback.get("touched")
+        or pullback.get("active")
+        or pullback.get("reference_price") is not None
+    )
     continuation_ready = bool(
         bias_aligned
-        and pullback["reactivated"]
+        and pullback_preparing
         and not compression_block
         and not continuation
         and (
