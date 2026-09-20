@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from . import _preflight_core as _core
 
-CORE_SOURCE_SHA = "d31cc6d6a43c78ed6689c59f53edc4884270f9d4"
+CORE_SOURCE_SHA = "28236646fca9144da99a31c474889ce93631034d"
 
 for _name in dir(_core):
     if not _name.startswith("__"):
@@ -187,4 +187,96 @@ def build_preflight_payload(*args, **kwargs):
     payload["plan_state"] = plan_state
     payload["live"] = live
     payload["entry_policy_version"] = "ADVISORY_RISK_V1"
-    return payload
+    return _separate_signal_and_position(payload, signal)
+
+
+def _separate_signal_and_position(payload, signal):
+    """One final preflight policy: live location describes cost, not validity.
+
+    This runs after quote/SL/TP and execution checks. It only removes named
+    location rules. True lifecycle, opposite, core-data and direction failures
+    retain priority at every price, including far outside the Entry zone.
+    """
+    from .position_advisory import (ACTIVE_SIGNAL_STAGES, POLICY_VERSION, POSITION_CODES,
+                                    mapping, number, position_advisory)
+    from .decision import _timeframe_direction_alignment
+    from . import _decision_core as decision_core
+
+    result = dict(payload)
+    verdict = dict(result.get("verdict", {}))
+    plan = dict(result.get("plan_state", {}))
+    lifecycle = dict(result.get("signal_lifecycle", {}))
+    live = dict(result.get("live", {}))
+    position = position_advisory(signal, price=live.get("price"), source=live.get("price_source"))
+    position["legacy_position_status"] = verdict.get("status")
+    position["legacy_situation"] = verdict.get("situation")
+    position["chase_atr"], position["adverse_atr"] = number(live.get("chase_atr")), number(live.get("adverse_atr"))
+    result["position_advisory"] = position
+    result["entry_policy_version"] = POLICY_VERSION
+    verdict["position_affects_signal"] = False
+
+    stored_life = mapping(getattr(signal, "lifecycle", {}))
+    stored_entry = mapping(getattr(signal, "entry_eligibility", {}))
+    stored_terminal = decision_core._terminal_invalidation(signal, stored_life, stored_entry)
+    stored_target = decision_core._target_completed(signal, stored_life, stored_entry)
+    if lifecycle.get("terminal") is True or stored_terminal or stored_target:
+        if stored_terminal and lifecycle.get("terminal") is not True:
+            lifecycle.update(status="INVALIDATED", active=False, terminal=True)
+            verdict.update(status="PLAN_INVALIDATED", label="訊號已失效", situation="INVALIDATED")
+        elif stored_target and lifecycle.get("terminal") is not True:
+            lifecycle.update(status="TARGET_REACHED", active=False, terminal=True)
+            verdict.update(status="MISSED_ENTRY", label="目標已達｜計畫已結束", situation="TARGET_REACHED")
+        verdict.update(actionable=False, new_entry_allowed=False, signal_status=lifecycle.get("status"))
+        plan.update(new_entry_allowed=False, old_plan_reusable_for_new_entry=False, new_trigger_required=True)
+        result.update(verdict=verdict, signal_lifecycle=lifecycle, plan_state=plan)
+        return result
+
+    blockers = [str(k).upper() for k in verdict.get("hard_blockers", []) if str(k).upper() not in POSITION_CODES]
+    story = mapping(getattr(signal, "market_story", {}))
+    trigger = mapping(story.get("trigger"))
+    if signal.signal_stage not in ACTIVE_SIGNAL_STAGES or (trigger.get("triggered") is False and trigger.get("active_episode_preserved") is not True):
+        blockers.append("NO_FORMAL_TRIGGER")
+    direction = str(signal.direction).upper()
+    if direction not in {"LONG", "SHORT"}:
+        blockers.append("DIRECTION_UNAVAILABLE")
+    alignment = _timeframe_direction_alignment(signal, direction)
+    if alignment.get("passed") is False:
+        blockers.append("TIMEFRAME_DIRECTION_ALIGNMENT")
+    if trigger.get("new_entry_suspended") or trigger.get("opposite_warning_only"):
+        blockers.append("OPPOSITE_SIGNAL")
+    final = mapping(mapping(getattr(signal, "decision_context", {})).get("final"))
+    wait_code = str(mapping(final.get("wait_reason")).get("code") or "").upper()
+    if wait_code in {"EVIDENCE_CONFLICT", "TIMEFRAME_DIRECTION_ALIGNMENT"}:
+        blockers.append(wait_code)
+    dq = mapping(getattr(signal, "data_quality", {}))
+    core_state = str(dq.get("core") or dq.get("core_status") or "").upper()
+    if core_state and core_state not in {"AVAILABLE", "COMPLETE", "COMPLETED", "FRESH", "OK"}:
+        blockers.append("CORE_DATA_UNAVAILABLE")
+    if dq.get("closed_candle") is False:
+        blockers.append("CORE_CANDLE_UNCONFIRMED")
+    # Missing optional execution/flow inputs are still only advisory.
+    if any(str(k).lower() not in _ADVISORY_DATA_SOURCES | {"publication_ticker"}
+           for k in dq.get("required_missing_sources", [])):
+        blockers.append("CORE_DATA_UNAVAILABLE")
+    blockers = list(dict.fromkeys(blockers))
+    permitted = not blockers
+    if permitted:
+        verdict.update(status="ENTRY_READY", label="訊號已觸發", reason=position["note"],
+                       signal_status="TRIGGERED", actionable=True, new_entry_allowed=True)
+        plan.update(status="ACTIVE", old_plan_reusable=True, old_plan_reusable_for_new_entry=True,
+                    new_entry_status="READY", new_entry_allowed=True, new_trigger_required=False,
+                    direction_still_valid=True, note="訊號與原計畫仍有效；可進位置只供參考，不是放行條件。")
+        lifecycle["note"] = "訊號已觸發；目前價格位置只作提示，不取消訊號。"
+    else:
+        unavailable = any("DATA" in k or "UNAVAILABLE" in k or "UNCONFIRMED" in k for k in blockers)
+        verdict.update(status="DATA_UNAVAILABLE" if unavailable else "HARD_GATE_BLOCKED",
+                       label="核心資料待更新" if unavailable else "核心訊號條件未成立",
+                       reason=alignment.get("reason") if "TIMEFRAME_DIRECTION_ALIGNMENT" in blockers else "已出現正式反向訊號，原方向暫停新進場。" if "OPPOSITE_SIGNAL" in blockers else "核心條件：" + "、".join(blockers),
+                       signal_status="UNCONFIRMED", actionable=False, new_entry_allowed=False)
+        plan.update(status="ACTIVE_ENTRY_BLOCKED", new_entry_status="WAIT", new_entry_allowed=False,
+                    old_plan_reusable_for_new_entry=False)
+    verdict["hard_blockers"] = blockers
+    live["reentry_confirmation_advisory"] = bool(live.get("reentry_confirmation_required"))
+    result.update(verdict=verdict, signal_lifecycle=lifecycle, plan_state=plan, live=live,
+                  timeframe_alignment=alignment)
+    return result

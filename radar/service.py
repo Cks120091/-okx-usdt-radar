@@ -1340,6 +1340,10 @@ def _canonical_single_decision(
         "NO_EDGE": "風險報酬不值得",
         "WAIT": str(verdict.get("label") or "目前等待確認"),
     }
+    if preflight.get("entry_policy_version") == "SIGNAL_POSITION_SEPARATED_V1":
+        decision["entry_policy_version"] = "SIGNAL_POSITION_SEPARATED_V1"
+        final["position_advisory"] = dict(preflight.get("position_advisory", {}))
+        labels["ENTER"] = "訊號已觸發"
     reason = str(verdict.get("reason") or "等待下一次完整資料確認")
     confirmation_message = str((confirmation or {}).get("message") or "")
     reasons = [reason]
@@ -1365,6 +1369,7 @@ def _canonical_single_decision(
                 "做多" if direction == "LONG" else "做空" if direction == "SHORT" else "中性"
             ),
             "new_entry_allowed": mapped_status == "ENTER",
+            "signal_status": "TRIGGERED" if mapped_status == "ENTER" else mapped_status,
             "trigger_preserved": mapped_status != "INVALIDATED",
             "reasons": list(dict.fromkeys(item for item in reasons if item))[:3],
             "wait_reason": (
@@ -1658,7 +1663,9 @@ def _record_preflight_entry_window(repository: Any, signal: Any, payload: dict, 
     allowed = bool(verdict.get("status") == "ENTRY_READY" and verdict.get("actionable") is True
                    and payload.get("plan_state", {}).get("new_entry_allowed") is True)
     projected = replace(signal, actionable=allowed,
-        entry_eligibility={**signal.entry_eligibility, "status": verdict.get("status"),
+        entry_eligibility={**signal.entry_eligibility, "status": (
+            payload.get("position_advisory", {}).get("legacy_position_status", verdict.get("status"))
+            if payload.get("entry_policy_version") == "SIGNAL_POSITION_SEPARATED_V1" else verdict.get("status")),
                            "actionable": allowed, "new_entry_allowed": allowed},
         decision_context={**signal.decision_context, "final": {"status": "ENTER" if allowed else "WAIT",
                                                                "new_entry_allowed": allowed}})

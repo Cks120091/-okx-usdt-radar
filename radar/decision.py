@@ -1,8 +1,9 @@
 from __future__ import annotations
 
 from . import _decision_core as _core
+from .position_advisory import POSITION_CODES, POLICY_VERSION
 
-CORE_SOURCE_SHA = "de6cddf55c7c4b2cec7dcdeb7ef67a1e5673950e"
+CORE_SOURCE_SHA = "39a284fe4b377d5c7228812758240c8dba6b6971"
 
 for _name in dir(_core):
     if not _name.startswith("__"):
@@ -14,10 +15,9 @@ _original_conflict_layer = _core._conflict_layer
 _original_build_decision_context = _core.build_decision_context
 
 # Risk/quality checks remain visible, but they no longer veto an otherwise
-# valid Entry Zone.  Only the price contract itself remains binding here:
-# invalidation, a formal opposite Trigger, missing required core/live-price
-# data, a missing trade plan, or an Entry Window that is not open.
-_SOFT_GATE_KEYS = {
+# valid formal signal. Location, chase and entry-window observations are
+# advisory; invalidation, formal opposition and missing core/plan data bind.
+_SOFT_GATE_KEYS = set(POSITION_CODES) | {
     "ANOMALY",
     "ANOMALOUS_MARKET",
     "LIQUIDITY",
@@ -37,7 +37,7 @@ _SOFT_GATE_KEYS = {
     "EXECUTION_COST_TOO_HIGH",
 }
 
-_ADVISORY_SAFETY_KEYS = {
+_ADVISORY_SAFETY_KEYS = set(POSITION_CODES) | {
     "ANOMALY",
     "ANOMALOUS_MARKET",
     "LIQUIDITY",
@@ -233,10 +233,11 @@ def _timeframe_direction_alignment(item, direction):
     raw = _core._mapping(metrics.get("raw_indicators", {}))
     frame = _core._mapping(raw.get(direction_tf, {}))
     long_score = _core._number(frame.get("fusion_long_score"))
-    if long_score is None:
+    if long_score is None or not 0.0 <= long_score <= 100.0:
         return {
             "required": True,
-            "passed": None,
+            # A present but corrupt direction frame is not a legacy omission.
+            "passed": False if direction_tf in raw else None,
             "state": "UNKNOWN",
             "timeframe": direction_tf,
             "trigger_timeframe": trigger_tf,
@@ -298,7 +299,7 @@ def _swing_maturity(item, direction):
     limit = 4.0 if fresh_retest else 3.0
     passed = extension_atr <= limit
     side = "低點" if direction == "LONG" else "高點"
-    suffix = "仍在可接受範圍。" if passed else "行情已走一段，不建立新的追價型進場；等待回踩／反彈後重新形成 Trigger。"
+    suffix = "仍在可接受範圍。" if passed else "行情已走一段；追價風險較高，可等回踩／反彈再評估（不影響訊號）。"
     return {
         "required": True, "passed": passed,
         "state": "ACCEPTABLE" if passed else "MATURE",
@@ -381,33 +382,6 @@ def build_decision_context(*args, **kwargs):
             ])[:3],
         })
 
-    # Presentation policy: an active formal Trigger remains a signal even when
-    # immutable Entry-zone/chase geometry says the current quote is not ideal.
-    # Preserve the canonical safety result in position_advisory, but do not let
-    # position alone erase the Trigger in the public decision projection.
-    position_codes = {"PRICE_TOO_FAR", "ENTRY_RETEST", "ENTRY_WINDOW_CLOSED"}
-    wait = dict(final.get("wait_reason", {}) or {})
-    position_only = str(wait.get("code") or "").upper() in position_codes or str(final.get("status") or "").upper() == "NO_CHASE"
-    story = _core._mapping(_core._read(item, "market_story", {})) if item is not None else {}
-    trigger = _core._mapping(story.get("trigger", {}))
-    stage = str(_core._read(item, "signal_stage", "") if item is not None else "").upper()
-    formal_trigger = bool(trigger.get("triggered")) and stage in {"EARLY", "EARLY_SIGNAL", "CONFIRMED", "REENTRY", "TRENDING", "EXTENDED"}
-    if position_only and formal_trigger and alignment.get("passed") is not False:
-        canonical = {
-            "status": final.get("status"),
-            "label": final.get("label"),
-            "new_entry_allowed": final.get("new_entry_allowed"),
-            "wait_reason": final.get("wait_reason"),
-        }
-        final["position_advisory"] = canonical
-        final["status"] = "ENTER"
-        final["label"] = "訊號已觸發｜可進位置請參考"
-        final["new_entry_allowed"] = True
-        final["wait_reason"] = None
-        warnings = list(final.get("risk_warnings", []) or [])
-        warnings.append(str(canonical.get("label") or "目前價格已離原可進位置；位置只作建議。"))
-        final["risk_warnings"] = _core._unique(warnings)[:3]
-
     final["timeframe_alignment"] = alignment
     # Keep OI observer outside the canonical final decision object so enriching
     # advisory OI data cannot mutate the decision contract.  UI/API consumers
@@ -416,10 +390,10 @@ def build_decision_context(*args, **kwargs):
     status = str(final.get("status") or "").upper()
     if status == "ENTER":
         final["label"] = (
-            "掃描條件通過｜附風險建議"
+            "訊號已觸發｜附風險建議"
             if list(final.get("risk_warnings", []) or [])
             or list(payload.get("hard_gate", {}).get("warnings", []) or [])
-            else "掃描條件通過"
+            else "訊號已觸發"
         )
     elif status == "HARD_GATE_BLOCKED":
         final["label"] = "必要條件未成立｜先更新確認"
@@ -429,5 +403,7 @@ def build_decision_context(*args, **kwargs):
     elif status == "DATA_UNAVAILABLE":
         final["label"] = "必要資料不足｜先更新確認"
     payload["final"] = final
-    payload["policy"] = "MTF_DIRECTION_ALIGNMENT_V1"
+    final["signal_status"] = "TRIGGERED" if final.get("status") == "ENTER" else final.get("status")
+    payload["policy"] = POLICY_VERSION
+    payload["entry_policy_version"] = POLICY_VERSION
     return payload

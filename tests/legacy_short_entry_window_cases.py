@@ -173,8 +173,9 @@ class EntryWindowTests(unittest.TestCase):
             actionable=False,reentry_confirmation_required=True,closed_retest_confirmed=False,
             label='已回到進場區｜等待收線重新確認',reason='價格在區間內；前一進場窗口已關閉。')
         out=build_decision_context(item)
-        self.assertEqual(out['final']['status'],'WAIT')
-        self.assertIn('區間內',out['final']['wait_reason']['label'])
+        self.assertEqual(out['final']['status'],'ENTER')
+        self.assertIsNone(out['final']['wait_reason'])
+        self.assertEqual(out['final']['position_advisory']['legacy_position_status'],'WAIT_RETEST')
         self.assertFalse(out['hard_gate']['blocked'])
 
     def test_preflight_continues_same_window_without_changing_plan(self):
@@ -262,7 +263,8 @@ class WindowIntegrationTests(unittest.TestCase):
         ticker=Ticker(self.s.inst_id,.3339,.3339,.3340,NOW+2000,30_000_000)
         result=build_preflight_payload(old_report,ticker,MarketContext(self.s.inst_id,None,None,None,None,NOW+2000),
             AppConfig(),report_generated_at=self.s.generated_at,now_ms=NOW+2000)
-        self.assertEqual(result['verdict']['status'],'WAIT_RETEST')
+        self.assertEqual(result['verdict']['status'],'ENTRY_READY')
+        self.assertFalse(result['position_advisory']['affects_signal'])
 
     def test_real_new_closed_retest_can_reopen_suspended_window(self):
         closed=self.repo.record_entry_window(replace(self.s,actionable=False),NOW+1000)
@@ -288,7 +290,7 @@ class WindowIntegrationTests(unittest.TestCase):
         closed.market_story=copy.deepcopy(closed.market_story)
         closed.market_story['trigger']['confirmation_ts']=TS
         closed.actionable=True
-        self.assertFalse(self.repo.record_entry_window(closed,NOW+2000).actionable)
+        self.assertTrue(self.repo.record_entry_window(closed,NOW+2000).actionable)
 
 
 if __name__=='__main__':unittest.main()

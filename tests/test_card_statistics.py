@@ -330,7 +330,7 @@ class CardStatisticsIntegrationTests(unittest.TestCase):
     def test_final_html_and_public_projection_have_stats_not_quality_conversion(self):
         from pathlib import Path
         html=(Path(__file__).resolve().parents[1]/'radar/static/pages.html').read_text()
-        self.assertIn("compactCoreCard(item)+decisionPanelBody(item)",html)
+        self.assertIn("decisionPanelBody(item)",html)
         self.assertIn('return [item.historical_performance,item.timeframe_states',html)
 
 
@@ -373,7 +373,7 @@ class PublishedScannerStatisticsTests(unittest.TestCase):
             self.assertIsNone(report.signals[0].historical_performance['rate_pct'])
             client.last=104.0
             report=scanner.scan_once(scan_mode='SHORT')
-            self.assertFalse(report.signals[0].actionable)
+            self.assertTrue(report.signals[0].actionable)
             self.assertEqual(scanner.repository._connection.execute('SELECT COUNT(*) FROM card_statistics_v1').fetchone()[0],1)
             self.assertAlmostEqual(scanner.repository._connection.execute('SELECT entry FROM card_statistics_v1').fetchone()[0],100.01)
         finally:

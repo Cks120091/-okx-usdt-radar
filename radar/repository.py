@@ -404,7 +404,8 @@ class SignalRepository:
                     or previous != incoming):
                 return _entry_window_changed(signal)
             ready = entry_window_is_ready(signal)
-            if ready and isinstance(previous, dict) and previous.get("state") == "SUSPENDED":
+            separated = signal.decision_context.get("entry_policy_version") == "SIGNAL_POSITION_SEPARATED_V1"
+            if ready and not separated and isinstance(previous, dict) and previous.get("state") == "SUSPENDED":
                 confirmed = signal.market_story.get("trigger", {}).get("confirmation_ts")
                 proof = signal.entry_eligibility.get("closed_retest_confirmed") is True
                 if not (proof and int(previous.get("core_ts") or 0) < (_number(confirmed) or 0)
