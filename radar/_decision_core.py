@@ -307,6 +307,10 @@ def _hard_gate(
             "BLOCKED",
             False,
             f"上游已標記新進場阻擋條件：{blocker}。",
+            hard=not (blocker == "ENTRY_PERMISSION"
+                      and str(entry.get("status") or "").upper() in {"WAIT_RETEST", "MISSED_ENTRY", "NO_CHASE"}
+                      and _stage(item) in _FORMAL_STAGES
+                      and entry.get("direction_still_valid") is not False),
         )
 
     explicit_entry_permission = (
@@ -322,7 +326,9 @@ def _hard_gate(
             "BLOCKED",
             False,
             str(entry.get("reason") or "上游目前位置判定為不可進；原 Trigger 保留，但禁止建立新倉。"),
-            hard=False,
+            hard=not (str(entry.get("status") or "").upper() in {"WAIT_RETEST", "MISSED_ENTRY", "NO_CHASE"}
+                      and _stage(item) in _FORMAL_STAGES
+                      and entry.get("direction_still_valid") is not False),
         )
 
     quote_volume = _number(_read(item, "quote_volume_24h", None))
@@ -1711,7 +1717,9 @@ def _final_layer(
         explicit_no_chase or beyond_missed_limit
     )
     stage = episode["source_stage"]
-    active_trigger = plan_present and stage in _FORMAL_STAGES and not target_completed
+    source_trigger = _mapping(_read(item, "trigger", None) or _mapping(_read(item, "market_story", {})).get("trigger", {}))
+    trigger_explicitly_absent = source_trigger.get("triggered") is False and source_trigger.get("type") != "ACTIVE_EPISODE"
+    active_trigger = plan_present and stage in _FORMAL_STAGES and not target_completed and not trigger_explicitly_absent
     has_risk_warnings = bool(
         hard_gate.get("warnings")
         or anomaly_warnings
@@ -1724,12 +1732,6 @@ def _final_layer(
     elif target_completed:
         status, label = "NO_EDGE", "本次目標已達｜不可重新追入"
         wait_code, wait_label = "NEW_TRIGGER_REQUIRED", "等待新的 Trigger／REENTRY"
-    elif missed_entry_no_chase and active_trigger:
-        status, label = "ENTER", "訊號已觸發｜目前價格已離可進位置"
-        wait_code, wait_label = "NONE", ""
-    elif entry_status == "MISSED_ENTRY" and active_trigger:
-        status, label = "ENTER", "訊號已觸發｜原可進位置僅供參考"
-        wait_code, wait_label = "NONE", ""
     elif not plan_present or direction == "NEUTRAL":
         if stage == "NEAR_TRIGGER":
             status, label = "WAIT", "訊號形成中｜等待正式 Trigger"
@@ -1748,6 +1750,9 @@ def _final_layer(
             status, label = "WAIT", str(entry.get("label") or "等待回踩／重新確認")
             wait_code = "ENTRY_RETEST"
             wait_label = str(entry.get("reason") or "等待新的已收盤回踩確認")
+        elif blockers == {"entry_permission"} and entry_status == "MISSED_ENTRY" and not active_trigger:
+            status, label = "WAIT", "目前階段未提供有效新訊號"
+            wait_code, wait_label = "ENTRY_WINDOW_CLOSED", "等待正式訊號重新確認"
         elif blockers == {"risk_reward"}:
             status, label = "NO_EDGE", "風險報酬不足｜禁止新進場"
             wait_code, wait_label = "RISK_REWARD", "等待風險報酬改善"
@@ -1757,22 +1762,15 @@ def _final_layer(
     elif hard_gate["unknown"]:
         status, label = "DATA_UNAVAILABLE", "資料不足｜禁止新進場"
         wait_code, wait_label = "DATA_MISSING", "等待最新完整資料"
-    elif (
-        entry_status == "ENTRY_READY"
-        and active_trigger
-        and conflict["blocks_entry"]
-    ):
+    elif active_trigger and conflict["blocks_entry"]:
         status, label = "WAIT", "方向證據高度衝突｜暫不進場"
         wait_code, wait_label = "EVIDENCE_CONFLICT", "等待方向衝突降級"
-    elif entry_status == "ENTRY_READY" and active_trigger:
-        status, label = (
-            "ENTER",
-            "目前可進｜附風險提醒" if has_risk_warnings else "目前可進",
-        )
+    elif entry_status in {"ENTRY_READY", "WAIT_RETEST", "MISSED_ENTRY", "NO_CHASE"} and active_trigger:
+        status, label = "ENTER", "訊號已觸發｜位置獨立參考"
         wait_code, wait_label = "NONE", ""
-    elif entry_status == "WAIT_RETEST" and active_trigger:
-        status, label = "ENTER", "訊號已觸發｜等待回到較佳可進位置"
-        wait_code, wait_label = "NONE", ""
+    elif entry_status == "MISSED_ENTRY":
+        status, label = "WAIT", "目前階段未提供有效新訊號"
+        wait_code, wait_label = "ENTRY_WINDOW_CLOSED", "等待正式訊號重新確認"
     elif stage in {"NEAR_TRIGGER", "WATCH", "NONE", ""}:
         status, label = "WAIT", "訊號形成中｜等待正式 Trigger"
         wait_code, wait_label = "SIGNAL_FORMING", "等待價格觸發與收盤確認"
@@ -1785,7 +1783,7 @@ def _final_layer(
         reasons.extend(
             [
                 f"主方向：{_direction_label(direction)}",
-                entry_label or "價格仍在合理進場區",
+                "訊號成立；可進位置另列參考，不代表目前位於區間內",
             ]
         )
         reasons.append(f"方向品質：{quality['direction']['label']}")

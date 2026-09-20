@@ -409,7 +409,9 @@ class SignalRepository:
                 proof = signal.entry_eligibility.get("closed_retest_confirmed") is True
                 if not (proof and int(previous.get("core_ts") or 0) < (_number(confirmed) or 0)
                         <= _signal_core_timestamp(signal)):
-                    return _entry_window_changed(signal)
+                    if signal.decision_context.get("final", {}).get("position_policy") != "SIGNAL_LOCATION_SEPARATION_V1":
+                        return _entry_window_changed(signal)
+                    ready = False  # retain the positional history; do not invent a new retest
             window = entry_window_snapshot(signal, observed_ms, "OPEN" if ready else "SUSPENDED")
             lifecycle = {**stored.lifecycle, "entry_window": window}
             persisted = replace(stored, lifecycle=lifecycle)

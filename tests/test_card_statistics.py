@@ -373,7 +373,8 @@ class PublishedScannerStatisticsTests(unittest.TestCase):
             self.assertIsNone(report.signals[0].historical_performance['rate_pct'])
             client.last=104.0
             report=scanner.scan_once(scan_mode='SHORT')
-            self.assertFalse(report.signals[0].actionable)
+            self.assertTrue(report.signals[0].actionable)
+            self.assertNotEqual(report.signals[0].entry_eligibility["status"], "ENTRY_READY")
             self.assertEqual(scanner.repository._connection.execute('SELECT COUNT(*) FROM card_statistics_v1').fetchone()[0],1)
             self.assertAlmostEqual(scanner.repository._connection.execute('SELECT entry FROM card_statistics_v1').fetchone()[0],100.01)
         finally:

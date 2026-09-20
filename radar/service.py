@@ -125,6 +125,7 @@ _BINDING_DATA_CODES = {
 }
 
 _BINDING_DIRECTION_CODES = {
+    "TIMEFRAME_DIRECTION_ALIGNMENT", "EVIDENCE_CONFLICT", "NO_FORMAL_TRIGGER",
     "OPPOSITE_SIGNAL",
     "OPPOSITE_WARNING",
 }
@@ -1390,6 +1391,12 @@ def _canonical_single_decision(
             ),
         }
     )
+    if preflight.get("entry_policy_version") == "SIGNAL_LOCATION_SEPARATION_V1":
+        final["position_policy"] = "SIGNAL_LOCATION_SEPARATION_V1"
+        final["entry_position"] = deepcopy(preflight.get("entry_position", {}))
+        final["signal_active"] = final.get("new_entry_allowed") is True
+        if final["signal_active"]:
+            final["label"] = "訊號已觸發"
     decision["final"] = final
     decision["episode_plan_state"] = {
         "status": plan.get("status"),
@@ -1657,11 +1664,15 @@ def _record_preflight_entry_window(repository: Any, signal: Any, payload: dict, 
         return payload
     allowed = bool(verdict.get("status") == "ENTRY_READY" and verdict.get("actionable") is True
                    and payload.get("plan_state", {}).get("new_entry_allowed") is True)
+    separated = payload.get("entry_policy_version") == "SIGNAL_LOCATION_SEPARATION_V1"
+    source_status = payload.get("entry_position", {}).get("source_status") if separated else verdict.get("status")
+    final = {"status": "ENTER" if allowed else "WAIT", "new_entry_allowed": allowed}
+    if separated:
+        final["position_policy"] = "SIGNAL_LOCATION_SEPARATION_V1"
     projected = replace(signal, actionable=allowed,
-        entry_eligibility={**signal.entry_eligibility, "status": verdict.get("status"),
+        entry_eligibility={**signal.entry_eligibility, "status": source_status,
                            "actionable": allowed, "new_entry_allowed": allowed},
-        decision_context={**signal.decision_context, "final": {"status": "ENTER" if allowed else "WAIT",
-                                                               "new_entry_allowed": allowed}})
+        decision_context={**signal.decision_context, "final": final})
     accepted = recorder(projected, observed_ms)
     if allowed and not accepted.actionable:
         payload = deepcopy(payload)

@@ -621,6 +621,14 @@ def _public_decision_context(decision: Any) -> dict[str, Any]:
         _read(decision, "final", {}),
         ("status", "label", "direction", "direction_label", "new_entry_allowed", "trigger_preserved", "reasons", "wait_reason", "weakening_conditions", "invalidation_condition", "confidence", "warnings"),
     )
+    final_source = _read(decision, "final", {})
+    payload["final"].update(_select(final_source, ("position_policy", "signal_active")))
+    position = _read(final_source, "entry_position", {})
+    payload["final"]["entry_position"] = _select(position, ("policy_version", "advisory_only", "state", "entry_low", "entry_high", "current_price", "price_source", "source_status", "gap_pct", "label", "advice", "risk_note"))
+    alignment = _read(final_source, "timeframe_alignment", {})
+    payload["final"]["timeframe_alignment"] = _select(alignment, ("required", "passed", "state", "timeframe", "trigger_timeframe", "timeframe_direction", "trigger_direction", "long_score", "reason"))
+    maturity = _read(final_source, "swing_maturity", {})
+    payload["final"]["swing_maturity"] = _select(maturity, ("required", "passed", "state", "extension_atr", "limit_atr", "anchor_price", "fresh_retest", "reason"))
     return payload
 
 

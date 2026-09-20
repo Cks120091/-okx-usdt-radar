@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from . import _decision_core as _core
+from .entry_position import POLICY_VERSION as POSITION_POLICY, describe_position
 
 CORE_SOURCE_SHA = "de6cddf55c7c4b2cec7dcdeb7ef67a1e5673950e"
 
@@ -18,6 +19,7 @@ _original_build_decision_context = _core.build_decision_context
 # invalidation, a formal opposite Trigger, missing required core/live-price
 # data, a missing trade plan, or an Entry Window that is not open.
 _SOFT_GATE_KEYS = {
+    "CHASE", "PRICE_TOO_FAR", "ENTRY_RETEST", "ENTRY_WINDOW_CLOSED",
     "ANOMALY",
     "ANOMALOUS_MARKET",
     "LIQUIDITY",
@@ -38,6 +40,7 @@ _SOFT_GATE_KEYS = {
 }
 
 _ADVISORY_SAFETY_KEYS = {
+    "ENTRY_ELIGIBILITY", "ENTRY_POSITION", "CHASE", "ENTRY_PERMISSION",
     "ANOMALY",
     "ANOMALOUS_MARKET",
     "LIQUIDITY",
@@ -143,6 +146,12 @@ def _hard_gate(*args, **kwargs):
             _core._number(_core._read(item, key, None)) is not None
             for key in ("entry_low", "entry_high", "stop_loss", "take_profit_1")
         )
+        if formal_plan_present:
+            low, high, stop, target = (_core._number(_core._read(item, key, None))
+                                      for key in ("entry_low", "entry_high", "stop_loss", "take_profit_1"))
+            side = str(_core._read(item, "direction", "")).upper()
+            formal_plan_present = all(value > 0 for value in (low, high, stop, target)) and low <= high
+            formal_plan_present = formal_plan_present and (stop < low <= high < target if side == "LONG" else target < low <= high < stop if side == "SHORT" else False)
         if not formal_plan_present:
             kwargs = {**kwargs, "plan_present": False}
     return _rebalance_hard_gate(_original_hard_gate(*args, **kwargs))
@@ -298,7 +307,7 @@ def _swing_maturity(item, direction):
     limit = 4.0 if fresh_retest else 3.0
     passed = extension_atr <= limit
     side = "低點" if direction == "LONG" else "高點"
-    suffix = "仍在可接受範圍。" if passed else "行情已走一段，不建立新的追價型進場；等待回踩／反彈後重新形成 Trigger。"
+    suffix = "仍在可接受範圍。" if passed else "行情已走一段，追價風險較高，可等回踩／反彈後評估；僅為建議。"
     return {
         "required": True, "passed": passed,
         "state": "ACCEPTABLE" if passed else "MATURE",
@@ -401,6 +410,11 @@ def build_decision_context(*args, **kwargs):
         final["wait_reason"] = wait
     elif status == "DATA_UNAVAILABLE":
         final["label"] = "必要資料不足｜先更新確認"
+    final["position_policy"] = POSITION_POLICY
+    final["entry_position"] = describe_position(item)
+    final["signal_active"] = bool(final.get("new_entry_allowed"))
+    if final.get("status") == "ENTER":
+        final["label"] = "訊號已觸發"
     payload["final"] = final
     payload["policy"] = "MTF_DIRECTION_ALIGNMENT_V1"
     return payload

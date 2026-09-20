@@ -787,15 +787,15 @@ class PreflightTests(unittest.TestCase):
             report_generated_at=datetime.now(timezone.utc).isoformat(),
         )
 
-        self.assertEqual(waiting["verdict"]["status"], "WAIT_RETEST")
-        self.assertFalse(waiting["verdict"]["actionable"])
+        self.assertEqual(waiting["verdict"]["status"], "ENTRY_READY")
+        self.assertTrue(waiting["verdict"]["actionable"])
         self.assertNotIn(
             "ENTRY_PERMISSION",
             waiting["verdict"]["hard_blockers"],
         )
         self.assertTrue(waiting["live"]["reentry_confirmation_required"])
         self.assertFalse(waiting["live"]["closed_retest_confirmed"])
-        self.assertFalse(
+        self.assertTrue(
             waiting["plan_state"]["old_plan_reusable_for_new_entry"]
         )
         self.assertTrue(waiting["plan_state"]["existing_position_plan_active"])
@@ -949,7 +949,7 @@ class PreflightTests(unittest.TestCase):
                     report_generated_at=datetime.now(timezone.utc).isoformat(),
                 )
 
-                self.assertEqual(payload["verdict"]["status"], "WAIT_RETEST")
+                self.assertEqual(payload["verdict"]["status"], "HARD_GATE_BLOCKED")
                 self.assertIn("OPPOSITE_SIGNAL", payload["verdict"]["hard_blockers"])
                 self.assertFalse(
                     payload["plan_state"]["old_plan_reusable_for_new_entry"]
@@ -1727,12 +1727,12 @@ class PreflightTests(unittest.TestCase):
 
             payload = runtime.preflight_dict(item.inst_id, "SHORT")
 
-            self.assertEqual(payload["verdict"]["status"], "WAIT_RETEST")
+            self.assertEqual(payload["verdict"]["status"], "ENTRY_READY")
             self.assertEqual(payload["verdict"]["situation"], "ADVERSE_TOLERANCE")
-            self.assertIn("容許回測中", payload["verdict"]["label"])
+            self.assertEqual(payload["entry_position"]["state"], "BELOW")
             self.assertEqual(payload["signal_lifecycle"]["label"], "已觸發・有效中")
             self.assertTrue(payload["plan_state"]["existing_position_plan_active"])
-            self.assertEqual(payload["plan_state"]["new_entry_status"], "WAIT")
+            self.assertEqual(payload["plan_state"]["new_entry_status"], "READY")
 
     def test_favorable_move_shows_active_trigger_and_waits_without_chasing(self):
         with tempfile.TemporaryDirectory() as directory:
@@ -1754,12 +1754,12 @@ class PreflightTests(unittest.TestCase):
 
             payload = runtime.preflight_dict(item.inst_id, "SHORT")
 
-            self.assertEqual(payload["verdict"]["status"], "WAIT_RETEST")
+            self.assertEqual(payload["verdict"]["status"], "ENTRY_READY")
             self.assertEqual(payload["verdict"]["situation"], "FAVORABLE_AWAY")
-            self.assertIn("已離開最佳進場點", payload["verdict"]["label"])
+            self.assertEqual(payload["entry_position"]["state"], "BELOW")
             self.assertEqual(payload["signal_lifecycle"]["label"], "已觸發・有效中")
             self.assertTrue(payload["plan_state"]["existing_position_plan_active"])
-            self.assertFalse(payload["verdict"]["actionable"])
+            self.assertTrue(payload["verdict"]["actionable"])
 
     def test_favorable_move_beyond_entry_window_closes_only_new_entry(self):
         with tempfile.TemporaryDirectory() as directory:
@@ -1781,11 +1781,11 @@ class PreflightTests(unittest.TestCase):
 
             payload = runtime.preflight_dict(item.inst_id, "SHORT")
 
-            self.assertEqual(payload["verdict"]["status"], "MISSED_ENTRY")
+            self.assertEqual(payload["verdict"]["status"], "ENTRY_READY")
             self.assertEqual(payload["verdict"]["situation"], "FAVORABLE_MISSED")
             self.assertEqual(payload["signal_lifecycle"]["status"], "ACTIVE")
             self.assertTrue(payload["plan_state"]["existing_position_plan_active"])
-            self.assertFalse(payload["plan_state"]["old_plan_reusable_for_new_entry"])
+            self.assertTrue(payload["plan_state"]["old_plan_reusable_for_new_entry"])
             self.assertEqual(
                 payload["plan_state"]["direction_status"],
                 "ORIGINAL_BIAS_RETAINED",

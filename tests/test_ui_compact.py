@@ -50,7 +50,7 @@ class CompactUiTests(unittest.TestCase):
         self.assertIn("風險建議｜不阻止進場", text)
         self.assertIn("必要條件未成立", text)
         self.assertIn("進場快照｜不是即時報價", text)
-        self.assertIn("ENTRY｜可進參考區間", text)
+        self.assertIn("ENTRY｜可進位置（參考）", text)
         self.assertIn("固定計畫價，不代表價格現在已到", text)
         self.assertIn("String(activeShort.length)", report)
         self.assertIn("String(activeLong.length)", report)

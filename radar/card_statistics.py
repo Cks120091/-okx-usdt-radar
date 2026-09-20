@@ -145,6 +145,9 @@ def enroll(connection: sqlite3.Connection, signal: Any, version: str, now: int) 
             or entry_state.get("status") != "ENTRY_READY" or gate.get("blocked") or gate.get("unknown")
             or life.get("terminal") or read(signal, "signal_stage") not in {"EARLY_SIGNAL", "CONFIRMED", "REENTRY"}):
         return False
+    if (final.get("position_policy") == "SIGNAL_LOCATION_SEPARATION_V1"
+            and mapping(final.get("entry_position")).get("state") != "IN_ZONE"):
+        return False  # an alert away from Entry is not an observed entry-price sample
     quote_ts = timestamp(metrics.get("ticker_sampled_at"))
     source = str(metrics.get("entry_execution_price_source") or "").upper()
     expected = {"ASK", "BEST_ASK"} if read(signal, "direction") == "LONG" else {"BID", "BEST_BID"}

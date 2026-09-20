@@ -187,4 +187,5 @@ def build_preflight_payload(*args, **kwargs):
     payload["plan_state"] = plan_state
     payload["live"] = live
     payload["entry_policy_version"] = "ADVISORY_RISK_V1"
-    return payload
+    from .preflight_position import apply_position_policy
+    return apply_position_policy(payload, signal)
