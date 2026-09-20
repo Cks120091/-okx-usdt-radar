@@ -322,7 +322,11 @@ def _hard_gate(
             "BLOCKED",
             False,
             str(entry.get("reason") or "上游目前位置判定為不可進；原 Trigger 保留，但禁止建立新倉。"),
-            hard=False,
+            hard=not (
+                str(entry.get("status") or "").upper() == "WAIT_RETEST"
+                and entry.get("reentry_confirmation_required") is True
+                and entry.get("closed_retest_confirmed") is not True
+            ),
         )
 
     quote_volume = _number(_read(item, "quote_volume_24h", None))
@@ -557,11 +561,10 @@ def _hard_gate(
     _add_check(
         checks,
         "chase",
-        "目前價格位置",
+        "價格未構成嚴重追價",
         chase_status,
         chase_value,
         chase_reason,
-        hard=False,
     )
 
     blocked = [
@@ -1724,12 +1727,15 @@ def _final_layer(
     elif target_completed:
         status, label = "NO_EDGE", "本次目標已達｜不可重新追入"
         wait_code, wait_label = "NEW_TRIGGER_REQUIRED", "等待新的 Trigger／REENTRY"
-    elif missed_entry_no_chase and active_trigger:
-        status, label = "ENTER", "訊號已觸發｜目前價格已離可進位置"
-        wait_code, wait_label = "NONE", ""
-    elif entry_status == "MISSED_ENTRY" and active_trigger:
-        status, label = "ENTER", "訊號已觸發｜原可進位置僅供參考"
-        wait_code, wait_label = "NONE", ""
+    elif missed_entry_no_chase:
+        status, label = "NO_CHASE", "已離開合理進場區｜禁止追價"
+        wait_code, wait_label = "PRICE_TOO_FAR", "等待新的進場機會"
+    elif entry_status == "MISSED_ENTRY":
+        status, label = "WAIT", "進場窗口已關閉｜禁止新進場"
+        wait_code, wait_label = (
+            "ENTRY_WINDOW_CLOSED",
+            "等待新的 Trigger／REENTRY",
+        )
     elif not plan_present or direction == "NEUTRAL":
         if stage == "NEAR_TRIGGER":
             status, label = "WAIT", "訊號形成中｜等待正式 Trigger"
@@ -1770,9 +1776,9 @@ def _final_layer(
             "目前可進｜附風險提醒" if has_risk_warnings else "目前可進",
         )
         wait_code, wait_label = "NONE", ""
-    elif entry_status == "WAIT_RETEST" and active_trigger:
-        status, label = "ENTER", "訊號已觸發｜等待回到較佳可進位置"
-        wait_code, wait_label = "NONE", ""
+    elif entry_status == "WAIT_RETEST":
+        status, label = "WAIT", str(entry.get("label") or "等待回踩／重新確認")
+        wait_code, wait_label = "ENTRY_RETEST", str(entry.get("reason") or "等待重新站回合理進場區")
     elif stage in {"NEAR_TRIGGER", "WATCH", "NONE", ""}:
         status, label = "WAIT", "訊號形成中｜等待正式 Trigger"
         wait_code, wait_label = "SIGNAL_FORMING", "等待價格觸發與收盤確認"
