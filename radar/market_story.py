@@ -1338,6 +1338,19 @@ def _trigger_candidate(
         and (bool(control["micro_defense_broken"]) or bool(momentum["confirmed"]))
         and not compression_block
     )
+    # PRE_CONTINUATION is watch-only: the trend and pullback setup exist, but
+    # the formal continuation trigger still lacks its final re-acceleration.
+    continuation_ready = bool(
+        bias_aligned
+        and pullback["reactivated"]
+        and not compression_block
+        and not continuation
+        and (
+            opponent_declining
+            or bool(momentum["partial"])
+            or bool(control["push_away"])
+        )
+    )
     triggered = bool(reversal or breakout or continuation)
     trigger_type = "REVERSAL" if reversal else "BREAKOUT" if breakout else "CONTINUATION" if continuation else "NONE"
     momentum_index = int(momentum.get("event_index", 0))
@@ -1440,7 +1453,13 @@ def _trigger_candidate(
                 opponent_declining or bias_aligned,
             )
         )
-        stage, freshness = ("NEAR_TRIGGER", "NONE") if near_facts >= 3 and not compression_block else ("WATCH", "NONE")
+        stage, freshness = (
+            ("PRE_CONTINUATION", "NONE")
+            if continuation_ready
+            else ("NEAR_TRIGGER", "NONE")
+            if near_facts >= 3 and not compression_block
+            else ("WATCH", "NONE")
+        )
 
     event_zone = breakout_zone if breakout else side_zone
     invalidation = (
@@ -1528,6 +1547,12 @@ def _trigger_candidate(
         "price_acceptance": acceptance,
         "control_transfer": control,
         "pullback": pullback,
+        "continuation_ready": continuation_ready,
+        "continuation_ready_label": (
+            "趨勢延續預備｜等待原方向重新發動"
+            if continuation_ready
+            else None
+        ),
         "compression_block": compression_block,
         "supporting": _unique(supporting),
         "conflicts": _unique(conflicts),
@@ -1547,6 +1572,15 @@ def _select_candidate(candidates: dict[str, dict[str, Any]], direction: str) -> 
                 -int(item.get("event_age_bars", 999)),
                 float(item.get("explainability_score", 0.0)),
             ),
+        )
+    continuation_ready = [
+        item for item in candidates.values()
+        if item.get("stage") == "PRE_CONTINUATION"
+    ]
+    if continuation_ready:
+        return max(
+            continuation_ready,
+            key=lambda item: float(item.get("explainability_score", 0.0)),
         )
     near = [item for item in candidates.values() if item.get("stage") == "NEAR_TRIGGER"]
     if near:
