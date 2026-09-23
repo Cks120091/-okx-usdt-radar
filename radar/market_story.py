@@ -1362,6 +1362,58 @@ def _trigger_candidate(
         and not compression_block
         and not continuation
     )
+
+    # PRE_TRIGGER is deliberately not a formal Trigger.  It publishes setups
+    # that already have a recognizable REVERSAL / BREAKOUT / CONTINUATION
+    # shape and are missing only the last price/momentum confirmation.
+    reversal_near = bool(
+        at_reversal_zone
+        and (rejection or opponent_declining)
+        and not reversal
+        and not compression_block
+    )
+    breakout_near = bool(
+        acceptance["state"] in ("BREAKING", "ACCEPTED")
+        and not breakout
+        and not compression_block
+    )
+    continuation_near = bool(continuation_ready)
+    pre_trigger_type = (
+        "CONTINUATION" if continuation_near
+        else "BREAKOUT" if breakout_near
+        else "REVERSAL" if reversal_near
+        else "NONE"
+    )
+    pre_trigger_missing: list[str] = []
+    if pre_trigger_type == "CONTINUATION":
+        if not pullback.get("reactivated"):
+            pre_trigger_missing.append("回踩重新啟動")
+        if not control.get("push_away"):
+            pre_trigger_missing.append("原方向 Push-Away")
+        if not momentum.get("partial"):
+            pre_trigger_missing.append("MA／MACD 動能呼應")
+        if not (control.get("micro_defense_broken") or momentum.get("confirmed")):
+            pre_trigger_missing.append("微型防守突破／完整動能確認")
+    elif pre_trigger_type == "BREAKOUT":
+        if acceptance["state"] not in ("ACCEPTED", "ROLE_REVERSAL_RETEST"):
+            pre_trigger_missing.append("突破後價格接受")
+        if not control.get("push_away"):
+            pre_trigger_missing.append("突破後 Push-Away")
+        if not control.get("micro_defense_broken"):
+            pre_trigger_missing.append("微型防守突破")
+        if not momentum.get("partial"):
+            pre_trigger_missing.append("MA／MACD 動能呼應")
+    elif pre_trigger_type == "REVERSAL":
+        if not rejection:
+            pre_trigger_missing.append("支撐／壓力拒絕")
+        if not opponent_declining:
+            pre_trigger_missing.append("原攻擊方衰退")
+        if not control.get("transferred"):
+            pre_trigger_missing.append("控制權轉移")
+        if not momentum.get("confirmed"):
+            pre_trigger_missing.append("MA／MACD 完整確認")
+
+    pre_trigger = pre_trigger_type != "NONE"
     triggered = bool(reversal or breakout or continuation)
     trigger_type = "REVERSAL" if reversal else "BREAKOUT" if breakout else "CONTINUATION" if continuation else "NONE"
     momentum_index = int(momentum.get("event_index", 0))
@@ -1465,8 +1517,8 @@ def _trigger_candidate(
             )
         )
         stage, freshness = (
-            ("PRE_CONTINUATION", "NONE")
-            if continuation_ready
+            ("PRE_TRIGGER", "NONE")
+            if pre_trigger
             else ("NEAR_TRIGGER", "NONE")
             if near_facts >= 3 and not compression_block
             else ("WATCH", "NONE")
@@ -1564,6 +1616,14 @@ def _trigger_candidate(
             if continuation_ready
             else None
         ),
+        "pre_trigger": pre_trigger,
+        "pre_trigger_type": pre_trigger_type,
+        "pre_trigger_label": (
+            f"快觸發｜{pre_trigger_type}"
+            if pre_trigger
+            else None
+        ),
+        "pre_trigger_missing": pre_trigger_missing,
         "compression_block": compression_block,
         "supporting": _unique(supporting),
         "conflicts": _unique(conflicts),
