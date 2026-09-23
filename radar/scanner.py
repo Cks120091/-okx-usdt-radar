@@ -535,6 +535,12 @@ class MarketScanner:
             if include_short
             else {}
         )
+        if include_short and short_results:
+            for inst_id, result in list(short_results.items()):
+                short_results[inst_id] = self._apply_market_resonance(
+                    result,
+                    market_bias,
+                )
         if include_short and preview is not None and short_results:
             preview(
                 self._core_preview_report(
@@ -660,6 +666,12 @@ class MarketScanner:
                 else {}
             ),
         }
+        if include_long and long_results:
+            for inst_id, result in list(long_results.items()):
+                long_results[inst_id] = self._apply_market_resonance(
+                    result,
+                    horizon_market_bias["LONG"],
+                )
 
         context_loader = getattr(self.client, "get_market_context", None)
         context_applier = getattr(self.engine, "apply_market_context", None)
@@ -2962,6 +2974,63 @@ class MarketScanner:
         return result
 
     @staticmethod
+    def _market_resonance_meta(
+        direction: str,
+        market_bias: dict[str, Any] | None,
+    ) -> dict[str, Any]:
+        """Describe broad-market agreement without creating/cancelling a Trigger."""
+        bias = market_bias if isinstance(market_bias, dict) else {}
+        score = _finite_number(bias.get("score"))
+        market_direction = (
+            "LONG" if score is not None and score >= 65.0
+            else "SHORT" if score is not None and score <= 35.0
+            else "NEUTRAL"
+        )
+        normalized_direction = str(direction or "").upper()
+        if normalized_direction not in {"LONG", "SHORT"}:
+            state, label, priority = "UNKNOWN", "大盤參考不足", 0
+        elif market_direction == "NEUTRAL":
+            state, label, priority = "NEUTRAL", "大盤中性", 1
+        elif normalized_direction == market_direction:
+            state, label, priority = "ALIGNED", "大盤共振", 2
+        else:
+            state, label, priority = "COUNTER", "逆大盤", 0
+        return {
+            "state": state,
+            "label": label,
+            "priority": priority,
+            "market_direction": market_direction,
+            "market_bias_score": round(score, 1) if score is not None else None,
+            "policy": "ADVISORY_RANKING_ONLY",
+            "affects_trigger": False,
+        }
+
+    @classmethod
+    def _apply_market_resonance(
+        cls,
+        result: AnalysisResult,
+        market_bias: dict[str, Any] | None,
+    ) -> AnalysisResult:
+        state = result.market_state
+        if state is None:
+            return result
+        meta = cls._market_resonance_meta(state.direction, market_bias)
+
+        def annotate(item):
+            if item is None:
+                return None
+            metrics = dict(item.market_metrics)
+            metrics["market_resonance"] = dict(meta)
+            return replace(item, market_metrics=metrics)
+
+        return replace(
+            result,
+            market_state=annotate(state),
+            signal=annotate(result.signal),
+            candidate_signal=annotate(result.candidate_signal),
+        )
+
+    @staticmethod
     def _rank_context_candidates(
         short_results: dict[str, AnalysisResult],
         long_results: dict[str, AnalysisResult],
@@ -2991,9 +3060,16 @@ class MarketScanner:
                     "ACTIVE": 2,
                     "EXTENDED": 1,
                 }.get(state.freshness, 0)
+                resonance = state.market_metrics.get("market_resonance", {})
+                resonance_priority = (
+                    int(resonance.get("priority", 0))
+                    if isinstance(resonance, dict)
+                    else 0
+                )
                 rank = (
                     freshness_priority,
                     stage_priority.get(state.status, 0),
+                    resonance_priority,
                     result.signal is not None,
                     state.direction in ("LONG", "SHORT"),
                     horizon_priority,
@@ -3481,10 +3557,17 @@ class MarketScanner:
             and final_status == "ENTER"
             and str(signal.direction or "").upper() in {"LONG", "SHORT"}
         )
+        resonance = signal.market_metrics.get("market_resonance", {})
+        resonance_priority = (
+            int(resonance.get("priority", 0))
+            if isinstance(resonance, dict)
+            else 0
+        )
         return (
             continuation_priority,
             permission_priority,
             status_priority,
+            resonance_priority,
             execution_score,
             freshness_timestamp,
             freshness_priority.get(signal.freshness, 0),
@@ -4106,6 +4189,11 @@ class MarketScanner:
                 item.status == "PRE_TRIGGER",
                 item.status == "PRE_CONTINUATION",
                 item.status == "NEAR_TRIGGER",
+                (
+                    int(item.market_metrics.get("market_resonance", {}).get("priority", 0))
+                    if isinstance(item.market_metrics.get("market_resonance", {}), dict)
+                    else 0
+                ),
                 item.freshness == "NEW",
                 item.readiness_score,
                 _finite_number(item.quote_volume_24h)
