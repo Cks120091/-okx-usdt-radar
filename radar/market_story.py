@@ -1619,7 +1619,7 @@ def _trigger_candidate(
         "pre_trigger": pre_trigger,
         "pre_trigger_type": pre_trigger_type,
         "pre_trigger_label": (
-            f"快觸發｜{pre_trigger_type}"
+            "快觸發"
             if pre_trigger
             else None
         ),
