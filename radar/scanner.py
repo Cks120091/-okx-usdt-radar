@@ -4096,13 +4096,14 @@ class MarketScanner:
         selected = [
             item
             for item in states
-            if item.status in ("PRE_CONTINUATION", "NEAR_TRIGGER", "WATCH", "NO_FOLLOW_THROUGH")
+            if item.status in ("PRE_TRIGGER", "PRE_CONTINUATION", "NEAR_TRIGGER", "WATCH", "NO_FOLLOW_THROUGH")
             and item.direction in ("LONG", "SHORT")
             and item.status != "FILTERED"
             and self._passes_output_liquidity(item, False)
         ]
         selected.sort(
             key=lambda item: (
+                item.status == "PRE_TRIGGER",
                 item.status == "PRE_CONTINUATION",
                 item.status == "NEAR_TRIGGER",
                 item.freshness == "NEW",
