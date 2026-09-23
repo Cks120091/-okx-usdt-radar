@@ -26,6 +26,7 @@ from .continuation import (
 )
 from .intraday_flow import summarize_intraday_flow
 from .entry_window import can_continue as entry_window_can_continue
+from .indicators import features
 from .decision import build_decision_context
 from .models import Candle, Instrument, MarketContext, MarketState, RadarReport, Signal, Ticker
 from .repository import SignalRepository, classify_microstructure
@@ -483,15 +484,35 @@ class MarketScanner:
 
         short_results: dict[str, AnalysisResult] = {}
         analysis_failures: dict[str, str] = {}
+        short_prefilter: dict[str, dict[str, Any]] = {}
         if include_short:
+            # Fast prefilter: use the user's MACD double-line + MA5/10/20
+            # control logic to reduce the universe before the expensive core.
+            # A strict cross must pass through (touching zero difference does
+            # not count).  "FORMING" candidates are also admitted so the
+            # prefilter does not recreate the old late-signal problem.
+            for inst_id, bundle in bundles.items():
+                try:
+                    short_prefilter[inst_id] = self._macd_ma_prefilter(
+                        bundle.get("15m", [])
+                    )
+                except Exception as exc:
+                    analysis_failures[f"{inst_id}:PREFILTER"] = (
+                        f"MACD／MA 前置篩選錯誤：{exc}"
+                    )
+            prefiltered_bundles = {
+                inst_id: bundle
+                for inst_id, bundle in bundles.items()
+                if short_prefilter.get(inst_id, {}).get("passed") is True
+            }
             self._progress(
                 progress,
                 "ANALYSIS",
                 0,
-                len(bundles),
-                "正在建立 15m Market Story 與價格 Trigger",
+                len(prefiltered_bundles),
+                f"MACD／MA 初篩通過 {len(prefiltered_bundles)} 個；正在送入 15m 核心",
             )
-            for index, (inst_id, bundle) in enumerate(sorted(bundles.items()), 1):
+            for index, (inst_id, bundle) in enumerate(sorted(prefiltered_bundles.items()), 1):
                 try:
                     short_results[inst_id] = self._analyze_short_v33(
                         instrument_map[inst_id],
@@ -505,8 +526,8 @@ class MarketScanner:
                     progress,
                     "ANALYSIS",
                     index,
-                    len(bundles),
-                    "正在判定短線 15m Trigger",
+                    len(prefiltered_bundles),
+                    "正在判定 MACD／MA 候選的 15m 核心 Trigger",
                 )
 
         market_bias = (
@@ -4583,6 +4604,63 @@ class MarketScanner:
             max_signals=min(max(self.config.max_signals, 0), 20),
             api_metrics=api_metrics,
         )
+
+    @staticmethod
+    def _macd_ma_prefilter(candles: list[Candle]) -> dict[str, Any]:
+        """Cheap 15m candidate filter before the full Market Story core.
+
+        MACD is 12/26/9 and only the two-line relationship is used for the
+        crossing event.  MA5/10/20 describes short-term control.  Exact
+        equality/touching is deliberately not a cross.
+        """
+        if len(candles) < 61:
+            return {"passed": False, "state": "INSUFFICIENT", "direction": "NEUTRAL"}
+        current = features(candles)
+        previous = features(candles[:-1])
+
+        prev_diff = previous.macd_line - previous.macd_signal
+        curr_diff = current.macd_line - current.macd_signal
+        bull_cross = prev_diff < 0.0 and curr_diff > 0.0
+        bear_cross = prev_diff > 0.0 and curr_diff < 0.0
+
+        bull_ma = current.sma5 > current.sma10 > current.sma20
+        bear_ma = current.sma5 < current.sma10 < current.sma20
+        bull_ma_transition = (
+            previous.sma5 <= previous.sma10
+            and current.sma5 > current.sma10
+            and current.sma5 > current.sma20
+            and current.sma10 > current.sma20
+        )
+        bear_ma_transition = (
+            previous.sma5 >= previous.sma10
+            and current.sma5 < current.sma10
+            and current.sma5 < current.sma20
+            and current.sma10 < current.sma20
+        )
+
+        # Admit an approaching cross only when the MACD gap is shrinking in
+        # that direction and the MA stack already supports the same side.
+        bull_forming = prev_diff < 0.0 and curr_diff < 0.0 and curr_diff > prev_diff and bull_ma
+        bear_forming = prev_diff > 0.0 and curr_diff > 0.0 and curr_diff < prev_diff and bear_ma
+
+        bullish = (bull_cross and (bull_ma or bull_ma_transition)) or bull_forming
+        bearish = (bear_cross and (bear_ma or bear_ma_transition)) or bear_forming
+        if bullish and not bearish:
+            direction = "LONG"
+            state = "CONFIRMED" if bull_cross else "FORMING"
+        elif bearish and not bullish:
+            direction = "SHORT"
+            state = "CONFIRMED" if bear_cross else "FORMING"
+        else:
+            direction = "NEUTRAL"
+            state = "REJECTED"
+        return {
+            "passed": direction in {"LONG", "SHORT"},
+            "state": state,
+            "direction": direction,
+            "macd_cross": "BULL" if bull_cross else "BEAR" if bear_cross else "NONE",
+            "ma_state": "BULL" if bull_ma else "BEAR" if bear_ma else "MIXED",
+        }
 
     def _passes_output_liquidity(
         self,
