@@ -36,6 +36,7 @@ from .strategy import (
     AnalysisResult,
     StrategyConfig,
     _entry_eligibility,
+    _completed_24h_rsi,
 )
 
 
@@ -504,6 +505,7 @@ class MarketScanner:
                 inst_id: bundle
                 for inst_id, bundle in bundles.items()
                 if short_prefilter.get(inst_id, {}).get("passed") is True
+                or self.repository.load_active_signal(inst_id, "SHORT") is not None
             }
             self._progress(
                 progress,
@@ -531,7 +533,7 @@ class MarketScanner:
                 )
 
         market_bias = (
-            self._calculate_market_bias(short_results)
+            self._calculate_short_market_bias(bundles, tickers, short_results)
             if include_short
             else {}
         )
@@ -638,6 +640,7 @@ class MarketScanner:
 
         data_incomplete = bool(
             eligible and not short_results and not long_results
+            and (not bundles or bool(analysis_failures))
         )
         context_failures: dict[str, list[str]] = {}
         open_interest: dict[str, float] = {}
@@ -2987,7 +2990,7 @@ class MarketScanner:
             else "NEUTRAL"
         )
         normalized_direction = str(direction or "").upper()
-        if normalized_direction not in {"LONG", "SHORT"}:
+        if score is None or normalized_direction not in {"LONG", "SHORT"}:
             state, label, priority = "UNKNOWN", "大盤參考不足", 0
         elif market_direction == "NEUTRAL":
             state, label, priority = "NEUTRAL", "大盤中性", 1
@@ -4030,7 +4033,7 @@ class MarketScanner:
                 "flow_velocity_abnormal": flow.get("abnormal_speed"),
                 "market_driver": driver,
                 "relative_strength": driver.get("relative_strength"),
-                "market_resonance": resonance,
+                "market_resonance": self._market_resonance_meta(direction, market_bias),
                 "market_sessions": context_payload.get("sessions", {}).get("items", []),
                 "anomaly_state": anomaly_status,
                 "anomalies": [
@@ -4732,14 +4735,16 @@ class MarketScanner:
         bull_forming = prev_diff < 0.0 and curr_diff < 0.0 and curr_diff > prev_diff and bull_ma
         bear_forming = prev_diff > 0.0 and curr_diff > 0.0 and curr_diff < prev_diff and bear_ma
 
-        bullish = (bull_cross and (bull_ma or bull_ma_transition)) or bull_forming
-        bearish = (bear_cross and (bear_ma or bear_ma_transition)) or bear_forming
+        bull_continuing = curr_diff > 0.0 and bull_ma
+        bear_continuing = curr_diff < 0.0 and bear_ma
+        bullish = (bull_cross and (bull_ma or bull_ma_transition)) or bull_forming or bull_continuing
+        bearish = (bear_cross and (bear_ma or bear_ma_transition)) or bear_forming or bear_continuing
         if bullish and not bearish:
             direction = "LONG"
-            state = "CONFIRMED" if bull_cross else "FORMING"
+            state = "CONFIRMED" if bull_cross else "CONTINUING" if bull_continuing else "FORMING"
         elif bearish and not bullish:
             direction = "SHORT"
-            state = "CONFIRMED" if bear_cross else "FORMING"
+            state = "CONFIRMED" if bear_cross else "CONTINUING" if bear_continuing else "FORMING"
         else:
             direction = "NEUTRAL"
             state = "REJECTED"
@@ -4760,6 +4765,47 @@ class MarketScanner:
         # thresholds.  Those values remain visible as risk warnings.
         del item, require_context
         return True
+
+    def _calculate_short_market_bias(self, bundles, tickers, candidates):
+        """Market breadth uses every fetched market, independently of entry screening.
+
+        MA5/10/20 and MACD describe direction only; these observations never
+        become candidates or create/persist signal episodes.
+        """
+        observations = {}
+        for inst_id, bundle in bundles.items():
+            candles = [c for c in bundle.get("15m", []) if c.confirmed]
+            if len(candles) < 60:
+                continue
+            tf = features(candles)
+            direction = (
+                "LONG" if tf.sma5 > tf.sma10 > tf.sma20 and tf.macd_line > tf.macd_signal
+                else "SHORT" if tf.sma5 < tf.sma10 < tf.sma20 and tf.macd_line < tf.macd_signal
+                else "NEUTRAL"
+            )
+            ticker = tickers[inst_id]
+            state = MarketState(
+                inst_id=inst_id, regime="TREND" if direction != "NEUTRAL" else "RANGE",
+                direction=direction, preferred_strategy="NONE", readiness_score=0.0,
+                status="WATCH", missing_conditions=[], spread_pct=ticker.spread_pct,
+                quote_volume_24h=ticker.quote_volume_24h or 0.0,
+                closed_candle_ts=candles[-1].ts,
+                market_metrics={
+                    "rsi_core": tf.rsi14,
+                    "rsi_24h": _completed_24h_rsi(bundle.get("1H", [])),
+                    "price_change_core_pct": (candles[-1].close / candles[-2].close - 1) * 100
+                    if candles[-2].close > 0 else None,
+                },
+            )
+            candidate = candidates.get(inst_id)
+            observations[inst_id] = AnalysisResult(
+                signal=candidate.signal if candidate else None,
+                reason="MARKET_CONTEXT_ONLY", market_state=state,
+            )
+        bias = self._calculate_market_bias(observations)
+        if not observations:
+            bias.update(score=None, label="資料不足")
+        return bias
 
     def _calculate_market_bias(self, results: dict[str, object]) -> dict[str, object]:
         states = [

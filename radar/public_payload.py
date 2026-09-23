@@ -433,6 +433,13 @@ def _public_metrics(
     include_order_book_reason: bool = False,
 ) -> dict[str, Any]:
     payload = _select(metrics, fields)
+    resonance = _select(_read(metrics, "market_resonance", {}), (
+        "state", "label", "priority", "market_direction", "market_bias_score",
+        "policy", "affects_trigger",
+    ))
+    if resonance:
+        payload["market_resonance"] = resonance
+
     if include_order_book_reason:
         sequence = _select(
             _read(metrics, "order_book_sequence", {}),

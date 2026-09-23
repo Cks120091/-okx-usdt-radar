@@ -652,7 +652,7 @@ class V33ContractTests(unittest.TestCase):
         self.assertNotIn("liveReady=activeShort.filter(itemCurrentEntryReady)", report)
         self.assertNotIn("itemWasEntryReady", report)
         self.assertIn(
-            "'本輪沒有 15m 訊號已觸發。',shortReadOnlyReason",
+            "'本輪沒有 15m 訊號已觸發或趨勢延續預備。',shortReadOnlyReason",
             report,
         )
         self.assertIn("'目前沒有 4H 長線訊號已觸發。',longReadOnlyReason", report)
