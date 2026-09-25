@@ -3555,8 +3555,13 @@ class MarketScanner:
                 signal.entry_eligibility.get("status"),
                 0,
             )
-        continuation_priority = int(
+        # Ranking policy: execution quality leads.  Continuation receives a
+        # bonus only when it is also a high-quality executable setup; it must
+        # not outrank a better-quality reversal/breakout merely by trigger type.
+        high_execution_quality = int(execution_score >= 75.0)
+        continuation_high_quality_priority = int(
             str(signal.trigger_type or "").upper() == "CONTINUATION"
+            and high_execution_quality == 1
             and final_status == "ENTER"
             and str(signal.direction or "").upper() in {"LONG", "SHORT"}
         )
@@ -3567,11 +3572,12 @@ class MarketScanner:
             else 0
         )
         return (
-            continuation_priority,
             permission_priority,
             status_priority,
-            resonance_priority,
+            high_execution_quality,
+            continuation_high_quality_priority,
             execution_score,
+            resonance_priority,
             freshness_timestamp,
             freshness_priority.get(signal.freshness, 0),
             -int(signal.lifecycle.get("age_bars", 0) or 0),
