@@ -1,4 +1,4 @@
-const SHELL_CACHE = "okx-radar-shell-v4.17-signal-position-separated";
+const SHELL_CACHE = "okx-radar-shell-v4.18-trigger-badge-scroll-fix";
 const SHELL_ASSETS = ["/", "/manifest.webmanifest", "/radar-icon.svg"];
 
 self.addEventListener("install", event => {
