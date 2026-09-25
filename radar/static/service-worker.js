@@ -1,4 +1,4 @@
-const SHELL_CACHE = "okx-radar-shell-v4.19-single-scan-ios-scroll";
+const SHELL_CACHE = "okx-radar-shell-v4.20-zh-labels";
 const SHELL_ASSETS = ["/", "/manifest.webmanifest", "/radar-icon.svg"];
 
 self.addEventListener("install", event => {
