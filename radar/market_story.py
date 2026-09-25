@@ -225,6 +225,7 @@ class MarketStoryEngine:
                 confirmation_window,
                 self.early_signal_max_age_bars,
                 self.max_early_entry_extension_atr,
+                price_action_trigger=(horizon == "SHORT"),
             )
             for candidate_direction in ("LONG", "SHORT")
         }
@@ -1280,6 +1281,7 @@ def _trigger_candidate(
     confirmation_window: int,
     early_signal_max_age_bars: int,
     max_early_entry_extension_atr: float,
+    price_action_trigger: bool = False,
 ) -> dict[str, Any]:
     is_long = direction == "LONG"
     side_zone = zones.get("support" if is_long else "resistance")
@@ -1309,33 +1311,51 @@ def _trigger_candidate(
     bias_aligned = bias_score >= 55.0 if is_long else bias_score <= 45.0
     compression_block = compression.get("blocks_direction") == direction
 
+    # SHORT horizon: 1H MA/MACD lives in tf_bias and sets directional bias.
+    # The 15m core Trigger is price-action first; its own MA/MACD remains
+    # telemetry only and must not delay REVERSAL / BREAKOUT / CONTINUATION.
+    price_control_transferred = bool(
+        control["push_away"]
+        and (
+            control["micro_defense_broken"]
+            or acceptance["state"] in ("ACCEPTED", "ROLE_REVERSAL_RETEST")
+        )
+        and not control["opponent_reclaimed"]
+    )
+    trigger_control = (
+        price_control_transferred if price_action_trigger else bool(control["transferred"])
+    )
     reversal = (
         at_reversal_zone
         and rejection
         and opponent_declining
-        and bool(control["transferred"])
-        and bool(momentum["confirmed"])
+        and trigger_control
+        and (price_action_trigger or bool(momentum["confirmed"]))
         and not compression_block
     )
     full_breakout = (
         acceptance["state"] in ("ACCEPTED", "ROLE_REVERSAL_RETEST")
-        and bool(control["transferred"])
-        and bool(momentum["confirmed"])
+        and trigger_control
+        and (price_action_trigger or bool(momentum["confirmed"]))
     )
     early_breakout = (
         acceptance["state"] in ("BREAKING", "ACCEPTED")
         and float(acceptance.get("excursion_atr", 0.0)) >= 0.05
         and bool(control["push_away"])
         and bool(control["micro_defense_broken"])
-        and bool(momentum["partial"])
+        and (price_action_trigger or bool(momentum["partial"]))
     )
     breakout = full_breakout or early_breakout
     continuation = (
         bias_aligned
         and pullback["reactivated"]
         and bool(control["push_away"])
-        and bool(momentum["partial"])
-        and (bool(control["micro_defense_broken"]) or bool(momentum["confirmed"]))
+        and (price_action_trigger or bool(momentum["partial"]))
+        and (
+            bool(control["micro_defense_broken"])
+            or (not price_action_trigger and bool(momentum["confirmed"]))
+        )
+        and not control["opponent_reclaimed"]
         and not compression_block
     )
     # PRE_CONTINUATION is watch-only: the trend and pullback setup exist, but
@@ -1554,6 +1574,8 @@ def _trigger_candidate(
         supporting.append(momentum["label"])
     elif momentum["partial"]:
         neutral.append(momentum["label"])
+    elif price_action_trigger:
+        neutral.append("15m MA／MACD 僅供觀察；短線 Trigger 由 1H 方向＋15m 價格行為決定")
     else:
         conflicts.append("MA／MACD 尚未在合理窗口呼應")
     if compression_block:
@@ -1630,7 +1652,12 @@ def _trigger_candidate(
         "neutral": _unique(neutral),
         "noise": noise,
         "explainability_score": explainability_score,
-        "permission_note": "Trigger 只由核心價格事實決定；Context 與 Execution Quality 無權取消。",
+        "trigger_model": "1H_BIAS_15M_PRICE_ACTION" if price_action_trigger else "CORE_PRICE_PLUS_MOMENTUM",
+        "permission_note": (
+            "15m 短線：1H MA／MACD 定方向，15m 價格行為建立 Trigger；15m MA／MACD 僅供觀察。"
+            if price_action_trigger
+            else "Trigger 只由核心價格事實決定；Context 與 Execution Quality 無權取消。"
+        ),
     }
 
 
