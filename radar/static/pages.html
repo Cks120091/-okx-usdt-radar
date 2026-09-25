@@ -1227,7 +1227,7 @@
       function row(item,index){
         const m=item.market_metrics||{},expired=isExpiredSnapshot(item),preview=isPreviewItem(item),readOnlyReason=preview?null:itemReadOnlyReason(item),ready=isReady(item),formal=Boolean(item?.trigger_id),snapshot=formal?itemSnapshotEntryState(item):null,readiness=item.readiness_score??item.score,execution=item.execution_quality?.score;
         const state=formal?snapshot.label:'接近觸發';
-        const stage=preview?'深度資料掃描中 · 不可進':readOnlyReason?'上一輪保留結果 · 只供參考':formal?`訊號已觸發 · ${freshnessName[item.freshness]||stageName[item.signal_stage]||'有效中'}`:(stageName[item.signal_stage||item.status]||'接近觸發');
+        const stage=preview?'深度資料掃描中 · 不可進':readOnlyReason?'上一輪保留結果 · 只供參考':formal?`訊號已觸發｜${entryReasonLabel(item)} · ${freshnessName[item.freshness]||stageName[item.signal_stage]||'有效中'}`:(stageName[item.signal_stage||item.status]||'接近觸發');
         const primary=formal?execution:readiness,primaryLabel=formal?'交易品質':'訊號準備度';
         const action=ready?`<div class="quick-links">${preflightActions(item.inst_id,item.radar_horizon||'SHORT',item)}</div>`:'';
         return `<div class="rank-row ${ready?'entry-ready':'watch-only'}"><div class="rank-main"><div class="rank-title-line"><div class="rank-symbol">${index+1}. ${esc(displaySymbol(item.inst_id))}</div><span class="rank-state ${ready?'ready':'watch'}">${state}</span></div><div class="rank-meta">${expired?'過期快照 · ':''}${esc(stage)} · 進場理由：${esc(entryReasonLabel(item))} · ${price(m.last_price,item)} · 1H ${signed(m.price_change_1h_pct)}</div>${action}</div><div class="card-actions">${favoriteButton(item.inst_id)}<div class="rank-score">${num(primary,0)}<small>${primaryLabel}</small></div></div></div>`;
@@ -1477,7 +1477,7 @@
       const horizon=item.radar_horizon==='LONG'?'LONG':'SHORT',decision=itemDecisionContext(item),final=decision.final||{},position=final.position_advisory||{},terminal=terminalSignalOutcome(item),preview=isPreviewItem(item),readOnly=itemReadOnlyReason(item),expired=isExpiredSnapshot(item),snapshot=itemSnapshotEntryState(item);
       const active=!terminal&&!preview&&!readOnly&&!expired&&final.status==='ENTER'&&final.new_entry_allowed===true;
       const side=item.direction==='LONG'?'做多':item.direction==='SHORT'?'做空':'方向待確認';
-      const label=terminal?(terminal==='TAKE_PROFIT'?'止盈已達｜計畫結束':terminal==='STOP_LOSS'?'止損已達｜訊號失效':'計畫已關閉'):preview?'訊號建立中':expired?'資料已過期｜請重新掃描':readOnly?snapshot.label:active?side+'訊號已觸發':final.label||snapshot.label;
+      const label=terminal?(terminal==='TAKE_PROFIT'?'止盈已達｜計畫結束':terminal==='STOP_LOSS'?'止損已達｜訊號失效':'計畫已關閉'):preview?'訊號建立中':expired?'資料已過期｜請重新掃描':readOnly?snapshot.label:active?side+'訊號已觸發｜'+entryReasonLabel(item):final.label||snapshot.label;
       const reason=terminal?'舊計畫僅供紀錄，不可再次沿用。':preview?'等待本輪掃描完成。':expired||readOnly?snapshot.detail:active?(position.note||'可進位置是參考區間，不是訊號成立條件。'):(final.wait_reason?.label||final.reasons?.[0]||snapshot.detail);
       const metrics=item.market_metrics||{},executionPrice=metricNumber(metrics.entry_execution_price)??metricNumber(metrics.last_price),source=String(metrics.entry_execution_price_source||'').toUpperCase(),executionLabel=source==='ASK'?'掃描快照 Ask（買入參考）':source==='BID'?'掃描快照 Bid（賣出參考）':'掃描快照價格';
       const maturity=final.swing_maturity||{},matureNote=active&&maturity.state==='MATURE'?'<small class="signal-position-note">行情已'+(item.direction==='SHORT'?'跌':'漲')+'一段，追價風險較高（僅提醒）。</small>':'';
