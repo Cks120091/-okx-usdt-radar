@@ -1346,6 +1346,17 @@ def _trigger_candidate(
         and (price_action_trigger or bool(momentum["partial"]))
     )
     breakout = full_breakout or early_breakout
+    # Breakout-retest is a distinct second-leg setup: price first closed beyond
+    # the breakout boundary, then a later closed bar retested that boundary and
+    # held the role-reversal zone before price resumed in the breakout direction.
+    breakout_retest = bool(
+        acceptance["state"] == "ROLE_REVERSAL_RETEST"
+        and acceptance.get("retested")
+        and trigger_control
+        and bool(control["push_away"])
+        and not control["opponent_reclaimed"]
+        and not compression_block
+    )
     continuation = (
         bias_aligned
         and pullback["reactivated"]
@@ -1434,8 +1445,14 @@ def _trigger_candidate(
             pre_trigger_missing.append("MA／MACD 完整確認")
 
     pre_trigger = pre_trigger_type != "NONE"
-    triggered = bool(reversal or breakout or continuation)
-    trigger_type = "REVERSAL" if reversal else "BREAKOUT" if breakout else "CONTINUATION" if continuation else "NONE"
+    triggered = bool(reversal or breakout_retest or breakout or continuation)
+    trigger_type = (
+        "REVERSAL" if reversal
+        else "BREAKOUT_RETEST" if breakout_retest
+        else "BREAKOUT" if breakout
+        else "CONTINUATION" if continuation
+        else "NONE"
+    )
     momentum_index = int(momentum.get("event_index", 0))
     acceptance_index = int(acceptance.get("event_index", 0))
     pullback_confirmation_index = (
@@ -1443,10 +1460,10 @@ def _trigger_candidate(
     )
     confirmation_index = max(
         momentum_index,
-        acceptance_index if breakout else 0,
+        acceptance_index if (breakout or breakout_retest) else 0,
         pullback_confirmation_index,
     )
-    if breakout:
+    if breakout or breakout_retest:
         onset_indices = [
             index
             for index in (acceptance_index, momentum_index)
@@ -1472,7 +1489,7 @@ def _trigger_candidate(
         full = False
     entry_reference = (
         acceptance.get("boundary")
-        if breakout
+        if (breakout or breakout_retest)
         else pullback.get("reference_price")
         if continuation
         else side_zone.center
