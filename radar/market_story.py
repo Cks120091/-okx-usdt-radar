@@ -1351,7 +1351,7 @@ def _trigger_candidate(
     # held the role-reversal zone before price resumed in the breakout direction.
     breakout_retest = bool(
         acceptance["state"] == "ROLE_REVERSAL_RETEST"
-        and acceptance.get("retested")
+        and acceptance.get("breakout_retest_confirmed")
         and trigger_control
         and bool(control["push_away"])
         and not control["opponent_reclaimed"]
@@ -1728,17 +1728,54 @@ def _price_acceptance(
         if current_outside and not prior_outside:
             event_index = index
     retested = False
+    breakout_departed = False
+    retest_index = 0
+    reactivation_index = 0
     if outside and event_index:
-        # A breakout candle cannot also prove a later role-reversal retest; OHLC
-        # has no intrabar ordering. Require at least one subsequent closed bar.
-        for candle in candles[event_index + 1 :]:
-            touched = candle.low <= zone.upper if is_long else candle.high >= zone.lower
-            held = candle.close > zone.center if is_long else candle.close < zone.center
-            if touched and held:
-                retested = True
+        # Reconstruct the sequence from closed historical candles every scan:
+        # BREAKOUT -> meaningful departure -> later retest -> hold -> re-acceleration.
+        # This does not depend on a previous radar run having observed the breakout.
+        departure_distance = max(float(atr_value) * 0.10, abs(zone.upper - zone.lower) * 0.25)
+        departure_index = 0
+        for index in range(event_index + 1, len(candles)):
+            candle = candles[index]
+            departed = (
+                candle.high >= boundary + departure_distance
+                if is_long
+                else candle.low <= boundary - departure_distance
+            )
+            if departed:
+                breakout_departed = True
+                departure_index = index
                 break
-    if outside and retested:
-        state, label = "ROLE_REVERSAL_RETEST", "突破後角色轉換回踩守住"
+        if breakout_departed:
+            for index in range(departure_index + 1, len(candles)):
+                candle = candles[index]
+                touched = candle.low <= boundary if is_long else candle.high >= boundary
+                held = candle.close > zone.center if is_long else candle.close < zone.center
+                if touched and held:
+                    retested = True
+                    retest_index = index
+                    break
+        if retested and retest_index < len(candles) - 1:
+            retest_candle = candles[retest_index]
+            retest_defense = retest_candle.high if is_long else retest_candle.low
+            for index in range(retest_index + 1, len(candles)):
+                candle = candles[index]
+                resumed = (
+                    candle.close > retest_defense
+                    if is_long
+                    else candle.close < retest_defense
+                )
+                still_holding = candle.close > zone.center if is_long else candle.close < zone.center
+                if resumed and still_holding:
+                    reactivation_index = index
+                    break
+    breakout_retest_confirmed = bool(
+        outside and breakout_departed and retested and reactivation_index > retest_index > event_index
+    )
+    if breakout_retest_confirmed:
+        state, label = "ROLE_REVERSAL_RETEST", "先突破、離開、回踩守住後再次發動"
     elif outside and (previous_outside or excursion >= 0.12):
         state, label = "ACCEPTED", "Zone 外新價格獲得接受"
     elif outside:
@@ -1754,6 +1791,10 @@ def _price_acceptance(
         "event_index": event_index,
         "excursion_atr": round(excursion, 3),
         "retested": retested,
+        "breakout_departed": breakout_departed,
+        "retest_index": retest_index,
+        "reactivation_index": reactivation_index,
+        "breakout_retest_confirmed": breakout_retest_confirmed,
         "sweep": swept,
     }
 
