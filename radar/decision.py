@@ -262,7 +262,7 @@ def _timeframe_direction_alignment(item, direction):
         "reason": (
             f"{direction_tf} {('偏多' if direction == 'LONG' else '偏空')}與 {trigger_tf} Trigger 同向。"
             if passed
-            else f"{direction_tf} 目前為 {timeframe_direction}，未與 {trigger_tf} {direction} Trigger 同向。"
+            else f"{direction_tf} 目前為 {timeframe_direction}（{'做多' if timeframe_direction == 'LONG' else '做空' if timeframe_direction == 'SHORT' else '中性' if timeframe_direction == 'NEUTRAL' else '方向待確認'}），未與 {trigger_tf} {direction}（{'做多' if direction == 'LONG' else '做空' if direction == 'SHORT' else '方向待確認'}）Trigger（價格觸發）同向。"
         ),
     }
 
