@@ -543,6 +543,9 @@
     .intraday-dialog[open]{display:flex;flex-direction:column;overflow:hidden;height:min(860px,calc(100dvh - 24px - env(safe-area-inset-top) - env(safe-area-inset-bottom)))}
     .intraday-dialog-head{flex:0 0 auto}
     #singleScanContent{flex:1 1 auto;height:0;min-height:0;max-height:none;overflow-y:scroll!important;overflow-x:hidden;touch-action:pan-y;overscroll-behavior-y:contain;-webkit-overflow-scrolling:touch}
+    .intraday-dialog{box-sizing:border-box}
+    .intraday-dialog[open]{position:fixed;inset:0;box-sizing:border-box;max-width:none!important;max-height:none!important;width:100vw!important;height:100dvh!important;margin:0!important;border-radius:0!important}
+    #singleScanContent{position:relative;display:block;flex:1 1 0!important;height:auto!important;min-height:0!important;overflow-y:auto!important;overflow-x:hidden!important;touch-action:auto!important;overscroll-behavior:auto!important;-webkit-overflow-scrolling:touch!important;padding-bottom:calc(40px + env(safe-area-inset-bottom))!important}
     .preflight-shell{min-width:0;scroll-padding-block:16px}
     .preflight-top .preflight-back{flex-shrink:0}
     .preflight-section-head,.history-group-head,.history-head,.history-event-head{flex-wrap:wrap}
@@ -1656,6 +1659,7 @@
         const data=await api('/api/instrument/scan',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({inst_id:instId,horizon,direction_lock:direction}),signal:controller.signal});
         if(sequence!==singleScanSequence||!dialog.open)return;
         const result=horizon==='LONG'?data.long:data.short,item=result?.item;
+        box.scrollTop=0;
         box.innerHTML=`<p class="intraday-note">本次更新 ${esc(taiwanTime(data.analyzed_at))}；${direction?'原卡方向固定，不會直接翻向。':'只掃此幣，不清空另一個雷達。'}</p>${item?`<div class="badges">${directionBadge(item)} · ${esc(stageName[item.signal_stage||item.status]||'觀察')}</div>${item.entry_low?decisionPanel(item):`${primaryReasons(item,result.message||'尚未形成正式價格事件')}`}${itemDataPage(item)}`:`<p>${esc(result?.message||'核心資料不足')}</p>`}${result?.opposite_warning?`<p class="entry-callout wait">${esc(result.opposite_warning.message)}</p>`:''}${intradayFlowPanel(data.cross_timeframe,item?.direction||direction||'NEUTRAL')}${exitReviewPanel(result?.exit_review,item||{})}`;
       }catch(error){if(sequence===singleScanSequence&&dialog.open)box.textContent=error.name==='AbortError'?'本次查詢逾時；未冒充取得新資料。':error.message}
       finally{clearTimeout(timer);singleScanBusy=false}
