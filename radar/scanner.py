@@ -3574,8 +3574,8 @@ class MarketScanner:
             else 0
         )
         return (
-            continuation_high_quality_priority,
             execution_score,
+            continuation_high_quality_priority,
             permission_priority,
             status_priority,
             resonance_priority,
