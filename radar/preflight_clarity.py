@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 from .position_advisory import ACTIVE_SIGNAL_STAGES, mapping, number
+from .early_warning import preflight_early_warning
 
 COMPONENTS = {
     "entry_location": "進場位置",
@@ -106,4 +107,5 @@ def explain_preflight(signal, payload):
         "execution_at": live.get("execution_sampled_at"),
     }
     result["quality_explanation"] = _quality_explanation(signal, payload)
+    result["early_warning"] = preflight_early_warning(signal, payload)
     return result

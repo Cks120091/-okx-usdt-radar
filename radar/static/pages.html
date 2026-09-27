@@ -656,6 +656,8 @@
     .back-to-top[hidden]{display:none}.back-to-top:focus-visible{outline:2px solid #8bbfff;outline-offset:3px}
     .preflight-quality-explanation{margin-top:10px;padding-top:9px;border-top:1px solid var(--line);font-size:12px;line-height:1.6;color:var(--muted)}
     .preflight-quality-explanation summary{cursor:pointer;color:#bdcddd}.preflight-quality-explanation p{font-size:12px;margin-top:5px;color:var(--muted)}
+    .preflight-early-warning{margin-top:12px;padding-left:10px;border-left:2px solid #d1ad68;font-size:12px;line-height:1.6;color:#d8c9a8;overflow-wrap:anywhere}
+    .preflight-early-warning b{font-size:11px;color:#dec184}.preflight-early-warning p{margin:3px 0;font-size:12px}.preflight-early-warning small{display:block;font-size:10px;color:var(--muted)}
 </style>
   <link rel="stylesheet" href="/history-replay.css">
   <script src="/history-replay.js"></script>
@@ -1787,6 +1789,13 @@ renderSignals(quality80,'#quality80Box','本輪沒有交易品質 80 分以上�
       const quote=Object.hasOwn(times,'quote_at')?times.quote_at:live.quote_sampled_at;
       return {quote:quote?taiwanTime(quote):'時間未提供',core:(times.core_scan_at||original.report_generated_at)?taiwanTime(times.core_scan_at||original.report_generated_at):'掃描時間未提供',execution:times.execution_at?taiwanTime(times.execution_at):'時間未提供'};
     }
+    function preflightEarlyWarning(data){
+      const warning=data.early_warning;
+      if(preflightResponseTerminal(data)||!warning?.text||warning.advisory_only!==true)return '';
+      const source=warning.source==='SINGLE_SCAN'?'本次單幣掃描':'最近掃描';
+      const time=warning.scan_at?taiwanTime(warning.scan_at):'掃描時間未提供';
+      return `<div class="preflight-early-warning"><b>${source}提醒 · 僅供觀察</b><p>${esc(warning.text)}</p><small>依據 ${esc(time)}（台灣 UTC+8）</small></div>`;
+    }
     function renderPreflight(data){
       const verdict=data.verdict||{},lifecycle=data.signal_lifecycle||{status:'ACTIVE'},presentation=preflightPresentation(data),original=preflightOriginalPlan(data),live=data.live||{},execution=data.execution||{},liquidity=execution.liquidity_policy||{},quality=data.data_quality||{},warnings=data.warnings||[],direction=directionName[data.direction]||data.direction,isNewPlan=data.reanalysis?.status==='NEW_ENTRY_OPPORTUNITY',positionMetric=preflightPositionMetric(data),riskMetric=preflightRiskMetric(data),archived=preflightResponseTerminal(data),detailsOpen='',executionPriceLabel=live.price_source==='BEST_ASK'?'本次進場前更新價格｜Ask（賣方報價／買入參考）':live.price_source==='BEST_BID'?'本次進場前更新價格｜Bid（買方報價／賣出參考）':'本次進場前更新價格';
       $('#preflightTitle').textContent=`${displaySymbol(data.inst_id)} · ${data.horizon_label}`;
@@ -1797,6 +1806,7 @@ renderSignals(quality80,'#quality80Box','本輪沒有交易品質 80 分以上�
           <div class="preflight-state-row"><span class="preflight-entry-caption">訊號生命週期</span><span class="preflight-lifecycle ${preflightSignalClass(lifecycle.status)}">${esc(presentation.lifecycle)}</span></div>
           <h2>${esc(presentation.label)}</h2>
           <p>${esc(presentation.detail)}</p>
+          ${preflightEarlyWarning(data)}
           ${preflightQualityExplanation(data)}
           ${isNewPlan?'<p class="preflight-guide-note"><b>這是重新分析後產生的全新 Trigger（價格觸發）與交易計畫；舊計畫沒有被沿用。</b></p>':''}
           <div class="preflight-live-price"><span>${esc(executionPriceLabel)}</span><b>${price(live.price,original)}</b><small>按下更新時重新向 OKX 取得 · 報價時間（台灣 UTC+8）${esc(dataTimes.quote)} · 不是持續即時報價</small></div>

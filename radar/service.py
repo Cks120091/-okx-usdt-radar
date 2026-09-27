@@ -26,6 +26,7 @@ from .continuation import ALGORITHM_VERSION, observer_schedule
 from .models import RadarReport
 from .price_display import signal_plan_display_fields
 from .preflight import build_preflight_payload
+from .early_warning import preflight_early_warning
 from .public_payload import (
     public_candidate_payload,
     public_capital_flow_payload,
@@ -2955,6 +2956,13 @@ class RadarRuntime:
                         preflight,
                         confirmation or {},
                     )
+                    if horizon == "SHORT":
+                        # Explain the current scan, not the frozen original
+                        # episode's old 15m observation or report timestamp.
+                        preflight["early_warning"] = preflight_early_warning(
+                            latest_item, preflight, scan_at=analysis.analyzed_at,
+                            source="SINGLE_SCAN",
+                        )
                     preflight = _record_preflight_entry_window(
                         getattr(self.scanner, "repository", None), stored_signal, preflight,
                         int(analysis.ticker.ts or time.time() * 1000),

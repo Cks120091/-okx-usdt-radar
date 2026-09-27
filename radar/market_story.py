@@ -7,6 +7,7 @@ from typing import Any
 from .indicators import TimeframeFeatures, atr, ema_series, features
 from .models import Candle, MarketContext
 from .short_direction import POLICY as SHORT_DIRECTION_POLICY, hourly_direction
+from .early_warning import short_scan_observation
 
 
 STRATEGY_VERSION = "V3.4_CONTEXT"
@@ -569,6 +570,12 @@ class MarketStoryEngine:
             "core_return_pct": _pct_change(core_candles[-1].close, core_candles[-2].close),
             "noise": selected.get("noise", {}),
         }
+        if hourly is not None:
+            raw["early_observation"] = short_scan_observation(
+                hourly, candidates,
+                closed=bool(core_candles[-1].confirmed and bias_candles[-1].confirmed),
+                max_age_bars=self.early_signal_max_age_bars,
+            )
         selected.setdefault(
             "trigger_event_key",
             _trigger_event_key(horizon, trigger_direction, selected),

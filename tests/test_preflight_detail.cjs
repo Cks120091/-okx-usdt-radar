@@ -17,7 +17,7 @@ function env(payload){
     api:async()=>payload,renderPreflight:data=>ctx.rendered=data,refreshPreflightHistoryRate(){},loadReport:async()=>{ctx.terminalRefreshes=(ctx.terminalRefreshes||0)+1;},
     $:selector=>{if(!elements.has(selector))elements.set(selector,node());return elements.get(selector);}};
   vm.createContext(ctx);
-  for(const name of ['preflightQualityScore','preflightQualityComparison','preflightCoreReason','preflightPresentation','preflightQualityExplanation','preflightDataTimes','preflightTerminalKind','preflightResponseTerminal','loadPreflight'])vm.runInContext(source(name),ctx);
+  for(const name of ['preflightQualityScore','preflightQualityComparison','preflightCoreReason','preflightPresentation','preflightQualityExplanation','preflightDataTimes','preflightEarlyWarning','preflightTerminalKind','preflightResponseTerminal','loadPreflight'])vm.runInContext(source(name),ctx);
   return ctx;
 }
 const payload={inst_id:'CFX-USDT-SWAP',trigger_id:'cfx-1',horizon:'SHORT',direction:'LONG',entry_policy_version:'SIGNAL_POSITION_SEPARATED_V1',original:{quality_score:90},live:{quality_score:65,price:.05669},verdict:{status:'HARD_GATE_BLOCKED',new_entry_allowed:false,label:'核心訊號條件未成立',reason:'核心條件：NO_FORMAL_TRIGGER',hard_blockers:['NO_FORMAL_TRIGGER']},signal_lifecycle:{status:'ACTIVE',terminal:false}};
@@ -78,6 +78,15 @@ async function test(name,fn){await fn();passed++;console.log('PASS '+name);}
   await test('quality reason content is escaped and original missing details are explicit',()=>{
     const c=env(payload),out=c.preflightQualityExplanation({quality_explanation:{mode:'CURRENT_ONLY',reasons:['<script>'],note:'原品質明細未保存'}});
     assert.ok(!out.includes('<script>'));assert.ok(out.includes('原品質明細未保存'));
+  });
+  await test('scan warning is escaped, tied to its source time and hidden on terminal plans',()=>{
+    const c=env(payload),data={...payload,early_warning:{text:'1H 仍偏多 <script>',advisory_only:true,source:'STORED_SCAN',scan_at:'original-scan'}};
+    const out=c.preflightEarlyWarning(data);
+    assert.ok(out.includes('最近掃描提醒'));assert.ok(out.includes('僅供觀察'));assert.ok(out.includes('original-scan'));assert.ok(!out.includes('<script>'));
+    assert.ok(c.preflightEarlyWarning({...data,early_warning:{...data.early_warning,source:'SINGLE_SCAN',scan_at:null}}).includes('掃描時間未提供'));
+    assert.equal(c.preflightEarlyWarning({...data,signal_lifecycle:{status:'INVALIDATED',terminal:true}}),'');
+    assert.equal(c.preflightEarlyWarning({...payload,early_warning:{}}),'');
+    assert.equal(data.verdict.new_entry_allowed,false);
   });
   console.log(`${passed} preflight detail regressions passed`);
 })().catch(error=>{console.error(error);process.exitCode=1;});
