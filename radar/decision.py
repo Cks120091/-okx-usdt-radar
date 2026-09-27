@@ -220,7 +220,7 @@ def _timeframe_direction_alignment(item, direction):
     """Require the direction timeframe to agree with the formal Trigger.
 
     SHORT: completed 1H direction + 15m Trigger; 4H is background.
-    LONG: completed 1D direction + 4H Trigger; 1H is timing context.
+    LONG: completed 1D macro direction + 4H setup + 1H Trigger.
     The hidden fusion consolidates correlated EMA/RSI/MACD observations.
     """
     horizon = str(_core._read(item, "radar_horizon", "SHORT")).upper()
@@ -228,7 +228,7 @@ def _timeframe_direction_alignment(item, direction):
         return {"required": False, "passed": True, "state": "NOT_APPLICABLE"}
 
     direction_tf = "1H" if horizon == "SHORT" else "1D"
-    trigger_tf = "15m" if horizon == "SHORT" else "4H"
+    trigger_tf = "15m" if horizon == "SHORT" else "1H"
     metrics = _core._mapping(_core._read(item, "market_metrics", {}))
     raw = _core._mapping(metrics.get("raw_indicators", {}))
     frame = _core._mapping(raw.get(direction_tf, {}))
