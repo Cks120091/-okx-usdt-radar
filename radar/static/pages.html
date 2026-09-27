@@ -1401,7 +1401,7 @@ renderSignals(quality80,'#quality80Box','本輪沒有交易品質 80 分以上�
       if(isTerminalSignal(item))return '<span class="badge missed-entry-b">交易已結束</span>';
       return `<span class="badge triggered-signal-b">⚡ 訊號已觸發</span>${triggerKindBadge(item)}${stageBadge(item)}`
     }
-    function signalSecondaryMeta(item){const fresh=item.freshness||'NONE',freshLabel=freshnessName[fresh]||fresh,episode=item.lifecycle?.transition,episodeLabel={UPGRADED:'本輪增強',NEW:'新訊號週期',DOWNGRADED:'本輪轉弱',REACTIVATED:'重新啟動'}[episode],frame=item.radar_horizon==='LONG'?'4H':'15m',rsi=metricNumber(item.market_metrics?.rsi_core),res=item.market_metrics?.market_resonance,resLabel=res&&typeof res==='object'?res.label:null,parts=[freshLabel];if(resLabel)parts.push(resLabel);if(rsi!==null)parts.push(`${frame} RSI（相對強弱指標） ${num(rsi,1)}`);if(episodeLabel)parts.push(episodeLabel);return parts.map((value,index)=>index===0?`<strong>${esc(value)}</strong>`:esc(value)).join(' · ')}
+    function signalSecondaryMeta(item){const preflight=item.preflight_snapshot||{},fresh=item.freshness||'NONE',freshLabel=preflight.development||freshnessName[fresh]||fresh,episode=item.lifecycle?.transition,episodeLabel={UPGRADED:'本輪增強',NEW:'新訊號週期',DOWNGRADED:'本輪轉弱',REACTIVATED:'重新啟動'}[episode],frame=item.radar_horizon==='LONG'?'1H':'15m',rsi=metricNumber(item.market_metrics?.rsi_core),res=item.market_metrics?.market_resonance,resLabel=res&&typeof res==='object'?res.label:null,parts=[freshLabel];if(resLabel)parts.push(resLabel);if(rsi!==null)parts.push(`${frame} RSI（相對強弱指標） ${num(rsi,1)}`);if(episodeLabel)parts.push(episodeLabel);return parts.map((value,index)=>index===0?`<strong>${esc(value)}</strong>`:esc(value)).join(' · ')}
     function isExpiredSnapshot(item){if(isTerminalSignal(item))return false;if(itemReadOnlyReason(item)==='STALE')return true;const horizon=item?.radar_horizon==='LONG'?'LONG':'SHORT',freshness=state.report?.horizon_freshness?.[horizon];if(freshness?.available)return freshness.expired===true;return state.report?.snapshot_expired===true||state.report?.runtime_status==='STALE'||state.status?.system_status==='STALE'}
     function expiredSnapshotBadge(item){return isExpiredSnapshot(item)?'<span class="badge invalid-b">⏱ 資料已過期</span>':''}
     function readOnlyReferenceBadge(item){const reason=itemReadOnlyReason(item);if(!reason||reason==='STALE'||reason==='CORE_PREVIEW')return '';const label=reason==='SCANNING'?'本輪掃描中':reason==='ERROR'?'本輪更新失敗':'只供參考';return `<span class="badge ${reason==='ERROR'?'invalid-b':'preview-b'}">${esc(label)}</span>`}
@@ -1754,6 +1754,14 @@ renderSignals(quality80,'#quality80Box','本輪沒有交易品質 80 分以上�
         updated.market_metrics.entry_execution_price=livePrice;
         updated.market_metrics.entry_execution_price_source=live.price_source==='BEST_ASK'?'ASK':live.price_source==='BEST_BID'?'BID':live.price_source||'PREFLIGHT';
       }
+      const triggerPrice=metricNumber(original.trigger_price??original.market_story?.trigger?.event_price),atr=metricNumber(original.market_story?.trigger?.event_atr),dir=String(original.direction||'').toUpperCase(),move=livePrice!==null&&triggerPrice!==null?(dir==='SHORT'?triggerPrice-livePrice:livePrice-triggerPrice):null,moveAtr=move!==null&&atr!==null&&atr>0?move/atr:null,entryLow=metricNumber(original.entry_low),entryHigh=metricNumber(original.entry_high),inEntry=livePrice!==null&&entryLow!==null&&entryHigh!==null&&livePrice>=Math.min(entryLow,entryHigh)&&livePrice<=Math.max(entryLow,entryHigh),status=String(verdict.status||'').toUpperCase();
+      let development='持續觀察';
+      if(preflightResponseTerminal(data))development='交易計畫已結束';
+      else if(['INVALIDATED','STOP_LOSS'].includes(status))development='❌ 原訊號已失效';
+      else if(status==='NO_CHASE'||(moveAtr!==null&&moveAtr>0.5))development='⏳ 原方向已延伸｜不追價';
+      else if(inEntry)development='🟡 回到原進場區｜重新確認中';
+      else if(moveAtr!==null&&moveAtr>=0.12)development='↗️ 原訊號有延續';
+      else if(moveAtr!==null&&moveAtr<=-0.12)development='⚠️ 原訊號暫未延續';
       updated.preflight_snapshot={
         sampled_at:live.sampled_at||new Date().toISOString(),
         verdict_status:verdict.status||null,
@@ -1763,7 +1771,10 @@ renderSignals(quality80,'#quality80Box','本輪沒有交易品質 80 分以上�
         remaining_rr:metricNumber(data?.position?.remaining_rr??data?.entry_eligibility?.remaining_rr),
         source:'PREFLIGHT',
         live_price:livePrice,
-        price_source:live.price_source==='BEST_ASK'?'ASK':live.price_source==='BEST_BID'?'BID':live.price_source||'PREFLIGHT'
+        price_source:live.price_source==='BEST_ASK'?'ASK':live.price_source==='BEST_BID'?'BID':live.price_source||'PREFLIGHT',
+        original_trigger_type:String(original.trigger_type||original.market_story?.trigger?.type||''),
+        development,
+        move_from_trigger_atr:moveAtr
       };
       if(isRecord(data.entry_eligibility))updated.entry_eligibility={...(original.entry_eligibility||{}),...data.entry_eligibility};
       if(isRecord(data.execution_quality))updated.execution_quality={...(original.execution_quality||{}),...data.execution_quality};
