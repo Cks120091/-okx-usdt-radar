@@ -2,5 +2,7 @@ __pycache__/
 *.pyc
 .git/
 data/
-tests/
+tests/*
+!tests/test_build_preflight_sync.py
+!tests/test_preflight_sync.cjs
 
