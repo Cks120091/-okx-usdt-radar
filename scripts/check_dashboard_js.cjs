@@ -5,8 +5,8 @@ const path = require('node:path');
 const vm = require('node:vm');
 const root = path.resolve(__dirname, '..');
 const html = fs.readFileSync(path.join(root, 'radar/static/pages.html'), 'utf8');
-if (!html.includes('/* PREFLIGHT_CARD_SYNC_V2: compiled */')) {
-  throw new Error('Preflight card sync module was not assembled into the dashboard');
+if (!html.includes('content="preflight-detail-v1"')) {
+  throw new Error('Preflight detail UI marker is missing');
 }
 let checked = 0;
 for (const match of html.matchAll(/<script\b([^>]*)>([\s\S]*?)<\/script\s*>/gi)) {
@@ -17,4 +17,4 @@ for (const match of html.matchAll(/<script\b([^>]*)>([\s\S]*?)<\/script\s*>/gi))
 }
 if (!checked) throw new Error('No inline JavaScript found');
 new vm.Script(fs.readFileSync(path.join(root, 'radar/static/service-worker.js'), 'utf8'), {filename: 'service-worker.js'});
-console.log('PASS: ' + checked + ' assembled dashboard scripts and service worker syntax');
+console.log('PASS: ' + checked + ' dashboard scripts and service worker syntax');

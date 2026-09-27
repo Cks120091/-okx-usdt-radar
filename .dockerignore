@@ -3,6 +3,4 @@ __pycache__/
 .git/
 data/
 tests/*
-!tests/test_build_preflight_sync.py
-!tests/test_preflight_sync.cjs
-
+!tests/test_preflight_detail.cjs

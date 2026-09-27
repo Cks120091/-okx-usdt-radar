@@ -403,6 +403,17 @@
     .preflight-shell{width:min(100%,820px);max-width:820px;padding-top:16px;padding-bottom:18px}
     .preflight-verdict{padding:17px;border-color:var(--border);border-radius:14px;background:var(--surface-2)}
     .preflight-verdict.ready{border-left:4px solid var(--blue)}.preflight-verdict.wait{border-left:4px solid var(--orange)}.preflight-verdict.missed{border-left:4px solid var(--gray)}.preflight-verdict.completed{border-left:4px solid var(--yellow)}.preflight-verdict.unavailable{border-left:4px solid var(--blue)}.preflight-verdict.invalid{border-left:4px solid var(--red)}
+    .preflight-summary-head{display:grid;grid-template-columns:minmax(0,1fr) auto;align-items:start;gap:10px;margin-bottom:12px}
+    .preflight-summary-head .preflight-kicker{min-width:0;line-height:1.6}
+    .preflight-quality-summary{width:138px;padding:9px 10px;border:1px solid #34485c;border-radius:10px;background:#0b1723;text-align:center}
+    .preflight-quality-caption{display:block;font-size:10px;color:var(--muted);margin-bottom:6px}
+    .preflight-quality-values{display:grid;grid-template-columns:1fr auto 1fr;gap:6px;align-items:center}
+    .preflight-quality-values small{display:block;color:var(--muted);font-size:10px;white-space:nowrap}
+    .preflight-quality-values b{display:block;font-size:20px;line-height:1.3;font-variant-numeric:tabular-nums;color:var(--text)}
+    .preflight-quality-values i{font-style:normal;color:var(--muted);font-size:13px}
+    .preflight-quality-summary[data-quality-change="lower"] .preflight-quality-values>span:last-child b{color:var(--orange)}
+    .preflight-quality-summary[data-quality-change="improved"] .preflight-quality-values>span:last-child b{color:var(--green)}
+    @media(max-width:360px){.preflight-quality-summary{width:122px;padding:8px}.preflight-quality-values b{font-size:18px}.preflight-summary-head{gap:8px}}
     .preflight-kicker{color:#8da1b6;font-size:11.5px}.preflight-verdict h2{margin:6px 0;font-size:23px;font-weight:800}.preflight-verdict p{font-size:13.5px}
     .preflight-state-row{margin:9px 0 3px}.preflight-lifecycle{font-size:11.5px}.preflight-lifecycle.active{border-color:#46617e;background:#0c1825;color:#afd0f5}.preflight-entry-caption{color:var(--text-subtle);font-size:11.5px}
     .preflight-explainer{gap:9px;margin-top:14px;padding-top:14px}.preflight-guide-heading{font-size:13.5px}.preflight-guide-row{padding:11px 12px}.preflight-guide-row b,.preflight-guide-row span{font-size:12.5px}.preflight-guide-position{border-left-color:#607083}
@@ -644,6 +655,7 @@
 </style>
   <link rel="stylesheet" href="/history-replay.css">
   <script src="/history-replay.js"></script>
+<meta name="radar-ui-build" content="preflight-detail-v1">
 </head>
 <body data-active-group="home">
   <a class="skip-link" href="#appContent">跳至主要內容</a>
@@ -886,7 +898,7 @@
       <button id="preflightBack" class="preflight-back" type="button">‹ 返回</button>
       <div class="preflight-heading">
         <h1 id="preflightTitle" tabindex="-1">進場檢查</h1>
-        <p>重新抓取按下進場前更新時的最新價格、進場距離、成交條件、續走力道與歷史 OI（未平倉量） 持倉動向；不改寫方向或原 Entry（進場）（進場）／SL（止損）／TP（止盈）</p>
+        <p>重新抓取按下進場前更新時的最新價格、進場距離、成交條件、續走力道與歷史 OI（未平倉量） 持倉動向；不改寫方向或原 Entry（進場）／SL（止損）／TP（止盈）</p>
       </div>
     </header>
     <main class="preflight-shell">
@@ -909,7 +921,7 @@
     const $$=selector=>[...document.querySelectorAll(selector)];
     const savedFavorites=(()=>{try{return JSON.parse(localStorage.getItem('okx-radar-favorites')||'[]')}catch(_){return []}})();
     const savedPushEnabled=(()=>{try{return localStorage.getItem('okx-radar-push-enabled')==='1'}catch(_){return false}})();
-    const state={status:null,report:null,reportRenderKey:null,currentPreviewGeneratedAt:null,preflightCardSnapshots:new Map(),history:[],polling:false,scanStarting:false,scanRequestedMode:'FULL',preflight:null,preflightReturnFocus:null,preflightLoading:false,preflightRequestSeq:0,preflightAbort:null,pushConfig:null,pushEnabled:savedPushEnabled,pushSubscription:null,pushLoading:false,activeGroup:'home',groupTabs:{home:'overview',fifteen:'fifteenAll',long:'longSignals',more:'anomalies'},favorites:new Set(Array.isArray(savedFavorites)?savedFavorites:[])};
+    const state={status:null,report:null,reportRenderKey:null,currentPreviewGeneratedAt:null,history:[],polling:false,scanStarting:false,scanRequestedMode:'FULL',preflight:null,preflightReturnFocus:null,preflightLoading:false,preflightRequestSeq:0,preflightAbort:null,pushConfig:null,pushEnabled:savedPushEnabled,pushSubscription:null,pushLoading:false,activeGroup:'home',groupTabs:{home:'overview',fifteen:'fifteenAll',long:'longSignals',more:'anomalies'},favorites:new Set(Array.isArray(savedFavorites)?savedFavorites:[])};
     const directionName={LONG:'做多',SHORT:'做空',NEUTRAL:'中性'};
     const stageName={WATCH:'觀望',PRE_TRIGGER:'快觸發',PRE_CONTINUATION:'快觸發',NEAR_TRIGGER:'接近觸發',EARLY:'早期',EARLY_SIGNAL:'早期',CONFIRMED:'完整確認',TRENDING:'趨勢進行中',REENTRY:'回踩再發動',EXTENDED:'已延伸',NO_FOLLOW_THROUGH:'未獲延續',COMPLETED:'交易計畫完成',INVALIDATED:'訊號失效'};
     const freshnessName={NEW:'🆕 剛觸發',REACTIVATED:'↗️ 再發動',ACTIVE:'▶️ 有效中',EXTENDED:'⏳ 已延伸',NO_FOLLOW_THROUGH:'⚠️ 未延續',INVALIDATED:'❌ 已失效',COMPLETED:'✓ 已完成',NONE:'等待新事件'};
@@ -1189,7 +1201,6 @@
     function restoreReportUiState(saved){if(!saved)return;const entries=reportCardEntries(),cardFor=key=>entries.find(entry=>entry.key===key)?.card;saved.opened.forEach(([key,index])=>{const detail=cardFor(key)?.querySelectorAll('details')?.[index];if(detail)detail.open=true});if(saved.focus){const card=cardFor(saved.focus.cardKey);let target=null;if(saved.focus.kind==='summary')target=card?.querySelectorAll('details')?.[saved.focus.index]?.querySelector('summary');else if(card)target=[...card.querySelectorAll('button,a')].find(element=>element.dataset?.[saved.focus.name]===saved.focus.value);try{target?.focus({preventScroll:true})}catch(_){target?.focus()}}const shell=$('.shell');if(shell)shell.scrollTop=saved.scrollTop}
 
     function renderReport(report){
-      report=reapplyPreflightCardSnapshots(report);
       setHomeReportEmpty(false);pruneExpiredTerminalCards(report);const renderKey=reportRenderFingerprint(report),savedUi=state.reportRenderKey===renderKey?null:captureReportUiState();state.report=report;if(state.reportRenderKey===renderKey)return;const preview=report.runtime_status==='CORE_PREVIEW',activeScanMode=activeUiScanMode(report),shortTransient=horizonTransientState(report,'SHORT'),longTransient=horizonTransientState(report,'LONG'),shortPreview=preview&&!shortTransient&&(activeScanMode==='SHORT'||activeScanMode==='FULL'),longPreview=preview&&!longTransient&&activeScanMode==='LONG',shortState=horizonSnapshot(report,'SHORT'),longState=horizonSnapshot(report,'LONG'),shortAvailable=shortState.available,longAvailable=longState.available,shortReadOnlyReason=horizonReadOnlyReason(report,'SHORT'),longReadOnlyReason=horizonReadOnlyReason(report,'LONG');
       const activeShort=[...(report.signals||[])].filter(item=>!isTerminalSignal(item)),quality80=[...activeShort].filter(item=>!isPreviewItem(item)&&(metricNumber(item.execution_quality?.score)??-1)>=80).sort(signalSortComparator),shortClosed=retainedClosedSignals(report,'SHORT'),allShort=[...activeShort].sort(signalSortComparator),earlyCount=activeShort.filter(x=>!isPreviewItem(x)&&x.signal_stage==='EARLY_SIGNAL').length,confirmedCount=activeShort.filter(x=>!isPreviewItem(x)&&['CONFIRMED','REENTRY'].includes(x.signal_stage)).length,waiting=activeShort.filter(x=>!isPreviewItem(x)&&itemWaitingForEntry(x)).sort(signalSortComparator),missed=activeShort.filter(x=>!isPreviewItem(x)&&itemEntryStatus(x)==='MISSED_ENTRY').sort(signalSortComparator);
       const activeLong=[...(report.long_signals||[])].filter(item=>!isTerminalSignal(item)),longQuality80=[...activeLong].filter(item=>!isPreviewItem(item)&&(metricNumber(item.execution_quality?.score)??-1)>=80).sort(signalSortComparator),longClosed=retainedClosedSignals(report,'LONG'),allLong=[...activeLong].sort(signalSortComparator),longEarlyCount=activeLong.filter(x=>!isPreviewItem(x)&&x.signal_stage==='EARLY_SIGNAL').length,longConfirmedCount=activeLong.filter(x=>!isPreviewItem(x)&&['CONFIRMED','REENTRY'].includes(x.signal_stage)).length,longWaiting=activeLong.filter(x=>!isPreviewItem(x)&&itemWaitingForEntry(x)).sort(signalSortComparator),longMissed=activeLong.filter(x=>!isPreviewItem(x)&&itemEntryStatus(x)==='MISSED_ENTRY').sort(signalSortComparator),allClosed=[...shortClosed,...longClosed].sort(terminalSortComparator);
@@ -1587,6 +1598,20 @@ renderSignals(quality80,'#quality80Box','本輪沒有交易品質 80 分以上�
 
     function preflightClass(status,situation='',lifecycleStatus=''){const states=[status,situation,lifecycleStatus].map(value=>String(value||'').toUpperCase());if(states.some(value=>['PLAN_INVALIDATED','INVALIDATED','STOP_LOSS','HARD_GATE_BLOCKED','DATA_UNAVAILABLE','NO_FORMAL_TRIGGER','ANOMALY','NO_EDGE','UPDATE_FAILED'].includes(value)))return 'invalid';if(states.some(value=>['COMPLETED','TARGET_REACHED','TAKE_PROFIT'].includes(value)))return 'completed';if(states.some(value=>['CLOSED_UNKNOWN','UNKNOWN'].includes(value)))return 'unavailable';if(status==='ENTRY_READY')return 'ready';if(status==='WAIT_RETEST')return 'wait';return 'missed'}
     function preflightSignalClass(status){return status==='ACTIVE'?'active':status==='TARGET_REACHED'?'completed':status==='INVALIDATED'?'invalid':''}
+    function preflightQualityScore(value){
+      if(value===null||value===undefined||typeof value==='boolean'||(typeof value==='string'&&!value.trim()))return null;
+      const score=Number(value);return Number.isFinite(score)&&score>=0&&score<=100?score:null;
+    }
+    function preflightQualityComparison(data){
+      const original=preflightQualityScore(data?.original?.quality_score),current=preflightQualityScore(data?.live?.quality_score);
+      const format=value=>value===null?'—':num(value,1),change=original===null||current===null?'unknown':current>original?'improved':current<original?'lower':'same';
+      return `<aside class="preflight-quality-summary" data-quality-change="${change}" aria-label="交易品質：原品質 ${format(original)}，更新後 ${format(current)}"><span class="preflight-quality-caption">交易品質 · 非勝率</span><div class="preflight-quality-values"><span><small>原品質</small><b>${format(original)}</b></span><i aria-hidden="true">→</i><span><small>更新後</small><b>${format(current)}</b></span></div></aside>`;
+    }
+    function preflightCoreReason(data){
+      const verdict=data?.verdict||{},reason=String(verdict.reason||'');
+      const labels={NO_FORMAL_TRIGGER:'目前訊號記錄未符合正式觸發狀態，暫停新進場；原交易計畫保留。',DIRECTION_UNAVAILABLE:'訊號的多空方向資料不足。',TIMEFRAME_DIRECTION_ALIGNMENT:'大週期方向與這張訊號的方向未通過確認。',OPPOSITE_SIGNAL:'已出現正式反向訊號，原方向暫停新進場。',EVIDENCE_CONFLICT:'核心判斷互相衝突，等待重新確認。',CORE_DATA_UNAVAILABLE:'必要的核心資料不足，請重新掃描取得資料。',CORE_CANDLE_UNCONFIRMED:'必要的 K 線尚未確認收盤。'};
+      return reason.replace(/\b(?:NO_FORMAL_TRIGGER|DIRECTION_UNAVAILABLE|TIMEFRAME_DIRECTION_ALIGNMENT|OPPOSITE_SIGNAL|EVIDENCE_CONFLICT|CORE_DATA_UNAVAILABLE|CORE_CANDLE_UNCONFIRMED)\b/g,code=>labels[code])||'必要條件尚未通過，請重新掃描確認。';
+    }
     function preflightPresentation(data){
       const verdict=data?.verdict||{},lifecycle=data?.signal_lifecycle||{},status=String(verdict.status||'UNKNOWN').toUpperCase(),situation=String(verdict.situation||'UNKNOWN').toUpperCase(),terminal=preflightTerminalKind(data);
       if(terminal==='TAKE_PROFIT')return {label:'交易已完成',detail:'本次更新確認原始 TP 已被觸及；舊計畫不可再次使用。',lifecycle:'交易計畫已結束'};
@@ -1594,7 +1619,7 @@ renderSignals(quality80,'#quality80Box','本輪沒有交易品質 80 分以上�
       if(terminal==='CLOSED_UNKNOWN')return {label:'交易計畫已關閉',detail:'現有資料無法確認 TP／SL 先後；舊計畫不可沿用。',lifecycle:'交易計畫已關閉'};
       if(data?.entry_policy_version==='SIGNAL_POSITION_SEPARATED_V1'){
         if(status==='ENTRY_READY'&&verdict.new_entry_allowed===true)return {label:(data.direction==='LONG'?'做多':'做空')+'訊號仍有效',detail:data.position_advisory?.note||'可進位置僅供參考。',lifecycle:'⚡ 訊號已觸發｜有效中'};
-        return {label:verdict.label||'核心條件待確認',detail:verdict.reason||'請更新核心資料。',lifecycle:'訊號待確認'};
+        return {label:verdict.label||'核心條件待確認',detail:preflightCoreReason(data),lifecycle:'訊號待確認'};
       }
       if(status==='ENTRY_READY')return {label:'最近更新時條件通過',detail:'這是本次更新的固定快照，不是持續即時報價；下單前仍須核對。',lifecycle:'⚡ 訊號已觸發｜有效中'};
       if(situation==='FAVORABLE_AWAY'){const original=preflightOriginalPlan(data),live=data?.live||{},current=metricNumber(live.price),edge=data?.direction==='LONG'?metricNumber(original.entry_high):metricNumber(original.entry_low),gapPct=current!==null&&edge!==null&&edge>0?Math.abs(current-edge)/edge*100:null,slight=gapPct!==null&&gapPct<=0.15;if(slight)return {label:data?.direction==='LONG'?'價格略高於原進場區':'價格略低於原進場區',detail:`目前只差約 ${num(gapPct,2)}%；訊號仍有效，等待小幅${data?.direction==='LONG'?'回踩':'反彈'}後再更新確認。`,lifecycle:'⚡ 訊號已觸發｜有效中'};return {label:'等待回踩',detail:data?.direction==='LONG'?'價格已漲離原進場區，不建議追高；等待回踩後再更新。':'價格已跌離原進場區，不建議追空；等待反彈後再更新。',lifecycle:'⚡ 訊號已觸發｜有效中'};}
@@ -1737,89 +1762,18 @@ renderSignals(quality80,'#quality80Box','本輪沒有交易品質 80 分以上�
       else if(status==='WAIT_RETEST')notEntered=`先不要進場；等待價格回到可進參考區間 ${entry}，再更新確認。`;
       else if(status==='MISSED_ENTRY'){notEntered='不要追價；等待新的 Trigger（價格觸發）。';alreadyEntered=`若已持倉，仍只依原 SL（止損）${stop}／TP（止盈）管理；新進場狀態不是自動出場指令。`}
       if(data?.entry_policy_version==='SIGNAL_POSITION_SEPARATED_V1'&&!preflightTerminalKind(data)){
-        notEntered=verdict.new_entry_allowed===true?'訊號仍有效。'+(data.position_advisory?.note||'可進位置僅供參考。'):'先確認核心條件：'+(verdict.reason||'資料待補。');
+        notEntered=verdict.new_entry_allowed===true?'訊號仍有效。'+(data.position_advisory?.note||'可進位置僅供參考。'):'先確認核心條件：'+preflightCoreReason(data);
         alreadyEntered='系統不知道你是否持倉；位置提示不是自動出場指令，仍依原 SL／TP 管理。';
       }
       const terminalKind=preflightTerminalKind(data),invalidation=terminalKind==='TAKE_PROFIT'?'原始 TP 已被觸及；本次交易計畫已完成，舊價位不可再次使用。':terminalKind==='STOP_LOSS'?'原始 SL／失效位已被觸發；本次交易計畫永久結束。':terminalKind==='CLOSED_UNKNOWN'?'現有資料無法證明 TP／SL 先後；只確認舊計畫已關閉且不可沿用。':`價格${isLong?'跌破':'突破'}原始 SL（止損）${stop}時，舊計畫失效。`;
       return `<div class="preflight-explainer"><div class="preflight-guide-heading">現在怎麼做</div><div class="preflight-guide-row preflight-guide-action"><b>尚未進場</b><span>${tech(notEntered)}</span></div><div class="preflight-guide-row preflight-guide-position"><b>若已經進場（系統無法確認）</b><span>${tech(alreadyEntered)}</span></div><details class="judgement-details"><summary>判定依據（簡要）</summary><div class="judgement-rows"><div class="judgement-row"><b>訊號含義</b><span>${tech(meaning)}</span></div><div class="judgement-row warning"><b>失效條件</b><span>${tech(invalidation)}</span></div></div></details></div>`
-    }
-    function reapplyPreflightCardSnapshots(report){
-      if(!report||!state.preflightCardSnapshots?.size)return report;
-      for(const key of ['signals','long_signals']){
-        const items=Array.isArray(report[key])?report[key]:[];
-        report[key]=items.map(item=>{
-          const snapshot=state.preflightCardSnapshots.get(String(item?.trigger_id||''));
-          if(!snapshot||snapshot.inst_id!==item.inst_id)return item;
-          return {
-            ...item,
-            market_metrics:{...(item.market_metrics||{}),...(snapshot.market_metrics||{})},
-            entry_eligibility:{...(item.entry_eligibility||{}),...(snapshot.entry_eligibility||{})},
-            execution_quality:{...(item.execution_quality||{}),...(snapshot.execution_quality||{})},
-            preflight_snapshot:{...(snapshot.preflight_snapshot||{})},
-            data_timestamp:snapshot.data_timestamp||item.data_timestamp
-          };
-        });
-      }
-      return report;
-    }
-    function applyPreflightToSignalCard(data){
-      if(!state.report||!data?.inst_id||!data?.trigger_id)return false;
-      const horizon=String(data.horizon||'SHORT').toUpperCase(),key=horizon==='LONG'?'long_signals':'signals',items=Array.isArray(state.report[key])?state.report[key]:[],index=items.findIndex(item=>item?.inst_id===data.inst_id&&String(item?.trigger_id||'')===String(data.trigger_id));
-      if(index<0)return false;
-      const original=items[index],live=data.live||{},verdict=data.verdict||{},execution=data.execution||{},updated={...original};
-      updated.market_metrics={...(original.market_metrics||{})};
-      const livePrice=metricNumber(live.price);
-      if(livePrice!==null){
-        updated.market_metrics.last_price=livePrice;
-        updated.market_metrics.entry_execution_price=livePrice;
-        updated.market_metrics.entry_execution_price_source=live.price_source==='BEST_ASK'?'ASK':live.price_source==='BEST_BID'?'BID':live.price_source||'PREFLIGHT';
-      }
-      const triggerPrice=metricNumber(original.trigger_price??original.market_story?.trigger?.event_price),atr=metricNumber(original.market_story?.trigger?.event_atr),dir=String(original.direction||'').toUpperCase(),move=livePrice!==null&&triggerPrice!==null?(dir==='SHORT'?triggerPrice-livePrice:livePrice-triggerPrice):null,moveAtr=move!==null&&atr!==null&&atr>0?move/atr:null,entryLow=metricNumber(original.entry_low),entryHigh=metricNumber(original.entry_high),inEntry=livePrice!==null&&entryLow!==null&&entryHigh!==null&&livePrice>=Math.min(entryLow,entryHigh)&&livePrice<=Math.max(entryLow,entryHigh),status=String(verdict.status||'').toUpperCase();
-      let development='持續觀察';
-      if(preflightResponseTerminal(data))development='交易計畫已結束';
-      else if(['INVALIDATED','STOP_LOSS'].includes(status))development='❌ 原訊號已失效';
-      else if(status==='NO_CHASE'||(moveAtr!==null&&moveAtr>0.5))development='⏳ 原方向已延伸｜不追價';
-      else if(inEntry)development='🟡 回到原進場區｜重新確認中';
-      else if(moveAtr!==null&&moveAtr>=0.12)development='↗️ 原訊號有延續';
-      else if(moveAtr!==null&&moveAtr<=-0.12)development='⚠️ 原訊號暫未延續';
-      updated.preflight_snapshot={
-        sampled_at:live.sampled_at||new Date().toISOString(),
-        verdict_status:verdict.status||null,
-        verdict_label:verdict.label||null,
-        new_entry_allowed:verdict.new_entry_allowed,
-        actionable:verdict.actionable,
-        remaining_rr:metricNumber(data?.position?.remaining_rr??data?.entry_eligibility?.remaining_rr),
-        source:'PREFLIGHT',
-        live_price:livePrice,
-        price_source:live.price_source==='BEST_ASK'?'ASK':live.price_source==='BEST_BID'?'BID':live.price_source||'PREFLIGHT',
-        original_trigger_type:String(original.trigger_type||original.market_story?.trigger?.type||''),
-        development,
-        move_from_trigger_atr:moveAtr
-      };
-      if(isRecord(data.entry_eligibility))updated.entry_eligibility={...(original.entry_eligibility||{}),...data.entry_eligibility};
-      if(isRecord(data.execution_quality))updated.execution_quality={...(original.execution_quality||{}),...data.execution_quality};
-      if(isRecord(execution.execution_quality))updated.execution_quality={...(updated.execution_quality||{}),...execution.execution_quality};
-      updated.data_timestamp=live.sampled_at||updated.data_timestamp;
-      updated.market_metrics.preflight_sampled_at=live.sampled_at||null;
-      items[index]=updated;state.report[key]=items;
-      state.preflightCardSnapshots.set(String(updated.trigger_id||data.trigger_id),{
-        inst_id:updated.inst_id,
-        market_metrics:{...(updated.market_metrics||{})},
-        entry_eligibility:{...(updated.entry_eligibility||{})},
-        execution_quality:{...(updated.execution_quality||{})},
-        preflight_snapshot:{...(updated.preflight_snapshot||{})},
-        data_timestamp:updated.data_timestamp
-      });
-      state.reportRenderKey=null;
-      renderReport(state.report);
-      return true;
     }
     function renderPreflight(data){
       const verdict=data.verdict||{},lifecycle=data.signal_lifecycle||{status:'ACTIVE'},presentation=preflightPresentation(data),original=preflightOriginalPlan(data),live=data.live||{},execution=data.execution||{},liquidity=execution.liquidity_policy||{},quality=data.data_quality||{},warnings=data.warnings||[],direction=directionName[data.direction]||data.direction,isNewPlan=data.reanalysis?.status==='NEW_ENTRY_OPPORTUNITY',positionMetric=preflightPositionMetric(data),riskMetric=preflightRiskMetric(data),archived=preflightResponseTerminal(data),detailsOpen='',executionPriceLabel=live.price_source==='BEST_ASK'?'本次進場前更新價格｜Ask（賣方報價／買入參考）':live.price_source==='BEST_BID'?'本次進場前更新價格｜Bid（買方報價／賣出參考）':'本次進場前更新價格';
       $('#preflightTitle').textContent=`${displaySymbol(data.inst_id)} · ${data.horizon_label}`;
       $('#preflightContent').innerHTML=`
         <section class="preflight-verdict ${preflightClass(verdict.status,verdict.situation,lifecycle.status)}">
-          <div class="preflight-kicker">進場前更新快照 · ${esc(direction)} · ${tech(preflightTriggerLabel(data.trigger_type))}</div>
+          <div class="preflight-summary-head"><div class="preflight-kicker">進場前更新快照 · ${esc(direction)} · ${tech(preflightTriggerLabel(data.trigger_type))}</div>${preflightQualityComparison(data)}</div>
           <div class="preflight-state-row"><span class="preflight-entry-caption">訊號生命週期</span><span class="preflight-lifecycle ${preflightSignalClass(lifecycle.status)}">${esc(presentation.lifecycle)}</span></div>
           <h2>${esc(presentation.label)}</h2>
           <p>${esc(presentation.detail)}</p>
@@ -1830,7 +1784,7 @@ renderSignals(quality80,'#quality80Box','本輪沒有交易品質 80 分以上�
         ${preflightRiskAdvice(data)}
         <section class="preflight-block preflight-plan-block ${archived?'archived':''}">
           <h3>${(verdict.new_entry_allowed===false||verdict.actionable===false)?'原交易計畫｜僅供既有持倉／歷史參考':'原始進出場價格（固定，不被本次更新改寫）'}</h3>
-          ${archived?'<p class="preflight-plan-note">僅供紀錄・交易計畫已結束，不可沿用舊 Entry（進場）／SL（止損）／TP（止盈）</p>':(verdict.new_entry_allowed===false||verdict.actionable===false)?'<p class="preflight-plan-note"><b>目前禁止新進場。</b> 原 Entry（進場）（進場）／SL（止損）／TP（止盈） 保留供既有持倉管理與歷史參考，不代表現在可重新開倉。</p>':''}
+          ${archived?'<p class="preflight-plan-note">僅供紀錄・交易計畫已結束，不可沿用舊 Entry（進場）／SL（止損）／TP（止盈）</p>':(verdict.new_entry_allowed===false||verdict.actionable===false)?'<p class="preflight-plan-note"><b>目前禁止新進場。</b> 原 Entry（進場）／SL（止損）／TP（止盈） 保留供既有持倉管理與歷史參考，不代表現在可重新開倉。</p>':''}
           ${tradeRoute(original,{prefix:'原始 ',entryRole:(verdict.new_entry_allowed===false||verdict.actionable===false)?'原 ENTRY｜不可新進':'ENTRY 進場'})}
           ${planBasis({...original,inst_id:data.inst_id})}
           <details class="data-advanced"><summary>尚未進場／已有持倉，分別怎麼看</summary>${preflightPlainGuide(data)}</details>
@@ -1845,14 +1799,6 @@ renderSignals(quality80,'#quality80Box','本輪沒有交易品質 80 分以上�
         </section>
         ${preflightAuxiliary(data)}
         <details class="preflight-disclosure"${detailsOpen}><summary>成交、品質與資料細節${warnings.length?` · ${warnings.length} 項提醒`:''}</summary>
-          <section class="preflight-block">
-            <h3>交易品質變化（不是勝率）</h3>
-            <div class="quality-compare">
-              <div class="quality-box"><span>掃描時</span><b>${num(original.quality_score,0)}</b><small>${price(original.price,original)}</small></div>
-              <div class="quality-arrow">→</div>
-              <div class="quality-box"><span>本次更新</span><b>${num(live.quality_score,0)}</b><small>${tech(live.quality_label||'待評估')}</small></div>
-            </div>
-          </section>
           <section class="preflight-block">
             <h3>本次更新成交條件</h3>
             <div class="preflight-grid">
@@ -1895,7 +1841,7 @@ renderSignals(quality80,'#quality80Box','本輪沒有交易品質 80 分以上�
         const query=new URLSearchParams({inst_id:instId,horizon,expected_trigger_id:triggerId,force_refresh:forceRefresh?'1':'0'}),data=await api(`/api/preflight?${query}`,{signal:controller?.signal});
         if(!preflightRequestIsCurrent(token,instId,horizon,triggerId))return;
         if(String(data?.trigger_id||'')!==triggerId){const mismatch=new Error('這張卡的 Trigger 已更新；為避免錯查另一筆交易計畫，已停止顯示結果。');mismatch.code='TRIGGER_MISMATCH';throw mismatch}
-        renderPreflight(data);applyPreflightToSignalCard(data);refreshPreflightHistoryRate();Promise.resolve(window.HistoryReplay?.refresh?.()).then(()=>{if(preflightRequestIsCurrent(token,instId,horizon,triggerId))refreshPreflightHistoryRate()}).catch(()=>{});
+        renderPreflight(data);refreshPreflightHistoryRate();Promise.resolve(window.HistoryReplay?.refresh?.()).then(()=>{if(preflightRequestIsCurrent(token,instId,horizon,triggerId))refreshPreflightHistoryRate()}).catch(()=>{});
         if(preflightResponseTerminal(data)){
           state.preflight.terminal=true;button.disabled=true;button.textContent='交易計畫已結束';
           try{await loadReport()}catch(refreshError){console.error('交易計畫結束後無法同步清單',refreshError)}

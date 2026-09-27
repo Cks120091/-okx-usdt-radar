@@ -1,0 +1,23 @@
+name: Preflight detail UI
+on:
+  push:
+    branches: [main]
+  pull_request:
+    paths:
+      - radar/static/pages.html
+      - scripts/check_dashboard_js.cjs
+      - tests/test_preflight_detail.cjs
+      - Dockerfile
+permissions:
+  contents: read
+concurrency:
+  group: preflight-detail-${{ github.ref }}
+  cancel-in-progress: true
+jobs:
+  verify:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v6
+      - name: Verify deployable image, UI syntax and regression tests
+        run: docker build --progress=plain --tag radar-preflight-detail-test .
