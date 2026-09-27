@@ -161,13 +161,17 @@ class MarketStoryEngine:
         candles_1h: list[Candle],
         previous_story: dict[str, Any] | None = None,
     ) -> StoryAssessment:
+        # LONG radar V3.5: 1D keeps the macro bias, 4H is the setup/location
+        # context, and the completed 1H candle becomes the formal price Trigger.
+        # This makes the swing radar earlier without letting 1H trigger freely:
+        # the 4H frame remains part of directional/setup scoring.
         return self._analyze(
             horizon="LONG",
             higher_candles=candles_1d,
-            bias_candles=candles_1d,
-            core_candles=candles_4h,
-            timing_candles=candles_1h,
-            frame_names=("1D", "1D", "4H", "1H"),
+            bias_candles=candles_4h,
+            core_candles=candles_1h,
+            timing_candles=None,
+            frame_names=("1D", "4H", "1H", "—"),
             previous_story=previous_story,
         )
 
@@ -230,7 +234,7 @@ class MarketStoryEngine:
             for candidate_direction in ("LONG", "SHORT")
         }
         # Short Trigger selection must not inherit an averaged HTF direction.
-        selection_direction = _direction_state(core_long)[0] if horizon == "SHORT" else direction
+        selection_direction = _direction_state(core_long)[0] if horizon in ("SHORT", "LONG") else direction
         selected = _select_candidate(candidates, selection_direction)
         trigger_direction = str(selected.get("direction", "NEUTRAL"))
         stage = str(selected.get("stage", "WATCH"))
