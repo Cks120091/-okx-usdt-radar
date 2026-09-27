@@ -49,6 +49,7 @@ def complete_signal():
             "missing_sources": [],
         },
         "market_metrics": {
+            "raw_indicators": {"1H": {"fusion_long_score": 65.0}},
             "technical_stop_pct": 2.0,
             "buy_slippage_pct": 0.02,
             "sell_slippage_pct": 0.02,
@@ -1440,6 +1441,7 @@ class DecisionContextTests(unittest.TestCase):
     def test_short_direction_uses_directional_volume_and_taker(self):
         item = complete_signal()
         item["direction"] = "SHORT"
+        item["market_metrics"]["raw_indicators"]["1H"]["fusion_long_score"] = 35
         item.update(stop_loss="102", take_profit_1="96", take_profit_2="94")
         item["supporting_evidence"] = ["15m 結構轉空"]
         item["market_participation"] = {"state": "NEUTRAL"}

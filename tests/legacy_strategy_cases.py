@@ -615,7 +615,7 @@ class StrategyTests(unittest.TestCase):
         self.assertEqual(plan.signal_stage, "EARLY_SIGNAL")
         self.assertEqual(plan.strategy, "早期動能擴張")
 
-    def test_higher_timeframe_opposition_is_conflict_not_trigger_veto(self):
+    def test_opposed_hourly_direction_prevents_fifteen_minute_long_trigger(self):
         candles_4h, candles_1h, candles_15m = valid_breakout_frames(
             opposed_context=True
         )
@@ -635,12 +635,10 @@ class StrategyTests(unittest.TestCase):
             candles_1h,
             candles_15m,
         )
-        self.assertIsNotNone(result.signal, result.reason)
-        self.assertEqual(result.signal.direction, "LONG")
-        self.assertEqual(result.assessment.direction, "SHORT")
-        self.assertTrue(
-            any("Conflict" in item or "反向" in item for item in result.signal.conflicts)
-        )
+        self.assertIsNone(result.signal)
+        self.assertFalse(result.assessment.triggered)
+        self.assertEqual(result.assessment.timeframe_states["1H"]["direction"], "SHORT")
+        self.assertEqual(result.assessment.trigger_direction, "SHORT")
 
     def test_low_liquidity_is_a_warning_not_a_filter(self):
         data = trend_candles(100, 0.1, quote_volume=100)

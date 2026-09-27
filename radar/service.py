@@ -1108,6 +1108,8 @@ def _canonical_single_decision(
         return decision
 
     verdict = dict(preflight.get("verdict", {}) or {})
+    if isinstance(preflight.get("timeframe_alignment"), dict):
+        final["timeframe_alignment"] = deepcopy(preflight["timeframe_alignment"])
     lifecycle = dict(preflight.get("signal_lifecycle", {}) or {})
     plan = dict(preflight.get("plan_state", {}) or {})
     _normalize_preflight_advisories(verdict, lifecycle, plan)
@@ -2924,8 +2926,23 @@ class RadarRuntime:
             persisted_terminal_kind = None
             if stored_signal is not None:
                 try:
+                    preflight_signal = stored_signal
+                    if horizon == "SHORT":
+                        # A full single-coin scan has newer 1H evidence than
+                        # the stored episode. Recheck that evidence against
+                        # the original direction without replacing its plan.
+                        preflight_signal = deepcopy(stored_signal)
+                        latest_item = getattr(result, "signal", None) or getattr(result, "market_state", None)
+                        latest_raw = dict((getattr(latest_item, "market_metrics", {}) or {}).get("raw_indicators", {}) or {})
+                        metrics = dict(preflight_signal.market_metrics or {})
+                        raw = dict(metrics.get("raw_indicators", {}) or {})
+                        raw.pop("1H", None)
+                        if "1H" in latest_raw:
+                            raw["1H"] = deepcopy(latest_raw["1H"])
+                        metrics["raw_indicators"] = raw
+                        preflight_signal.market_metrics = metrics
                     preflight = build_preflight_payload(
-                        stored_signal,
+                        preflight_signal,
                         analysis.ticker,
                         analysis.context,
                         self.config,
@@ -3284,6 +3301,14 @@ class RadarRuntime:
                     live_price if live_price is not None else analysis.ticker.last
                 )
                 item.market_metrics = merged_metrics
+                if horizon == "SHORT":
+                    from .short_direction import hourly_direction
+                    hourly = hourly_direction(preflight.get("timeframe_alignment", {}).get("long_score"))
+                    item.timeframe_states = {
+                        **dict(getattr(item, "timeframe_states", {}) or {}),
+                        "1H": {"role": "方向｜決定多空", "direction": hourly["direction"],
+                               "label": hourly["label"], "score": hourly["score"], "can_block_trigger": True},
+                    }
                 if fresh_item is not None:
                     for field in ("spread_pct", "quote_volume_24h"):
                         value = getattr(fresh_item, field, None)

@@ -245,6 +245,7 @@ def qualified_signal(inst_id="AAA-USDT-SWAP"):
         signal_stage="CONFIRMED",
         readiness_score=88.0,
         market_metrics={
+            "raw_indicators": {"1H": {"fusion_long_score": 65.0}},
             "last_price": 100.0,
             "technical_stop_pct": 3.0,
             "execution_notional_usdt": 1_000.0,

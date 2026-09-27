@@ -6,7 +6,7 @@ ROOT = Path(__file__).parents[1]
 
 
 class FusionBalancePolicyTests(unittest.TestCase):
-    def test_policy_is_downstream_and_keeps_risk_advisory(self):
+    def test_hourly_direction_is_required_while_execution_risk_stays_advisory(self):
         strategy = (ROOT / "radar/strategy.py").read_text(encoding="utf-8")
         decision = (ROOT / "radar/decision.py").read_text(encoding="utf-8")
         preflight = (ROOT / "radar/preflight.py").read_text(encoding="utf-8")
@@ -29,7 +29,8 @@ class FusionBalancePolicyTests(unittest.TestCase):
         self.assertIn("OPPOSITE_SIGNAL", preflight_core)
         self.assertNotIn('"OPPOSITE_SIGNAL",', decision)
         self.assertNotIn('"OPPOSITE_SIGNAL",', preflight)
-        self.assertNotIn("fusion_long_score", story)
+        self.assertIn("hourly_direction(tf_bias.fusion_long_score)", story)
+        self.assertNotIn("hourly_direction(tf_core.fusion_long_score)", story)
 
     def test_fusion_replaces_duplicate_momentum_veto_only(self):
         decision = (ROOT / "radar/decision.py").read_text(encoding="utf-8")

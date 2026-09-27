@@ -6,6 +6,7 @@ from typing import Any
 
 from .indicators import TimeframeFeatures, atr, ema_series, features
 from .models import Candle, MarketContext
+from .short_direction import POLICY as SHORT_DIRECTION_POLICY, hourly_direction
 
 
 STRATEGY_VERSION = "V3.4_CONTEXT"
@@ -204,6 +205,10 @@ class MarketStoryEngine:
             else bias_long * 0.60 + core_long * 0.40
         )
         direction, direction_state, direction_label = _direction_state(long_score)
+        hourly = hourly_direction(tf_bias.fusion_long_score) if horizon == "SHORT" else None
+        if hourly is not None:
+            bias_long = long_score = hourly["score"] if hourly["score"] is not None else 50.0
+            direction, direction_state, direction_label = hourly["direction"], hourly["state"], hourly["label"]
 
         zones = _dynamic_zones(core_candles, tf_core)
         location = _price_location(tf_core.close, tf_core.atr14, zones)
@@ -220,7 +225,7 @@ class MarketStoryEngine:
                 candidate_direction,
                 core_candles,
                 tf_core,
-                tf_core if horizon == "SHORT" else tf_bias,
+                tf_bias,
                 zones,
                 location,
                 efficiencies,
@@ -233,9 +238,18 @@ class MarketStoryEngine:
             )
             for candidate_direction in ("LONG", "SHORT")
         }
-        # Short Trigger selection must not inherit an averaged HTF direction.
+        # 1H owns SHORT direction. A fresher/stronger opposite 15m candidate
+        # cannot win selection; weakening is not permission to reverse it.
         selection_direction = _direction_state(core_long)[0] if horizon in ("SHORT", "LONG") else direction
-        selected = _select_candidate(candidates, selection_direction)
+        if hourly is not None and hourly["direction"] in ("LONG", "SHORT"):
+            selected = dict(candidates[hourly["direction"]])
+        else:
+            selected = dict(_select_candidate(candidates, selection_direction))
+            if hourly is not None:
+                selected.update(triggered=False, type="NONE", stage="WATCH", freshness="NONE", direction="NEUTRAL")
+                selected.setdefault("neutral", []).append("1H 方向尚未確定；15m 價格變化只供觀察。")
+        if hourly is not None:
+            selected["direction_policy"] = SHORT_DIRECTION_POLICY
         trigger_direction = str(selected.get("direction", "NEUTRAL"))
         stage = str(selected.get("stage", "WATCH"))
         freshness = str(selected.get("freshness", "NONE"))
@@ -496,6 +510,10 @@ class MarketStoryEngine:
             trigger_direction,
         )
         if horizon == "SHORT":
+            timeframe_states["1H"].update(
+                role="方向｜決定多空", direction=hourly["direction"],
+                label=hourly["label"], score=hourly["score"], can_block_trigger=True,
+            )
             background = timeframe_states["4H"]
             # Describe the internal leg without claiming an unfinished 4H close.
             leg_return = _pct_change(core_candles[-1].close, core_candles[-5].close)
@@ -563,7 +581,7 @@ class MarketStoryEngine:
             direction=direction,
             direction_state=direction_state,
             direction_label=direction_label,
-            bias_direction="LONG" if bias_long >= 56.0 else "SHORT" if bias_long <= 44.0 else "NEUTRAL",
+            bias_direction=hourly["direction"] if hourly is not None else "LONG" if bias_long >= 56.0 else "SHORT" if bias_long <= 44.0 else "NEUTRAL",
             trigger_direction=trigger_direction,
             trigger_type=str(selected.get("type", "NONE")),
             stage=stage,
@@ -1322,7 +1340,10 @@ def _trigger_candidate(
     opponent_declining = opposing.get("state") == "DECLINING"
     pullback = _pullback_reactivation(candles, tf, direction, side_zone)
     bias_score = _direction_score(tf_bias)
-    bias_aligned = bias_score >= 55.0 if is_long else bias_score <= 45.0
+    if price_action_trigger:
+        bias_aligned = hourly_direction(tf_bias.fusion_long_score)["direction"] == direction
+    else:
+        bias_aligned = bias_score >= 55.0 if is_long else bias_score <= 45.0
     compression_block = compression.get("blocks_direction") == direction
 
     # SHORT horizon: 1H MA/MACD lives in tf_bias and sets directional bias.

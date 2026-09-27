@@ -65,7 +65,7 @@ def _source_hash() -> str:
     digest = hashlib.sha256(VERSION.encode())
     for name in ("strategy.py", "market_story.py", "decision.py", "entry_window.py",
                  "evidence.py", "scanner.py", "preflight.py", "service.py", "repository.py",
-                 "position_advisory.py"):
+                 "position_advisory.py", "short_direction.py"):
         digest.update(name.encode())
         digest.update((root / name).read_bytes())
     return digest.hexdigest()

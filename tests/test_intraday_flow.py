@@ -243,6 +243,7 @@ class IntradayEpisodeTests(unittest.TestCase):
     def test_bullish_4h_can_report_closed_15m_short_during_pullback(self):
         engine=MarketStoryEngine();a,b,c=valid_breakout_frames()
         c=[replace(x,open=200-x.open,high=200-x.low,low=200-x.high,close=200-x.close) for x in c]
+        b=[replace(x,open=200-x.open,high=200-x.low,low=200-x.high,close=200-x.close) for x in b]
         previous={'allow_opposite_episode':True,'active_trigger_direction':'LONG','active_stage':'CONFIRMED',
             'invalidation_price':min(x.low for x in c)-1,'last_evaluated_core_ts':c[-5].ts,
             'trigger':{'event_ts':c[-10].ts,'trigger_event_key':'oldlong','direction':'LONG',
@@ -250,6 +251,7 @@ class IntradayEpisodeTests(unittest.TestCase):
         result=engine.analyze_short(a,b,c,previous_story=previous)
         self.assertTrue(result.triggered);self.assertEqual(result.trigger_direction,'SHORT')
         self.assertEqual(result.timeframe_states['4H']['direction'],'LONG')
+        self.assertEqual(result.timeframe_states['1H']['direction'],'SHORT')
         self.assertIn('短線回落',result.timeframe_states['4H']['label'])
         self.assertFalse(result.timeframe_states['4H']['can_block_trigger'])
         c[-1]=replace(c[-1],confirmed=False)

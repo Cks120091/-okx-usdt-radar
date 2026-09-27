@@ -232,6 +232,25 @@ def _timeframe_direction_alignment(item, direction):
     metrics = _core._mapping(_core._read(item, "market_metrics", {}))
     raw = _core._mapping(metrics.get("raw_indicators", {}))
     frame = _core._mapping(raw.get(direction_tf, {}))
+    if horizon == "SHORT":
+        from .short_direction import POLICY, hourly_direction
+        hourly = hourly_direction(frame.get("fusion_long_score"))
+        bias = hourly["direction"]
+        passed = bias in {"LONG", "SHORT"} and bias == direction
+        if bias in {"UNKNOWN", "NEUTRAL"}:
+            reason = "1H 方向資料不足，請重新掃描確認；15m 不單獨決定多空。" if bias == "UNKNOWN" else "1H 方向尚未確定，等待方向明確後再由 15m 同向觸發。"
+        elif passed:
+            reason = f"1H {hourly['label']}，15m {'做多' if direction == 'LONG' else '做空'}觸發同向。"
+        else:
+            reason = f"1H {hourly['label']}，只允許{'做多' if bias == 'LONG' else '做空'}；15m 反向變化僅供觀察，不允許反向新進場。"
+        return {
+            "required": True, "passed": passed,
+            "state": "ALIGNED" if passed else "UNKNOWN" if bias == "UNKNOWN" else "NOT_ALIGNED",
+            "timeframe": "1H", "trigger_timeframe": "15m",
+            "timeframe_direction": bias, "bias_state": hourly["state"],
+            "trigger_direction": direction, "long_score": hourly["score"],
+            "policy": POLICY, "reason": reason,
+        }
     long_score = _core._number(frame.get("fusion_long_score"))
     if long_score is None or not 0.0 <= long_score <= 100.0:
         return {
@@ -244,32 +263,12 @@ def _timeframe_direction_alignment(item, direction):
             "reason": f"{direction_tf} 方向資料不足；最新掃描需重新取得方向確認。",
         }
 
-    # 15m short radar uses a five-state 1H bias.  Strong opposite bias still
-    # blocks entry, but transition/weakening states are surfaced as early
-    # counter-direction setups instead of being treated like a hard opposite.
-    if horizon == "SHORT":
-        if long_score >= 60.0:
-            timeframe_direction = "LONG"
-        elif long_score >= 52.0:
-            timeframe_direction = "LONG_WEAKENING"
-        elif long_score > 48.0:
-            timeframe_direction = "TRANSITION"
-        elif long_score > 40.0:
-            timeframe_direction = "SHORT_WEAKENING"
-        else:
-            timeframe_direction = "SHORT"
-        hard_opposite = (
-            (direction == "LONG" and timeframe_direction == "SHORT")
-            or (direction == "SHORT" and timeframe_direction == "LONG")
-        )
-        passed = not hard_opposite
-    else:
-        timeframe_direction = (
-            "LONG" if long_score >= 55.0
-            else "SHORT" if long_score <= 45.0
-            else "NEUTRAL"
-        )
-        passed = timeframe_direction == direction
+    timeframe_direction = (
+        "LONG" if long_score >= 55.0
+        else "SHORT" if long_score <= 45.0
+        else "NEUTRAL"
+    )
+    passed = timeframe_direction == direction
     return {
         "required": True,
         "passed": passed,
@@ -387,8 +386,7 @@ def build_decision_context(*args, **kwargs):
         warnings.append(str(maturity.get("reason") or "行情已走一段，追價風險較高。"))
         final["risk_warnings"] = _core._unique(warnings)[:3]
 
-    # Direction/trigger contract: SHORT uses 1H -> 15m; LONG uses 1D -> 4H.
-    # 4H is SHORT background; 1H is LONG timing context.
+    # SHORT: 1H direction -> 15m trigger; LONG: 1D bias, 4H setup, 1H trigger.
     if (
         str(final.get("status") or "").upper() == "ENTER"
         and alignment.get("required") is True

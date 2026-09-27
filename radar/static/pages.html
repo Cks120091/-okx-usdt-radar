@@ -860,7 +860,7 @@
         <section class="manual-section"><div class="manual-section-title"><span>01</span><div><h3>開始使用</h3><p>掃描什麼、資料何時有效</p></div></div>
           <details class="manual-card" open><summary>快速開始／三種掃描</summary><div class="manual-body"><p>選擇 <span class="manual-term">15m 掃描</span>、<span class="manual-term">4H 掃描</span>，或<span class="manual-term">全市場掃描（15m＋4H）</span>建立正式交易計畫。所有正式 Trigger 都集中在「訊號已觸發」，卡片頂端另標示「早期／完整確認／回踩再發動」；價格是掃描快照，不是即時報價。下單前按「進場前更新」，重新檢查價格、深度、滑價、成本與歷史 OI（未平倉量） 持倉動向，不會改寫原方向或 Entry（進場）／SL（止損）／TP（止盈）。雷達只分析、不自動下單。</p></div></details>
           <details class="manual-card"><summary>掃描市場範圍</summary><div class="manual-body"><p>全市場雷達只掃描 OKX 分類為加密資產的 USDT 永續合約（instCategory＝1），並對 24H USDT 成交額使用「上 200 萬、向下緩衝 50 萬」規則：新標的達 200 萬就納入；已經納入的標的，跌破 150 萬才移除。這樣不會在 200 萬附近一下出現、一下消失，而且未通過者不抓多週期 K 線。股票型永續合約（instCategory＝3）及其他非加密分類也會在合約清單入口直接排除。手動指定單幣仍可查看分析；未達成交額建議線時會醒目提示流動性風險，但不替使用者禁止進場，也不會因此加入全市場 Universe。</p></div></details>
-          <details class="manual-card"><summary>15m 短線／4H 波段</summary><div class="manual-body"><p>短線固定採用 <span class="manual-term">4H 判斷方向</span>、<span class="manual-term">1H 判斷背景／形態</span>、<span class="manual-term">15m 作為 Trigger 與入場時間</span>，5m 只補充 Timing（進場時機），不單獨翻向。4H 波段則是獨立交易計畫，兩套 Entry（進場）／SL（止損）／TP（止盈） 不串台。</p></div></details>
+          <details class="manual-card"><summary>15m 短線／4H 波段</summary><div class="manual-body"><p>短線固定採用 <span class="manual-term">1H 決定多空方向</span>、<span class="manual-term">15m 同方向觸發</span>。1H 偏多只做多、偏空只做空；轉弱不等於反向，方向不明先等待。4H 只看背景，5m 只補充 Timing（進場時機），不單獨翻向。4H 波段則是獨立交易計畫，兩套 Entry（進場）／SL（止損）／TP（止盈） 不串台。</p></div></details>
           <details class="manual-card"><summary>掃描中／資料期限</summary><div class="manual-body"><p>掃描哪個週期，該週期先不顯示上一輪卡片；完成後一次換成最新結果。未被掃描的另一週期若仍是 Fresh（最新）就照常有效，不會被誤標為只供參考。只有 STALE（超過 30 分鐘）、本次錯誤或初步預覽才不可直接進場。</p></div></details>
         </section>
         <section class="manual-section"><div class="manual-section-title"><span>02</span><div><h3>讀懂交易計畫</h3><p>先看狀態，再看價格與風險</p></div></div>
@@ -1522,8 +1522,7 @@ renderSignals(quality80,'#quality80Box','本輪沒有交易品質 80 分以上�
       if(terminal)return {title:'這筆計畫已結束',body:'保留作紀錄，不沿用舊 Entry（進場）／SL（止損）／TP（止盈）；等待新的正式訊號。'};
       if(preview)return {title:'先觀察，不進場',body:'目前只是初步候選，等本輪掃描完成並形成正式價格訊號。'};
       if(expired||readOnly)return {title:'先重新更新',body:'目前是舊快照或資料尚未完成；先重新掃描／進場前更新，不沿用舊價格。'};
-      if(String(align.state||'').toUpperCase()==='NOT_ALIGNED')parts.push('大小週期方向仍衝突，先等方向一致');
-      else if(String(align.state||'').toUpperCase()==='TRANSITIONAL')parts.push('大級別正在轉換，可觀察但不要把它當完整同向');
+      if(align.required===true&&align.passed===false)parts.push(align.reason||'等待大級別方向明確，且小級別同向觸發');
       if(maturity.state==='MATURE')parts.push('行情已走一段，避免追價，優先等回踩後再更新');
       if(status==='WAIT_RETEST')parts.push('目前不在理想進場位置，等待價格回到 Entry（進場）參考區再更新');
       else if(status==='MISSED_ENTRY'||status==='NO_CHASE')parts.push('原進場窗口已錯過，不追價，等待新的結構或新訊號');

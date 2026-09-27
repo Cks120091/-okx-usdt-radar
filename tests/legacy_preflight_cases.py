@@ -41,6 +41,7 @@ def make_signal() -> Signal:
         trigger_id="old-trigger-id",
         freshness="NEW",
         market_metrics={
+            "raw_indicators": {"1H": {"fusion_long_score": 65.0}},
             "last_price": 100.0,
             "instrument_tick_size": 0.05,
         },
@@ -281,7 +282,7 @@ def make_new_short_signal() -> Signal:
         take_profit_2="92",
         trigger_id="new-trigger-id",
         trigger_type="REVERSAL",
-        market_metrics={"last_price": 97.5},
+        market_metrics={"last_price": 97.5, "raw_indicators": {"1H": {"fusion_long_score": 35.0}}},
         market_story={
             "raw": {"core_atr": 2.0},
             "trigger": {
@@ -1737,6 +1738,7 @@ class PreflightTests(unittest.TestCase):
             item = replace(
                 make_signal(),
                 direction="SHORT",
+                market_metrics={"last_price": 100, "raw_indicators": {"1H": {"fusion_long_score": 35}}},
                 signal_stage="CONFIRMED",
                 entry_low="99.8",
                 entry_high="100.2",
@@ -1764,6 +1766,7 @@ class PreflightTests(unittest.TestCase):
             item = replace(
                 make_signal(),
                 direction="SHORT",
+                market_metrics={"last_price": 100, "raw_indicators": {"1H": {"fusion_long_score": 35}}},
                 signal_stage="CONFIRMED",
                 entry_low="99.8",
                 entry_high="100.2",

@@ -31,6 +31,7 @@ def ready_signal(direction='SHORT'):
              take_profit_1='0.3199' if direction=='SHORT' else '0.3480',
              take_profit_2='0.3128' if direction=='SHORT' else '0.3550',
              generated_at=datetime.fromtimestamp(NOW/1000,timezone.utc).isoformat())
+    x['market_metrics']['raw_indicators']={'1H': {'fusion_long_score': 35 if direction=='SHORT' else 65}}
     x['market_metrics'].update(last_price=.3341, entry_execution_price=.3341,
                               entry_execution_price_source='BID' if direction=='SHORT' else 'ASK',
                               ticker_sampled_at=NOW, core_timestamp=TS)
@@ -49,10 +50,11 @@ def ready_signal(direction='SHORT'):
 
 
 class ShortContextPolicyTests(unittest.TestCase):
-    def test_strong_background_is_advisory_both_directions(self):
+    def test_four_hour_background_is_advisory_with_aligned_hourly_direction(self):
         for direction in ('LONG','SHORT'):
             item=complete_signal();item['direction']=direction;item['radar_horizon']='SHORT'
-            item['conflicts']=['1H 背景反向，屬逆勢 Trigger','更高週期背景明顯反向；只列 Conflict，不取消核心 Trigger']
+            item['market_metrics']['raw_indicators']={'1H': {'fusion_long_score': 65 if direction=='LONG' else 35}}
+            item['conflicts']=['4H 背景反向，屬逆勢 Trigger','更高週期背景明顯反向；只列 Conflict，不取消核心 Trigger']
             if direction=='SHORT':
                 item.update(stop_loss='102', take_profit_1='96', take_profit_2='94')
             result=build_decision_context(item)
@@ -99,12 +101,12 @@ class ShortContextPolicyTests(unittest.TestCase):
         item=complete_signal();item['market_story']['trigger']['new_entry_suspended']=True
         self.assertFalse(build_decision_context(item)['final']['new_entry_allowed'])
 
-    def test_core_groups_independent_of_changed_higher_frames(self):
+    def test_core_groups_independent_of_changed_four_hour_background(self):
         a,b,c=valid_breakout_frames();engine=MarketStoryEngine()
         first=engine.analyze_short(a,b,c)
         def flip(rows):
             return [replace(x,open=300-x.open, high=300-x.low, low=300-x.high, close=300-x.close) for x in rows]
-        other=engine.analyze_short(flip(a),flip(b),c)
+        other=engine.analyze_short(flip(a),b,c)
         for key in ('position_structure','trend_momentum'):
             self.assertEqual(first.groups[key]['score'],other.groups[key]['score'])
             self.assertEqual(other.groups[key]['source_timeframe'],'15m')

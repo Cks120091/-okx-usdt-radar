@@ -42,7 +42,7 @@ def signal():
         regime="TREND",
         signal_stage="EARLY_SIGNAL",
         readiness_score=75.0,
-        market_metrics={"last_price": 100.5},
+        market_metrics={"last_price": 100.5, "raw_indicators": {"1H": {"fusion_long_score": 65}}},
         market_story={"raw": {"core_atr": 2.0}, "trigger": {}},
         execution_quality={"score": 80.0, "label": "良好"},
     )
@@ -230,6 +230,7 @@ class SingleInstrumentScanner(ImmediateScanner):
             quote_volume_24h=20_000_000,
             closed_candle_ts=1,
             summary="目前接近觸發，但還不能進場。",
+            market_metrics={"raw_indicators": {"1H": {"fusion_long_score": 65}}},
         )
         return SimpleNamespace(
             inst_id=inst_id,

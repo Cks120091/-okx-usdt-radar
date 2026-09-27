@@ -4,9 +4,9 @@ This layer is intentionally unnamed in the user interface. It is part of the rad
 
 ## Goal
 
-Increase context quality without reducing signal frequency or changing the existing trading contract.
+Use one direction score to keep the completed 1H direction, short-radar display and 15m entry permission consistent. This contract was updated on 2026-09-27 at the user's request.
 
-The current formal Trigger, Entry permission, Entry/SL/TP geometry, Signal Episode lifecycle, OI/CVD logic, execution-risk gates and ranking remain unchanged.
+A formal 15m price pattern is still required. The 1H score cannot create a price Trigger by itself. Original Entry/SL/TP geometry and episode identity stay fixed. See `SHORT_DIRECTION_20260927.md` for the direction contract.
 
 ## Internal fusion
 
@@ -26,17 +26,11 @@ The resulting hidden directional score contains four descriptive components:
 3. smoothed-RSI + MACD momentum persistence,
 4. EMA7 fast continuation state.
 
-## Non-gating contract
+## Direction contract (2026-09-27)
 
-The fusion score is shadow telemetry in this release.
+The completed 1H fusion score is the shared short-radar direction source in `short_direction.py`. Market-story selection, the visible 1H label, scanner permission and preflight use the same classification. Bullish weakening still permits only LONG; bearish weakening only SHORT. Neutral or missing 1H data waits. A 15m counter-direction event cannot become a new entry.
 
-It is deliberately not read by:
-
-- `radar/market_story.py` formal Trigger selection,
-- `radar/strategy.py` Entry / SL / TP / actionable logic,
-- `radar/decision.py` hard gates.
-
-Therefore adding this feature layer cannot remove an existing Trigger or make Entry rules stricter. A future change that promotes any fusion component into a gate must be explicit, reviewed, and backed by historical Trigger-time evidence.
+The 15m price structure supplies the formal Trigger, while 4H remains background. The direction score is not a probability or a historical win-rate claim.
 
 ## Data-window policy
 
