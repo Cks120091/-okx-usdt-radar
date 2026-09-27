@@ -1607,6 +1607,65 @@ def _trigger_candidate(
             stage = "WATCH"
             freshness = "NONE"
 
+    # Pre-launch engine: rank setups that are close to a formal trigger
+    # without pretending they are entries. Price/location facts lead; flow
+    # remains supporting context elsewhere and never creates this state.
+    trigger_distance_atr = None
+    if breakout_zone is not None:
+        boundary = breakout_zone.upper if is_long else breakout_zone.lower
+        raw_distance = boundary - candles[-1].close if is_long else candles[-1].close - boundary
+        trigger_distance_atr = max(0.0, raw_distance) / max(tf.atr14, 1e-9)
+    launch_facts = {
+        "position_ready": bool(
+            at_reversal_zone
+            or acceptance["state"] in ("BREAKING", "ACCEPTED", "ROLE_REVERSAL_RETEST")
+            or pullback_preparing
+        ),
+        "opponent_declining": bool(opponent_declining),
+        "bias_aligned": bool(bias_aligned),
+        "push_away_forming": bool(control.get("push_away")),
+        "micro_defense_broken": bool(control.get("micro_defense_broken")),
+        "compression_present": bool(compression.get("compressed")),
+        "near_trigger": bool(
+            trigger_distance_atr is not None and trigger_distance_atr <= 0.50
+        ),
+    }
+    launch_score = sum(
+        (
+            22 if launch_facts["position_ready"] else 0,
+            16 if launch_facts["opponent_declining"] else 0,
+            16 if launch_facts["bias_aligned"] else 0,
+            18 if launch_facts["push_away_forming"] else 0,
+            12 if launch_facts["micro_defense_broken"] else 0,
+            6 if launch_facts["compression_present"] else 0,
+            10 if launch_facts["near_trigger"] else 0,
+        )
+    )
+    if triggered:
+        launch_state, launch_label = "TRIGGERED", "正式訊號已觸發"
+    elif compression_block or control.get("opponent_reclaimed"):
+        launch_state, launch_label = "WATCH", "尚未形成發動條件"
+    elif launch_score >= 72 and launch_facts["position_ready"] and (
+        launch_facts["near_trigger"] or launch_facts["push_away_forming"]
+    ):
+        launch_state, launch_label = "PRE_LAUNCH", "🚨 發動前"
+    elif launch_score >= 55 and launch_facts["position_ready"]:
+        launch_state, launch_label = "NEAR_LAUNCH", "🟠 接近發動"
+    elif launch_score >= 38:
+        launch_state, launch_label = "BUILDING", "🟡 蓄力中"
+    else:
+        launch_state, launch_label = "WATCH", "觀察中"
+    launch_missing = []
+    if not launch_facts["position_ready"]:
+        launch_missing.append("接近有效位置")
+    if not launch_facts["bias_aligned"]:
+        launch_missing.append("大級別方向呼應")
+    if not launch_facts["opponent_declining"]:
+        launch_missing.append("反方攻擊效率衰退")
+    if not launch_facts["push_away_forming"]:
+        launch_missing.append("原方向開始推離")
+    if not launch_facts["micro_defense_broken"]:
+        launch_missing.append("突破微型防守")
     explainability_score = round(
         _clamp(
             (85.0 if at_reversal_zone or acceptance["state"] in ("ACCEPTED", "ROLE_REVERSAL_RETEST") else 45.0) * 0.30
@@ -1663,6 +1722,19 @@ def _trigger_candidate(
             else None
         ),
         "pre_trigger_missing": pre_trigger_missing,
+        "pre_launch": {
+            "state": launch_state,
+            "label": launch_label,
+            "score": launch_score,
+            "distance_atr": (
+                round(trigger_distance_atr, 3)
+                if trigger_distance_atr is not None
+                else None
+            ),
+            "facts": launch_facts,
+            "missing": launch_missing,
+            "formal_trigger": False,
+        },
         "compression_block": compression_block,
         "supporting": _unique(supporting),
         "conflicts": _unique(conflicts),
