@@ -1742,6 +1742,36 @@ renderSignals(quality80,'#quality80Box','本輪沒有交易品質 80 分以上�
       const terminalKind=preflightTerminalKind(data),invalidation=terminalKind==='TAKE_PROFIT'?'原始 TP 已被觸及；本次交易計畫已完成，舊價位不可再次使用。':terminalKind==='STOP_LOSS'?'原始 SL／失效位已被觸發；本次交易計畫永久結束。':terminalKind==='CLOSED_UNKNOWN'?'現有資料無法證明 TP／SL 先後；只確認舊計畫已關閉且不可沿用。':`價格${isLong?'跌破':'突破'}原始 SL（止損）${stop}時，舊計畫失效。`;
       return `<div class="preflight-explainer"><div class="preflight-guide-heading">現在怎麼做</div><div class="preflight-guide-row preflight-guide-action"><b>尚未進場</b><span>${tech(notEntered)}</span></div><div class="preflight-guide-row preflight-guide-position"><b>若已經進場（系統無法確認）</b><span>${tech(alreadyEntered)}</span></div><details class="judgement-details"><summary>判定依據（簡要）</summary><div class="judgement-rows"><div class="judgement-row"><b>訊號含義</b><span>${tech(meaning)}</span></div><div class="judgement-row warning"><b>失效條件</b><span>${tech(invalidation)}</span></div></div></details></div>`
     }
+    function applyPreflightToSignalCard(data){
+      if(!state.report||!data?.inst_id||!data?.trigger_id)return false;
+      const horizon=String(data.horizon||'SHORT').toUpperCase(),key=horizon==='LONG'?'long_signals':'signals',items=Array.isArray(state.report[key])?state.report[key]:[],index=items.findIndex(item=>item?.inst_id===data.inst_id&&String(item?.trigger_id||'')===String(data.trigger_id));
+      if(index<0)return false;
+      const original=items[index],live=data.live||{},verdict=data.verdict||{},execution=data.execution||{},updated={...original};
+      updated.market_metrics={...(original.market_metrics||{})};
+      const livePrice=metricNumber(live.price);
+      if(livePrice!==null){
+        updated.market_metrics.last_price=livePrice;
+        updated.market_metrics.entry_execution_price=livePrice;
+        updated.market_metrics.entry_execution_price_source=live.price_source==='BEST_ASK'?'ASK':live.price_source==='BEST_BID'?'BID':live.price_source||'PREFLIGHT';
+      }
+      updated.preflight_snapshot={
+        sampled_at:live.sampled_at||new Date().toISOString(),
+        verdict_status:verdict.status||null,
+        verdict_label:verdict.label||null,
+        new_entry_allowed:verdict.new_entry_allowed,
+        actionable:verdict.actionable,
+        remaining_rr:metricNumber(data?.position?.remaining_rr??data?.entry_eligibility?.remaining_rr),
+        source:'PREFLIGHT'
+      };
+      if(isRecord(data.entry_eligibility))updated.entry_eligibility={...(original.entry_eligibility||{}),...data.entry_eligibility};
+      if(isRecord(data.execution_quality))updated.execution_quality={...(original.execution_quality||{}),...data.execution_quality};
+      if(isRecord(execution.execution_quality))updated.execution_quality={...(updated.execution_quality||{}),...execution.execution_quality};
+      updated.data_timestamp=live.sampled_at||updated.data_timestamp;
+      items[index]=updated;state.report[key]=items;
+      state.reportRenderKey=null;
+      renderReport(state.report);
+      return true;
+    }
     function renderPreflight(data){
       const verdict=data.verdict||{},lifecycle=data.signal_lifecycle||{status:'ACTIVE'},presentation=preflightPresentation(data),original=preflightOriginalPlan(data),live=data.live||{},execution=data.execution||{},liquidity=execution.liquidity_policy||{},quality=data.data_quality||{},warnings=data.warnings||[],direction=directionName[data.direction]||data.direction,isNewPlan=data.reanalysis?.status==='NEW_ENTRY_OPPORTUNITY',positionMetric=preflightPositionMetric(data),riskMetric=preflightRiskMetric(data),archived=preflightResponseTerminal(data),detailsOpen='',executionPriceLabel=live.price_source==='BEST_ASK'?'本次進場前更新價格｜Ask（賣方報價／買入參考）':live.price_source==='BEST_BID'?'本次進場前更新價格｜Bid（買方報價／賣出參考）':'本次進場前更新價格';
       $('#preflightTitle').textContent=`${displaySymbol(data.inst_id)} · ${data.horizon_label}`;
@@ -1823,7 +1853,7 @@ renderSignals(quality80,'#quality80Box','本輪沒有交易品質 80 分以上�
         const query=new URLSearchParams({inst_id:instId,horizon,expected_trigger_id:triggerId,force_refresh:forceRefresh?'1':'0'}),data=await api(`/api/preflight?${query}`,{signal:controller?.signal});
         if(!preflightRequestIsCurrent(token,instId,horizon,triggerId))return;
         if(String(data?.trigger_id||'')!==triggerId){const mismatch=new Error('這張卡的 Trigger 已更新；為避免錯查另一筆交易計畫，已停止顯示結果。');mismatch.code='TRIGGER_MISMATCH';throw mismatch}
-        renderPreflight(data);refreshPreflightHistoryRate();Promise.resolve(window.HistoryReplay?.refresh?.()).then(()=>{if(preflightRequestIsCurrent(token,instId,horizon,triggerId))refreshPreflightHistoryRate()}).catch(()=>{});
+        renderPreflight(data);applyPreflightToSignalCard(data);refreshPreflightHistoryRate();Promise.resolve(window.HistoryReplay?.refresh?.()).then(()=>{if(preflightRequestIsCurrent(token,instId,horizon,triggerId))refreshPreflightHistoryRate()}).catch(()=>{});
         if(preflightResponseTerminal(data)){
           state.preflight.terminal=true;button.disabled=true;button.textContent='交易計畫已結束';
           try{await loadReport()}catch(refreshError){console.error('交易計畫結束後無法同步清單',refreshError)}
