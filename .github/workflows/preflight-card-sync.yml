@@ -1,0 +1,25 @@
+name: Preflight card synchronization
+on:
+  push:
+    branches: [fix/preflight-card-sync-v2-20260927]
+  pull_request:
+    paths:
+      - radar/static/preflight-card-sync.js
+      - scripts/build_preflight_sync.py
+      - scripts/check_dashboard_js.cjs
+      - tests/test_preflight_sync.cjs
+      - tests/test_build_preflight_sync.py
+      - Dockerfile
+permissions:
+  contents: read
+concurrency:
+  group: preflight-card-sync-${{ github.ref }}
+  cancel-in-progress: true
+jobs:
+  verify:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v6
+      - name: Verify deployable image, integration hooks and regression tests
+        run: docker build --progress=plain --tag radar-preflight-sync-test .
