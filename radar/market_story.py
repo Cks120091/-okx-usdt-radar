@@ -894,6 +894,7 @@ def execution_quality(
         if max(float(entry_slippage or 0.0), float(exit_slippage or 0.0)) > max_slippage_pct:
             warnings.append("估算滑價偏高")
     else:
+        cost_score = 50.0
         score += 50.0 * 0.10
         warnings.append("Order Book 深度不足，無法完整估算成交成本")
     if risk_reward < target_rr:
@@ -914,6 +915,15 @@ def execution_quality(
     recommendation = "NORMAL" if final_score >= 60.0 else "CAUTION" if final_score >= 35.0 else "AVOID_EXECUTION"
     return {
         "score": final_score,
+        "score_components_version": 1,
+        "score_components": {
+            "entry_location": round(float(entry.get("score", 50.0)) * 0.30, 6),
+            "spread": round(spread_score * 0.20, 6),
+            "risk_reward": round(rr_score * 0.25, 6),
+            "stop_distance": round(stop_score * 0.15, 6),
+            "execution_cost": round(cost_score * 0.10, 6),
+        },
+        "execution_cost_estimated": bool(context is not None and context.execution_quality_complete),
         "label": label,
         "recommendation": recommendation,
         "reasons": reasons,

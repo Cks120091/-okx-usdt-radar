@@ -93,7 +93,7 @@ class MarketStoryV34Tests(unittest.TestCase):
         self.assertEqual(story.stage, "EXTENDED")
         self.assertGreater(story.trigger["entry_extension_atr"], 0.50)
 
-    def test_gentle_reactivation_can_still_be_an_early_signal(self):
+    def test_gentle_range_bounce_waits_for_formal_price_trigger(self):
         base = [100 + math.sin(index * 0.55) * 0.10 for index in range(98)]
         start = base[-1]
         story = self.engine.analyze_short(
@@ -108,9 +108,11 @@ class MarketStoryV34Tests(unittest.TestCase):
             story_candles(base + [start + 0.06, start + 0.12]),
         )
 
-        self.assertTrue(story.triggered)
-        self.assertEqual(story.trigger_type, "CONTINUATION")
-        self.assertEqual(story.stage, "EARLY_SIGNAL")
+        self.assertFalse(story.triggered)
+        self.assertEqual(story.trigger_type, "NONE")
+        self.assertEqual(story.trigger["pre_trigger_type"], "CONTINUATION")
+        self.assertFalse(story.control_transfer["micro_defense_broken"])
+        self.assertEqual(story.stage, "PRE_TRIGGER")
         self.assertLessEqual(story.trigger["entry_extension_atr"], 0.50)
 
     def test_role_reversal_retest_requires_a_later_closed_bar(self):
@@ -125,13 +127,13 @@ class MarketStoryV34Tests(unittest.TestCase):
             last_touch_bars=1,
             source="fixture",
         )
-        values = [99.7, 99.9, 100.5, 100.4]
+        values = [99.7, 99.9, 100.5, 100.6, 100.4, 100.7]
         candles = [
             Candle(
                 ts=index,
                 open=values[index - 1] if index else close,
                 high=max(values[index - 1] if index else close, close) + 0.05,
-                low=(100.15 if index == 3 else min(values[index - 1] if index else close, close) - 0.05),
+                low=(100.15 if index == 4 else min(values[index - 1] if index else close, close) - 0.05),
                 close=close,
                 volume=1,
                 quote_volume=1,
@@ -141,6 +143,9 @@ class MarketStoryV34Tests(unittest.TestCase):
         ]
 
         accepted = _price_acceptance(candles[:3], zone, "LONG", 0.5)
+        incomplete = _price_acceptance(candles[:5], zone, "LONG", 0.5)
+        self.assertEqual(incomplete["state"], "ACCEPTED")
+        self.assertFalse(incomplete["breakout_retest_confirmed"])
         retested = _price_acceptance(candles, zone, "LONG", 0.5)
         self.assertEqual(accepted["state"], "ACCEPTED")
         self.assertEqual(retested["state"], "ROLE_REVERSAL_RETEST")
@@ -787,8 +792,10 @@ class MarketStoryV34Tests(unittest.TestCase):
         self.assertFalse(story.control_transfer["transferred"])
         self.assertEqual(story.trigger_type, "NONE")
 
-    def test_long_radar_uses_1d_bias_4h_trigger_and_1h_timing(self):
-        _, candles_1h, candles_4h_trigger = valid_breakout_frames()
+    def test_long_radar_uses_1d_bias_4h_setup_and_1h_trigger(self):
+        _, setup, trigger = valid_breakout_frames()
+        candles_4h_setup = [replace(c, ts=1_700_000_000_000 + i * 14_400_000) for i, c in enumerate(setup)]
+        candles_1h_trigger = [replace(c, ts=1_700_000_000_000 + i * 3_600_000) for i, c in enumerate(trigger)]
         candles_1d = story_candles(
             [80 + index * 0.10 for index in range(100)],
             86_400_000,
@@ -800,7 +807,7 @@ class MarketStoryV34Tests(unittest.TestCase):
             "linear",
             0.01,
         )
-        close = candles_4h_trigger[-1].close
+        close = candles_1h_trigger[-1].close
         ticker = Ticker(instrument.inst_id, close, close - 0.01, close + 0.01, 1)
         result = AdaptiveStrategyEngine(
             StrategyConfig(min_quote_volume_24h=1_000_000)
@@ -808,16 +815,18 @@ class MarketStoryV34Tests(unittest.TestCase):
             instrument,
             ticker,
             candles_1d,
-            candles_4h_trigger,
-            candles_1h,
+            candles_4h_setup,
+            candles_1h_trigger,
         )
 
         self.assertIsNotNone(result.signal, result.reason)
         self.assertEqual(result.signal.radar_horizon, "LONG")
         self.assertEqual(result.signal.trigger_type, "BREAKOUT")
         self.assertEqual(result.signal.timeframe_states["1D"]["role"], "大方向 Bias")
-        self.assertTrue(result.signal.timeframe_states["4H"]["can_block_trigger"])
-        self.assertFalse(result.signal.timeframe_states["1H"]["can_block_trigger"])
+        self.assertFalse(result.signal.timeframe_states["4H"]["can_block_trigger"])
+        self.assertEqual(result.signal.timeframe_states["4H"]["role"], "Bias／Setup")
+        self.assertTrue(result.signal.timeframe_states["1H"]["can_block_trigger"])
+        self.assertEqual(result.signal.timeframe_states["1H"]["role"], "核心 Trigger")
 
 
 if __name__ == "__main__":

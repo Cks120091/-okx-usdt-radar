@@ -652,10 +652,14 @@
     .history-stats-panel>p,.history-replay-card>p{margin:6px 0;font-size:12px}
     .history-stats-panel details,.history-replay-card details{margin-top:7px}
     .preflight-heading p{display:none}
+    .back-to-top{position:fixed;z-index:95;right:max(16px,env(safe-area-inset-right));bottom:100px;width:44px;height:44px;display:grid;place-items:center;padding:0;border:1px solid #53667b;border-radius:50%;background:rgba(25,39,55,.88);color:#eaf3ff;font-size:23px;line-height:1;box-shadow:0 3px 12px #0005;backdrop-filter:blur(8px);cursor:pointer;touch-action:manipulation}
+    .back-to-top[hidden]{display:none}.back-to-top:focus-visible{outline:2px solid #8bbfff;outline-offset:3px}
+    .preflight-quality-explanation{margin-top:10px;padding-top:9px;border-top:1px solid var(--line);font-size:12px;line-height:1.6;color:var(--muted)}
+    .preflight-quality-explanation summary{cursor:pointer;color:#bdcddd}.preflight-quality-explanation p{font-size:12px;margin-top:5px;color:var(--muted)}
 </style>
   <link rel="stylesheet" href="/history-replay.css">
   <script src="/history-replay.js"></script>
-<meta name="radar-ui-build" content="preflight-detail-v1">
+<meta name="radar-ui-build" content="preflight-clarity-v2">
 </head>
 <body data-active-group="home">
   <a class="skip-link" href="#appContent">跳至主要內容</a>
@@ -882,6 +886,7 @@
     </details>
 
     <p class="foot">分析用途，不保證獲利。沒有接入 OKX 私人 API（應用程式介面），也不會自動下單、開倉或平倉。</p>
+    <button id="listBackToTop" class="back-to-top" type="button" aria-label="回到列表頂端" title="回到頂端" hidden><span aria-hidden="true">↑</span></button>
   </main>
 
   <nav class="primary-nav" aria-label="手機主導覽">
@@ -906,6 +911,7 @@
       <div id="preflightContent"><div class="empty">請從正式訊號卡開啟進場檢查。</div></div>
     </main>
     <footer class="preflight-action-bar"><button id="preflightRefresh" class="preflight-refresh" type="button">更新進場判定與持倉動向</button></footer>
+    <button id="preflightBackToTop" class="back-to-top" type="button" aria-label="回到更新頁頂端" title="回到頂端" hidden><span aria-hidden="true">↑</span></button>
   </section>
 
   <dialog id="singleScanDialog" class="intraday-dialog" aria-labelledby="singleScanTitle">
@@ -1609,6 +1615,7 @@ renderSignals(quality80,'#quality80Box','本輪沒有交易品質 80 分以上�
     }
     function preflightCoreReason(data){
       const verdict=data?.verdict||{},reason=String(verdict.reason||'');
+      const details=(data?.core_assessment?.reasons||[]).map(row=>row.detail).filter(Boolean);if(details.length)return details.join(' ');
       const labels={NO_FORMAL_TRIGGER:'目前訊號記錄未符合正式觸發狀態，暫停新進場；原交易計畫保留。',DIRECTION_UNAVAILABLE:'訊號的多空方向資料不足。',TIMEFRAME_DIRECTION_ALIGNMENT:'大週期方向與這張訊號的方向未通過確認。',OPPOSITE_SIGNAL:'已出現正式反向訊號，原方向暫停新進場。',EVIDENCE_CONFLICT:'核心判斷互相衝突，等待重新確認。',CORE_DATA_UNAVAILABLE:'必要的核心資料不足，請重新掃描取得資料。',CORE_CANDLE_UNCONFIRMED:'必要的 K 線尚未確認收盤。'};
       return reason.replace(/\b(?:NO_FORMAL_TRIGGER|DIRECTION_UNAVAILABLE|TIMEFRAME_DIRECTION_ALIGNMENT|OPPOSITE_SIGNAL|EVIDENCE_CONFLICT|CORE_DATA_UNAVAILABLE|CORE_CANDLE_UNCONFIRMED)\b/g,code=>labels[code])||'必要條件尚未通過，請重新掃描確認。';
     }
@@ -1617,6 +1624,8 @@ renderSignals(quality80,'#quality80Box','本輪沒有交易品質 80 分以上�
       if(terminal==='TAKE_PROFIT')return {label:'交易已完成',detail:'本次更新確認原始 TP 已被觸及；舊計畫不可再次使用。',lifecycle:'交易計畫已結束'};
       if(terminal==='STOP_LOSS')return {label:'訊號已失效',detail:'本次更新確認原始 SL／失效位已被觸發；等待全新 Trigger。',lifecycle:'訊號已失效'};
       if(terminal==='CLOSED_UNKNOWN')return {label:'交易計畫已關閉',detail:'現有資料無法確認 TP／SL 先後；舊計畫不可沿用。',lifecycle:'交易計畫已關閉'};
+      if(data?.core_assessment?.state==='DATA_UNAVAILABLE')return {label:'資料不足，暫時無法確認',detail:preflightCoreReason(data),lifecycle:'等待資料確認'};
+      if(data?.core_assessment?.state==='ENTRY_SUSPENDED'&&verdict.new_entry_allowed!==true)return {label:'原計畫保留，暫停新進場',detail:preflightCoreReason(data),lifecycle:'暫停新進場'};
       if(data?.entry_policy_version==='SIGNAL_POSITION_SEPARATED_V1'){
         if(status==='ENTRY_READY'&&verdict.new_entry_allowed===true)return {label:(data.direction==='LONG'?'做多':'做空')+'訊號仍有效',detail:data.position_advisory?.note||'可進位置僅供參考。',lifecycle:'⚡ 訊號已觸發｜有效中'};
         return {label:verdict.label||'核心條件待確認',detail:preflightCoreReason(data),lifecycle:'訊號待確認'};
@@ -1768,18 +1777,31 @@ renderSignals(quality80,'#quality80Box','本輪沒有交易品質 80 分以上�
       const terminalKind=preflightTerminalKind(data),invalidation=terminalKind==='TAKE_PROFIT'?'原始 TP 已被觸及；本次交易計畫已完成，舊價位不可再次使用。':terminalKind==='STOP_LOSS'?'原始 SL／失效位已被觸發；本次交易計畫永久結束。':terminalKind==='CLOSED_UNKNOWN'?'現有資料無法證明 TP／SL 先後；只確認舊計畫已關閉且不可沿用。':`價格${isLong?'跌破':'突破'}原始 SL（止損）${stop}時，舊計畫失效。`;
       return `<div class="preflight-explainer"><div class="preflight-guide-heading">現在怎麼做</div><div class="preflight-guide-row preflight-guide-action"><b>尚未進場</b><span>${tech(notEntered)}</span></div><div class="preflight-guide-row preflight-guide-position"><b>若已經進場（系統無法確認）</b><span>${tech(alreadyEntered)}</span></div><details class="judgement-details"><summary>判定依據（簡要）</summary><div class="judgement-rows"><div class="judgement-row"><b>訊號含義</b><span>${tech(meaning)}</span></div><div class="judgement-row warning"><b>失效條件</b><span>${tech(invalidation)}</span></div></div></details></div>`
     }
+    function preflightQualityExplanation(data){
+      const explanation=data.quality_explanation;if(!explanation)return '';
+      const reasons=(explanation.reasons||[]).filter(Boolean).map(esc).join(' ');
+      const title=explanation.mode==='COMPARISON'?'品質變化原因':explanation.mode==='TERMINAL'?'計畫結束後的品質說明':'本次品質說明';
+      return `<details class="preflight-quality-explanation"><summary>${title}${reasons?' · '+reasons:''}</summary><p>${esc(explanation.note||'原品質與更新後分數僅供紀錄。')}</p></details>`;
+    }
+    function preflightDataTimes(data){
+      const times=data.data_times||{},original=data.original||{},live=data.live||{};
+      const quote=Object.hasOwn(times,'quote_at')?times.quote_at:live.quote_sampled_at;
+      return {quote:quote?taiwanTime(quote):'時間未提供',core:(times.core_scan_at||original.report_generated_at)?taiwanTime(times.core_scan_at||original.report_generated_at):'掃描時間未提供',execution:times.execution_at?taiwanTime(times.execution_at):'時間未提供'};
+    }
     function renderPreflight(data){
       const verdict=data.verdict||{},lifecycle=data.signal_lifecycle||{status:'ACTIVE'},presentation=preflightPresentation(data),original=preflightOriginalPlan(data),live=data.live||{},execution=data.execution||{},liquidity=execution.liquidity_policy||{},quality=data.data_quality||{},warnings=data.warnings||[],direction=directionName[data.direction]||data.direction,isNewPlan=data.reanalysis?.status==='NEW_ENTRY_OPPORTUNITY',positionMetric=preflightPositionMetric(data),riskMetric=preflightRiskMetric(data),archived=preflightResponseTerminal(data),detailsOpen='',executionPriceLabel=live.price_source==='BEST_ASK'?'本次進場前更新價格｜Ask（賣方報價／買入參考）':live.price_source==='BEST_BID'?'本次進場前更新價格｜Bid（買方報價／賣出參考）':'本次進場前更新價格';
       $('#preflightTitle').textContent=`${displaySymbol(data.inst_id)} · ${data.horizon_label}`;
+      const dataTimes=preflightDataTimes(data);
       $('#preflightContent').innerHTML=`
         <section class="preflight-verdict ${preflightClass(verdict.status,verdict.situation,lifecycle.status)}">
           <div class="preflight-summary-head"><div class="preflight-kicker">進場前更新快照 · ${esc(direction)} · ${tech(preflightTriggerLabel(data.trigger_type))}</div>${preflightQualityComparison(data)}</div>
           <div class="preflight-state-row"><span class="preflight-entry-caption">訊號生命週期</span><span class="preflight-lifecycle ${preflightSignalClass(lifecycle.status)}">${esc(presentation.lifecycle)}</span></div>
           <h2>${esc(presentation.label)}</h2>
           <p>${esc(presentation.detail)}</p>
+          ${preflightQualityExplanation(data)}
           ${isNewPlan?'<p class="preflight-guide-note"><b>這是重新分析後產生的全新 Trigger（價格觸發）與交易計畫；舊計畫沒有被沿用。</b></p>':''}
-          <div class="preflight-live-price"><span>${esc(executionPriceLabel)}</span><b>${price(live.price,original)}</b><small>按下更新時重新向 OKX 取得 · 快照時間（台灣 UTC+8）${esc(taiwanTime(live.sampled_at))}</small></div>
-          <div class="preflight-stamp">訊號觸發時間（台灣 UTC+8）：${esc(taiwanTime(original.triggered_at))}<br>本次更新快照時間（台灣 UTC+8）：${esc(taiwanTime(live.sampled_at))} · 不是持續即時報價 · 觸發約 ${num(live.trigger_age_bars,0)} 根 ${data.horizon==='LONG'?'4H':'15m'} K</div>
+          <div class="preflight-live-price"><span>${esc(executionPriceLabel)}</span><b>${price(live.price,original)}</b><small>按下更新時重新向 OKX 取得 · 報價時間（台灣 UTC+8）${esc(dataTimes.quote)} · 不是持續即時報價</small></div>
+          <div class="preflight-stamp">核心判讀：沿用 ${esc(dataTimes.core)} 的掃描（台灣 UTC+8）<br>本次更新報價與成交、續走資料；重新掃描才會重算核心條件。<details><summary>資料時間明細</summary>訊號觸發：${esc(taiwanTime(original.triggered_at))}<br>成交資料：${esc(dataTimes.execution)}<br>觸發約 ${num(live.trigger_age_bars,0)} 根 ${data.horizon==='LONG'?'4H':'15m'} K</details></div>
         </section>
         ${preflightRiskAdvice(data)}
         <section class="preflight-block preflight-plan-block ${archived?'archived':''}">
@@ -1917,7 +1939,17 @@ renderSignals(quality80,'#quality80Box','本輪沒有交易品質 80 分以上�
     $('#preflightRefresh').addEventListener('click',()=>loadPreflight(true));
     document.addEventListener('keydown',event=>{if($('#dataDetailDialog').open||$('#singleScanDialog').open)return;trapPreflightFocus(event);if(event.key==='Escape'&&!$('#preflightPage').hidden){event.preventDefault();closePreflight()}});
     window.addEventListener('popstate',event=>{if(event.state?.preflight){const {instId,horizon,triggerId}=event.state;if(instId&&horizon&&triggerId&&$('#preflightPage').hidden)openPreflight(instId,horizon,triggerId,{pushHistory:false,rememberFocus:false});return}hidePreflight()});
-    activateTab('overview',false);refreshSessions();bootstrap();setTimeout(refreshFreshness,15000);
+    function initBackToTop(){
+      const page=$('#preflightPage'),pairs=[{root:$('#appContent'),button:$('#listBackToTop'),detail:false},{root:$('#preflightPage .preflight-shell'),button:$('#preflightBackToTop'),detail:true}];let frame=0;
+      const update=()=>{frame=0;const modal=!!document.querySelector('dialog[open]');for(const {root,button,detail} of pairs){const active=detail?!page.hidden:page.hidden;button.hidden=modal||!active||root.clientHeight<=0||root.scrollTop<Math.min(root.clientHeight,Math.max(1,root.scrollHeight-root.clientHeight));const rect=root.getBoundingClientRect();button.style.bottom=`${Math.max(12,window.innerHeight-rect.bottom+12)}px`;button.style.right=`${Math.max(16,window.innerWidth-rect.right+16)}px`}};
+      const schedule=()=>{if(!frame)frame=requestAnimationFrame(update)};
+      for(const {root,button,detail} of pairs){root.addEventListener('scroll',schedule,{passive:true});button.addEventListener('click',()=>{(detail?$('#preflightTitle'):root).focus({preventScroll:true});root.scrollTo({top:0,behavior:window.matchMedia('(prefers-reduced-motion: reduce)').matches?'auto':'smooth'});schedule()});}
+      window.addEventListener('resize',schedule,{passive:true});
+      const observer=new MutationObserver(schedule);observer.observe(page,{attributes:true,attributeFilter:['hidden']});document.querySelectorAll('dialog').forEach(dialog=>observer.observe(dialog,{attributes:true,attributeFilter:['open']}));
+      if(window.ResizeObserver){const resize=new ResizeObserver(schedule);pairs.forEach(({root})=>resize.observe(root));}
+      schedule();
+    }
+    initBackToTop();activateTab('overview',false);refreshSessions();bootstrap();setTimeout(refreshFreshness,15000);
   </script>
 </body>
 </html>

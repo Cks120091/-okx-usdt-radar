@@ -1,5 +1,6 @@
 from pathlib import Path
 import unittest
+from tests.ui_copy import without_glossary
 
 
 ROOT = Path(__file__).parents[1]
@@ -7,7 +8,7 @@ ROOT = Path(__file__).parents[1]
 
 class CompactUiTests(unittest.TestCase):
     def test_main_card_prioritizes_decision_and_removes_repeated_microcopy(self):
-        text = (ROOT / "radar/static/pages.html").read_text(encoding="utf-8")
+        text = without_glossary((ROOT / "radar/static/pages.html").read_text(encoding="utf-8"))
         self.assertIn("function decisionPanel(item){return decisionPanelBody(item)", text)
         self.assertNotIn("摘要，不新增判定", text)
         self.assertNotIn("（僅供輔助）", text)
@@ -18,8 +19,8 @@ class CompactUiTests(unittest.TestCase):
         )[0]
         self.assertNotIn("scanPriceLabel", preflight)
         self.assertNotIn("live.price_change_from_scan_pct", preflight)
-        self.assertIn("本次進場前更新價格｜Ask（買入參考）", preflight)
-        self.assertIn("本次進場前更新價格｜Bid（賣出參考）", preflight)
+        self.assertIn("本次進場前更新價格｜Ask（賣方報價／買入參考）", preflight)
+        self.assertIn("本次進場前更新價格｜Bid（買方報價／賣出參考）", preflight)
         self.assertIn('class="preflight-live-price"', preflight)
         self.assertIn("按下更新時重新向 OKX 取得", preflight)
         self.assertIn("price(live.price,original)", preflight)
@@ -30,14 +31,14 @@ class CompactUiTests(unittest.TestCase):
         )
 
     def test_trigger_lifecycle_is_separate_from_snapshot_entry_state(self):
-        text = (ROOT / "radar/static/pages.html").read_text(encoding="utf-8")
+        text = without_glossary((ROOT / "radar/static/pages.html").read_text(encoding="utf-8"))
         report = text.split("function renderReport(report){", 1)[1].split(
             "function renderOverview(report)", 1
         )[0]
 
         self.assertIn('class="badge triggered-signal-b">⚡ 訊號已觸發', text)
         self.assertIn("EARLY_SIGNAL:'早期'", text)
-        self.assertNotIn("EARLY_SIGNAL:'早期訊號'", text)
+        self.assertNotIn("EARLY_SIGNAL:'早期訊號'", text.split("const stageName=", 1)[1].split(";", 1)[0])
         self.assertNotIn("待進場確認", text)
         self.assertIn("${stageBadge(item)}", text)
         self.assertNotIn('id="earlySignals"', text)
@@ -60,7 +61,7 @@ class CompactUiTests(unittest.TestCase):
         self.assertNotIn("現在能否進場", text)
 
     def test_oi_and_taker_use_independent_segments_for_consistency(self):
-        text = (ROOT / "radar/static/pages.html").read_text(encoding="utf-8")
+        text = without_glossary((ROOT / "radar/static/pages.html").read_text(encoding="utf-8"))
         self.assertIn("非重疊區間交叉確認", text)
         self.assertIn("資料完整度：", text)
         self.assertIn("共同資料截至：", text)

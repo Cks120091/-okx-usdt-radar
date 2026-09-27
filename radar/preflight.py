@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from . import _preflight_core as _core
 
-CORE_SOURCE_SHA = "28236646fca9144da99a31c474889ce93631034d"
+CORE_SOURCE_SHA = "5b56882dcb4f9b4ed438ca0894fd0ab029fd52bd"
 
 for _name in dir(_core):
     if not _name.startswith("__"):
@@ -187,7 +187,8 @@ def build_preflight_payload(*args, **kwargs):
     payload["plan_state"] = plan_state
     payload["live"] = live
     payload["entry_policy_version"] = "ADVISORY_RISK_V1"
-    return _separate_signal_and_position(payload, signal)
+    from .preflight_clarity import explain_preflight
+    return explain_preflight(signal, _separate_signal_and_position(payload, signal))
 
 
 def _separate_signal_and_position(payload, signal):

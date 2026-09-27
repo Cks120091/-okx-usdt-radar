@@ -2687,7 +2687,7 @@ class ScannerTests(unittest.TestCase):
 
         self.assertIs(ordered[0], still_positive)
 
-    def test_formal_top_twenty_uses_final_permission_before_raw_entry_status(self):
+    def test_formal_top_twenty_ranks_quality_without_changing_permission(self):
         def candidate(inst_id, *, allowed, quality):
             signal = qualified_signal(inst_id)
             return replace(
@@ -2729,9 +2729,11 @@ class ScannerTests(unittest.TestCase):
             reverse=True,
         )[:20]
 
-        self.assertIs(top_twenty[0], permitted)
-        self.assertIn(permitted, top_twenty)
-        self.assertEqual(sum(not item.actionable for item in top_twenty), 19)
+        self.assertEqual(top_twenty, blocked)
+        self.assertNotIn(permitted, top_twenty)
+        self.assertTrue(permitted.decision_context["final"]["new_entry_allowed"])
+        self.assertTrue(all(not item.decision_context["final"]["new_entry_allowed"] for item in top_twenty))
+        self.assertEqual(sum(not item.actionable for item in top_twenty), 20)
 
     def test_attach_decision_applies_canonical_chase_hard_gate(self):
         scanner = MarketScanner(

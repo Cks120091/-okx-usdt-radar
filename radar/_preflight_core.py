@@ -524,6 +524,8 @@ def build_preflight_payload(
         },
         "live": {
             "sampled_at": _iso_from_ms(sampled_at),
+            "quote_sampled_at": _iso_from_ms(int(ticker.ts or 0)),
+            "execution_sampled_at": _iso_from_ms(int(context.sampled_at or 0)),
             "price": round(current_price, 12),
             "price_source": current_price_source,
             "ticker_last_price": round(market_last_price, 12),
@@ -554,6 +556,9 @@ def build_preflight_payload(
             "quality_score": quality["score"],
             "quality_label": quality["label"],
             "quality_recommendation": quality["recommendation"],
+            "quality_components": quality.get("score_components", {}),
+            "quality_components_version": quality.get("score_components_version"),
+            "quality_cost_estimated": quality.get("execution_cost_estimated", False),
         },
         "execution": {
             "best_bid": round(best_bid, 12),

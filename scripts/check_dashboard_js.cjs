@@ -5,7 +5,7 @@ const path = require('node:path');
 const vm = require('node:vm');
 const root = path.resolve(__dirname, '..');
 const html = fs.readFileSync(path.join(root, 'radar/static/pages.html'), 'utf8');
-if (!html.includes('content="preflight-detail-v1"')) {
+if (!html.includes('content="preflight-clarity-v2"')) {
   throw new Error('Preflight detail UI marker is missing');
 }
 let checked = 0;

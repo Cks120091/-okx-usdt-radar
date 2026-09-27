@@ -1,5 +1,6 @@
 import tempfile
 import unittest
+from tests.ui_copy import without_glossary
 from pathlib import Path
 
 from radar.config import AppConfig
@@ -73,12 +74,13 @@ class V33ContractTests(unittest.TestCase):
         service_worker = (
             Path(__file__).parents[1] / "radar" / "static" / "service-worker.js"
         ).read_text(encoding="utf-8")
+        html = without_glossary(html)
         self.assertIn("/api/scan", html)
         self.assertIn("method:'POST'", html)
         self.assertIn("bootstrap()", html)
         self.assertIn("全市場掃描（15m＋4H）", html)
         self.assertIn("EARLY_SIGNAL:'早期'", html)
-        self.assertNotIn("EARLY_SIGNAL:'早期訊號'", html)
+        self.assertNotIn("EARLY_SIGNAL:'早期訊號'", html.split("const stageName=", 1)[1].split(";", 1)[0])
         self.assertIn("完整確認", html)
         self.assertIn("15m 訊號已觸發", html)
         self.assertIn("⚡ 訊號已觸發", html)
@@ -150,7 +152,7 @@ class V33ContractTests(unittest.TestCase):
         self.assertIn('<body data-active-group="home">', html)
         self.assertIn('body:not([data-active-group="home"]) .command-deck', html)
         self.assertIn("document.body.dataset.activeGroup=group", html)
-        self.assertIn("okx-radar-shell-v4.17-signal-position-separated", service_worker)
+        self.assertIn("okx-radar-shell-v4.24-preflight-clarity", service_worker)
         self.assertIn("市場方向 · 24H 全市場平均 RSI", html)
         self.assertIn("bias.market_average_rsi", html)
         self.assertIn("rsi24.market_rsi_24h_label", html)
@@ -236,7 +238,7 @@ class V33ContractTests(unittest.TestCase):
         self.assertIn("已觸發 · ${watchCount} 接近", html)
         self.assertIn("function itemCurrentEntryReady(item)", html)
         self.assertIn("function itemWasEntryReady(item)", html)
-        self.assertIn("OI（未平倉量）異動雷達", html)
+        self.assertIn("OI異動雷達", html)
         self.assertIn("市場方向分布", html)
         self.assertIn("市場平均 RSI", html)
         self.assertIn("localStorage", html)
@@ -278,7 +280,7 @@ class V33ContractTests(unittest.TestCase):
         self.assertIn("function signalTriggerTime(item)", html)
         self.assertIn("訊號觸發時間（台灣 UTC+8）", html)
         self.assertNotIn("status!=='ENTRY_READY'&&status!=='MISSED_ENTRY'", html)
-        self.assertIn("okx-radar-shell-v4.17-signal-position-separated", service_worker)
+        self.assertIn("okx-radar-shell-v4.24-preflight-clarity", service_worker)
         self.assertIn("$('#preflightRefresh').addEventListener('click',()=>loadPreflight(true))", html)
         self.assertIn("${decisionPanel(item)}", html)
         self.assertNotIn("showPreflight", html)
@@ -296,7 +298,7 @@ class V33ContractTests(unittest.TestCase):
         self.assertIn("4H 長線歷史", html)
         self.assertIn("24 小時內", html)
         self.assertIn("7 天內", html)
-        self.assertIn("不因 TP（止盈）／SL（止損）或走遠而提前消失", html)
+        self.assertIn("不因 TP／SL或走遠而提前消失", html)
         self.assertIn("function historyGroups(items)", html)
         self.assertIn("目前有效新訊號 · 不會更新下方舊紀錄", html)
         self.assertIn("觸發 ${events.length} 次", html)
@@ -355,14 +357,14 @@ class V33ContractTests(unittest.TestCase):
         self.assertIn("容許回測", html)
         self.assertIn("本次更新位置與進場檢查", html)
         self.assertIn("原始進出場價格（固定，不被本次更新改寫）", html)
-        self.assertIn("交易品質變化（不是勝率）", html)
+        self.assertIn("交易品質 · 非勝率", html)
         self.assertIn("Spread（買賣價差）", html)
         self.assertIn("R:R（風險報酬比）", html)
         self.assertIn("Order Book（委託簿）", html)
         self.assertIn("Order Book（訂單簿）", html)
         self.assertIn("(?:（(?:委託簿|訂單簿)）)*", html)
         self.assertNotIn("Trade Quality（交易品質）", html)
-        self.assertIn("Execution Quality（執行品質，不是勝率）", html)
+        self.assertIn("Execution Quality（交易品質）（執行品質，不是勝率）", html)
         self.assertNotIn("quality.combined_score", html)
         self.assertNotIn("'分層判讀'", html)
         self.assertIn("function technicalText(value)", html)
@@ -379,8 +381,8 @@ class V33ContractTests(unittest.TestCase):
             comparator.index("readyDiff="),
         )
         self.assertLess(
-            comparator.index("readyDiff="),
             comparator.index("qualityDiff="),
+            comparator.index("readyDiff="),
         )
         self.assertLess(
             comparator.index("qualityDiff="),
@@ -551,6 +553,7 @@ class V33ContractTests(unittest.TestCase):
         html = (Path(__file__).parents[1] / "radar" / "static" / "pages.html").read_text(
             encoding="utf-8"
         )
+        html = without_glossary(html)
         self.assertIn("horizon_read_only_reasons", html)
         self.assertIn("function horizonReadOnlyReason(report,horizon)", html)
         self.assertIn("function horizonAttempt(status,horizon)", html)
@@ -701,7 +704,7 @@ class V33ContractTests(unittest.TestCase):
         )
         self.assertNotIn("continuationRank", comparator)
         self.assertIn("readyDiff=Number(itemCurrentEntryReady(b))", comparator)
-        self.assertLess(comparator.index("readyDiff"), comparator.index("qualityDiff"))
+        self.assertLess(comparator.index("qualityDiff"), comparator.index("readyDiff"))
         self.assertLess(comparator.index("qualityDiff"), comparator.index("statusDiff"))
         self.assertLess(comparator.index("statusDiff"), comparator.index("dataTimeDiff"))
         self.assertLess(comparator.index("dataTimeDiff"), comparator.index("freshDiff"))
@@ -853,8 +856,8 @@ class V33ContractTests(unittest.TestCase):
         self.assertIn("position.note", decision_panel)
         self.assertIn("signal-status-line", render_signals)
         self.assertIn("快照不是持續即時報價", decision_panel)
-        self.assertIn("掃描快照 Ask（買入參考）", decision_panel)
-        self.assertIn("掃描快照 Bid（賣出參考）", decision_panel)
+        self.assertIn("掃描快照 Ask（賣方報價／買入參考）", decision_panel)
+        self.assertIn("掃描快照 Bid（買方報價／賣出參考）", decision_panel)
         self.assertIn("續走力道", continuation)
         self.assertNotIn("最高等級門檻", continuation)
         self.assertNotIn("加成", continuation)
@@ -954,6 +957,7 @@ class V33ContractTests(unittest.TestCase):
         html = (
             Path(__file__).parents[1] / "radar" / "static" / "pages.html"
         ).read_text(encoding="utf-8")
+        html = without_glossary(html)
 
         availability = html.split("function oiAvailability(item)", 1)[1].split(
             "function oiInterpretation", 1
@@ -1000,6 +1004,7 @@ class V33ContractTests(unittest.TestCase):
         html = (
             Path(__file__).parents[1] / "radar" / "static" / "pages.html"
         ).read_text(encoding="utf-8")
+        html = without_glossary(html)
 
         capital = html.split("function capitalFlowData(item)", 1)[1].split(
             "function horizonBadge", 1
@@ -1107,7 +1112,9 @@ class V33ContractTests(unittest.TestCase):
         self.assertNotIn("hour12:false", time_helpers)
         self.assertIn("normalized=`${normalized}Z`", time_helpers)
         self.assertIn("year:'numeric'", time_helpers)
-        self.assertIn("本次更新快照時間（台灣 UTC+8）", html)
+        self.assertIn("報價時間（台灣 UTC+8）", html)
+        self.assertIn("核心判讀：沿用", html)
+        self.assertIn("preflightDataTimes(data)", html)
         self.assertIn("持倉資料截止：${esc(taiwanMinute(asOf))}（台灣 UTC+8）", html)
         self.assertNotIn("<br>取得時間：", html)
 

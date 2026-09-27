@@ -93,11 +93,13 @@ class SignalPositionSeparationTests(unittest.TestCase):
                 item["market_metrics"]["raw_indicators"][timeframe]["fusion_long_score"] = bad
                 self.assertFalse(build_decision_context(item)["final"]["new_entry_allowed"])
 
-    def test_neutral_mtf_is_not_directional_confirmation(self):
+    def test_neutral_short_bias_is_transitional_but_neutral_long_bias_waits(self):
         for timeframe, horizon in (("1H", "SHORT"), ("1D", "LONG")):
             item = signal_dict(horizon=horizon)
             item["market_metrics"]["raw_indicators"][timeframe]["fusion_long_score"] = 50
-            self.assertFalse(build_decision_context(item)["final"]["new_entry_allowed"])
+            final = build_decision_context(item)["final"]
+            self.assertEqual(final["new_entry_allowed"], horizon == "SHORT")
+            self.assertEqual(final["status"], "ENTER" if horizon == "SHORT" else "WAIT")
 
     def test_location_does_not_bypass_explicit_missing_or_unconfirmed_core(self):
         for delta in ({"core": "UNAVAILABLE"}, {"closed_candle": False},
