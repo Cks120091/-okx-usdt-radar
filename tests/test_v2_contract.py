@@ -691,7 +691,10 @@ class V33ContractTests(unittest.TestCase):
             "longMissed=activeLong.filter(x=>!isPreviewItem(x)&&itemEntryStatus(x)==='MISSED_ENTRY').sort(signalSortComparator)",
             report,
         )
-        self.assertGreaterEqual(html.count("階段標示在卡片頂端"), 2)
+        short_section = html.split('<section id="fifteenAll"', 1)[1].split('</section>', 1)[0]
+        long_section = html.split('<section id="longSignals"', 1)[1].split('</section>', 1)[0]
+        self.assertIn("1H 與 15m 同向且條件成立 · 其餘候選放在預備", short_section)
+        self.assertIn("階段標示在卡片頂端", long_section)
 
         comparator = html.split("function signalSortComparator(a,b){", 1)[1].split(
             "function renderContextCoverage", 1
