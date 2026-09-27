@@ -244,29 +244,52 @@ def _timeframe_direction_alignment(item, direction):
             "reason": f"{direction_tf} 方向資料不足；最新掃描需重新取得方向確認。",
         }
 
-    timeframe_direction = (
-        "LONG" if long_score >= 55.0
-        else "SHORT" if long_score <= 45.0
-        else "NEUTRAL"
-    )
-    passed = timeframe_direction == direction
+    # 15m short radar uses a five-state 1H bias.  Strong opposite bias still
+    # blocks entry, but transition/weakening states are surfaced as early
+    # counter-direction setups instead of being treated like a hard opposite.
+    if horizon == "SHORT":
+        if long_score >= 60.0:
+            timeframe_direction = "LONG"
+        elif long_score >= 52.0:
+            timeframe_direction = "LONG_WEAKENING"
+        elif long_score > 48.0:
+            timeframe_direction = "TRANSITION"
+        elif long_score > 40.0:
+            timeframe_direction = "SHORT_WEAKENING"
+        else:
+            timeframe_direction = "SHORT"
+        hard_opposite = (
+            (direction == "LONG" and timeframe_direction == "SHORT")
+            or (direction == "SHORT" and timeframe_direction == "LONG")
+        )
+        passed = not hard_opposite
+    else:
+        timeframe_direction = (
+            "LONG" if long_score >= 55.0
+            else "SHORT" if long_score <= 45.0
+            else "NEUTRAL"
+        )
+        passed = timeframe_direction == direction
     return {
         "required": True,
         "passed": passed,
-        "state": "ALIGNED" if passed else "NOT_ALIGNED",
+        "state": (
+            "ALIGNED" if passed and timeframe_direction in {"LONG", "SHORT"}
+            else "TRANSITIONAL" if passed
+            else "NOT_ALIGNED"
+        ),
         "timeframe": direction_tf,
         "trigger_timeframe": trigger_tf,
         "timeframe_direction": timeframe_direction,
         "trigger_direction": direction,
         "long_score": round(long_score, 1),
         "reason": (
-            f"{direction_tf} {('偏多' if direction == 'LONG' else '偏空')}與 {trigger_tf} Trigger 同向。"
-            if passed
-            else (
-                f"{direction_tf} 大方向目前"
-                f"{'偏多' if timeframe_direction == 'LONG' else '偏空' if timeframe_direction == 'SHORT' else '還沒有明確方向'}，"
-                f"但 {trigger_tf} 已出現{'做多' if direction == 'LONG' else '做空' if direction == 'SHORT' else '反向'}訊號；"
-                "大小週期方向還沒一致，先不要把它當成完整同向進場。"
+            (
+                f"{direction_tf} 明確{'偏多' if timeframe_direction == 'LONG' else '偏空'}，與 {trigger_tf} 訊號同向。"
+                if timeframe_direction in {"LONG", "SHORT"} and passed
+                else f"{direction_tf} 正在{'多頭轉弱' if timeframe_direction == 'LONG_WEAKENING' else '空頭轉弱' if timeframe_direction == 'SHORT_WEAKENING' else '方向轉換'}；{trigger_tf} 已出現{'做多' if direction == 'LONG' else '做空'}價格訊號，列為早期轉向觀察，不把轉換期當成明確反向。"
+                if passed
+                else f"{direction_tf} 仍明確{'偏多' if timeframe_direction == 'LONG' else '偏空'}，但 {trigger_tf} 出現{'做空' if direction == 'SHORT' else '做多'}訊號；目前屬真正逆勢，先不要當完整同向進場。"
             )
         ),
     }
