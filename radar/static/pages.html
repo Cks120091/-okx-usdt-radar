@@ -706,7 +706,7 @@
       <button class="filter-tab" type="button" data-tab="longQuality80" aria-controls="longQuality80">⭐ 80分以上</button>
       <button class="filter-tab" type="button" data-tab="longWaitRetest" aria-controls="longWaitRetest">等待回踩</button>
       <button class="filter-tab" type="button" data-tab="longMissedSignals" aria-controls="longMissedSignals">等待新訊號</button>
-      <button class="filter-tab" type="button" data-tab="longWatchlist" aria-controls="longWatchlist">接近</button>
+      <button class="filter-tab" type="button" data-tab="longWatchlist" aria-controls="longWatchlist">預備</button>
     </nav>
     <nav class="filter-tabs" data-group-filters="closed" aria-label="已結束交易計畫篩選" hidden>
       <button class="filter-tab active" type="button" data-tab="closedSignals" aria-controls="closedSignals">全部</button>
@@ -792,7 +792,7 @@
       <div id="missedSignalsBox"><div class="empty">等待最新掃描。</div></div>
     </section>
     <section id="longSignals" class="section">
-      <div class="section-title"><h2>4H 長線訊號已觸發</h2><span>所有已觸發訊號都在這裡；階段標示在卡片頂端</span></div>
+      <div class="section-title"><h2>4H 長線訊號已觸發</h2><span>方向同向且條件成立 · 其餘候選放在預備</span></div>
       <div id="longSignalsBox"><div class="empty">等待最新掃描。</div></div>
     </section>
     <section id="longQuality80" class="section">
@@ -812,7 +812,7 @@
       <div id="watchBox"><div class="empty">等待最新掃描。</div></div>
     </section>
     <section id="longWatchlist" class="section">
-      <div class="section-title"><h2>長線接近觸發</h2><span>不是目前進場訊號</span></div>
+      <div class="section-title"><h2>4H 長線預備觀察</h2><span>等待同向或觸發確認 · 尚不可新進場</span></div>
       <div id="longWatchBox"><div class="empty">等待最新掃描。</div></div>
     </section>
     <section id="closedSignals" class="section">
@@ -1208,48 +1208,54 @@
     function captureReportUiState(){const shell=$('.shell'),entries=reportCardEntries(),opened=[];entries.forEach(({card,key})=>{[...card.querySelectorAll('details')].forEach((detail,index)=>{if(detail.open)opened.push([key,index])})});const active=document.activeElement;let focus=null;if(active&&active!==document.body){const entry=entries.find(({card})=>card.contains(active)),detail=active.closest?.('details');if(entry&&active.tagName==='SUMMARY'&&detail)focus={kind:'summary',cardKey:entry.key,index:[...entry.card.querySelectorAll('details')].indexOf(detail)};else if(entry){for(const name of ['preflightId','favorite']){if(active.dataset?.[name]){focus={kind:'control',cardKey:entry.key,name,value:active.dataset[name]};break}}}}return {opened,focus,scrollTop:shell?.scrollTop||0}}
     function restoreReportUiState(saved){if(!saved)return;const entries=reportCardEntries(),cardFor=key=>entries.find(entry=>entry.key===key)?.card;saved.opened.forEach(([key,index])=>{const detail=cardFor(key)?.querySelectorAll('details')?.[index];if(detail)detail.open=true});if(saved.focus){const card=cardFor(saved.focus.cardKey);let target=null;if(saved.focus.kind==='summary')target=card?.querySelectorAll('details')?.[saved.focus.index]?.querySelector('summary');else if(card)target=[...card.querySelectorAll('button,a')].find(element=>element.dataset?.[saved.focus.name]===saved.focus.value);try{target?.focus({preventScroll:true})}catch(_){target?.focus()}}const shell=$('.shell');if(shell)shell.scrollTop=saved.scrollTop}
 
-    function shortSignalGroups(report){
-      const signals=(report.signals||[]).filter(item=>item.radar_horizon!=='LONG'&&!isTerminalSignal(item));
-      const formal=signals.filter(item=>{
-        const final=itemFinalDecision(item),alignment=final.timeframe_alignment||{};
-        return !isPreviewItem(item)&&!isExpiredSnapshot(item)&&!itemReadOnlyReason(item)
-          && ['EARLY_SIGNAL','CONFIRMED','REENTRY','TRENDING','EXTENDED'].includes(item.signal_stage)
-          && final.status==='ENTER'&&final.new_entry_allowed===true
-          && alignment.required===true&&alignment.passed===true
-          && alignment.timeframe==='1H'&&alignment.trigger_timeframe==='15m'
-          && ['LONG','SHORT'].includes(item.direction)
-          && alignment.timeframe_direction===item.direction&&alignment.trigger_direction===item.direction;
-      });
+    function isFormalSignal(item,horizon=item.radar_horizon==='LONG'?'LONG':'SHORT'){
+      const final=itemFinalDecision(item),alignment=final.timeframe_alignment||{},long=horizon==='LONG';
+      return !isTerminalSignal(item)&&!isPreviewItem(item)&&!isExpiredSnapshot(item)&&!itemReadOnlyReason(item)
+        && ['EARLY_SIGNAL','CONFIRMED','REENTRY','TRENDING','EXTENDED'].includes(item.signal_stage)
+        && final.status==='ENTER'&&final.new_entry_allowed===true
+        && alignment.required===true&&alignment.passed===true
+        && alignment.timeframe===(long?'1D':'1H')&&alignment.trigger_timeframe===(long?'1H':'15m')
+        && ['LONG','SHORT'].includes(item.direction)
+        && alignment.timeframe_direction===item.direction&&alignment.trigger_direction===item.direction;
+    }
+    function signalGroups(report,horizon){
+      const long=horizon==='LONG',belongs=item=>long?item.radar_horizon!=='SHORT':item.radar_horizon!=='LONG';
+      const signals=(report[long?'long_signals':'signals']||[]).filter(item=>belongs(item)&&!isTerminalSignal(item));
+      const formal=signals.filter(item=>isFormalSignal(item,horizon));
       const seen=new Set(formal.map(item=>item.inst_id)),preparing=[];
-      for(const item of [...signals,...(report.watchlist||[])]){
-        if(item.radar_horizon==='LONG'||isTerminalSignal(item)||seen.has(item.inst_id))continue;
+      for(const item of [...signals,...(report[long?'long_watchlist':'watchlist']||[])]){
+        if(!belongs(item)||isTerminalSignal(item)||seen.has(item.inst_id))continue;
         seen.add(item.inst_id);preparing.push(item);
       }
       return {formal,preparing};
     }
-    function shortPreparationView(item){
-      const final=itemFinalDecision(item),alignment=final.timeframe_alignment||{},preparation=item.market_story?.preparation||item.market_story?.raw?.preparation||{};
+    function shortSignalGroups(report){return signalGroups(report,'SHORT')}
+    function longSignalGroups(report){return signalGroups(report,'LONG')}
+    function shortPreparationView(item){return signalPreparationView(item,'SHORT')}
+    function signalPreparationView(item,horizon=item.radar_horizon==='LONG'?'LONG':'SHORT'){
+      const final=itemFinalDecision(item),alignment=final.timeframe_alignment||{},long=horizon==='LONG',pair=long?'1D 與 1H':'1H 與 15m',preparation=long?{}:item.market_story?.preparation||item.market_story?.raw?.preparation||{};
       if(isPreviewItem(item))return {label:'預備｜掃描中',reason:'等待本輪掃描完成，尚不可新進場。'};
       if(isExpiredSnapshot(item)||itemReadOnlyReason(item))return {label:'待更新｜重新掃描',reason:'這是保留的掃描資料；重新掃描後再確認方向與觸發條件。'};
-      if(final.status==='DATA_UNAVAILABLE'||alignment.state==='UNKNOWN')return {label:'待更新｜資料不足',reason:'方向或核心資料不足；請重新掃描，尚不可新進場。'};
-      if(alignment.required===true&&alignment.passed!==true)return {label:'預備｜等待同向',reason:preparation.reason||alignment.reason||'等待 1H 與 15m 方向一致，尚不可新進場。'};
+      if(final.status==='DATA_UNAVAILABLE'||alignment.state==='UNKNOWN'||(item.trigger_id&&alignment.required!==true))return {label:'待更新｜資料不足',reason:'方向或核心資料不足；請重新掃描，尚不可新進場。'};
+      if(alignment.required===true&&(alignment.passed!==true||alignment.timeframe_direction!==item.direction||alignment.trigger_direction!==item.direction))return {label:'預備｜等待同向',reason:preparation.reason||alignment.reason||`等待 ${pair} 方向一致，尚不可新進場。`};
       if(preparation.advisory_only===true)return {label:preparation.label,reason:preparation.reason};
       if(item.trigger_id)return {label:'預備｜等待重新確認',reason:(final.wait_reason?.label||final.reasons?.[0]||'等待同向價格條件重新確認。')+' 原計畫保留，暫不可新進場。'};
-      return {label:'預備｜等待觸發',reason:'形態仍在觀察；須 1H 與 15m 同向且觸發成立，才列正式訊號。'};
+      return {label:'預備｜等待觸發',reason:`形態仍在觀察；須 ${pair} 同向且觸發成立，才列正式訊號。`};
     }
-    function renderShortPreparations(items,selector,readOnlyReason){
-      const box=$(selector),notice=readOnlyReferenceBanner(readOnlyReason,'SHORT');
-      if(!items.length){box.innerHTML=notice+'<div class="empty">目前沒有短線預備候選。</div>';return}
+    function renderShortPreparations(items,selector,readOnlyReason){renderPreparations(items,selector,readOnlyReason,'SHORT')}
+    function renderPreparations(items,selector,readOnlyReason,horizon){
+      const box=$(selector),notice=readOnlyReferenceBanner(readOnlyReason,horizon),long=horizon==='LONG';
+      if(!items.length){box.innerHTML=notice+`<div class="empty">目前沒有${long?'長線':'短線'}預備候選。</div>`;return}
       box.innerHTML=notice+items.map((item,index)=>{
-        const view=shortPreparationView(item),preparation=item.market_story?.preparation||{},side=preparation.candidate_direction||item.direction;
+        const view=signalPreparationView(item,horizon),preparation=long?{}:item.market_story?.preparation||{},side=preparation.candidate_direction||item.direction;
         const direction=side==='LONG'?'觀察多方':side==='SHORT'?'觀察空方':'方向待確認',hasPlan=Boolean(item.trigger_id),score=metricNumber(hasPlan?item.execution_quality?.score:item.readiness_score);
-        return `<article class="watch-card" data-preparation-id="${esc(item.inst_id)}"><div class="card-head"><div class="signal-identity"><div class="signal-title-line"><span class="signal-rank">${String(index+1).padStart(2,'0')}</span><div class="symbol">${esc(displaySymbol(item.inst_id))}</div><span class="signal-horizon">15m</span></div><div class="badges"><span class="badge watch-b">${esc(direction)}</span><span class="badge near-b">${esc(view.label)}</span></div></div><div class="card-actions">${favoriteButton(item.inst_id)}<div class="score">${score===null?'—':num(score,0)}<small>${hasPlan?'原計畫品質':'準備度'}</small></div></div></div><div class="watch-summary"><div><b>尚不可新進場</b><span>${esc(view.reason)}</span></div></div>${itemDataPage(item)}${quickLinks(item)}</article>`;
+        return `<article class="watch-card" data-preparation-id="${esc(item.inst_id)}"><div class="card-head"><div class="signal-identity"><div class="signal-title-line"><span class="signal-rank">${String(index+1).padStart(2,'0')}</span><div class="symbol">${esc(displaySymbol(item.inst_id))}</div><span class="signal-horizon">${long?'4H':'15m'}</span></div><div class="badges"><span class="badge watch-b">${esc(direction)}</span><span class="badge near-b">${esc(view.label)}</span></div></div><div class="card-actions">${favoriteButton(item.inst_id)}<div class="score">${score===null?'—':num(score,0)}<small>${hasPlan?'原計畫品質':'準備度'}</small></div></div></div><div class="watch-summary"><div><b>尚不可新進場</b><span>${esc(view.reason)}</span></div></div>${itemDataPage(item)}${quickLinks(item)}</article>`;
       }).join('');
     }
     function renderReport(report){
       setHomeReportEmpty(false);pruneExpiredTerminalCards(report);const renderKey=reportRenderFingerprint(report),savedUi=state.reportRenderKey===renderKey?null:captureReportUiState();state.report=report;if(state.reportRenderKey===renderKey)return;const preview=report.runtime_status==='CORE_PREVIEW',activeScanMode=activeUiScanMode(report),shortTransient=horizonTransientState(report,'SHORT'),longTransient=horizonTransientState(report,'LONG'),shortPreview=preview&&!shortTransient&&(activeScanMode==='SHORT'||activeScanMode==='FULL'),longPreview=preview&&!longTransient&&activeScanMode==='LONG',shortState=horizonSnapshot(report,'SHORT'),longState=horizonSnapshot(report,'LONG'),shortAvailable=shortState.available,longAvailable=longState.available,shortReadOnlyReason=horizonReadOnlyReason(report,'SHORT'),longReadOnlyReason=horizonReadOnlyReason(report,'LONG');
       const shortGroups=shortSignalGroups(report),activeShort=shortGroups.formal,quality80=[...activeShort].filter(item=>!isPreviewItem(item)&&(metricNumber(item.execution_quality?.score)??-1)>=80).sort(signalSortComparator),shortClosed=retainedClosedSignals(report,'SHORT'),allShort=[...activeShort].sort(signalSortComparator),earlyCount=activeShort.filter(x=>!isPreviewItem(x)&&x.signal_stage==='EARLY_SIGNAL').length,confirmedCount=activeShort.filter(x=>!isPreviewItem(x)&&['CONFIRMED','REENTRY'].includes(x.signal_stage)).length,waiting=activeShort.filter(x=>!isPreviewItem(x)&&itemWaitingForEntry(x)).sort(signalSortComparator),missed=activeShort.filter(x=>!isPreviewItem(x)&&itemEntryStatus(x)==='MISSED_ENTRY').sort(signalSortComparator);
-      const activeLong=[...(report.long_signals||[])].filter(item=>!isTerminalSignal(item)),longQuality80=[...activeLong].filter(item=>!isPreviewItem(item)&&(metricNumber(item.execution_quality?.score)??-1)>=80).sort(signalSortComparator),longClosed=retainedClosedSignals(report,'LONG'),allLong=[...activeLong].sort(signalSortComparator),longEarlyCount=activeLong.filter(x=>!isPreviewItem(x)&&x.signal_stage==='EARLY_SIGNAL').length,longConfirmedCount=activeLong.filter(x=>!isPreviewItem(x)&&['CONFIRMED','REENTRY'].includes(x.signal_stage)).length,longWaiting=activeLong.filter(x=>!isPreviewItem(x)&&itemWaitingForEntry(x)).sort(signalSortComparator),longMissed=activeLong.filter(x=>!isPreviewItem(x)&&itemEntryStatus(x)==='MISSED_ENTRY').sort(signalSortComparator),allClosed=[...shortClosed,...longClosed].sort(terminalSortComparator);
+      const longGroups=longSignalGroups(report),activeLong=longGroups.formal,longQuality80=[...activeLong].filter(item=>!isPreviewItem(item)&&(metricNumber(item.execution_quality?.score)??-1)>=80).sort(signalSortComparator),longClosed=retainedClosedSignals(report,'LONG'),allLong=[...activeLong].sort(signalSortComparator),longEarlyCount=activeLong.filter(x=>!isPreviewItem(x)&&x.signal_stage==='EARLY_SIGNAL').length,longConfirmedCount=activeLong.filter(x=>!isPreviewItem(x)&&['CONFIRMED','REENTRY'].includes(x.signal_stage)).length,longWaiting=activeLong.filter(x=>!isPreviewItem(x)&&itemWaitingForEntry(x)).sort(signalSortComparator),longMissed=activeLong.filter(x=>!isPreviewItem(x)&&itemEntryStatus(x)==='MISSED_ENTRY').sort(signalSortComparator),allClosed=[...shortClosed,...longClosed].sort(terminalSortComparator);
       const shortExpired=shortState.expired===true||shortReadOnlyReason==='STALE',longExpired=longState.expired===true||longReadOnlyReason==='STALE',shortReference=Boolean(shortReadOnlyReason&&!shortPreview),longReference=Boolean(longReadOnlyReason&&!longPreview);
       const completedLabel=taiwanTime(report.completed_at||report.generated_at);$('#updatedAt').textContent=completedLabel;$('#headerUpdatedAt').textContent=`更新 ${completedLabel}`;$('#headerUpdatedAt').title=`台灣時間 ${completedLabel}`;
       $('#signalCountLabel').textContent='15m 訊號已觸發';
@@ -1257,7 +1263,7 @@
       $('#signalCount').textContent=shortTransient||!shortAvailable||shortPreview||shortReference||shortExpired?'—':String(activeShort.length);
       $('#longSignalCount').textContent=longTransient||!longAvailable||longPreview||longReference||longExpired?'—':String(activeLong.length);
       $('#signalCountNote').textContent=shortTransient?(shortTransient==='ERROR'?'更新失敗':'掃描中'):!shortAvailable?'尚未掃描':shortPreview?`${shortGroups.preparing.length} 個初步候選`:shortReference?`${allShort.length} 個保留結果｜只供參考`:shortExpired?`${allShort.length} 個結果已過期`:`${earlyCount} 早期 · ${confirmedCount} 完整／再發動 · ${waiting.length} 等待回踩`;
-      $('#longSignalCountNote').textContent=longTransient?(longTransient==='ERROR'?'更新失敗':'掃描中'):!longAvailable?(preview&&activeScanMode==='FULL'?'補充中':'尚未掃描'):longPreview?`${allLong.length} 個初步候選`:longReference?`${allLong.length} 個保留結果｜只供參考`:longExpired?`${allLong.length} 個結果已過期`:`${longEarlyCount} 早期 · ${longConfirmedCount} 完整／再發動 · ${longWaiting.length} 等待回踩`;
+      $('#longSignalCountNote').textContent=longTransient?(longTransient==='ERROR'?'更新失敗':'掃描中'):!longAvailable?(preview&&activeScanMode==='FULL'?'補充中':'尚未掃描'):longPreview?`${longGroups.preparing.length} 個初步候選`:longReference?`${longGroups.preparing.length} 個保留結果｜只供參考`:longExpired?`${longGroups.preparing.length} 個結果已過期`:`${longEarlyCount} 早期 · ${longConfirmedCount} 完整／再發動 · ${longWaiting.length} 等待回踩`;
       $('#nearCount').textContent=shortAvailable?num(shortGroups.preparing.length,0):'—';
       const bias=report.market_bias||{},longBias=report.long_market_bias||{},biasRows=[],rsi24Sources=[shortAvailable?{data:bias,completedAt:Date.parse(report.short_completed_at||'')||0}:null,longAvailable?{data:longBias,completedAt:Date.parse(report.long_completed_at||'')||0}:null].filter(source=>source&&metricNumber(source.data.market_rsi_24h)!==null).sort((a,b)=>(b.completedAt-a.completedAt)||((metricNumber(b.data.market_rsi_24h_sample_count)||0)-(metricNumber(a.data.market_rsi_24h_sample_count)||0))),rsi24=rsi24Sources[0]?.data||{},rsi24Value=metricNumber(rsi24.market_rsi_24h),rsi24State=String(rsi24.market_rsi_24h_state||'UNKNOWN').toLowerCase().replaceAll('_','-');
       if(shortAvailable||longAvailable)biasRows.push(`<span class="bias-primary ${esc(rsi24State)}"><b>24H</b><strong>${esc(String(rsi24.market_rsi_24h_label||'資料不足'))}</strong><small><em>${rsi24Value===null?'—':num(rsi24Value,1)}</em> RSI(24) · ${num(rsi24.market_rsi_24h_sample_count,0)} 幣</small></span>`);
@@ -1267,7 +1273,7 @@
       renderContextCoverage(report,shortTransient||longTransient,preview);
       if(shortTransient){const message=horizonTransientMessage(shortTransient,'SHORT');renderHorizonUnavailable('SHORT',message);renderOverviewUnavailable(message)}else if(!shortAvailable){const message='尚未執行 15m 掃描；完成 15m 或全市場掃描後才會顯示短線資料。';renderHorizonUnavailable('SHORT',message);renderOverviewUnavailable(message)}else{renderSignals(allShort,'#fifteenAllBox','本輪沒有 1H 與 15m 同向且條件成立的正式訊號；可到預備區查看候選。',shortReadOnlyReason);renderSignals(waiting,'#waitRetestBox','目前沒有等待回踩的訊號。',shortReadOnlyReason);renderSignals(missed,'#missedSignalsBox','目前沒有等待新訊號的舊進場窗口。',shortReadOnlyReason);
 renderSignals(quality80,'#quality80Box','本輪沒有交易品質 80 分以上的正式訊號。',shortReadOnlyReason);renderWatchlist(shortGroups.preparing,'#watchBox',shortReadOnlyReason);renderMap(report.market_map||[],$('#mapSearch').value);renderFavorites();renderOverview({...report,signals:activeShort});if(shortReadOnlyReason)$('#rankingBox').insertAdjacentHTML('afterbegin',readOnlyReferenceBanner(shortReadOnlyReason,'SHORT'))}
-      if(longTransient)renderHorizonUnavailable('LONG',horizonTransientMessage(longTransient,'LONG'));else if(!longAvailable)renderHorizonUnavailable('LONG','尚未執行 4H 掃描；完成 4H 或全市場掃描後才會顯示長線資料。');else{renderSignals(allLong,'#longSignalsBox','目前沒有 4H 長線訊號已觸發。',longReadOnlyReason);renderSignals(longQuality80,'#longQuality80Box','本輪沒有交易品質 80 分以上的 4H 正式訊號。',longReadOnlyReason);renderSignals(longWaiting,'#longWaitRetestBox','目前沒有等待回踩的長線訊號。',longReadOnlyReason);renderSignals(longMissed,'#longMissedSignalsBox','目前沒有等待新訊號的長線舊進場窗口。',longReadOnlyReason);renderWatchlist(report.long_watchlist||[],'#longWatchBox',longReadOnlyReason)}
+      if(longTransient)renderHorizonUnavailable('LONG',horizonTransientMessage(longTransient,'LONG'));else if(!longAvailable)renderHorizonUnavailable('LONG','尚未執行 4H 掃描；完成 4H 或全市場掃描後才會顯示長線資料。');else{renderSignals(allLong,'#longSignalsBox','本輪沒有同向且條件成立的長線正式訊號；可到預備區查看候選。',longReadOnlyReason);renderSignals(longQuality80,'#longQuality80Box','本輪沒有交易品質 80 分以上的 4H 正式訊號。',longReadOnlyReason);renderSignals(longWaiting,'#longWaitRetestBox','目前沒有等待回踩的長線訊號。',longReadOnlyReason);renderSignals(longMissed,'#longMissedSignalsBox','目前沒有等待新訊號的長線舊進場窗口。',longReadOnlyReason);renderWatchlist(longGroups.preparing,'#longWatchBox',longReadOnlyReason)}
       renderSignals(allClosed,'#closedSignalsBox','目前沒有仍在保留期內的已結束交易計畫。');renderSignals(shortClosed,'#closedShortBox','目前沒有 15m 已結束交易計畫。');renderSignals(longClosed,'#closedLongBox','目前沒有 4H 已結束交易計畫。');
       if(preview){$('#scanNotice').classList.add('show');$('#scanMessage').textContent=activeScanMode==='SHORT'?'15m 初步候選已發布；原有 4H 結果保持不變，正在補齊深度與風險提醒':activeScanMode==='LONG'?'4H 初步候選已發布；原有 15m 結果保持不變，正在補齊深度與風險提醒':'15m 初步候選已發布；4H 與深度資料仍在掃描，完成後顯示正式結果'}
       state.reportRenderKey=renderKey;restoreReportUiState(savedUi);
@@ -1457,6 +1463,7 @@ renderSignals(quality80,'#quality80Box','本輪沒有交易品質 80 分以上�
     }
     function currentEntryBadge(item){
       if(isTerminalSignal(item))return '<span class="badge missed-entry-b">交易已結束</span>';
+      if(!isFormalSignal(item))return `<span class="badge near-b">${esc(signalPreparationView(item).label)}</span>`;
       return `<span class="badge triggered-signal-b">⚡ 訊號已觸發</span>${triggerKindBadge(item)}${stageBadge(item)}`
     }
     function signalSecondaryMeta(item){const preflight=item.preflight_snapshot||{},fresh=item.freshness||'NONE',freshLabel=preflight.development||freshnessName[fresh]||fresh,episode=item.lifecycle?.transition,episodeLabel={UPGRADED:'本輪增強',NEW:'新訊號週期',DOWNGRADED:'本輪轉弱',REACTIVATED:'重新啟動'}[episode],frame=item.radar_horizon==='LONG'?'1H':'15m',rsi=metricNumber(item.market_metrics?.rsi_core),res=item.market_metrics?.market_resonance,resLabel=res&&typeof res==='object'?res.label:null,parts=[freshLabel];if(resLabel)parts.push(resLabel);if(rsi!==null)parts.push(`${frame} RSI（相對強弱指標） ${num(rsi,1)}`);if(episodeLabel)parts.push(episodeLabel);return parts.map((value,index)=>index===0?`<strong>${esc(value)}</strong>`:esc(value)).join(' · ')}
@@ -1621,7 +1628,7 @@ renderSignals(quality80,'#quality80Box','本輪沒有交易品質 80 分以上�
       if(!rows.length){box.innerHTML='<div class="empty">目前沒有趨勢延續預備候選。</div>';return}
       box.innerHTML=rows.map((item,index)=>{const m=item.market_metrics||{},trigger=item.market_story?.trigger||{},missing=[];if(!trigger.control_transfer?.push_away)missing.push('原方向重新 Push-Away（價格推離）');if(!trigger.momentum_confirmation?.partial)missing.push('MA／MACD（指數平滑異同移動平均線） 重新發動');if(!trigger.control_transfer?.micro_defense_broken)missing.push('突破微型防守');return `<article class="signal-card continuation-ready-card"><div class="card-head"><div class="signal-identity"><div class="signal-title-line"><span class="signal-rank">${String(index+1).padStart(2,'0')}</span><div class="symbol">${esc(displaySymbol(item.inst_id))}</div><span class="signal-horizon">15m</span></div><div class="signal-status-line"><span class="badge watch">👀 趨勢延續預備</span></div><div class="signal-submeta">${esc(directionName[item.direction]||item.direction)} · 回踩條件形成中</div></div><div class="card-actions"><div class="score">${num(item.readiness_score??item.score,0)}<small>準備度</small></div></div></div><section class="quicklook-panel"><div class="quicklook-head"><h3>等待確認</h3><strong>${esc(missing.join('＋')||'等待收盤確認')}</strong></div></section><div class="quick-links">${singleScanButton(item.inst_id,item.radar_horizon||'SHORT',item).replace('掃描幣種資訊','🔥 延續確認更新')}</div></article>`}).join('');
     }
-    function renderWatchlist(items,selector='#watchBox',readOnlyReason=null){if(!selector.includes('long')){renderShortPreparations(items,selector,readOnlyReason);return}const box=$(selector),horizon=selector.includes('long')?'LONG':'SHORT',notice=readOnlyReferenceBanner(readOnlyReason,horizon),filtered=items.filter(x=>x.direction!=='NEUTRAL');if(!filtered.length){box.innerHTML=`${notice}<div class="empty">目前沒有接近觸發候選。</div>`;return}box.innerHTML=notice+filtered.map((item,index)=>{const preview=isPreviewItem(item),itemReadOnly=itemReadOnlyReason(item),decision=preview?decisionPanel(item):'',links=preview?'':quickLinks(item),score=`<div class="score">${num(item.readiness_score,0)}<small>訊號準備度</small></div>`,summary=tech(item.summary||'控制權尚未完全轉移，不能直接當進場訊號。'),launch=item?.market_story?.trigger?.pre_launch||{},launchLabel=String(launch.label||''),launchScore=metricNumber(launch.score),launchMissing=Array.isArray(launch.missing)?launch.missing:[],watchState=preview?'初步候選｜不可進':launchLabel||'觀察中｜尚未觸發',frame=item.radar_horizon==='LONG'?'4H':'15m';return `<article class="watch-card ${item.direction==='LONG'?'long':item.direction==='SHORT'?'short':''} ${isExpiredSnapshot(item)?'expired-snapshot':''} ${itemReadOnly&&!preview?'read-only-card':''}"><div class="card-head"><div><div class="signal-title-line"><span class="signal-rank">${String(index+1).padStart(2,'0')}</span><div class="symbol">${esc(displaySymbol(item.inst_id))}</div><span class="signal-horizon">${frame}</span></div><div class="badges">${directionBadge(item)}${marketResonanceBadge(item)}${preview?previewBadge():`${stageBadge(item)}${freshnessBadge(item)}${expiredSnapshotBadge(item)}${readOnlyReferenceBadge(item)}`}</div></div><div class="card-actions">${favoriteButton(item.inst_id)}${score}</div></div><div class="watch-summary"><div><b>${esc(watchState)}</b><span>${launchMissing.length?'還差：'+esc(launchMissing.slice(0,3).join('＋')):'方向只供觀察；正式 Trigger 與進場資格尚未成立。'}</span></div><strong>${launchScore!==null?num(launchScore,0):num(item.readiness_score,0)}%</strong></div>${decision}${primaryReasons(item,item.summary)}${itemDataPage(item)}${links}</article>`}).join('')}
+    function renderWatchlist(items,selector='#watchBox',readOnlyReason=null){renderPreparations(items,selector,readOnlyReason,selector.includes('long')?'LONG':'SHORT')}
     function renderStats(stats){const box=$('#statsBox'),o=stats.overall||{};if(!stats.available||!o.sample_size){box.innerHTML='<div class="empty">尚無已完成的真實 Signal（訊號）樣本，因此不顯示假勝率。交易品質百分比只代表現在好不好執行。</div>';return}box.innerHTML=`<article class="overview-card"><h3>全部真實樣本數 ${num(o.sample_size,0)}</h3><div class="heat-grid"><div class="heat-item"><b>${num(o.win_rate_pct,2)}%</b><span>歷史勝率</span></div><div class="heat-item"><b>${num(o.average_r,3)}R</b><span>平均 R（風險單位）／Expectancy（期望值）</span></div><div class="heat-item"><b>${num(o.profit_factor,3)}</b><span>Profit Factor（獲利因子）</span></div></div><div class="detail-grid" style="margin-top:12px"><div class="detail"><b>最大連敗</b>${num(o.max_consecutive_losses,0)}</div><div class="detail"><b>最大 Drawdown（資金回撤）</b>${num(o.max_drawdown_r,3)}R</div></div></article>`}
     function historyGroups(items){const groups=new Map();items.forEach(item=>{const key=String(item.inst_id||'UNKNOWN');if(!groups.has(key))groups.set(key,[]);groups.get(key).push(item)});return [...groups.entries()].map(([instId,events])=>({instId,events}))}
     function historyPreflightAction(instId,horizon){const signal=activePreflightSignal(instId,horizon);if(!preflightSignalUsable(signal))return preflightButton(instId,horizon,signal,true);return `<span class="history-current-label">目前有效新訊號 · 不會更新下方舊紀錄</span>${preflightButton(instId,horizon,signal,true)}`}

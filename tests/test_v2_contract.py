@@ -152,7 +152,7 @@ class V33ContractTests(unittest.TestCase):
         self.assertIn('<body data-active-group="home">', html)
         self.assertIn('body:not([data-active-group="home"]) .command-deck', html)
         self.assertIn("document.body.dataset.activeGroup=group", html)
-        self.assertIn("okx-radar-shell-v4.27-short-preparation", service_worker)
+        self.assertIn("okx-radar-shell-v4.28-long-preparation", service_worker)
         self.assertIn("市場方向 · 24H 全市場平均 RSI", html)
         self.assertIn("bias.market_average_rsi", html)
         self.assertIn("rsi24.market_rsi_24h_label", html)
@@ -234,7 +234,7 @@ class V33ContractTests(unittest.TestCase):
         self.assertIn("訊號已觸發", html)
         self.assertIn("所有已觸發階段統一排列", html)
         self.assertIn("訊號準備度", html)
-        self.assertIn("尚未觸發", html)
+        self.assertIn("預備｜等待同向", html)
         self.assertIn("已觸發 · ${watchCount} 接近", html)
         self.assertIn("function itemCurrentEntryReady(item)", html)
         self.assertIn("function itemWasEntryReady(item)", html)
@@ -280,7 +280,7 @@ class V33ContractTests(unittest.TestCase):
         self.assertIn("function signalTriggerTime(item)", html)
         self.assertIn("訊號觸發時間（台灣 UTC+8）", html)
         self.assertNotIn("status!=='ENTRY_READY'&&status!=='MISSED_ENTRY'", html)
-        self.assertIn("okx-radar-shell-v4.27-short-preparation", service_worker)
+        self.assertIn("okx-radar-shell-v4.28-long-preparation", service_worker)
         self.assertIn("$('#preflightRefresh').addEventListener('click',()=>loadPreflight(true))", html)
         self.assertIn("${decisionPanel(item)}", html)
         self.assertNotIn("showPreflight", html)
@@ -440,7 +440,7 @@ class V33ContractTests(unittest.TestCase):
         self.assertIn("開始使用", html)
         self.assertIn("讀懂交易計畫", html)
         self.assertIn("市場與紀錄", html)
-        self.assertIn("觀察中｜尚未觸發", html)
+        self.assertIn("預備｜等待觸發", html)
         self.assertIn("terminal-profit", html)
         self.assertIn("terminal-loss", html)
         self.assertIn("terminal-unknown", html)
@@ -458,7 +458,7 @@ class V33ContractTests(unittest.TestCase):
         self.assertIn("function setHomeReportEmpty", html)
         self.assertIn('body.home-report-empty[data-active-tab="overview"] #overview', html)
         self.assertIn('body[data-active-tab="manual"] .search-tools', html)
-        self.assertIn("所有已觸發訊號都在這裡；階段標示在卡片頂端", html)
+        self.assertIn("方向同向且條件成立 · 其餘候選放在預備", html)
         self.assertIn("NEW:'新訊號週期'", html)
         self.assertIn("calc((100vw - var(--layout-max) + 28px)/2)", html)
         self.assertIn("function preflightPositionMetric(data)", html)
@@ -658,7 +658,7 @@ class V33ContractTests(unittest.TestCase):
             "'本輪沒有 1H 與 15m 同向且條件成立的正式訊號；可到預備區查看候選。',shortReadOnlyReason",
             report,
         )
-        self.assertIn("'目前沒有 4H 長線訊號已觸發。',longReadOnlyReason", report)
+        self.assertIn("'本輪沒有同向且條件成立的長線正式訊號；可到預備區查看候選。',longReadOnlyReason", report)
         self.assertIn(
             "renderContextCoverage(report,shortTransient||longTransient,preview)", report
         )
@@ -694,7 +694,7 @@ class V33ContractTests(unittest.TestCase):
         short_section = html.split('<section id="fifteenAll"', 1)[1].split('</section>', 1)[0]
         long_section = html.split('<section id="longSignals"', 1)[1].split('</section>', 1)[0]
         self.assertIn("1H 與 15m 同向且條件成立 · 其餘候選放在預備", short_section)
-        self.assertIn("階段標示在卡片頂端", long_section)
+        self.assertIn("方向同向且條件成立 · 其餘候選放在預備", long_section)
 
         comparator = html.split("function signalSortComparator(a,b){", 1)[1].split(
             "function renderContextCoverage", 1

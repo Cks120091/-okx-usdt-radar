@@ -18,10 +18,13 @@ function env(payload){
     $:selector=>{if(!elements.has(selector))elements.set(selector,node());return elements.get(selector);}};
   Object.assign(ctx,{itemFinalDecision:item=>item.decision_context?.final||{},isTerminalSignal:item=>item.lifecycle?.terminal===true,isPreviewItem:item=>item.preview===true,isExpiredSnapshot:item=>item.expired===true,itemReadOnlyReason:item=>item.read_only===true});
   vm.createContext(ctx);
-  for(const name of ['shortSignalGroups','shortPreparationView','preflightQualityScore','preflightQualityComparison','preflightCoreReason','preflightPresentation','preflightQualityExplanation','preflightDataTimes','preflightEarlyWarning','preflightTerminalKind','preflightResponseTerminal','loadPreflight'])vm.runInContext(source(name),ctx);
+  for(const name of ['isFormalSignal','signalGroups','shortSignalGroups','longSignalGroups','signalPreparationView','shortPreparationView','currentEntryBadge','preflightQualityScore','preflightQualityComparison','preflightCoreReason','preflightPresentation','preflightQualityExplanation','preflightDataTimes','preflightEarlyWarning','preflightTerminalKind','preflightResponseTerminal','loadPreflight'])vm.runInContext(source(name),ctx);
   return ctx;
 }
 const payload={inst_id:'CFX-USDT-SWAP',trigger_id:'cfx-1',horizon:'SHORT',direction:'LONG',entry_policy_version:'SIGNAL_POSITION_SEPARATED_V1',original:{quality_score:90},live:{quality_score:65,price:.05669},verdict:{status:'HARD_GATE_BLOCKED',new_entry_allowed:false,label:'核心訊號條件未成立',reason:'核心條件：NO_FORMAL_TRIGGER',hard_blockers:['NO_FORMAL_TRIGGER']},signal_lifecycle:{status:'ACTIVE',terminal:false}};
+function longSignal(direction='SHORT'){
+  return {inst_id:'LONG-TEST-USDT-SWAP',trigger_id:'original-long-plan',radar_horizon:'LONG',direction,signal_stage:'EARLY_SIGNAL',execution_quality:{score:95},entry_low:.6061,entry_high:.6086,stop_loss:.6553,take_profit_1:.4954,take_profit_2:.3895,decision_context:{final:{status:'ENTER',new_entry_allowed:true,timeframe_alignment:{required:true,passed:true,state:'ALIGNED',timeframe:'1D',trigger_timeframe:'1H',timeframe_direction:direction,trigger_direction:direction}}}};
+}
 let passed=0;
 async function test(name,fn){await fn();passed++;console.log('PASS '+name);}
 (async()=>{
@@ -117,6 +120,55 @@ async function test(name,fn){await fn();passed++;console.log('PASS '+name);}
     assert.ok(c.shortPreparationView({decision_context:{final:{status:'DATA_UNAVAILABLE'}}}).label.includes('資料不足'));
     assert.ok(c.shortPreparationView({decision_context:{final:{timeframe_alignment:{required:true,passed:false,reason:'1H 多、15m 空'}}}}).reason.includes('1H 多、15m 空'));
     assert.ok(c.shortPreparationView({market_story:{preparation:{advisory_only:true,label:'預備｜等待觸發',reason:'等待同向價格觸發'}}}).reason.includes('同向價格觸發'));
+  });
+  await test('opposed long plans leave formal and quality lists, remain accessible once, and can return only after confirmation',()=>{
+    const c=env(payload);
+    for(const direction of ['LONG','SHORT']){
+      const aligned=longSignal(direction),opposed=structuredClone(aligned);opposed.inst_id='OPPOSED';
+      Object.assign(opposed.decision_context.final,{status:'WAIT',new_entry_allowed:false});
+      Object.assign(opposed.decision_context.final.timeframe_alignment,{passed:false,state:'NOT_ALIGNED',timeframe_direction:direction==='LONG'?'SHORT':'LONG',reason:'週期方向不同步'});
+      const watch={inst_id:'WATCH',radar_horizon:'LONG',direction,status:'PRE_TRIGGER'},closed={...aligned,inst_id:'CLOSED',lifecycle:{terminal:true}},report={long_signals:[aligned,opposed,closed],long_watchlist:[watch,{...watch,inst_id:'OPPOSED'},{...watch,inst_id:aligned.inst_id},closed]},before=JSON.stringify(report);
+      let groups=c.longSignalGroups(report);
+      assert.equal(groups.formal.length,1);assert.equal(groups.formal[0],aligned);assert.equal(groups.preparing.length,2);assert.equal(groups.preparing[0],opposed);assert.equal(JSON.stringify(report),before);
+      assert.equal(c.signalPreparationView(opposed).label,'預備｜等待同向');assert.ok(!c.currentEntryBadge(opposed).includes('訊號已觸發'));
+      const promoted=structuredClone(opposed);promoted.decision_context=structuredClone(aligned.decision_context);
+      groups=c.longSignalGroups({long_signals:[aligned,promoted],long_watchlist:[{...watch,inst_id:'OPPOSED'}]});
+      assert.equal(groups.formal.length,2);assert.equal(groups.preparing.length,0);
+      for(const key of ['trigger_id','entry_low','entry_high','stop_loss','take_profit_1','take_profit_2'])assert.equal(promoted[key],opposed[key]);
+    }
+  });
+  await test('long missing alignment, neutral direction, stale data and pending core never display triggered badges',()=>{
+    const c=env(payload),aligned=longSignal();Object.assign(c,{triggerKindBadge:()=>'',stageBadge:()=>''});
+    assert.ok(c.currentEntryBadge(aligned).includes('訊號已觸發'));
+    for(const change of [{signal_stage:'PRE_TRIGGER'},{preview:true},{expired:true},{read_only:true}]){
+      const item={...aligned,...change};assert.equal(c.longSignalGroups({long_signals:[item]}).formal.length,0);assert.ok(!c.currentEntryBadge(item).includes('訊號已觸發'));
+    }
+    for(const change of [{passed:false,timeframe_direction:'NEUTRAL'},{passed:null,state:'UNKNOWN'},{timeframe:'4H'},{timeframe_direction:'LONG'}]){
+      const item=structuredClone(aligned);Object.assign(item.decision_context.final.timeframe_alignment,change);
+      assert.equal(c.longSignalGroups({long_signals:[item]}).formal.length,0);assert.ok(!c.currentEntryBadge(item).includes('訊號已觸發'));
+    }
+    const missing=structuredClone(aligned);delete missing.decision_context.final.timeframe_alignment;
+    assert.equal(c.longSignalGroups({long_signals:[missing]}).formal.length,0);assert.ok(c.currentEntryBadge(missing).includes('資料不足'));
+    const terminal={...aligned,lifecycle:{terminal:true}};assert.ok(c.currentEntryBadge(terminal).includes('交易已結束'));
+  });
+  await test('long report rendering uses the same formal group for count and 80-point filter',()=>{
+    const c=env(payload),draws=new Map(),aligned=longSignal(),opposed=structuredClone(aligned);opposed.inst_id='OPPOSED';
+    Object.assign(opposed.decision_context.final,{status:'WAIT',new_entry_allowed:false});Object.assign(opposed.decision_context.final.timeframe_alignment,{passed:false,timeframe_direction:'LONG'});
+    Object.assign(c,{setHomeReportEmpty(){},pruneExpiredTerminalCards(){},reportRenderFingerprint:()=> 'new-report',captureReportUiState:()=>null,restoreReportUiState(){},activeUiScanMode:()=> 'FULL',horizonTransientState:()=>null,horizonSnapshot:()=>({available:true}),horizonReadOnlyReason:()=>null,metricNumber:x=>typeof x==='number'?x:null,signalSortComparator:()=>0,retainedClosedSignals:()=>[],itemWaitingForEntry:()=>false,itemEntryStatus:()=> 'ENTRY_READY',terminalSortComparator:()=>0,renderContextCoverage(){},renderMap(){},renderFavorites(){},renderOverview(){},renderSignals:(items,selector)=>draws.set(selector,items),renderWatchlist:(items,selector)=>draws.set(selector,items)});
+    vm.runInContext(source('renderReport'),c);
+    c.renderReport({long_signals:[aligned,opposed],long_watchlist:[{...opposed,trigger_id:null}],signals:[]});
+    assert.equal(c.$('#longSignalCount').textContent,'1');
+    for(const selector of ['#longSignalsBox','#longQuality80Box']){assert.equal(draws.get(selector).length,1);assert.equal(draws.get(selector)[0],aligned);}
+    assert.equal(draws.get('#longWatchBox').length,1);assert.equal(draws.get('#longWatchBox')[0],opposed);
+  });
+  await test('long preparation cards name the pending state, escape reasons and retain plan links',()=>{
+    const c=env(payload),opposed=longSignal();Object.assign(opposed.decision_context.final,{status:'WAIT',new_entry_allowed:false});Object.assign(opposed.decision_context.final.timeframe_alignment,{passed:false,timeframe_direction:'LONG',reason:'1D 偏多，1H 做空 <script>'});
+    const before=JSON.stringify(opposed);
+    Object.assign(c,{readOnlyReferenceBanner:()=>'',metricNumber:x=>typeof x==='number'?x:null,displaySymbol:x=>x,favoriteButton:()=>'',itemDataPage:()=>'<button>查看數據與完整理由</button>',quickLinks:item=>`<button data-preflight-trigger-id="${item.trigger_id}">4H 進場前更新</button>`});
+    vm.runInContext(source('renderPreparations'),c);vm.runInContext(source('renderWatchlist'),c);
+    c.renderWatchlist([opposed],'#longWatchBox');const out=c.$('#longWatchBox').innerHTML;
+    for(const text of ['預備｜等待同向','尚不可新進場','原計畫品質','original-long-plan','signal-horizon">4H'])assert.ok(out.includes(text));
+    assert.ok(!out.includes('訊號已觸發'));assert.ok(!out.includes('<script>'));assert.equal(JSON.stringify(opposed),before);
   });
   console.log(`${passed} preflight detail regressions passed`);
 })().catch(error=>{console.error(error);process.exitCode=1;});
