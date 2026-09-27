@@ -452,6 +452,11 @@ def _public_metrics(
 
 def _public_market_story(story: Any) -> dict[str, Any]:
     payload: dict[str, Any] = {}
+    preparation = _select(_read(_read(story, "raw", {}), "preparation", {}), (
+        "code", "candidate_direction", "hourly_direction", "label", "reason", "advisory_only",
+    ))
+    if preparation.get("advisory_only") is True:
+        payload["preparation"] = preparation
     for key, fields in (
         ("where", ("label",)),
         ("price_acceptance", ("label",)),

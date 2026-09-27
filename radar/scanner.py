@@ -4186,16 +4186,21 @@ class MarketScanner:
         return "SIGNAL_FORMING"
 
     def _watchlist(self, states: list[MarketState]) -> list[MarketState]:
+        def has_preparation(item):
+            return (item.radar_horizon == "SHORT"
+                    and item.market_story.get("raw", {}).get("preparation", {}).get("advisory_only") is True)
+
         selected = [
             item
             for item in states
             if item.status in ("PRE_TRIGGER", "PRE_CONTINUATION", "NEAR_TRIGGER", "WATCH", "NO_FOLLOW_THROUGH")
-            and item.direction in ("LONG", "SHORT")
+            and (item.direction in ("LONG", "SHORT") or has_preparation(item))
             and item.status != "FILTERED"
             and self._passes_output_liquidity(item, False)
         ]
         selected.sort(
             key=lambda item: (
+                has_preparation(item),
                 item.status == "PRE_TRIGGER",
                 item.status == "PRE_CONTINUATION",
                 item.status == "NEAR_TRIGGER",

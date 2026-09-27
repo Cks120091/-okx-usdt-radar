@@ -8,6 +8,40 @@ VERSION = "SHORT_SCAN_OBSERVATION_V1"
 PREPARING = {"PRE_TRIGGER", "NEAR_TRIGGER", "PRE_CONTINUATION"}
 
 
+def short_scan_preparation(hourly, candidates, *, closed):
+    """Keep a real setup visible while direction/trigger permission is pending."""
+    side = hourly["direction"]
+    if not closed or side == "UNKNOWN":
+        return {}
+    own = mapping(candidates.get(side))
+    if own.get("triggered") is True:
+        return {}
+    eligible = [mapping(candidate) for candidate in candidates.values()
+                if (candidate.get("stage") in PREPARING
+                    or (candidate.get("triggered") is True
+                        and candidate.get("stage") in {"EARLY_SIGNAL", "CONFIRMED", "REENTRY"}))
+                and not candidate.get("compression_block")
+                and not mapping(candidate.get("noise")).get("high")
+                and not mapping(candidate.get("control_transfer")).get("opponent_reclaimed")]
+    if not eligible:
+        return {}
+    candidate = max(eligible, key=lambda value: (
+        value.get("triggered") is True, value.get("direction") == side,
+        number(value.get("explainability_score")) or 0,
+    ))
+    candidate_side = candidate.get("direction")
+    if candidate_side not in {"LONG", "SHORT"}:
+        return {}
+    aligned = side == candidate_side
+    name = "多" if candidate_side == "LONG" else "空"
+    reason = (f"1H {hourly['label']}，15m {name}方形態形成中；等待同向價格觸發。"
+              if aligned else f"1H {hourly['label']}，15m 出現{name}方形態；等待 1H 與 15m 同向，尚不可進場。")
+    return {"code": "TRIGGER_PENDING" if aligned else "DIRECTION_PENDING",
+            "candidate_direction": candidate_side, "hourly_direction": side,
+            "label": "預備｜等待觸發" if aligned else "預備｜等待同向",
+            "reason": reason, "advisory_only": True}
+
+
 def short_scan_observation(hourly, candidates, *, closed, max_age_bars):
     """Keep otherwise-discarded opposite price evidence outside the Trigger."""
     side = hourly["direction"]

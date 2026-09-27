@@ -7,7 +7,7 @@ from typing import Any
 from .indicators import TimeframeFeatures, atr, ema_series, features
 from .models import Candle, MarketContext
 from .short_direction import POLICY as SHORT_DIRECTION_POLICY, hourly_direction
-from .early_warning import short_scan_observation
+from .early_warning import short_scan_observation, short_scan_preparation
 
 
 STRATEGY_VERSION = "V3.4_CONTEXT"
@@ -571,6 +571,10 @@ class MarketStoryEngine:
             "noise": selected.get("noise", {}),
         }
         if hourly is not None:
+            raw["preparation"] = short_scan_preparation(
+                hourly, candidates,
+                closed=bool(core_candles[-1].confirmed and bias_candles[-1].confirmed),
+            )
             raw["early_observation"] = short_scan_observation(
                 hourly, candidates,
                 closed=bool(core_candles[-1].confirmed and bias_candles[-1].confirmed),

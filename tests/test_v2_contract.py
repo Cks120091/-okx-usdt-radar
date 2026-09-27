@@ -152,7 +152,7 @@ class V33ContractTests(unittest.TestCase):
         self.assertIn('<body data-active-group="home">', html)
         self.assertIn('body:not([data-active-group="home"]) .command-deck', html)
         self.assertIn("document.body.dataset.activeGroup=group", html)
-        self.assertIn("okx-radar-shell-v4.26-scan-warning", service_worker)
+        self.assertIn("okx-radar-shell-v4.27-short-preparation", service_worker)
         self.assertIn("市場方向 · 24H 全市場平均 RSI", html)
         self.assertIn("bias.market_average_rsi", html)
         self.assertIn("rsi24.market_rsi_24h_label", html)
@@ -280,7 +280,7 @@ class V33ContractTests(unittest.TestCase):
         self.assertIn("function signalTriggerTime(item)", html)
         self.assertIn("訊號觸發時間（台灣 UTC+8）", html)
         self.assertNotIn("status!=='ENTRY_READY'&&status!=='MISSED_ENTRY'", html)
-        self.assertIn("okx-radar-shell-v4.26-scan-warning", service_worker)
+        self.assertIn("okx-radar-shell-v4.27-short-preparation", service_worker)
         self.assertIn("$('#preflightRefresh').addEventListener('click',()=>loadPreflight(true))", html)
         self.assertIn("${decisionPanel(item)}", html)
         self.assertNotIn("showPreflight", html)
@@ -655,7 +655,7 @@ class V33ContractTests(unittest.TestCase):
         self.assertNotIn("liveReady=activeShort.filter(itemCurrentEntryReady)", report)
         self.assertNotIn("itemWasEntryReady", report)
         self.assertIn(
-            "'本輪沒有 15m 訊號已觸發或趨勢延續預備。',shortReadOnlyReason",
+            "'本輪沒有 1H 與 15m 同向且條件成立的正式訊號；可到預備區查看候選。',shortReadOnlyReason",
             report,
         )
         self.assertIn("'目前沒有 4H 長線訊號已觸發。',longReadOnlyReason", report)

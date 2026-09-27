@@ -16,8 +16,9 @@ function env(payload){
     num:(n,d)=>Number(n).toFixed(d),normalizedHorizon:x=>x,preflightRequestIsCurrent:()=>true,
     api:async()=>payload,renderPreflight:data=>ctx.rendered=data,refreshPreflightHistoryRate(){},loadReport:async()=>{ctx.terminalRefreshes=(ctx.terminalRefreshes||0)+1;},
     $:selector=>{if(!elements.has(selector))elements.set(selector,node());return elements.get(selector);}};
+  Object.assign(ctx,{itemFinalDecision:item=>item.decision_context?.final||{},isTerminalSignal:item=>item.lifecycle?.terminal===true,isPreviewItem:item=>item.preview===true,isExpiredSnapshot:item=>item.expired===true,itemReadOnlyReason:item=>item.read_only===true});
   vm.createContext(ctx);
-  for(const name of ['preflightQualityScore','preflightQualityComparison','preflightCoreReason','preflightPresentation','preflightQualityExplanation','preflightDataTimes','preflightEarlyWarning','preflightTerminalKind','preflightResponseTerminal','loadPreflight'])vm.runInContext(source(name),ctx);
+  for(const name of ['shortSignalGroups','shortPreparationView','preflightQualityScore','preflightQualityComparison','preflightCoreReason','preflightPresentation','preflightQualityExplanation','preflightDataTimes','preflightEarlyWarning','preflightTerminalKind','preflightResponseTerminal','loadPreflight'])vm.runInContext(source(name),ctx);
   return ctx;
 }
 const payload={inst_id:'CFX-USDT-SWAP',trigger_id:'cfx-1',horizon:'SHORT',direction:'LONG',entry_policy_version:'SIGNAL_POSITION_SEPARATED_V1',original:{quality_score:90},live:{quality_score:65,price:.05669},verdict:{status:'HARD_GATE_BLOCKED',new_entry_allowed:false,label:'核心訊號條件未成立',reason:'核心條件：NO_FORMAL_TRIGGER',hard_blockers:['NO_FORMAL_TRIGGER']},signal_lifecycle:{status:'ACTIVE',terminal:false}};
@@ -87,6 +88,35 @@ async function test(name,fn){await fn();passed++;console.log('PASS '+name);}
     assert.equal(c.preflightEarlyWarning({...data,signal_lifecycle:{status:'INVALIDATED',terminal:true}}),'');
     assert.equal(c.preflightEarlyWarning({...payload,early_warning:{}}),'');
     assert.equal(data.verdict.new_entry_allowed,false);
+  });
+  await test('only aligned formal short signals reach the signal group; pending plans remain immutable',()=>{
+    const c=env(payload),signal={inst_id:'A',trigger_id:'old-plan',radar_horizon:'SHORT',direction:'LONG',signal_stage:'CONFIRMED',entry_low:100,stop_loss:98,take_profit_1:106,decision_context:{final:{status:'ENTER',new_entry_allowed:true,timeframe_alignment:{required:true,passed:true,timeframe:'1H',trigger_timeframe:'15m',timeframe_direction:'LONG',trigger_direction:'LONG'}}}};
+    for(const direction of ['LONG','SHORT']){
+      const aligned=structuredClone(signal);aligned.direction=direction;Object.assign(aligned.decision_context.final.timeframe_alignment,{timeframe_direction:direction,trigger_direction:direction});
+      assert.equal(c.shortSignalGroups({signals:[aligned]}).formal.length,1);
+      const opposed=structuredClone(aligned);opposed.inst_id='B';Object.assign(opposed.decision_context.final.timeframe_alignment,{passed:false,timeframe_direction:direction==='LONG'?'SHORT':'LONG'});
+      const waiting={inst_id:'C',radar_horizon:'SHORT',direction:'NEUTRAL',status:'WATCH'},continuation={inst_id:'D',radar_horizon:'SHORT',direction, status:'PRE_CONTINUATION'};
+      const report={signals:[aligned,opposed],watchlist:[waiting,continuation,{...waiting,inst_id:'A'}]},before=JSON.stringify(report),groups=c.shortSignalGroups(report);
+      assert.equal(groups.formal.length,1);assert.equal(groups.preparing.length,3);assert.ok(groups.preparing.includes(opposed));assert.equal(JSON.stringify(report),before);
+      assert.equal(opposed.stop_loss,98);assert.equal(opposed.trigger_id,'old-plan');
+    }
+  });
+  await test('aligned but untriggered, unknown direction, failed data and previews are not formal signals',()=>{
+    const c=env(payload),item={inst_id:'A',direction:'LONG',signal_stage:'CONFIRMED',decision_context:{final:{status:'ENTER',new_entry_allowed:true,timeframe_alignment:{required:true,passed:true,timeframe:'1H',trigger_timeframe:'15m',timeframe_direction:'LONG',trigger_direction:'LONG'}}}};
+    for(const change of [{signal_stage:'PRE_TRIGGER'},{preview:true},{expired:true},{read_only:true}]){
+      const result=c.shortSignalGroups({signals:[{...item,...change}]});assert.equal(result.formal.length,0);assert.equal(result.preparing.length,1);
+    }
+    for(const final of [{status:'DATA_UNAVAILABLE'},{status:'WAIT',new_entry_allowed:false},{status:'ENTER',new_entry_allowed:true,timeframe_alignment:{}}]){
+      const result=c.shortSignalGroups({signals:[{...item,decision_context:{final}}]});assert.equal(result.formal.length,0);assert.equal(result.preparing.length,1);
+    }
+    const closed={...item,lifecycle:{terminal:true}};assert.equal(c.shortSignalGroups({signals:[closed],watchlist:[closed]}).preparing.length,0);
+    const long={...item,radar_horizon:'LONG'},report={signals:[],long_signals:[long]},before=JSON.stringify(report);c.shortSignalGroups(report);assert.equal(JSON.stringify(report),before);
+  });
+  await test('preparation labels distinguish missing data, awaiting alignment and awaiting trigger',()=>{
+    const c=env(payload);
+    assert.ok(c.shortPreparationView({decision_context:{final:{status:'DATA_UNAVAILABLE'}}}).label.includes('資料不足'));
+    assert.ok(c.shortPreparationView({decision_context:{final:{timeframe_alignment:{required:true,passed:false,reason:'1H 多、15m 空'}}}}).reason.includes('1H 多、15m 空'));
+    assert.ok(c.shortPreparationView({market_story:{preparation:{advisory_only:true,label:'預備｜等待觸發',reason:'等待同向價格觸發'}}}).reason.includes('同向價格觸發'));
   });
   console.log(`${passed} preflight detail regressions passed`);
 })().catch(error=>{console.error(error);process.exitCode=1;});
