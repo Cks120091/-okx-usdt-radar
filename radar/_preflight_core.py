@@ -11,6 +11,7 @@ from .models import MarketContext, Signal, Ticker
 from .price_display import signal_plan_display_fields
 from .entry_window import can_continue as entry_window_can_continue
 from .strategy import _entry_eligibility
+from .entry_quality import entry_location_quality
 
 
 class PreflightConfig(Protocol):
@@ -645,38 +646,9 @@ def _live_entry_location(
     invalidated: bool,
     target_reached: bool,
 ) -> dict[str, Any]:
-    chase_atr = float(eligibility.get("chase_atr", 0.0) or 0.0)
-    if invalidated:
-        return {
-            "key": "INVALIDATED",
-            "label": "原交易計畫已失效",
-            "score": 0.0,
-            "extension_atr": round(chase_atr, 3),
-        }
-    if target_reached:
-        return {
-            "key": "SEVERE_CHASE",
-            "label": "第一目標已到達",
-            "score": 0.0,
-            "extension_atr": round(chase_atr, 3),
-        }
-    status = eligibility.get("status")
-    if status == "ENTRY_READY":
-        ready_limit = max(float(eligibility.get("ready_max_chase_atr", 0.15)), 1e-9)
-        score = max(75.0, 95.0 - min(chase_atr / ready_limit, 1.0) * 20.0)
-        key, label = "LIVE_ACCEPTABLE", "仍在合理進場區"
-    elif status == "WAIT_RETEST":
-        score = 55.0
-        key, label = "RETEST_REQUIRED", "等待回踩／重新確認"
-    else:
-        score = 10.0
-        key, label = "SEVERE_CHASE", "已錯過／不宜追價"
-    return {
-        "key": key,
-        "label": label,
-        "score": round(score, 1),
-        "extension_atr": round(chase_atr, 3),
-    }
+    return entry_location_quality(
+        eligibility, invalidated=invalidated, target_reached=target_reached
+    )
 
 
 def _signal_atr(signal: Signal) -> float:

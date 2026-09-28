@@ -72,7 +72,7 @@ class PreflightClarityTests(unittest.TestCase):
         old = {**current, "entry_location": current["entry_location"] - 4,
                "risk_reward": current["risk_reward"] + 2}
         signal = replace(signal, execution_quality={"score": round(sum(old.values()), 1),
-                         "score_components_version": 1, "score_components": old})
+                         "score_components_version": 2, "score_components": old})
         payload["original"]["quality_score"] = signal.execution_quality["score"]
         before = copy.deepcopy(payload)
         explanation = explain_preflight(signal, payload)["quality_explanation"]

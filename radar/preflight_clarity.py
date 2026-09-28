@@ -26,7 +26,13 @@ def _quality_explanation(signal, payload):
     if mapping(payload.get("signal_lifecycle")).get("terminal") is True:
         result.update(mode="TERMINAL", reasons=["原計畫已結束，品質分數不再代表新進場機會。"], note="")
         return result
-    comparable = (old.get("score_components_version") == live.get("quality_components_version") == 1
+    old_version = old.get("score_components_version")
+    live_version = live.get("quality_components_version")
+    if old_version != live_version and live_version == 2:
+        result["basis_changed"] = True
+        result["delta"] = None
+        result["note"] = "原品質使用舊評分方式，與本次無法直接比較；以下僅列本次評分，無法精確歸因分數變化。重新掃描後將採用相同評分方式。"
+    comparable = (old_version == live_version == 2
                   and all(number(previous.get(k)) is not None and number(latest.get(k)) is not None for k in COMPONENTS)
                   and original is not None and current is not None
                   and abs(sum(number(previous[k]) for k in COMPONENTS) - original) <= 0.11
@@ -107,5 +113,16 @@ def explain_preflight(signal, payload):
         "execution_at": live.get("execution_sampled_at"),
     }
     result["quality_explanation"] = _quality_explanation(signal, payload)
+    confirmation_pending = (
+        not lifecycle.get("terminal")
+        and live.get("reentry_confirmation_required") is True
+        and live.get("closed_retest_confirmed") is not True
+    )
+    within = mapping(payload.get("position_advisory")).get("state") == "WITHIN"
+    result["confirmation_assessment"] = {
+        "pending": confirmation_pending, "affects_position_score": False,
+        "note": (("價格位於進場區，但" if within else "")
+                 + "最近掃描尚未記錄新的收線回踩確認；此提醒不另扣位置分。") if confirmation_pending else "",
+    }
     result["early_warning"] = preflight_early_warning(signal, payload)
     return result

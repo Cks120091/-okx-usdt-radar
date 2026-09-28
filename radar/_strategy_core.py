@@ -21,6 +21,7 @@ from .market_story import (
     execution_quality,
 )
 from .models import Candle, Instrument, MarketContext, MarketState, Signal, Ticker
+from .entry_quality import entry_location_quality
 
 
 @dataclass(frozen=True)
@@ -974,18 +975,6 @@ class AdaptiveStrategyEngine:
         else:
             entry_low, entry_high = plan.entry - zone_offset * 0.45, plan.entry + zone_offset
         risk_pct = abs(plan.entry - plan.stop) / max(abs(plan.entry), 1e-9) * 100.0
-        initial_quality = execution_quality(
-            story,
-            ticker.spread_pct,
-            risk_pct,
-            plan.rr,
-            None,
-            target_rr=self.config.minimum_rr,
-            max_cost_to_risk_pct=self.config.max_execution_cost_to_risk_pct,
-            max_spread_pct=self.config.max_spread_pct,
-            max_slippage_pct=self.config.max_slippage_pct,
-            estimated_taker_fee_pct=self.config.estimated_taker_fee_pct,
-        )
         eligibility = _entry_eligibility(
             direction=plan.direction,
             current_price=ticker.last,
@@ -1000,6 +989,15 @@ class AdaptiveStrategyEngine:
             missed_chase_atr=self.config.entry_missed_chase_atr,
             existing_episode=existing_episode,
             closed_retest_confirmed=closed_retest_confirmed,
+        )
+        initial_quality = execution_quality(
+            story, ticker.spread_pct, risk_pct, plan.rr, None,
+            target_rr=self.config.minimum_rr,
+            max_cost_to_risk_pct=self.config.max_execution_cost_to_risk_pct,
+            max_spread_pct=self.config.max_spread_pct,
+            max_slippage_pct=self.config.max_slippage_pct,
+            estimated_taker_fee_pct=self.config.estimated_taker_fee_pct,
+            entry_location=entry_location_quality(eligibility),
         )
         metrics = dict(state.market_metrics)
         metrics.update(
@@ -1518,6 +1516,7 @@ class AdaptiveStrategyEngine:
             max_spread_pct=self.config.max_spread_pct,
             max_slippage_pct=self.config.max_slippage_pct,
             estimated_taker_fee_pct=self.config.estimated_taker_fee_pct,
+            entry_location=entry_location_quality(eligibility),
         )
         metrics.update(
             {

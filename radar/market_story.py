@@ -866,10 +866,11 @@ def execution_quality(
     max_spread_pct: float = 0.10,
     max_slippage_pct: float = 0.15,
     estimated_taker_fee_pct: float = 0.05,
+    entry_location: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     reasons: list[str] = []
     warnings: list[str] = []
-    entry = dict(story.execution_quality.get("entry_location", {}))
+    entry = dict(entry_location if entry_location is not None else story.execution_quality.get("entry_location", {}))
     score = float(entry.get("score", 50.0)) * 0.30
     # Execution data is a penalty-only ranking input.  A cheap market is the
     # neutral baseline; it must not outrank an otherwise identical candidate
@@ -944,7 +945,7 @@ def execution_quality(
     recommendation = "NORMAL" if final_score >= 60.0 else "CAUTION" if final_score >= 35.0 else "AVOID_EXECUTION"
     return {
         "score": final_score,
-        "score_components_version": 1,
+        "score_components_version": 2 if entry.get("basis") == "ENTRY_ZONE_V2" else 1,
         "score_components": {
             "entry_location": round(float(entry.get("score", 50.0)) * 0.30, 6),
             "spread": round(spread_score * 0.20, 6),

@@ -1657,8 +1657,9 @@ renderSignals(quality80,'#quality80Box','本輪沒有交易品質 80 分以上�
     }
     function preflightQualityComparison(data){
       const original=preflightQualityScore(data?.original?.quality_score),current=preflightQualityScore(data?.live?.quality_score);
-      const format=value=>value===null?'—':num(value,1),change=original===null||current===null?'unknown':current>original?'improved':current<original?'lower':'same';
-      return `<aside class="preflight-quality-summary" data-quality-change="${change}" aria-label="交易品質：原品質 ${format(original)}，更新後 ${format(current)}"><span class="preflight-quality-caption">交易品質 · 非勝率</span><div class="preflight-quality-values"><span><small>原品質</small><b>${format(original)}</b></span><i aria-hidden="true">→</i><span><small>更新後</small><b>${format(current)}</b></span></div></aside>`;
+      const basisChanged=data?.quality_explanation?.basis_changed===true;
+      const format=value=>value===null?'—':num(value,1),change=basisChanged||original===null||current===null?'unknown':current>original?'improved':current<original?'lower':'same';
+      return `<aside class="preflight-quality-summary" data-quality-change="${change}" aria-label="交易品質：原品質 ${format(original)}，更新後 ${format(current)}"><span class="preflight-quality-caption">${basisChanged?'評分方式已更新 · 不直接比較':'交易品質 · 非勝率'}</span><div class="preflight-quality-values"><span><small>原品質</small><b>${format(original)}</b></span><i aria-hidden="true">${basisChanged?'／':'→'}</i><span><small>更新後</small><b>${format(current)}</b></span></div></aside>`;
     }
     function preflightCoreReason(data){
       const verdict=data?.verdict||{},reason=String(verdict.reason||'');
@@ -1826,9 +1827,11 @@ renderSignals(quality80,'#quality80Box','本輪沒有交易品質 80 分以上�
     }
     function preflightQualityExplanation(data){
       const explanation=data.quality_explanation;if(!explanation)return '';
+      const confirmation=data.confirmation_assessment;
+      const confirmationNote=!preflightResponseTerminal(data)&&confirmation?.pending&&confirmation?.note?`<p class="preflight-quality-explanation">收線確認提醒 · ${esc(confirmation.note)}</p>`:'';
       const reasons=(explanation.reasons||[]).filter(Boolean).map(esc).join(' ');
       const title=explanation.mode==='COMPARISON'?'品質變化原因':explanation.mode==='TERMINAL'?'計畫結束後的品質說明':'本次品質說明';
-      return `<details class="preflight-quality-explanation"><summary>${title}${reasons?' · '+reasons:''}</summary><p>${esc(explanation.note||'原品質與更新後分數僅供紀錄。')}</p></details>`;
+      return `${confirmationNote}<details class="preflight-quality-explanation"><summary>${title}${reasons?' · '+reasons:''}</summary><p>${esc(explanation.note||'原品質與更新後分數僅供紀錄。')}</p></details>`;
     }
     function preflightDataTimes(data){
       const times=data.data_times||{},original=data.original||{},live=data.live||{};

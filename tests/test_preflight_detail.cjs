@@ -76,6 +76,15 @@ async function test(name,fn){await fn();passed++;console.log('PASS '+name);}
     const out=c.preflightQualityComparison({original:{},live:{quality_score:0}});
     assert.ok(out.includes('—'));assert.ok(out.includes('0.0'));assert.ok(out.includes('data-quality-change="unknown"'));
   });
+  await test('changed scoring basis is neutral and confirmation stays separate from quality deductions',()=>{
+    const c=env(payload),data={...payload,quality_explanation:{basis_changed:true,mode:'CURRENT_ONLY',reasons:['本次止損距離評分 3.0 分。'],note:'評分方式不同'},confirmation_assessment:{pending:true,note:'<提醒>此提醒不另扣位置分。'}};
+    const comparison=c.preflightQualityComparison(data),explanation=c.preflightQualityExplanation(data);
+    assert.ok(comparison.includes('data-quality-change="unknown"'));
+    assert.ok(comparison.includes('不直接比較'));
+    assert.ok(explanation.includes('收線確認提醒'));
+    assert.ok(explanation.includes('&lt;提醒>'));
+    assert.ok(!c.preflightQualityExplanation({...data,signal_lifecycle:{terminal:true,status:'INVALIDATED'}}).includes('收線確認提醒'));
+  });
   await test('formal trigger explanation is readable and does not clear its blocker',()=>{
     const c=env(payload),before=JSON.stringify(payload),p=c.preflightPresentation(payload);
     assert.ok(p.detail.includes('目前訊號記錄未符合正式觸發狀態'));assert.ok(!p.detail.includes('NO_FORMAL_TRIGGER'));

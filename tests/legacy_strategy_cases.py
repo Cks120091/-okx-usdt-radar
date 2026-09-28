@@ -882,10 +882,10 @@ class StrategyTests(unittest.TestCase):
             filtered.market_state.market_metrics["execution_cost_to_risk_pct"],
             12.0,
         )
-        self.assertIn(
-            filtered.signal.execution_quality["recommendation"],
-            ("CAUTION", "AVOID_EXECUTION"),
-        )
+        # Location now uses the Entry zone, so the total need not fall below
+        # 60. The cost penalty and warning must still survive independently.
+        self.assertLess(filtered.signal.execution_quality["score_components"]["execution_cost"], 5)
+        self.assertIn("交易成本占原始風險超過建議上限", filtered.signal.execution_quality["warnings"])
         execution_check = next(
             item
             for item in filtered.signal.safety_checks
