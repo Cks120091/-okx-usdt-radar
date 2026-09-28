@@ -3,6 +3,7 @@ from unittest.mock import MagicMock, patch
 from urllib.error import URLError
 
 from radar.api import OKXAPIError, OKXPublicClient, SlidingWindowRateLimiter
+from radar.market_scope import XAU_INST_ID
 from radar.models import Instrument
 
 
@@ -112,14 +113,94 @@ class APITests(unittest.TestCase):
         instruments = FixtureClient(rows).get_usdt_swap_instruments()
         self.assertEqual([item.inst_id for item in instruments], ["BTC-USDT-SWAP"])
 
-    def test_rejects_every_explicit_non_crypto_contract_category(self):
+    def test_only_xau_is_allowed_outside_crypto_contract_category(self):
         rows = [
             {"instId": "TSLA-USDT-SWAP", "state": "live", "settleCcy": "USDT", "ctType": "linear", "tickSz": "0.01", "instCategory": "3"},
             {"instId": "XAU-USDT-SWAP", "state": "live", "settleCcy": "USDT", "ctType": "linear", "tickSz": "0.01", "instCategory": "4"},
+            {"instId": "XAG-USDT-SWAP", "state": "live", "settleCcy": "USDT", "ctType": "linear", "tickSz": "0.01", "instCategory": "4"},
+            {"instId": "BRENT-USDT-SWAP", "state": "live", "settleCcy": "USDT", "ctType": "linear", "tickSz": "0.01", "instCategory": "4"},
+            {"instId": "XAU2-USDT-SWAP", "state": "live", "settleCcy": "USDT", "ctType": "linear", "tickSz": "0.01", "instCategory": "4"},
             {"instId": "UNKNOWN-USDT-SWAP", "state": "live", "settleCcy": "USDT", "ctType": "linear", "tickSz": "0.01"},
         ]
 
-        self.assertEqual(FixtureClient(rows).get_usdt_swap_instruments(), [])
+        self.assertEqual(
+            [item.inst_id for item in FixtureClient(rows).get_usdt_swap_instruments()],
+            [XAU_INST_ID],
+        )
+        for row in rows:
+            with self.subTest(inst_id=row["instId"]):
+                instrument = FixtureClient(rows).get_usdt_swap_instrument(row["instId"])
+                if row["instId"] == XAU_INST_ID:
+                    self.assertEqual(instrument.inst_id, XAU_INST_ID)
+                else:
+                    self.assertIsNone(instrument)
+
+    @staticmethod
+    def _xau_instrument_row():
+        return {
+            "instId": XAU_INST_ID,
+            "state": "live",
+            "settleCcy": "USDT",
+            "ctType": "linear",
+            "tickSz": "0.1",
+            "listTime": "1760000000000",
+            "ctVal": "0.001",
+            "ctMult": "1",
+            "ctValCcy": "XAU",
+            "instCategory": "4",
+        }
+
+    def test_xau_list_and_single_lookup_preserve_contract_metadata(self):
+        row = self._xau_instrument_row()
+        expected = Instrument(
+            inst_id=XAU_INST_ID,
+            state="live",
+            settle_ccy="USDT",
+            ct_type="linear",
+            tick_size=0.1,
+            list_time=1760000000000,
+            contract_value=0.001,
+            contract_multiplier=1.0,
+            contract_value_ccy="XAU",
+        )
+        self.assertEqual(FixtureClient([row]).get_usdt_swap_instruments(), [expected])
+        self.assertEqual(
+            FixtureClient([row]).get_usdt_swap_instrument(XAU_INST_ID), expected
+        )
+
+    def test_xau_exception_keeps_all_instrument_safety_filters(self):
+        invalid_fields = (
+            {"instCategory": "1"},
+            {"instCategory": "3"},
+            {"instCategory": "2"},
+            {"instCategory": ""},
+            {"instCategory": None},
+            {"state": "suspend"},
+            {"state": "preopen"},
+            {"state": ""},
+            {"settleCcy": "USDC"},
+            {"settleCcy": "XAU"},
+            {"settleCcy": ""},
+            {"ctType": "inverse"},
+            {"ctType": ""},
+            {"instId": "XAU-USDC-SWAP"},
+            {"instId": "XAU-USDT-260925"},
+            {"instId": "XAU-USDT-SWAP-EXTRA"},
+            {"instId": "xau-USDT-SWAP"},
+        )
+        for fields in invalid_fields:
+            with self.subTest(fields=fields):
+                row = {**self._xau_instrument_row(), **fields}
+                self.assertEqual(FixtureClient([row]).get_usdt_swap_instruments(), [])
+                self.assertIsNone(
+                    FixtureClient([row]).get_usdt_swap_instrument(row["instId"])
+                )
+        for key in ("instCategory", "ctType", "state", "settleCcy", "instId"):
+            with self.subTest(missing=key):
+                row = self._xau_instrument_row()
+                del row[key]
+                self.assertEqual(FixtureClient([row]).get_usdt_swap_instruments(), [])
+                self.assertIsNone(FixtureClient([row]).get_usdt_swap_instrument(XAU_INST_ID))
 
     def test_swap_tickers_convert_base_volume_to_usdt_notional(self):
         rows = [

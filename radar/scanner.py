@@ -29,6 +29,7 @@ from .entry_window import can_continue as entry_window_can_continue
 from .indicators import features
 from .decision import build_decision_context
 from .models import Candle, Instrument, MarketContext, MarketState, RadarReport, Signal, Ticker
+from .market_scope import XAU_INST_ID
 from .repository import SignalRepository, classify_microstructure
 from .card_statistics import fingerprint as card_statistics_fingerprint
 from .strategy import (
@@ -359,7 +360,7 @@ class MarketScanner:
             volume_exit_threshold,
         ) = self._volume_hysteresis_thresholds()
         scope = (
-            "OKX instCategory=1 加密資產、state=live、USDT 結算、"
+            "OKX instCategory=1 加密資產及僅限 XAU-USDT-SWAP 黃金例外、state=live、USDT 結算、"
             f"線性永續合約、24H USDT 成交額以 {volume_reference:,.0f} "
             f"為納入線並設向下 {volume_buffer:,.0f} 緩衝（新納入 "
             f"{volume_entry_threshold:,.0f}、移除低於 "
@@ -939,9 +940,9 @@ class MarketScanner:
                         updated_result = context_applier(
                             result,
                             directional_context,
-                            btc_bias,
+                            "NEUTRAL" if inst_id == XAU_INST_ID else btc_bias,
                             timing,
-                            horizon_market_bias[horizon],
+                            {} if inst_id == XAU_INST_ID else horizon_market_bias[horizon],
                         )
                         results[inst_id] = self._apply_professional_context(
                             updated_result,
@@ -1781,6 +1782,9 @@ class MarketScanner:
                         if result_name == "long_result"
                         else btc_bias
                     )
+                    if inst_id == XAU_INST_ID:
+                        result_market_bias = {}
+                        result_btc_bias = "NEUTRAL"
                     updated = context_applier(
                         result,
                         directional_context,
@@ -2199,7 +2203,7 @@ class MarketScanner:
                     directional_context,
                     "NEUTRAL",
                     timing or None,
-                    market_bias or {},
+                    {} if inst_id == XAU_INST_ID else market_bias or {},
                 )
                 result = self._apply_professional_context(
                     result,
@@ -2980,8 +2984,19 @@ class MarketScanner:
     def _market_resonance_meta(
         direction: str,
         market_bias: dict[str, Any] | None,
+        inst_id: str | None = None,
     ) -> dict[str, Any]:
         """Describe broad-market agreement without creating/cancelling a Trigger."""
+        if inst_id == XAU_INST_ID:
+            return {
+                "state": "NOT_APPLICABLE",
+                "label": "黃金獨立觀察",
+                "priority": 0,
+                "market_direction": "UNKNOWN",
+                "market_bias_score": None,
+                "policy": "ADVISORY_RANKING_ONLY",
+                "affects_trigger": False,
+            }
         bias = market_bias if isinstance(market_bias, dict) else {}
         score = _finite_number(bias.get("score"))
         market_direction = (
@@ -3017,7 +3032,7 @@ class MarketScanner:
         state = result.market_state
         if state is None:
             return result
-        meta = cls._market_resonance_meta(state.direction, market_bias)
+        meta = cls._market_resonance_meta(state.direction, market_bias, state.inst_id)
 
         def annotate(item):
             if item is None:
@@ -3887,6 +3902,10 @@ class MarketScanner:
         state = result.market_state
         if state is None:
             return result
+        if state.inst_id == XAU_INST_ID:
+            # Gold is scanned normally, but crypto breadth/BTC are not its
+            # market benchmark and must not create a correlation claim.
+            market_bias = {}
         direction = state.direction if state.direction in {"LONG", "SHORT"} else "NEUTRAL"
         stored_history = (previous_micro or {}).get("raw_history")
         if not stored_history:
@@ -3959,6 +3978,11 @@ class MarketScanner:
             else None,
             resonance,
         )
+        if state.inst_id == XAU_INST_ID:
+            driver.update(
+                label="黃金獨立觀察",
+                reason="黃金不套用加密市場共振或 BTC 相對強弱判讀",
+            )
         trigger_type = str(
             getattr(result.signal, "trigger_type", "")
             or story.get("trigger", {}).get("type", "NONE")
@@ -4040,7 +4064,7 @@ class MarketScanner:
                 "flow_velocity_abnormal": flow.get("abnormal_speed"),
                 "market_driver": driver,
                 "relative_strength": driver.get("relative_strength"),
-                "market_resonance": self._market_resonance_meta(direction, market_bias),
+                "market_resonance": self._market_resonance_meta(direction, market_bias, state.inst_id),
                 "market_sessions": context_payload.get("sessions", {}).get("items", []),
                 "anomaly_state": anomaly_status,
                 "anomalies": [
@@ -4232,7 +4256,7 @@ class MarketScanner:
             metrics_reset()
         self._progress(progress, "INSTRUMENTS", 0, None, "正在取得 OKX live USDT 永續合約")
         scope = (
-            "OKX instCategory=1 加密資產、state=live、USDT 結算、"
+            "OKX instCategory=1 加密資產及僅限 XAU-USDT-SWAP 黃金例外、state=live、USDT 結算、"
             "線性永續合約"
         )
         try:
@@ -4599,9 +4623,9 @@ class MarketScanner:
                     analysis_results[inst_id] = context_applier(
                         analysis_results[inst_id],
                         context,
-                        btc_bias,
+                        "NEUTRAL" if inst_id == XAU_INST_ID else btc_bias,
                         micro_candles.get(inst_id),
-                        market_bias,
+                        {} if inst_id == XAU_INST_ID else market_bias,
                     )
                 except Exception as exc:
                     context_failures.setdefault(inst_id, []).append(
@@ -4786,6 +4810,8 @@ class MarketScanner:
         """
         observations = {}
         for inst_id, bundle in bundles.items():
+            if inst_id == XAU_INST_ID:
+                continue
             candles = [c for c in bundle.get("15m", []) if c.confirmed]
             if len(candles) < 60:
                 continue
@@ -4820,6 +4846,15 @@ class MarketScanner:
         return bias
 
     def _calculate_market_bias(self, results: dict[str, object]) -> dict[str, object]:
+        # One exclusion protects both RSI samples and the separately computed
+        # breadth/formal-signal resonance across short, long and legacy scans.
+        # It does not remove gold from scanning, signal cards or market maps.
+        excluded_xau = XAU_INST_ID in results
+        results = {
+            inst_id: result
+            for inst_id, result in results.items()
+            if inst_id != XAU_INST_ID
+        }
         states = [
             result.market_state
             for result in results.values()
@@ -4946,8 +4981,8 @@ class MarketScanner:
         )
         label = "偏多" if score >= 65.0 else "偏空" if score <= 35.0 else "中性"
         return {
-            "score": score,
-            "label": label,
+            "score": None if excluded_xau and not results else score,
+            "label": "資料不足" if excluded_xau and not results else label,
             "market_breadth_long_pct": breadth_score,
             "liquid_breadth_long_pct": liquid_score,
             "btc_score": btc_score,

@@ -1,6 +1,8 @@
 # OKX Radar V3.4
 
-以 OKX 公開市場資料運作的加密資產 USDT 線性永續合約雙雷達。全市場 Universe 只接受 OKX `instCategory=1`，並對 24H USDT 成交額套用「上 200 萬、向下緩衝 50 萬」規則：新標的達 200 萬就納入，已納入標的跌破 150 萬才移除，避免在 200 萬附近反覆進出。股票型永續（`instCategory=3`）、其他非加密分類與未通過緩衝帶的合約都會在多週期 K 線請求前排除。這是全市場掃描範圍規則；對已形成或手動查詢的正式訊號，流動性只顯示建議。系統只做分析，不接受 API Key、Secret 或 Passphrase，也沒有自動下單、Paper Trading 或 Live Trading 路徑。V3.4 延續既有 Price-first（價格優先）Trigger 與 Signal Episode（訊號生命週期）。正式 Trigger／卡片與「掃描快照中的新進場條件」分開：Spread、Slippage、成交成本、流動性、R:R、Stop 寬度、行情異常與風險資料缺失只提供建議，不替使用者禁止進場。只有正式反向訊號、原計畫／SL 已失效、缺少必要核心或即時價格資料，以及價格尚未進入可用 Entry Window，仍會使新進場條件不成立。
+以 OKX 公開市場資料運作的加密資產 USDT 線性永續合約雙雷達，另僅加入 XAU 黃金永續。全市場 Universe 接受 OKX `instCategory=1` 加密資產，以及唯一的非加密例外 `XAU-USDT-SWAP`（`instCategory=4`，必須明確為線性合約），並對兩者的 24H USDT 成交額套用「上 200 萬、向下緩衝 50 萬」規則：新標的達 200 萬就納入，已納入標的跌破 150 萬才移除，避免在 200 萬附近反覆進出。股票型永續（`instCategory=3`）、XAU 以外的非加密分類與未通過緩衝帶的合約都會在多週期 K 線請求前排除。這是全市場掃描範圍規則；對已形成或手動查詢的正式訊號，流動性只顯示建議。系統只做分析，不接受 API Key、Secret 或 Passphrase，也沒有自動下單、Paper Trading 或 Live Trading 路徑。V3.4 延續既有 Price-first（價格優先）Trigger 與 Signal Episode（訊號生命週期）。正式 Trigger／卡片與「掃描快照中的新進場條件」分開：Spread、Slippage、成交成本、流動性、R:R、Stop 寬度、行情異常與風險資料缺失只提供建議，不替使用者禁止進場。只有正式反向訊號、原計畫／SL 已失效、缺少必要核心或即時價格資料，以及價格尚未進入可用 Entry Window，仍會使新進場條件不成立。
+
+XAU 搜尋支援 `XAU`、`XAUUSDT`、`XAU/USDT`、`XAU-USDT`、`XAU-USDT-SWAP`，以及指定別名 `XAUUSDT.P`／`OKX:XAUUSDT.P`，統一指向 OKX 的 `XAU-USDT-SWAP`；不會因支援此別名而開放其他非加密商品。XAU 可使用既有掃描、預備卡與進場前更新流程，但不計入加密市場整體 24H RSI 或方向分布，也不套用 BTC／加密大盤共振判讀。
 
 手機介面將 Entry Zone 統一顯示為「Entry（可進參考區間）」，並依「方向 → ⚡ 訊號觸發＋早期／完整階段 → 進場快照 → 風險建議／必要條件 → Entry／SL／TP／R:R → 進場前更新 → 輔助判讀」排列。15m 與 4H 不再設獨立「早期」或「待進場確認」頁；正式 Early、Confirmed、Reentry 統一放在「訊號觸發」，階段標在卡片頂端。內部 `ENTRY_READY` 只顯示為「掃描條件通過」，避免和 Trigger 階段混淆；其他快照可顯示等待回踩、必要條件未成立或等待新訊號。風險項目以「風險建議｜不阻止進場」特別標記，不混進等待回踩分頁。卡片與進場前更新都附資料時間。續走力道與 OI 預設收合，而且不加入正式方向、進場判定或目標計算。首頁顯示 15m／4H 有效的訊號觸發數量；真正必要條件與高週期衝突直接顯示在卡片上方。市場方向由每個具有連續完整 1H 收盤資料的市場，以 25 個收盤計算 24H RSI(24) 後作全市場等權平均，直接顯示真實數字與「強多／偏多／中性／偏空／強空」。
 
@@ -25,7 +27,7 @@ Market Context、OI、Taker、CVD、Funding 與 Order Book 仍會保存並放在
 
 ## 系統流程
 
-1. 動態取得所有 `instCategory=1`、`state=live`、USDT 結算、線性 `*-USDT-SWAP`，再以 bulk ticker 套用 200 萬納入線與向下 50 萬緩衝；新標的達 200 萬就加入，既有標的跌破 150 萬才移除，通過後才抓多週期 K 線。股票型與其他非加密合約更早在合約入口排除。
+1. 動態取得所有 `instCategory=1` 的加密資產及唯一 `instCategory=4` 例外 `XAU-USDT-SWAP`，皆須 `state=live`、USDT 結算、線性 `*-USDT-SWAP`，再以 bulk ticker 套用 200 萬納入線與向下 50 萬緩衝；新標的達 200 萬就加入，既有標的跌破 150 萬才移除，通過後才抓多週期 K 線。股票型與 XAU 以外的非加密合約更早在合約入口排除。
 2. 依掃描範圍載入資料：15m 掃描使用 4H／1H／15m，4H 掃描使用 1D／4H／1H，全市場掃描同時執行兩套雷達。
 3. 短線與長線雷達各自建立 Market Story，不共用 Trigger。
 4. 15m 核心判定完成後可先發布只讀 `CORE_PREVIEW`；它不建立／推進持久 Signal Episode，也一律不可進場。
@@ -209,7 +211,7 @@ Trigger 是否存在與「掃描快照中的進場條件」分開顯示。下列
 - 首頁把「⚡ 訊號觸發」與固定時間進場快照分成兩層；風險建議與真正必要條件分開醒目顯示，首頁數量只計算有效正式 Trigger
 - 15m 與 4H 長線皆保留訊號觸發、等待回踩、等待新訊號與接近觸發分頁；不再重複設早期或 `ENTRY_READY` 分頁
 - 已達 TP／SL 的終局卡集中到獨立「已結束」主板塊，並可切換全部、15m 與 4H；原始 Entry／SL／TP 和更早歷史紀錄仍保留
-- 全市場與單一合約入口都只接受 OKX `instCategory=1` 加密資產；股票型合約不會進入 K 線、OI、深度或策略掃描
+- 全市場與單一合約入口接受 OKX `instCategory=1` 加密資產，另僅開放 `instCategory=4` 的 `XAU-USDT-SWAP`；股票型及其他非加密合約不會進入 K 線、OI、深度或策略掃描，XAU 不混入加密市場整體 RSI／方向分布
 - 頂部提供 15m、4H 與「全市場掃描（15m＋4H）」三個固定可見入口；部分掃描保留另一雷達但維持各自資料年齡與過期標記
 - 亞洲盤、倫敦盤與紐約盤以台北／香港時間顯示；倫敦、紐約夏冬令依各自時區自動換算
 - 新鮮度、Lifecycle、價格位置、攻擊效率、Price Acceptance、控制權、市場參與、執行品質與資料品質
@@ -236,7 +238,7 @@ iPhone／iPad 的背景通知需先用 Safari 將雷達「加入主畫面」，�
 - `POST /api/scan`：啟動或加入唯一一輪掃描；`scan_mode` 可為 `SHORT`（15m）、`LONG`（4H）或 `FULL`（15m＋4H），亦可附本輪瀏覽器 `push_subscription`
 - `GET /api/report/preview`：本輪已完成的 15m 核心只讀候選；正式掃描完成後才更新持久 Episode 與最終卡片
 - `GET /api/report/latest`：手機需要的精簡 V3.4 JSON；完整 Raw Indicators 與內部 Market Story 不對外傳送
-- `POST /api/instrument/scan`：按需只掃一個 `instCategory=1` 的 live 加密資產 USDT 永續；`horizon` 可為 `SHORT`、`LONG` 或 `BOTH`，只回傳請求週期的交易計畫，不重掃 Universe、不改寫全市場報告；股票型與其他非加密合約會在合約驗證時拒絕，核心週期、Ticker 與合約資料各自重試，錯誤回應會指出實際失敗來源
+- `POST /api/instrument/scan`：按需只掃一個 `instCategory=1` 的 live 加密資產 USDT 永續，或唯一 `instCategory=4` 例外 `XAU-USDT-SWAP`（接受 `XAUUSDT.P`／`OKX:XAUUSDT.P` 別名）；`horizon` 可為 `SHORT`、`LONG` 或 `BOTH`，只回傳請求週期的交易計畫，不重掃 Universe、不改寫全市場報告；股票型與 XAU 以外的非加密合約會在合約驗證時拒絕，核心週期、Ticker 與合約資料各自重試，錯誤回應會指出實際失敗來源
 - `GET /api/preflight?inst_id=...&horizon=SHORT|LONG`：舊版 PWA 相容入口；委派給同一套單幣掃描與目前判定，不再維護另一套可能矛盾的答案
 - `POST /api/preflight/reanalyze`：舊版 PWA 相容別名，同樣使用統一單幣判定
 - `GET /api/report/latest.md`：中文文字報告
@@ -320,7 +322,7 @@ python -m unittest discover -s tests -v
 git diff --check
 ```
 
-測試涵蓋 Price Trigger 與進場資格分離、OI／Taker-CVD／核心量比的同向延續輔助描述、OKX 歷史 OI 生成時間映射至已收線 5m K、最新端點對前段均值、SHORT 2／3 點的 5／10m 視窗、LONG 7／13 點的 30／60m 視窗、未來端點排除、衝突重複點拒收、缺棒不內插、SHORT／LONG 共用一次 OI 請求、raw OI 單位隔離、Taker／成交量單一尖峰不翻轉平均、缺價格不冒充吸收、舊 observer 不接手、新核心 generation 重啟、輔助延續分級不刪卡不翻向也不改進場、早期訊號在同一 Episode 升級且 Entry／SL／TP 不漂移、第二次掃描才正式觸發時新增且同一 Episode 不重複、舊 Entry Zone 不自動重開、正式反向訊號暫停原方向新進場、TP／SL 結果卡的 5／24 小時期限與獨立已結束板塊、股票型／非加密合約在全市場及單一合約入口被排除、24H USDT 成交額 200 萬納入／150 萬移除的緩衝、單幣來源並行與短等待上限、結構＋波動分布止損、OI／Taker／Funding／Order Book 不改自動目標、正式發布 Ticker 刷新與 LONG Ask／SHORT Bid 進場幾何、執行價格缺失 fail closed、Spread／Slippage／成交成本／流動性／R:R／Stop 寬度／行情異常只作建議、資料不知道不冒充最新、Market Context／DST 時段、價格接受、控制權轉移、Signal Episode 去重與永久失效、舊資料／亂序資料不回寫、15m／4H 隔離、三種掃描、部分掃描與獨立新鮮度、`CORE_PREVIEW` 唯讀、訊號觸發與進場快照分層、早期／完整階段統一顯示、醒目必要條件與風險建議、Scan Lock、舊請求不可覆蓋新結果、STALE 快照保留、API 失敗降級、Web Push、PWA 與 API contract。
+測試涵蓋 Price Trigger 與進場資格分離、OI／Taker-CVD／核心量比的同向延續輔助描述、OKX 歷史 OI 生成時間映射至已收線 5m K、最新端點對前段均值、SHORT 2／3 點的 5／10m 視窗、LONG 7／13 點的 30／60m 視窗、未來端點排除、衝突重複點拒收、缺棒不內插、SHORT／LONG 共用一次 OI 請求、raw OI 單位隔離、Taker／成交量單一尖峰不翻轉平均、缺價格不冒充吸收、舊 observer 不接手、新核心 generation 重啟、輔助延續分級不刪卡不翻向也不改進場、早期訊號在同一 Episode 升級且 Entry／SL／TP 不漂移、第二次掃描才正式觸發時新增且同一 Episode 不重複、舊 Entry Zone 不自動重開、正式反向訊號暫停原方向新進場、TP／SL 結果卡的 5／24 小時期限與獨立已結束板塊、全市場及單一合約入口僅允許 XAU 黃金例外而繼續排除股票型／其他非加密合約、XAU 合約資料與搜尋別名以及加密市場統計隔離、24H USDT 成交額 200 萬納入／150 萬移除的緩衝、單幣來源並行與短等待上限、結構＋波動分布止損、OI／Taker／Funding／Order Book 不改自動目標、正式發布 Ticker 刷新與 LONG Ask／SHORT Bid 進場幾何、執行價格缺失 fail closed、Spread／Slippage／成交成本／流動性／R:R／Stop 寬度／行情異常只作建議、資料不知道不冒充最新、Market Context／DST 時段、價格接受、控制權轉移、Signal Episode 去重與永久失效、舊資料／亂序資料不回寫、15m／4H 隔離、三種掃描、部分掃描與獨立新鮮度、`CORE_PREVIEW` 唯讀、訊號觸發與進場快照分層、早期／完整階段統一顯示、醒目必要條件與風險建議、Scan Lock、舊請求不可覆蓋新結果、STALE 快照保留、API 失敗降級、Web Push、PWA 與 API contract。
 
 ## 安全邊界與限制
 

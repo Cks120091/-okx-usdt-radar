@@ -24,6 +24,7 @@ from .entry_window import plan_key as entry_window_plan_key
 from .exit_review import review_exit_plan
 from .continuation import ALGORITHM_VERSION, observer_schedule
 from .models import RadarReport
+from .market_scope import XAU_INST_ID
 from .price_display import signal_plan_display_fields
 from .preflight import build_preflight_payload
 from .early_warning import preflight_early_warning
@@ -4884,6 +4885,10 @@ class RadarRuntime:
 
 def _normalize_usdt_swap_id(value: str) -> str:
     raw = str(value or "").strip().upper().replace(" ", "")
+    # Only the explicitly supported OKX gold alias is added.  Do not strip
+    # arbitrary exchange prefixes and accidentally substitute an OKX quote.
+    if raw in {"XAUUSDT.P", "OKX:XAUUSDT.P"}:
+        return XAU_INST_ID
     if raw.endswith("-USDT-SWAP"):
         base = raw[: -len("-USDT-SWAP")]
     else:

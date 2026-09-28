@@ -28,6 +28,26 @@ function longSignal(direction='SHORT'){
 let passed=0;
 async function test(name,fn){await fn();passed++;console.log('PASS '+name);}
 (async()=>{
+  await test('only the exact OKX XAU perpetual alias is normalized and chart links preserve its venue',()=>{
+    const c=env(payload);c.displaySymbol=x=>x.replace('-USDT-SWAP','');
+    for(const name of ['normalizeInstrumentQuery','tvUrl'])vm.runInContext(source(name),c);
+    for(const value of ['XAU','XAUUSDT','XAU/USDT','XAU-USDT-SWAP','XAUUSDT.P','OKX:XAUUSDT.P',' okx:xauusdt.p '])assert.equal(c.normalizeInstrumentQuery(value),'XAU-USDT-SWAP');
+    for(const value of ['BINANCE:XAUUSDT.P','BYBIT:XAUUSDT.P','XAGUSDT.P','XAUTUSDT.P','XAUUSDT.P.EXTRA'])assert.equal(c.normalizeInstrumentQuery(value),'');
+    assert.equal(c.normalizeInstrumentQuery('BTC'),'BTC-USDT-SWAP');
+    assert.ok(c.tvUrl('XAU-USDT-SWAP').endsWith('symbol=OKX:XAUUSDT.P'));
+    assert.ok(c.tvUrl('BTC-USDT-SWAP').endsWith('symbol=OKX:BTCUSDTPERP'));
+  });
+  await test('XAU stays visible as a symbol but does not change crypto market breadth',()=>{
+    const c=env(payload);vm.runInContext(source('renderMarketHeat'),c);
+    const crypto=[{inst_id:'BTC-USDT-SWAP',direction:'LONG'},{inst_id:'ETH-USDT-SWAP',direction:'SHORT'}],gold={inst_id:'XAU-USDT-SWAP',direction:'LONG'},mixed=[...crypto,gold],before=JSON.stringify(mixed);
+    c.renderMarketHeat(crypto);const expected=c.$('#marketHeat').innerHTML;
+    c.renderMarketHeat(mixed);assert.equal(c.$('#marketHeat').innerHTML,expected);assert.equal(JSON.stringify(mixed),before);
+    c.renderMarketHeat([gold]);assert.ok(c.$('#marketHeat').innerHTML.includes('做多 0'));assert.ok(!c.$('#marketHeat').innerHTML.includes('NaN'));
+    const formal=longSignal();formal.inst_id=gold.inst_id;
+    assert.equal(c.longSignalGroups({long_signals:[formal]}).formal[0],formal);
+    formal.decision_context.final.timeframe_alignment.passed=false;
+    assert.equal(c.longSignalGroups({long_signals:[formal]}).preparing[0],formal);
+  });
   await test('successful and repeated refresh leave original list, prices, quality and order intact',async()=>{
     const c=env(payload),report=c.state.report,before=JSON.stringify(report);
     await c.loadPreflight();assert.equal(c.rendered,payload);

@@ -12,6 +12,7 @@ from urllib.error import HTTPError, URLError
 from urllib.parse import urlencode, urlparse
 from urllib.request import Request, urlopen
 
+from .market_scope import XAU_INST_ID
 from .models import Candle, Instrument, MarketContext, Ticker
 
 
@@ -1195,12 +1196,14 @@ def _instrument_from_row(row: dict[str, Any]) -> Instrument | None:
         and settle_ccy == "USDT"
         and inst_id.endswith("-USDT-SWAP")
         and ct_type in {"linear", ""}
-        # OKX classifies crypto contracts as category 1 and stock
-        # perpetuals as category 3.  Reject every explicitly non-crypto
-        # category at the universe boundary so excluded products never reach
-        # ticker, candle, OI or order-book requests.  Missing category data is
-        # also rejected: fail closed instead of risking a stock scan.
-        and inst_category == "1"
+        # Crypto is category 1.  The sole non-crypto exception is this exact
+        # category-4 gold perpetual, with explicit linear contract metadata.
+        # Missing or mismatched categories still fail closed; no other
+        # commodity, stock or look-alike symbol may enter the scan universe.
+        and (
+            (inst_id == XAU_INST_ID and inst_category == "4" and ct_type == "linear")
+            or (inst_id != XAU_INST_ID and inst_category == "1")
+        )
     ):
         return None
     return Instrument(
