@@ -212,5 +212,19 @@ async function test(name,fn){await fn();passed++;console.log('PASS '+name);}
     for(const text of ['預備｜等待同向','尚不可新進場','原計畫品質','original-long-plan','signal-horizon">4H'])assert.ok(out.includes(text));
     assert.ok(!out.includes('訊號已觸發'));assert.ok(!out.includes('<script>'));assert.equal(JSON.stringify(opposed),before);
   });
+  await test('remaining R summary uses refreshed values for both horizons and explains unavailable cases',()=>{
+    const c=env(payload);c.metricNumber=x=>typeof x==='number'&&Number.isFinite(x)?x:null;
+    for(const name of ['preflightRemainingMetric','preflightRemainingSummary'])vm.runInContext(source(name),c);
+    for(const horizon of ['SHORT','LONG']){
+      const data={horizon,live:{remaining_rr:2.75,remaining_rr_applicable:true},signal_lifecycle:{status:'ACTIVE'},verdict:{status:'ENTRY_READY'}};
+      assert.ok(c.preflightRemainingSummary(data).includes('2.75R'));
+      data.live.remaining_rr=1.25;assert.ok(c.preflightRemainingSummary(data).includes('1.25R'));
+      Object.assign(data.live,{remaining_rr:0,remaining_rr_applicable:false,adverse_atr:.1});
+      const out=c.preflightRemainingSummary(data);assert.ok(out.includes('暫不適用'));assert.ok(out.includes('現價位於進場區不利側'));assert.ok(!out.includes('0.00R'));
+      data.live={};assert.ok(c.preflightRemainingSummary(data).includes('本次資料不足'));
+      data.signal_lifecycle={status:'STOP_LOSS',terminal:true};assert.ok(c.preflightRemainingSummary(data).includes('交易計畫已結束'));
+    }
+    assert.ok(source('renderPreflight').includes('${preflightRemainingSummary(data)}</div>${preflightQualityComparison(data)}'));
+  });
   console.log(`${passed} preflight detail regressions passed`);
 })().catch(error=>{console.error(error);process.exitCode=1;});
