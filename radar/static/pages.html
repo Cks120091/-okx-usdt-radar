@@ -1006,9 +1006,12 @@
     function price(value,context=null){const n=metricNumber(value);if(n===null)return '—';const exactDigits=pricePrecision(context),legacyDigits=n>=1000?0:n>=1?3:n>=.01?5:8,options=exactDigits===null?{maximumFractionDigits:legacyDigits}:{minimumFractionDigits:exactDigits,maximumFractionDigits:exactDigits};return `$${n.toLocaleString('zh-TW',options)}`}
     function changeClass(value){const n=metricNumber(value);return n===null||Math.abs(n)<.01?'flat':n>0?'up':'down'}
     function displaySymbol(instId){return String(instId||'').trim().replace(/-USDT-SWAP$/i,'')}
-    function tvUrl(instId){const symbol=displaySymbol(instId).replace(/[^A-Z0-9]/gi,'').toUpperCase();return `https://www.tradingview.com/chart/?symbol=OKX:${encodeURIComponent(instId==='XAU-USDT-SWAP'?'XAUUSDT.P':symbol+'USDTPERP')}`}
+    function chartInstrument(instId){const value=String(instId||'').trim().toUpperCase();return /^[A-Z0-9]+-USDT-SWAP$/.test(value)?value:null}
+    function tvUrl(instId){const id=chartInstrument(instId);return id?`https://www.tradingview.com/chart/?symbol=OKX:${encodeURIComponent(id.slice(0,-10)+'USDT.P')}`:''}
+    function okxChartUrl(instId){const id=chartInstrument(instId);return id?`https://www.okx.com/trade-swap/${id.toLowerCase()}`:''}
+    function chartLinks(instId){if(!chartInstrument(instId))return '';return `<div class="decision-actions chart-links" aria-label="開啟對應幣種圖表"><a class="quick-link" href="${okxChartUrl(instId)}" target="_blank" rel="noopener noreferrer" aria-label="OKX ${esc(instId)} 永續合約圖表">OKX 圖表 ↗</a><a class="quick-link" href="${tvUrl(instId)}" target="_blank" rel="noopener noreferrer" aria-label="TradingView OKX ${esc(instId)} 永續合約圖表">TradingView 圖表 ↗</a></div>`}
     function favoriteButton(instId){const on=state.favorites.has(instId);return `<button class="favorite ${on?'on':''}" type="button" data-favorite="${esc(instId)}" aria-label="${on?'取消收藏':'收藏'} ${esc(displaySymbol(instId))}">${on?'★':'☆'}</button>`}
-    function quickLinks(item){return `<div class="quick-links">${preflightActions(item.inst_id,item.radar_horizon||'BOTH',item)}<a class="quick-link" href="${tvUrl(item.inst_id)}" target="_blank" rel="noopener noreferrer">TradingView（技術圖表）↗</a></div>`}
+    function quickLinks(item){return `<div class="quick-links">${preflightActions(item.inst_id,item.radar_horizon||'BOTH',item)}</div>${chartLinks(item.inst_id)}`}
     function timestampDate(value){if(value===null||value===undefined||value==='')return null;let normalized=value;if(typeof normalized==='string'){normalized=normalized.trim();if(/^\d{10,13}$/.test(normalized))normalized=Number(normalized);else if(/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}(?::\d{2}(?:\.\d+)?)?$/.test(normalized))normalized=`${normalized}Z`}if(typeof normalized==='number'&&Math.abs(normalized)<100000000000)normalized*=1000;const date=new Date(normalized);return Number.isNaN(date.getTime())?null:date}
     function taiwanTime(value){const d=timestampDate(value);return d?new Intl.DateTimeFormat('zh-TW',{timeZone:'Asia/Taipei',year:'numeric',month:'2-digit',day:'2-digit',hour:'2-digit',minute:'2-digit',second:'2-digit',hourCycle:'h23'}).format(d):value?'時間未知':'尚未完成掃描'}
     function taiwanMinute(value){const d=timestampDate(value);return d?new Intl.DateTimeFormat('zh-TW',{timeZone:'Asia/Taipei',year:'numeric',month:'2-digit',day:'2-digit',hour:'2-digit',minute:'2-digit',hourCycle:'h23'}).format(d):'時間未知'}
@@ -1597,7 +1600,7 @@ renderSignals(quality80,'#quality80Box','本輪沒有交易品質 80 分以上�
       const reason=terminal?'舊計畫僅供紀錄，不可再次沿用。':preview?'等待本輪掃描完成。':expired||readOnly?snapshot.detail:active?(position.note||'可進位置是參考區間，不是訊號成立條件。'):(final.wait_reason?.label||final.reasons?.[0]||snapshot.detail);
       const metrics=item.market_metrics||{},preflight=item.preflight_snapshot||{},executionPrice=metricNumber(preflight.live_price)??metricNumber(metrics.entry_execution_price)??metricNumber(metrics.last_price),source=String(preflight.price_source||metrics.entry_execution_price_source||'').toUpperCase(),hasPreflight=String(preflight.source||'').toUpperCase()==='PREFLIGHT',executionLabel=hasPreflight?(source==='ASK'?'進場前更新 Ask（賣方報價／買入參考）':source==='BID'?'進場前更新 Bid（買方報價／賣出參考）':'進場前更新價格'):(source==='ASK'?'掃描快照 Ask（賣方報價／買入參考）':source==='BID'?'掃描快照 Bid（買方報價／賣出參考）':'掃描快照價格');
       const maturity=final.swing_maturity||{},matureNote=active&&maturity.state==='MATURE'?'<small class="signal-position-note">行情已'+(item.direction==='SHORT'?'跌':'漲')+'一段，追價風險較高（僅提醒）。</small>':'';
-      const primaryAction=preflightButton(item.inst_id,horizon,item,false);
+      const primaryAction=preflightButton(item.inst_id,horizon,item,false)+chartLinks(item.inst_id);
       return `<div class="decision-panel ${terminal?'closed':active?'ready':snapshot.panel}" data-signal-position-policy="${esc(decision.entry_policy_version||'legacy')}"><div class="decision-top"><div><span class="decision-kicker">訊號與可進位置</span><div class="decision-state" aria-live="polite">${esc(label)}</div></div><div class="decision-price"><span>${esc(executionLabel)}</span><b>${price(executionPrice,item)}</b></div></div><p class="signal-position-note">${esc(reason)}</p>${matureNote}${signalTradeGrid(item,{original:Boolean(terminal),preview})}<small class="signal-position-note">可進位置僅供參考；Entry（進場）／SL（止損）／TP（止盈） 固定。快照不是持續即時報價。</small><div class="decision-primary-action">${primaryAction}</div>${suggestedActionPanel(item)}</div>`;
     }
 
@@ -1857,6 +1860,7 @@ renderSignals(quality80,'#quality80Box','本輪沒有交易品質 80 分以上�
           <p>${esc(presentation.detail)}</p>
           ${preflightEarlyWarning(data)}
           ${preflightQualityExplanation(data)}
+          ${chartLinks(data.inst_id)}
           ${isNewPlan?'<p class="preflight-guide-note"><b>這是重新分析後產生的全新 Trigger（價格觸發）與交易計畫；舊計畫沒有被沿用。</b></p>':''}
           <div class="preflight-live-price"><span>${esc(executionPriceLabel)}</span><b>${price(live.price,original)}</b><small>按下更新時重新向 OKX 取得 · 報價時間（台灣 UTC+8）${esc(dataTimes.quote)} · 不是持續即時報價</small></div>
           <div class="preflight-stamp">核心判讀：沿用 ${esc(dataTimes.core)} 的掃描（台灣 UTC+8）<br>本次更新報價與成交、續走資料；重新掃描才會重算核心條件。<details><summary>資料時間明細</summary>訊號觸發：${esc(taiwanTime(original.triggered_at))}<br>成交資料：${esc(dataTimes.execution)}<br>觸發約 ${num(live.trigger_age_bars,0)} 根 ${data.horizon==='LONG'?'4H':'15m'} K</details></div>

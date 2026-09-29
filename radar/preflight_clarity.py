@@ -13,6 +13,50 @@ COMPONENTS = {
 }
 
 
+def _quality_reason(key, payload):
+    """Explain the actual scoring inputs, never infer market strength from a score."""
+    live = mapping(payload.get("live"))
+    inputs = mapping(live.get("quality_inputs"))
+    position = mapping(payload.get("position_advisory"))
+    thresholds = mapping(inputs.get("quality_thresholds"))
+    if key == "entry_location":
+        state = position.get("state")
+        if state == "WITHIN":
+            return "現價位於原進場區間，位置分不因訊號階段或等待重新確認而扣分"
+        location = mapping(inputs.get("entry_location"))
+        if location.get("key") == "ADVERSE_OUTSIDE":
+            return "現價已離開原進場區，移向止損一側，因此位置分較低"
+        chase = number(live.get("chase_atr"))
+        if state in {"ABOVE", "BELOW"} and chase is not None and chase > 0:
+            return f"現價已{'高' if state == 'ABOVE' else '低'}於原進場區，順向偏離 {chase:.2f} 倍近期波幅，位置分按偏離程度計算"
+        return "位置資料不足，無法確認價格與原進場區的距離"
+    if key == "stop_distance":
+        risk = number(inputs.get("risk_pct"))
+        if risk is not None:
+            band = "超過 5%，因此此項分數較低" if risk > 5 else "介於 2.5%～5%，此項採中間分數" if risk > 2.5 else "在 2.5% 以內，此項採較高分數"
+            return f"現價到原止損距離為 {risk:.2f}%，{band}"
+    if key == "risk_reward":
+        rr = number(inputs.get("risk_reward"))
+        target = number(thresholds.get("target_rr"))
+        if live.get("remaining_rr_applicable") is False:
+            return "現價位於進場區不利側，剩餘風報暫不適用，此項不給分"
+        if rr is not None and target is not None:
+            return f"依現價到原止損與第一目標計算，剩餘風報為 {rr:.2f}R（評分基準 {target:.2f}R）"
+    if key == "spread":
+        spread = number(inputs.get("spread_pct"))
+        limit = number(thresholds.get("max_spread_pct"))
+        if spread is not None and limit is not None:
+            return f"目前買賣價差 {spread:.4f}%，{'超過' if spread > limit else '未超過'} {limit:.4f}% 的扣分門檻"
+    if key == "execution_cost":
+        if not live.get("quality_cost_estimated"):
+            return "本次委託簿深度不足，成本採中性估值；不代表實際成交成本改善"
+        cost = number(inputs.get("execution_cost_to_risk_pct"))
+        limit = number(thresholds.get("max_cost_to_risk_pct"))
+        if cost is not None and limit is not None:
+            return f"價差、預估滑價與手續費合計占止損風險 {cost:.1f}%，{'超過' if cost > limit else '未超過'} {limit:.1f}% 的扣分門檻"
+    return "本次計分依據不足，無法說明實際原因"
+
+
 def _quality_explanation(signal, payload):
     live = mapping(payload.get("live"))
     old = mapping(getattr(signal, "execution_quality", {}))
@@ -40,19 +84,36 @@ def _quality_explanation(signal, payload):
     if comparable:
         changes = sorted(((k, number(latest[k]) - number(previous[k])) for k in COMPONENTS),
                          key=lambda row: abs(row[1]), reverse=True)
-        reasons = [f"{COMPONENTS[k]}評分{'提高' if change > 0 else '降低'} {abs(change):.1f} 分。"
+        reasons = [f"{COMPONENTS[k]}評分{'提高' if change > 0 else '降低'} {abs(change):.1f} 分：{_quality_change_detail(k, old, payload)}。"
                    for k, change in changes if abs(change) >= 0.05][:2]
         result.update(mode="COMPARISON", reasons=reasons or ["各項評分大致持平。"], note="列出影響最大的兩項；分數不代表勝率。")
     else:
         # Show actual current weighted points, never invent historical inputs.
         rows = [(k, number(latest.get(k))) for k in COMPONENTS]
-        maxima = {"entry_location": 30, "spread": 10, "risk_reward": 25, "stop_distance": 13.5, "execution_cost": 5}
+        maxima = {"entry_location": 28.5, "spread": 10, "risk_reward": 25, "stop_distance": 13.5, "execution_cost": 5}
         rows = sorted((row for row in rows if row[1] is not None),
                       key=lambda row: maxima[row[0]] - row[1], reverse=True)
-        result["reasons"] = [f"本次{COMPONENTS[k]}評分 {value:.1f} 分。" for k, value in rows[:2]]
+        result["reasons"] = [f"本次{COMPONENTS[k]}評分 {value:.1f} 分：{_quality_reason(k, payload)}。" for k, value in rows[:2]]
     if not live.get("quality_cost_estimated"):
         result["note"] += " 本次深度資料不足，成交成本分項使用中性估值。"
     return result
+
+
+def _quality_change_detail(key, old, payload):
+    fields = {"spread": ("spread_pct", "%"), "risk_reward": ("risk_reward", "R"),
+              "stop_distance": ("risk_pct", "%"), "execution_cost": ("execution_cost_to_risk_pct", "%")}
+    detail = _quality_reason(key, payload)
+    if key not in fields:
+        return detail
+    field, unit = fields[key]
+    live = mapping(payload.get("live"))
+    previous = number(old.get(field))
+    current = number(mapping(live.get("quality_inputs")).get(field))
+    if key == "execution_cost" and (not old.get("execution_cost_estimated") or not live.get("quality_cost_estimated")):
+        return detail
+    if previous is not None and current is not None and previous != current:
+        return f"{previous:g}{unit} → {current:g}{unit}；{detail}"
+    return detail
 
 
 def explain_preflight(signal, payload):

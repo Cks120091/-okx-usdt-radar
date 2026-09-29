@@ -560,6 +560,12 @@ def build_preflight_payload(
             "quality_components": quality.get("score_components", {}),
             "quality_components_version": quality.get("score_components_version"),
             "quality_cost_estimated": quality.get("execution_cost_estimated", False),
+            "quality_inputs": {
+                key: quality.get(key) for key in (
+                    "entry_location", "spread_pct", "risk_pct", "risk_reward",
+                    "execution_cost_to_risk_pct", "quality_thresholds",
+                )
+            },
         },
         "execution": {
             "best_bid": round(best_bid, 12),

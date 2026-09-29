@@ -30,12 +30,25 @@ async function test(name,fn){await fn();passed++;console.log('PASS '+name);}
 (async()=>{
   await test('only the exact OKX XAU perpetual alias is normalized and chart links preserve its venue',()=>{
     const c=env(payload);c.displaySymbol=x=>x.replace('-USDT-SWAP','');
-    for(const name of ['normalizeInstrumentQuery','tvUrl'])vm.runInContext(source(name),c);
+    for(const name of ['normalizeInstrumentQuery','chartInstrument','tvUrl'])vm.runInContext(source(name),c);
     for(const value of ['XAU','XAUUSDT','XAU/USDT','XAU-USDT-SWAP','XAUUSDT.P','OKX:XAUUSDT.P',' okx:xauusdt.p '])assert.equal(c.normalizeInstrumentQuery(value),'XAU-USDT-SWAP');
     for(const value of ['BINANCE:XAUUSDT.P','BYBIT:XAUUSDT.P','XAGUSDT.P','XAUTUSDT.P','XAUUSDT.P.EXTRA'])assert.equal(c.normalizeInstrumentQuery(value),'');
     assert.equal(c.normalizeInstrumentQuery('BTC'),'BTC-USDT-SWAP');
     assert.ok(c.tvUrl('XAU-USDT-SWAP').endsWith('symbol=OKX:XAUUSDT.P'));
-    assert.ok(c.tvUrl('BTC-USDT-SWAP').endsWith('symbol=OKX:BTCUSDTPERP'));
+    assert.ok(c.tvUrl('BTC-USDT-SWAP').endsWith('symbol=OKX:BTCUSDT.P'));
+  });
+  await test('both chart buttons preserve the exact OKX perpetual and reject invalid identifiers',()=>{
+    const c=env(payload);for(const name of ['chartInstrument','tvUrl','okxChartUrl','chartLinks'])vm.runInContext(source(name),c);
+    for(const symbol of ['BTC','TRX','HUMA','XAU','XAUT','1000SATS']){
+      const id=symbol+'-USDT-SWAP',out=c.chartLinks(id);
+      assert.equal(c.okxChartUrl(id),'https://www.okx.com/trade-swap/'+id.toLowerCase());
+      assert.equal(c.tvUrl(id),'https://www.tradingview.com/chart/?symbol=OKX:'+symbol+'USDT.P');
+      assert.equal((out.match(/<a /g)||[]).length,2);assert.ok(out.includes('noopener noreferrer'));
+    }
+    for(const id of [null,'BTC-USDT','BTC-USD-SWAP','<script>','BTC-USDT-SWAP" onclick="alert(1)','BINANCE:BTCUSDT.P'])assert.equal(c.chartLinks(id),'');
+    assert.ok(source('decisionPanelBody').includes('chartLinks(item.inst_id)'));
+    assert.ok(source('quickLinks').includes('chartLinks(item.inst_id)'));
+    assert.ok(source('renderPreflight').includes('chartLinks(data.inst_id)'));
   });
   await test('XAU stays visible as a symbol but does not change crypto market breadth',()=>{
     const c=env(payload);vm.runInContext(source('renderMarketHeat'),c);
