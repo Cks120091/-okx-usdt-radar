@@ -1007,8 +1007,8 @@
     function changeClass(value){const n=metricNumber(value);return n===null||Math.abs(n)<.01?'flat':n>0?'up':'down'}
     function displaySymbol(instId){return String(instId||'').trim().replace(/-USDT-SWAP$/i,'')}
     function chartInstrument(instId){const value=String(instId||'').trim().toUpperCase();return /^[A-Z0-9]+-USDT-SWAP$/.test(value)?value:null}
-    function tvUrl(instId){const id=chartInstrument(instId);return id?`https://www.tradingview.com/chart/?symbol=OKX:${encodeURIComponent(id.slice(0,-10)+'USDT.P')}`:''}
-    function okxChartUrl(instId){const id=chartInstrument(instId);return id?`https://www.okx.com/trade-swap/${id.toLowerCase()}`:''}
+    function tvUrl(instId){const id=chartInstrument(instId);return id?`https://tw.tradingview.com/symbols/${encodeURIComponent(id.slice(0,-10)+'USDT.P')}/?exchange=OKX&utm_source=iosapp&utm_medium=share`:''}
+    function okxChartUrl(instId){const id=chartInstrument(instId);if(id==='BTC-USDT-SWAP')return 'https://okx.com/ul/x4F1Vb2';return id?`https://www.okx.com/trade-swap/${id.toLowerCase()}`:''}
     function chartLinks(instId){if(!chartInstrument(instId))return '';return `<div class="decision-actions chart-links" aria-label="開啟對應幣種圖表"><a class="quick-link" href="${okxChartUrl(instId)}" target="_blank" rel="noopener noreferrer" aria-label="OKX ${esc(instId)} 永續合約圖表">OKX 圖表 ↗</a><a class="quick-link" href="${tvUrl(instId)}" target="_blank" rel="noopener noreferrer" aria-label="TradingView OKX ${esc(instId)} 永續合約圖表">TradingView 圖表 ↗</a></div>`}
     function favoriteButton(instId){const on=state.favorites.has(instId);return `<button class="favorite ${on?'on':''}" type="button" data-favorite="${esc(instId)}" aria-label="${on?'取消收藏':'收藏'} ${esc(displaySymbol(instId))}">${on?'★':'☆'}</button>`}
     function quickLinks(item){return `<div class="quick-links">${preflightActions(item.inst_id,item.radar_horizon||'BOTH',item)}</div>${chartLinks(item.inst_id)}`}

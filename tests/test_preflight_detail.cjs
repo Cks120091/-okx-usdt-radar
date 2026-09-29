@@ -34,15 +34,15 @@ async function test(name,fn){await fn();passed++;console.log('PASS '+name);}
     for(const value of ['XAU','XAUUSDT','XAU/USDT','XAU-USDT-SWAP','XAUUSDT.P','OKX:XAUUSDT.P',' okx:xauusdt.p '])assert.equal(c.normalizeInstrumentQuery(value),'XAU-USDT-SWAP');
     for(const value of ['BINANCE:XAUUSDT.P','BYBIT:XAUUSDT.P','XAGUSDT.P','XAUTUSDT.P','XAUUSDT.P.EXTRA'])assert.equal(c.normalizeInstrumentQuery(value),'');
     assert.equal(c.normalizeInstrumentQuery('BTC'),'BTC-USDT-SWAP');
-    assert.ok(c.tvUrl('XAU-USDT-SWAP').endsWith('symbol=OKX:XAUUSDT.P'));
-    assert.ok(c.tvUrl('BTC-USDT-SWAP').endsWith('symbol=OKX:BTCUSDT.P'));
+    assert.ok(c.tvUrl('XAU-USDT-SWAP').includes('/symbols/XAUUSDT.P/?exchange=OKX'));
+    assert.equal(c.tvUrl('BTC-USDT-SWAP'),'https://tw.tradingview.com/symbols/BTCUSDT.P/?exchange=OKX&utm_source=iosapp&utm_medium=share');
   });
   await test('both chart buttons preserve the exact OKX perpetual and reject invalid identifiers',()=>{
     const c=env(payload);for(const name of ['chartInstrument','tvUrl','okxChartUrl','chartLinks'])vm.runInContext(source(name),c);
     for(const symbol of ['BTC','TRX','HUMA','XAU','XAUT','1000SATS']){
       const id=symbol+'-USDT-SWAP',out=c.chartLinks(id);
-      assert.equal(c.okxChartUrl(id),'https://www.okx.com/trade-swap/'+id.toLowerCase());
-      assert.equal(c.tvUrl(id),'https://www.tradingview.com/chart/?symbol=OKX:'+symbol+'USDT.P');
+      assert.equal(c.okxChartUrl(id),symbol==='BTC'?'https://okx.com/ul/x4F1Vb2':'https://www.okx.com/trade-swap/'+id.toLowerCase());
+      assert.equal(c.tvUrl(id),'https://tw.tradingview.com/symbols/'+symbol+'USDT.P/?exchange=OKX&utm_source=iosapp&utm_medium=share');
       assert.equal((out.match(/<a /g)||[]).length,2);assert.ok(out.includes('noopener noreferrer'));
     }
     for(const id of [null,'BTC-USDT','BTC-USD-SWAP','<script>','BTC-USDT-SWAP" onclick="alert(1)','BINANCE:BTCUSDT.P'])assert.equal(c.chartLinks(id),'');

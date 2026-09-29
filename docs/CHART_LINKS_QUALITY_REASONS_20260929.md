@@ -1,5 +1,17 @@
 # 圖表入口與品質原因
 
+## 2026-09-30 App 分享連結更新
+
+使用者確認下列兩個連結在其 iPhone 都直接開啟 App 的 BTCUSDT 永續圖表：
+- `https://okx.com/ul/x4F1Vb2`
+- `https://tw.tradingview.com/symbols/BTCUSDT.P/?exchange=OKX&utm_source=iosapp&utm_medium=share`
+
+TradingView 按鈕改用使用者驗證的分享格式，依卡片替換幣種；其他幣種的
+URL 組合已測試，但尚未逐一實機測試 App 跳轉。OKX BTC 按鈕使用該專屬短連結，
+其他幣種保留各自官方合約頁，不能猜造短代碼或共用 BTC 連結。
+下方 App 限制為先前調查記錄；BTC 的實機結果以上述使用者確認為準，
+不代表所有裝置或所有幣種均已驗證。
+
 正式卡、預備卡及進場前更新提供 OKX 與 TradingView 圖表入口。
 只接受完整 `*-USDT-SWAP` 合約 ID，不把任意文字插入 URL。
 OKX 使用官方 `/trade-swap/<id>`；TradingView 使用 `OKX:<base>USDT.P`，
