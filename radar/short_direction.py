@@ -53,6 +53,17 @@ def hourly_direction(value):
     if not isinstance(value, Mapping) and not hasattr(value, "sma5"):
         return _legacy_fusion_direction(value)
 
+    if isinstance(value, Mapping):
+        has_trend_fields = all(
+            value.get(key) is not None
+            for key in ("ma5", "ma10", "ma20", "macd_line", "macd_signal")
+        )
+        if not has_trend_fields:
+            if "fusion_long_score" in value:
+                return _legacy_fusion_direction(value.get("fusion_long_score"))
+            return {"direction": "UNKNOWN", "state": "UNKNOWN", "label": "方向資料不足",
+                    "score": None, "policy": POLICY}
+
     ma5 = _finite(_read(value, "ma5"))
     if not math.isfinite(ma5):
         ma5 = _finite(_read(value, "sma5"))
@@ -70,10 +81,9 @@ def hourly_direction(value):
     required = (ma5, ma10, ma20, macd_line, macd_signal)
     if not all(math.isfinite(number) for number in required):
         fallback = _read(value, "fusion_long_score")
-        legacy = _legacy_fusion_direction(fallback)
-        if legacy["direction"] != "UNKNOWN":
-            return {**legacy, "label": f"{legacy['label']}｜舊資料相容", "state": legacy["state"]}
-        return {"direction": "UNKNOWN", "state": "UNKNOWN", "label": "1H MACD／MA 資料不足",
+        if fallback is not None:
+            return _legacy_fusion_direction(fallback)
+        return {"direction": "UNKNOWN", "state": "UNKNOWN", "label": "方向資料不足",
                 "score": None, "policy": POLICY}
 
     bull_ma = ma5 > ma10 > ma20
