@@ -206,7 +206,7 @@ class MarketStoryEngine:
             else bias_long * 0.60 + core_long * 0.40
         )
         direction, direction_state, direction_label = _direction_state(long_score)
-        hourly = hourly_direction(tf_bias.fusion_long_score) if horizon == "SHORT" else None
+        hourly = hourly_direction(tf_bias) if horizon == "SHORT" else None
         if hourly is not None:
             bias_long = long_score = hourly["score"] if hourly["score"] is not None else 50.0
             direction, direction_state, direction_label = hourly["direction"], hourly["state"], hourly["label"]
@@ -1353,7 +1353,7 @@ def _trigger_candidate(
     pullback = _pullback_reactivation(candles, tf, direction, side_zone)
     bias_score = _direction_score(tf_bias)
     if price_action_trigger:
-        bias_aligned = hourly_direction(tf_bias.fusion_long_score)["direction"] == direction
+        bias_aligned = hourly_direction(tf_bias)["direction"] == direction
     else:
         bias_aligned = bias_score >= 55.0 if is_long else bias_score <= 45.0
     compression_block = compression.get("blocks_direction") == direction
