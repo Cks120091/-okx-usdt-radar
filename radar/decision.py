@@ -639,7 +639,8 @@ def build_decision_context(*args, **kwargs):
         _core._mapping(weighted_pipeline.get("layers", {})).get("trend_resonance", {})
     )
     if (
-        str(final.get("status") or "").upper() == "ENTER"
+        str(_core._read(item, "radar_horizon", "SHORT") or "SHORT").upper() == "SHORT"
+        and str(final.get("status") or "").upper() == "ENTER"
         and trend_layer.get("state") not in {"UNKNOWN", "RESONANT"}
     ):
         trend_tf = str(trend_layer.get("timeframe") or "1H")
