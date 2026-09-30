@@ -3312,7 +3312,8 @@ class RadarRuntime:
                 item.market_metrics = merged_metrics
                 if horizon == "SHORT":
                     from .short_direction import hourly_direction
-                    hourly = hourly_direction(preflight.get("timeframe_alignment", {}).get("long_score"))
+                    raw_indicators = dict(merged_metrics.get("raw_indicators", {}) or {})
+                    hourly = hourly_direction(raw_indicators.get("1H", {}))
                     item.timeframe_states = {
                         **dict(getattr(item, "timeframe_states", {}) or {}),
                         "1H": {"role": "方向｜決定多空", "direction": hourly["direction"],
