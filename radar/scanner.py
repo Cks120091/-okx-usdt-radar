@@ -3690,11 +3690,18 @@ class MarketScanner:
                 signal.entry_eligibility.get("status"),
                 0,
             )
-        # Ranking policy:
-        # 1) CONTINUATION + high execution quality is the top bucket.
-        # 2) Everything else ranks by execution-quality score, regardless of
-        #    REVERSAL / BREAKOUT / CONTINUATION trigger type.
-        # 3) Entry permission/status and the remaining facts only break ties.
+        # Weighted funnel policy:
+        # trend resonance -> timeframe alignment -> flow participation ->
+        # trend strength/relative strength -> execution/remaining-R.
+        # The score is produced by decision.py and is a ranking/quality layer;
+        # formal direction alignment remains a hard permission requirement.
+        weighted_pipeline = decision.get("weighted_pipeline", {})
+        weighted_score = (
+            _finite_number(weighted_pipeline.get("score"))
+            if isinstance(weighted_pipeline, dict)
+            else None
+        )
+        weighted_score = weighted_score if weighted_score is not None else 0.0
         high_execution_quality = int(execution_score >= 75.0)
         continuation_high_quality_priority = int(
             str(signal.trigger_type or "").upper() == "CONTINUATION"
@@ -3709,10 +3716,11 @@ class MarketScanner:
             else 0
         )
         return (
-            execution_score,
-            continuation_high_quality_priority,
+            weighted_score,
             permission_priority,
             status_priority,
+            continuation_high_quality_priority,
+            execution_score,
             resonance_priority,
             freshness_timestamp,
             freshness_priority.get(signal.freshness, 0),
@@ -4879,34 +4887,35 @@ class MarketScanner:
 
         bull_ma = current.sma5 > current.sma10 > current.sma20
         bear_ma = current.sma5 < current.sma10 < current.sma20
-        bull_ma_transition = (
-            previous.sma5 <= previous.sma10
-            and current.sma5 > current.sma10
-            and current.sma5 > current.sma20
-            and current.sma10 > current.sma20
-        )
-        bear_ma_transition = (
-            previous.sma5 >= previous.sma10
-            and current.sma5 < current.sma10
-            and current.sma5 < current.sma20
-            and current.sma10 < current.sma20
-        )
+        bull_ma_fast = current.sma5 > current.sma10
+        bear_ma_fast = current.sma5 < current.sma10
+        bull_macd = curr_diff > 0.0
+        bear_macd = curr_diff < 0.0
+        bull_macd_improving = curr_diff > prev_diff
+        bear_macd_improving = curr_diff < prev_diff
 
-        # Admit an approaching cross only when the MACD gap is shrinking in
-        # that direction and the MA stack already supports the same side.
-        bull_forming = prev_diff < 0.0 and curr_diff < 0.0 and curr_diff > prev_diff and bull_ma
-        bear_forming = prev_diff > 0.0 and curr_diff > 0.0 and curr_diff < prev_diff and bear_ma
-
-        bull_continuing = curr_diff > 0.0 and bull_ma
-        bear_continuing = curr_diff < 0.0 and bear_ma
-        bullish = (bull_cross and (bull_ma or bull_ma_transition)) or bull_forming or bull_continuing
-        bearish = (bear_cross and (bear_ma or bear_ma_transition)) or bear_forming or bear_continuing
+        # Trend-first prefilter: MACD or MA may lead.  Do not require a fixed
+        # order.  A single leading family is admitted as FORMING only when the
+        # other family is not already in a clear opposite full-stack trend.
+        # Formal entry later requires same-direction MACD x MA resonance.
+        bull_resonant = bull_macd and bull_ma
+        bear_resonant = bear_macd and bear_ma
+        bull_leading = (
+            (bull_macd and not bear_ma and (bull_ma_fast or not bear_ma_fast))
+            or (bull_ma and not bear_macd and bull_macd_improving)
+        )
+        bear_leading = (
+            (bear_macd and not bull_ma and (bear_ma_fast or not bull_ma_fast))
+            or (bear_ma and not bull_macd and bear_macd_improving)
+        )
+        bullish = bull_resonant or bull_leading
+        bearish = bear_resonant or bear_leading
         if bullish and not bearish:
             direction = "LONG"
-            state = "CONFIRMED" if bull_cross else "CONTINUING" if bull_continuing else "FORMING"
+            state = "RESONANT" if bull_resonant else "FORMING"
         elif bearish and not bullish:
             direction = "SHORT"
-            state = "CONFIRMED" if bear_cross else "CONTINUING" if bear_continuing else "FORMING"
+            state = "RESONANT" if bear_resonant else "FORMING"
         else:
             direction = "NEUTRAL"
             state = "REJECTED"
@@ -4915,7 +4924,12 @@ class MarketScanner:
             "state": state,
             "direction": direction,
             "macd_cross": "BULL" if bull_cross else "BEAR" if bear_cross else "NONE",
+            "macd_state": "BULL" if bull_macd else "BEAR" if bear_macd else "NEUTRAL",
+            "macd_improving": bull_macd_improving if direction == "LONG" else bear_macd_improving if direction == "SHORT" else False,
             "ma_state": "BULL" if bull_ma else "BEAR" if bear_ma else "MIXED",
+            "ma_fast_state": "BULL" if bull_ma_fast else "BEAR" if bear_ma_fast else "MIXED",
+            "trend_resonance": bull_resonant or bear_resonant,
+            "policy": "MACD_MA_ANY_ORDER_RESONANCE_V1",
         }
 
     def _passes_output_liquidity(
