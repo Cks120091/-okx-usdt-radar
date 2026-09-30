@@ -3025,9 +3025,11 @@ class MarketScanner:
         btc = btc if isinstance(btc, dict) else {}
         symbol_change = _finite_number(metric_map.get("price_change_core_pct"))
         btc_change = _finite_number(btc.get("core_change_pct"))
+        market_change = _finite_number(bias.get("market_core_change_pct"))
+        benchmark_change = market_change if market_change is not None else btc_change
         relative_strength = (
-            round(symbol_change - btc_change, 2)
-            if symbol_change is not None and btc_change is not None
+            round(symbol_change - benchmark_change, 2)
+            if symbol_change is not None and benchmark_change is not None
             else None
         )
         directional_relative = (
@@ -3038,6 +3040,19 @@ class MarketScanner:
             else None
         )
         price_24h = _finite_number(metric_map.get("price_change_24h_pct"))
+        market_24h = _finite_number(bias.get("market_24h_change_pct"))
+        relative_24h = (
+            round(price_24h - market_24h, 2)
+            if price_24h is not None and market_24h is not None
+            else None
+        )
+        directional_relative_24h = (
+            relative_24h
+            if normalized_direction == "LONG"
+            else -relative_24h
+            if normalized_direction == "SHORT" and relative_24h is not None
+            else None
+        )
         driver_map = (
             driver
             if isinstance(driver, dict)
@@ -3058,11 +3073,8 @@ class MarketScanner:
             )
         )
         prior_weakness_visible = bool(
-            price_24h is not None
-            and (
-                (normalized_direction == "LONG" and price_24h < 0)
-                or (normalized_direction == "SHORT" and price_24h > 0)
-            )
+            directional_relative_24h is not None
+            and directional_relative_24h <= -0.75
         )
         relative_is_strong = bool(
             directional_relative is not None and directional_relative >= 0.75
@@ -3083,7 +3095,7 @@ class MarketScanner:
             if relative_is_strong:
                 path_state, path_label, priority = "COUNTER_STRONG", "逆勢強勢", 3
                 reason = (
-                    "個幣方向逆大盤，但同區間相對 BTC 明顯領先；"
+                    "個幣方向逆大盤，但同區間相對大盤明顯領先；"
                     + ("自身資金參與亦有支持" if strength_confirmed else "等待資金流再確認")
                 )
             else:
@@ -3102,7 +3114,7 @@ class MarketScanner:
                 path_state, path_label = "LEADING_RESONANCE", "領先共振"
                 priority = 4 if strength_confirmed else 3
                 reason = (
-                    "與大盤同向且相對 BTC 顯著領先；"
+                    "與大盤同向且相對大盤顯著領先；"
                     + ("自身資金參與亦有支持" if strength_confirmed else "等待資金流再確認")
                 )
             else:
@@ -3117,7 +3129,9 @@ class MarketScanner:
             "priority": priority,
             "market_direction": market_direction,
             "market_bias_score": round(score, 1) if score is not None else None,
+            "benchmark_change_pct": benchmark_change,
             "relative_strength_pct": relative_strength,
+            "relative_strength_24h_pct": relative_24h,
             "strength_confirmed": strength_confirmed,
             "reason": reason,
             "policy": "ADVISORY_RANKING_ONLY",
@@ -4934,6 +4948,12 @@ class MarketScanner:
                 else "NEUTRAL"
             )
             ticker = tickers[inst_id]
+            hourly = [c for c in bundle.get("1H", []) if c.confirmed]
+            price_change_24h_pct = (
+                (ticker.last / hourly[-25].close - 1) * 100
+                if len(hourly) >= 25 and hourly[-25].close > 0
+                else None
+            )
             state = MarketState(
                 inst_id=inst_id, regime="TREND" if direction != "NEUTRAL" else "RANGE",
                 direction=direction, preferred_strategy="NONE", readiness_score=0.0,
@@ -4945,6 +4965,7 @@ class MarketScanner:
                     "rsi_24h": _completed_24h_rsi(bundle.get("1H", [])),
                     "price_change_core_pct": (candles[-1].close / candles[-2].close - 1) * 100
                     if candles[-2].close > 0 else None,
+                    "price_change_24h_pct": price_change_24h_pct,
                 },
             )
             candidate = candidates.get(inst_id)
@@ -4972,6 +4993,26 @@ class MarketScanner:
             for result in results.values()
             if getattr(result, "market_state", None) is not None
         ]
+
+        def median_metric(key: str) -> float | None:
+            values = sorted(
+                value
+                for state in states
+                if state.status != "FILTERED"
+                and (value := _finite_number(state.market_metrics.get(key))) is not None
+            )
+            if not values:
+                return None
+            middle = len(values) // 2
+            median = (
+                values[middle]
+                if len(values) % 2
+                else (values[middle - 1] + values[middle]) / 2.0
+            )
+            return round(median, 4)
+
+        market_core_change_pct = median_metric("price_change_core_pct")
+        market_24h_change_pct = median_metric("price_change_24h_pct")
         directional = [
             state
             for state in states
@@ -5102,6 +5143,8 @@ class MarketScanner:
             "long_count": long_count,
             "short_count": short_count,
             "sample_count": len(directional),
+            "market_core_change_pct": market_core_change_pct,
+            "market_24h_change_pct": market_24h_change_pct,
             "market_average_rsi": market_average_rsi,
             "market_average_rsi_sample_count": len(market_rsi_values),
             "market_rsi_24h": market_rsi_24h,
