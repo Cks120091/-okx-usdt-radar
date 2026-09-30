@@ -3312,8 +3312,13 @@ class RadarRuntime:
                 item.market_metrics = merged_metrics
                 if horizon == "SHORT":
                     from .short_direction import hourly_direction
-                    raw_indicators = dict(merged_metrics.get("raw_indicators", {}) or {})
-                    hourly = hourly_direction(raw_indicators.get("1H", {}))
+                    # Always display the newest completed-1H direction evidence.
+                    # Opposite fresh direction must not overwrite the stored
+                    # Episode plan, but the card must not keep showing stale 1H.
+                    fresh_raw = dict(fresh_metrics.get("raw_indicators", {}) or {})
+                    merged_raw = dict(merged_metrics.get("raw_indicators", {}) or {})
+                    hourly_frame = fresh_raw.get("1H", merged_raw.get("1H", {}))
+                    hourly = hourly_direction(hourly_frame)
                     item.timeframe_states = {
                         **dict(getattr(item, "timeframe_states", {}) or {}),
                         "1H": {"role": "方向｜決定多空", "direction": hourly["direction"],
