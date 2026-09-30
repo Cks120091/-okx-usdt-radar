@@ -3701,7 +3701,7 @@ class MarketScanner:
             if isinstance(weighted_pipeline, dict)
             else None
         )
-        weighted_score = weighted_score if weighted_score is not None else 0.0
+        weighted_available = weighted_score is not None
         high_execution_quality = int(execution_score >= 75.0)
         continuation_high_quality_priority = int(
             str(signal.trigger_type or "").upper() == "CONTINUATION"
@@ -3715,7 +3715,29 @@ class MarketScanner:
             if isinstance(resonance, dict)
             else 0
         )
+        if not weighted_available:
+            # Backward-compatible fallback for stored/synthetic episodes that
+            # predate WEIGHTED_TREND_FUNNEL_V1.
+            return (
+                0,
+                execution_score,
+                continuation_high_quality_priority,
+                permission_priority,
+                status_priority,
+                resonance_priority,
+                freshness_timestamp,
+                freshness_priority.get(signal.freshness, 0),
+                -int(signal.lifecycle.get("age_bars", 0) or 0),
+                remaining_rr,
+                -slippage,
+                _finite_number(signal.quote_volume_24h)
+                if _finite_number(signal.quote_volume_24h) is not None
+                else -math.inf,
+                stage_priority.get(signal.signal_stage, 0),
+                signal.score,
+            )
         return (
+            1,
             weighted_score,
             permission_priority,
             status_priority,
@@ -4912,10 +4934,10 @@ class MarketScanner:
         bearish = bear_resonant or bear_leading
         if bullish and not bearish:
             direction = "LONG"
-            state = "RESONANT" if bull_resonant else "FORMING"
+            state = "CONFIRMED" if bull_resonant and bull_cross else "CONTINUING" if bull_resonant else "FORMING"
         elif bearish and not bullish:
             direction = "SHORT"
-            state = "RESONANT" if bear_resonant else "FORMING"
+            state = "CONFIRMED" if bear_resonant and bear_cross else "CONTINUING" if bear_resonant else "FORMING"
         else:
             direction = "NEUTRAL"
             state = "REJECTED"
