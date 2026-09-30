@@ -368,8 +368,8 @@ def _technical_trend_resonance(item, direction):
     metrics = _core._mapping(_core._read(item, "market_metrics", {}))
     raw = _core._mapping(metrics.get("raw_indicators", {}))
     horizon = str(_core._read(item, "radar_horizon", "SHORT")).upper()
-    trigger_tf = "15m" if horizon == "SHORT" else "1H"
-    frame = _core._mapping(raw.get(trigger_tf, {}))
+    trend_tf = "1H" if horizon == "SHORT" else "1H"
+    frame = _core._mapping(raw.get(trend_tf, {}))
     values = {
         key: _core._number(frame.get(key))
         for key in ("ma5", "ma10", "ma20", "macd_line", "macd_signal")
@@ -379,7 +379,7 @@ def _technical_trend_resonance(item, direction):
             "state": "UNKNOWN",
             "label": "MACD／MA 趨勢資料不足",
             "score": None,
-            "timeframe": trigger_tf,
+            "timeframe": trend_tf,
             "ma_aligned": None,
             "macd_aligned": None,
             "policy": "MACD_MA_ANY_ORDER_RESONANCE_V1",
@@ -441,7 +441,7 @@ def _technical_trend_resonance(item, direction):
         "state": state,
         "label": label,
         "score": score,
-        "timeframe": trigger_tf,
+        "timeframe": trend_tf,
         "ma_aligned": ma_aligned,
         "ma_fast_aligned": fast_aligned,
         "macd_aligned": macd_aligned,
@@ -478,9 +478,9 @@ def _weighted_pipeline(item, direction, alignment, payload):
 
     metrics = _core._mapping(_core._read(item, "market_metrics", {}))
     raw = _core._mapping(metrics.get("raw_indicators", {}))
-    trigger_tf = str(trend.get("timeframe") or ("15m" if str(_core._read(item, "radar_horizon", "SHORT")).upper() == "SHORT" else "1H"))
-    trigger_frame = _core._mapping(raw.get(trigger_tf, {}))
-    adx = _core._number(trigger_frame.get("adx14"))
+    strength_tf = str(trend.get("timeframe") or "1H")
+    strength_frame = _core._mapping(raw.get(strength_tf, {}))
+    adx = _core._number(strength_frame.get("adx14"))
     adx_score = (
         100.0 if adx is not None and adx >= 25.0
         else 82.0 if adx is not None and adx >= 20.0
@@ -642,14 +642,14 @@ def build_decision_context(*args, **kwargs):
         str(final.get("status") or "").upper() == "ENTER"
         and trend_layer.get("state") not in {"UNKNOWN", "RESONANT"}
     ):
-        trigger_tf = str(trend_layer.get("timeframe") or "Trigger")
+        trend_tf = str(trend_layer.get("timeframe") or "1H")
         final.update({
             "status": "WAIT",
-            "label": f"{trigger_tf} 趨勢形成中｜等待 MACD × MA 同向",
+            "label": f"{trend_tf} 趨勢形成中｜等待 MACD × MA 同向",
             "new_entry_allowed": False,
             "wait_reason": {
                 "code": "TECHNICAL_TREND_RESONANCE",
-                "label": str(trend_layer.get("label") or "等待 MACD 與 MA5/10/20 同向排列"),
+                "label": str(trend_layer.get("label") or "等待 1H MACD 與 MA5/10/20 同向排列"),
             },
             "reasons": _core._unique([
                 str(trend_layer.get("label") or ""),
