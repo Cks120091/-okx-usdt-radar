@@ -79,25 +79,44 @@ class ShortDirectionContractTests(unittest.TestCase):
         four, hourly, core = valid_breakout_frames()
         def measured(rows):
             tf = features(rows)
-            return replace(tf, fusion_long_score=50) if rows is hourly else tf
+            if rows is hourly:
+                return replace(
+                    tf,
+                    sma5=tf.sma20,
+                    sma10=tf.sma20,
+                    macd_line=tf.macd_signal,
+                )
+            return tf
         with patch("radar.market_story.features", side_effect=measured):
             result = MarketStoryEngine().analyze_short(four, hourly, core)
         self.assertFalse(result.triggered)
         self.assertEqual(result.timeframe_states["1H"]["direction"], "NEUTRAL")
 
-    def test_hourly_display_and_entry_use_same_score_even_if_other_metrics_differ(self):
+    def test_hourly_display_and_entry_use_same_macd_ma_direction_even_if_fusion_differs(self):
         four, hourly, core = valid_breakout_frames()
-        for score, side in ((54, "LONG"), (46, "SHORT")):
+        for side in ("LONG", "SHORT"):
+            h = hourly if side == "LONG" else mirror(hourly)
+            tf = features(h)
+            conflicting_fusion = 10 if side == "LONG" else 90
             def measured(rows):
-                tf = features(rows)
-                return replace(tf, fusion_long_score=score) if rows is hourly else tf
+                current = features(rows)
+                return replace(current, fusion_long_score=conflicting_fusion) if rows is h else current
             with patch("radar.market_story.features", side_effect=measured):
-                story = MarketStoryEngine().analyze_short(four, hourly, core)
+                story = MarketStoryEngine().analyze_short(four, h, core if side == "LONG" else mirror(core))
             item = signal_dict(side)
-            item["market_metrics"]["raw_indicators"]["1H"]["fusion_long_score"] = score
+            item["market_metrics"]["raw_indicators"]["1H"] = {
+                "ma5": tf.sma5,
+                "ma10": tf.sma10,
+                "ma20": tf.sma20,
+                "macd_line": tf.macd_line,
+                "macd_signal": tf.macd_signal,
+                "macd_hist": tf.macd_hist,
+                "macd_prev_hist": tf.macd_prev_hist,
+                "fusion_long_score": conflicting_fusion,
+            }
             alignment = build_decision_context(item)["final"]["timeframe_alignment"]
-            self.assertEqual(story.timeframe_states["1H"]["direction"], alignment["timeframe_direction"])
-            self.assertEqual(story.timeframe_states["1H"]["score"], alignment["long_score"])
+            self.assertEqual(story.timeframe_states["1H"]["direction"], side)
+            self.assertEqual(alignment["timeframe_direction"], side)
             self.assertTrue(alignment["passed"])
 
     def test_public_card_retains_direction_policy_and_reason(self):
