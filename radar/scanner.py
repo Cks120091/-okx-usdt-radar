@@ -488,15 +488,13 @@ class MarketScanner:
         analysis_failures: dict[str, str] = {}
         short_prefilter: dict[str, dict[str, Any]] = {}
         if include_short:
-            # Fast prefilter: use the user's MACD double-line + MA5/10/20
-            # control logic to reduce the universe before the expensive core.
-            # A strict cross must pass through (touching zero difference does
-            # not count).  "FORMING" candidates are also admitted so the
-            # prefilter does not recreate the old late-signal problem.
+            # Fast 1H direction prefilter: MACD and MA5/10/20 may lead in
+            # either order.  15m is NOT judged by this filter; it remains the
+            # price-action / retest / Trigger timeframe in Market Story.
             for inst_id, bundle in bundles.items():
                 try:
                     short_prefilter[inst_id] = self._macd_ma_prefilter(
-                        bundle.get("15m", [])
+                        bundle.get("1H", [])
                     )
                 except Exception as exc:
                     analysis_failures[f"{inst_id}:PREFILTER"] = (
@@ -513,7 +511,7 @@ class MarketScanner:
                 "ANALYSIS",
                 0,
                 len(prefiltered_bundles),
-                f"MACD／MA 初篩通過 {len(prefiltered_bundles)} 個；正在送入 15m 核心",
+                f"1H MACD／MA 方向初篩通過 {len(prefiltered_bundles)} 個；正在送入 15m 價格核心",
             )
             for index, (inst_id, bundle) in enumerate(sorted(prefiltered_bundles.items()), 1):
                 try:
@@ -4891,11 +4889,11 @@ class MarketScanner:
 
     @staticmethod
     def _macd_ma_prefilter(candles: list[Candle]) -> dict[str, Any]:
-        """Cheap 15m candidate filter before the full Market Story core.
+        """Cheap 1H direction filter before the 15m Market Story core.
 
-        MACD is 12/26/9 and only the two-line relationship is used for the
-        crossing event.  MA5/10/20 describes short-term control.  Exact
-        equality/touching is deliberately not a cross.
+        MACD is 12/26/9 and MA5/10/20 defines the 1H trend state.  Either
+        family may lead first; this function never judges the 15m Trigger.
+        Exact equality/touching is deliberately not a cross.
         """
         if len(candles) < 61:
             return {"passed": False, "state": "INSUFFICIENT", "direction": "NEUTRAL"}
