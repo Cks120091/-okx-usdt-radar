@@ -2985,19 +2985,35 @@ class MarketScanner:
         direction: str,
         market_bias: dict[str, Any] | None,
         inst_id: str | None = None,
+        metrics: dict[str, Any] | None = None,
+        driver: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
-        """Describe broad-market agreement without creating/cancelling a Trigger."""
+        """Classify broad-market relation without creating/cancelling a Trigger.
+
+        The legacy state field stays ALIGNED/COUNTER for compatibility.
+        path_state is the human-facing relation used for ranking and card hints:
+        ordinary resonance, counter-trend strength, weak-to-strong recovery,
+        or leading resonance. It is advisory only; entry permission remains
+        owned by the formal Trigger / timeframe / execution gates.
+        """
         if inst_id == XAU_INST_ID:
             return {
                 "state": "NOT_APPLICABLE",
                 "label": "黃金獨立觀察",
+                "path_state": "NOT_APPLICABLE",
+                "path_label": "黃金獨立觀察",
                 "priority": 0,
                 "market_direction": "UNKNOWN",
                 "market_bias_score": None,
+                "relative_strength_pct": None,
+                "strength_confirmed": False,
+                "reason": "黃金不套用加密大盤相對強弱分類",
                 "policy": "ADVISORY_RANKING_ONLY",
                 "affects_trigger": False,
             }
+
         bias = market_bias if isinstance(market_bias, dict) else {}
+        metric_map = metrics if isinstance(metrics, dict) else {}
         score = _finite_number(bias.get("score"))
         market_direction = (
             "LONG" if score is not None and score >= 65.0
@@ -3005,20 +3021,105 @@ class MarketScanner:
             else "NEUTRAL"
         )
         normalized_direction = str(direction or "").upper()
+        btc = bias.get("btc", {})
+        btc = btc if isinstance(btc, dict) else {}
+        symbol_change = _finite_number(metric_map.get("price_change_core_pct"))
+        btc_change = _finite_number(btc.get("core_change_pct"))
+        relative_strength = (
+            round(symbol_change - btc_change, 2)
+            if symbol_change is not None and btc_change is not None
+            else None
+        )
+        directional_relative = (
+            relative_strength
+            if normalized_direction == "LONG"
+            else -relative_strength
+            if normalized_direction == "SHORT" and relative_strength is not None
+            else None
+        )
+        price_24h = _finite_number(metric_map.get("price_change_24h_pct"))
+        driver_map = (
+            driver
+            if isinstance(driver, dict)
+            else metric_map.get("market_driver", {})
+            if isinstance(metric_map.get("market_driver"), dict)
+            else {}
+        )
+        flow_state = str(metric_map.get("flow_participation_state") or "").upper()
+        strength_confirmed = (
+            str(driver_map.get("key") or "").upper() == "INDEPENDENT"
+            or flow_state == "STRENGTHENING"
+        )
+        current_supports_direction = bool(
+            symbol_change is not None
+            and (
+                (normalized_direction == "LONG" and symbol_change > 0)
+                or (normalized_direction == "SHORT" and symbol_change < 0)
+            )
+        )
+        prior_weakness_visible = bool(
+            price_24h is not None
+            and (
+                (normalized_direction == "LONG" and price_24h < 0)
+                or (normalized_direction == "SHORT" and price_24h > 0)
+            )
+        )
+        relative_is_strong = bool(
+            directional_relative is not None and directional_relative >= 0.75
+        )
+
         if score is None or normalized_direction not in {"LONG", "SHORT"}:
-            state, label, priority = "UNKNOWN", "大盤參考不足", 0
+            state, label, path_state, path_label, priority = (
+                "UNKNOWN", "大盤參考不足", "UNKNOWN", "大盤參考不足", 0
+            )
+            reason = "大盤方向或個幣方向資料不足"
         elif market_direction == "NEUTRAL":
-            state, label, priority = "NEUTRAL", "大盤中性", 1
-        elif normalized_direction == market_direction:
-            state, label, priority = "ALIGNED", "大盤共振", 2
+            state, label, path_state, path_label, priority = (
+                "NEUTRAL", "大盤中性", "NEUTRAL", "大盤中性", 1
+            )
+            reason = "大盤尚未形成明確多空背景"
+        elif normalized_direction != market_direction:
+            state, label = "COUNTER", "逆大盤"
+            if relative_is_strong:
+                path_state, path_label, priority = "COUNTER_STRONG", "逆勢強勢", 3
+                reason = (
+                    "個幣方向逆大盤，但同區間相對 BTC 明顯領先；"
+                    + ("自身資金參與亦有支持" if strength_confirmed else "等待資金流再確認")
+                )
+            else:
+                path_state, path_label, priority = "COUNTER", "逆大盤", 0
+                reason = "個幣方向逆大盤，但尚未證明有足夠相對強度"
         else:
-            state, label, priority = "COUNTER", "逆大盤", 0
+            state, label = "ALIGNED", "大盤共振"
+            if prior_weakness_visible and current_supports_direction:
+                path_state, path_label, priority = (
+                    "RECOVERY_RESONANCE",
+                    "弱勢修復 → 共振",
+                    3,
+                )
+                reason = "24H 仍留有前段弱勢，但核心週期已重新跟回大盤方向"
+            elif relative_is_strong:
+                path_state, path_label = "LEADING_RESONANCE", "領先共振"
+                priority = 4 if strength_confirmed else 3
+                reason = (
+                    "與大盤同向且相對 BTC 顯著領先；"
+                    + ("自身資金參與亦有支持" if strength_confirmed else "等待資金流再確認")
+                )
+            else:
+                path_state, path_label, priority = "ALIGNED", "大盤共振", 2
+                reason = "個幣與大盤方向一致，未見明顯相對領先或修復特徵"
+
         return {
             "state": state,
             "label": label,
+            "path_state": path_state,
+            "path_label": path_label,
             "priority": priority,
             "market_direction": market_direction,
             "market_bias_score": round(score, 1) if score is not None else None,
+            "relative_strength_pct": relative_strength,
+            "strength_confirmed": strength_confirmed,
+            "reason": reason,
             "policy": "ADVISORY_RANKING_ONLY",
             "affects_trigger": False,
         }
@@ -3032,12 +3133,17 @@ class MarketScanner:
         state = result.market_state
         if state is None:
             return result
-        meta = cls._market_resonance_meta(state.direction, market_bias, state.inst_id)
 
         def annotate(item):
             if item is None:
                 return None
             metrics = dict(item.market_metrics)
+            meta = cls._market_resonance_meta(
+                item.direction,
+                market_bias,
+                item.inst_id,
+                metrics=metrics,
+            )
             metrics["market_resonance"] = dict(meta)
             return replace(item, market_metrics=metrics)
 
@@ -4064,7 +4170,13 @@ class MarketScanner:
                 "flow_velocity_abnormal": flow.get("abnormal_speed"),
                 "market_driver": driver,
                 "relative_strength": driver.get("relative_strength"),
-                "market_resonance": self._market_resonance_meta(direction, market_bias, state.inst_id),
+                "market_resonance": self._market_resonance_meta(
+                    direction,
+                    market_bias,
+                    state.inst_id,
+                    metrics=metrics,
+                    driver=driver,
+                ),
                 "market_sessions": context_payload.get("sessions", {}).get("items", []),
                 "anomaly_state": anomaly_status,
                 "anomalies": [
