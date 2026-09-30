@@ -18,7 +18,7 @@ function env(payload){
     $:selector=>{if(!elements.has(selector))elements.set(selector,node());return elements.get(selector);}};
   Object.assign(ctx,{itemFinalDecision:item=>item.decision_context?.final||{},isTerminalSignal:item=>item.lifecycle?.terminal===true,isPreviewItem:item=>item.preview===true,isExpiredSnapshot:item=>item.expired===true,itemReadOnlyReason:item=>item.read_only===true});
   vm.createContext(ctx);
-  for(const name of ['isFormalSignal','signalGroups','shortSignalGroups','longSignalGroups','signalPreparationView','shortPreparationView','currentEntryBadge','preflightQualityScore','preflightQualityComparison','preflightCoreReason','preflightPresentation','preflightQualityExplanation','preflightDataTimes','preflightEarlyWarning','preflightTerminalKind','preflightResponseTerminal','loadPreflight'])vm.runInContext(source(name),ctx);
+  for(const name of ['isFormalSignal','signalGroups','shortSignalGroups','longSignalGroups','signalPreparationView','shortPreparationView','currentEntryBadge','marketResonanceBadge','preflightQualityScore','preflightQualityComparison','preflightCoreReason','preflightPresentation','preflightQualityExplanation','preflightDataTimes','preflightEarlyWarning','preflightTerminalKind','preflightResponseTerminal','loadPreflight'])vm.runInContext(source(name),ctx);
   return ctx;
 }
 const payload={inst_id:'CFX-USDT-SWAP',trigger_id:'cfx-1',horizon:'SHORT',direction:'LONG',entry_policy_version:'SIGNAL_POSITION_SEPARATED_V1',original:{quality_score:90},live:{quality_score:65,price:.05669},verdict:{status:'HARD_GATE_BLOCKED',new_entry_allowed:false,label:'核心訊號條件未成立',reason:'核心條件：NO_FORMAL_TRIGGER',hard_blockers:['NO_FORMAL_TRIGGER']},signal_lifecycle:{status:'ACTIVE',terminal:false}};
