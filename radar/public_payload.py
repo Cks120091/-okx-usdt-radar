@@ -434,8 +434,9 @@ def _public_metrics(
 ) -> dict[str, Any]:
     payload = _select(metrics, fields)
     resonance = _select(_read(metrics, "market_resonance", {}), (
-        "state", "label", "priority", "market_direction", "market_bias_score",
-        "policy", "affects_trigger",
+        "state", "label", "path_state", "path_label", "priority",
+        "market_direction", "market_bias_score", "relative_strength_pct",
+        "strength_confirmed", "reason", "policy", "affects_trigger",
     ))
     if resonance:
         payload["market_resonance"] = resonance
