@@ -627,10 +627,10 @@ def build_decision_context(*args, **kwargs):
 
     final["timeframe_alignment"] = alignment
 
-    # Apply the user's ordered quality funnel. MACD and MA may lead in either
-    # order, but a formal new entry waits until they are both aligned on the
-    # trigger timeframe. The remaining data layers rank quality rather than
-    # fabricating a new direction.
+    # Apply the ordered quality funnel. For SHORT, MACD and MA5/10/20 belong
+    # to the completed 1H direction layer; 15m remains price-action / retest /
+    # Trigger only.  MACD or MA may lead first, but 1H direction is formal only
+    # after both families resonate in the same direction.
     weighted_pipeline = _weighted_pipeline(item, direction, alignment, payload) if item is not None else {}
     payload["weighted_pipeline"] = weighted_pipeline
     final["weighted_score"] = weighted_pipeline.get("score")
