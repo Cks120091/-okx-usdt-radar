@@ -29,8 +29,8 @@ class FusionBalancePolicyTests(unittest.TestCase):
         self.assertIn("OPPOSITE_SIGNAL", preflight_core)
         self.assertNotIn('"OPPOSITE_SIGNAL",', decision)
         self.assertNotIn('"OPPOSITE_SIGNAL",', preflight)
-        self.assertIn("hourly_direction(tf_bias.fusion_long_score)", story)
-        self.assertNotIn("hourly_direction(tf_core.fusion_long_score)", story)
+        self.assertIn("hourly_direction(tf_bias)", story)
+        self.assertNotIn("hourly_direction(tf_core)", story)
 
     def test_fusion_replaces_duplicate_momentum_veto_only(self):
         decision = (ROOT / "radar/decision.py").read_text(encoding="utf-8")
