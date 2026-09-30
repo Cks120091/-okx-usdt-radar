@@ -39,7 +39,14 @@ class ShortPreparationTests(unittest.TestCase):
         four, hourly, core = valid_breakout_frames()
         def measured(rows):
             tf = features(rows)
-            return replace(tf, fusion_long_score=50) if rows is hourly else tf
+            if rows is hourly:
+                return replace(
+                    tf,
+                    sma5=tf.sma20,
+                    sma10=tf.sma20,
+                    macd_line=tf.macd_signal,
+                )
+            return tf
         with patch("radar.market_story.features", side_effect=measured):
             story = MarketStoryEngine().analyze_short(four, hourly, core)
         state = MarketState(
