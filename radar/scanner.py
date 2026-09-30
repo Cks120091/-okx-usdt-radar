@@ -4901,12 +4901,12 @@ class MarketScanner:
         bull_resonant = bull_macd and bull_ma
         bear_resonant = bear_macd and bear_ma
         bull_leading = (
-            (bull_macd and not bear_ma and (bull_ma_fast or not bear_ma_fast))
-            or (bull_ma and not bear_macd and bull_macd_improving)
+            (bull_macd and not bear_ma)
+            or (bull_ma and bull_macd_improving)
         )
         bear_leading = (
-            (bear_macd and not bull_ma and (bear_ma_fast or not bull_ma_fast))
-            or (bear_ma and not bull_macd and bear_macd_improving)
+            (bear_macd and not bull_ma)
+            or (bear_ma and bear_macd_improving)
         )
         bullish = bull_resonant or bull_leading
         bearish = bear_resonant or bear_leading
