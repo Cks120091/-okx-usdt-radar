@@ -363,6 +363,223 @@ def _oi_resonance(item, direction):
         "standalone_trigger": False,
     }
 
+def _technical_trend_resonance(item, direction):
+    """Score MACD x MA5/10/20 without imposing which family must lead first."""
+    metrics = _core._mapping(_core._read(item, "market_metrics", {}))
+    raw = _core._mapping(metrics.get("raw_indicators", {}))
+    horizon = str(_core._read(item, "radar_horizon", "SHORT")).upper()
+    trigger_tf = "15m" if horizon == "SHORT" else "1H"
+    frame = _core._mapping(raw.get(trigger_tf, {}))
+    values = {
+        key: _core._number(frame.get(key))
+        for key in ("ma5", "ma10", "ma20", "macd_line", "macd_signal")
+    }
+    if any(value is None for value in values.values()) or direction not in {"LONG", "SHORT"}:
+        return {
+            "state": "UNKNOWN",
+            "label": "MACD／MA 趨勢資料不足",
+            "score": None,
+            "timeframe": trigger_tf,
+            "ma_aligned": None,
+            "macd_aligned": None,
+            "policy": "MACD_MA_ANY_ORDER_RESONANCE_V1",
+        }
+
+    ma5, ma10, ma20 = values["ma5"], values["ma10"], values["ma20"]
+    diff = values["macd_line"] - values["macd_signal"]
+    hist = _core._number(frame.get("macd_hist"))
+    prev_hist = _core._number(frame.get("macd_prev_hist"))
+    is_long = direction == "LONG"
+
+    ma_aligned = (ma5 > ma10 > ma20) if is_long else (ma5 < ma10 < ma20)
+    ma_opposite = (ma5 < ma10 < ma20) if is_long else (ma5 > ma10 > ma20)
+    fast_aligned = (ma5 > ma10) if is_long else (ma5 < ma10)
+    slow_support = (ma10 > ma20) if is_long else (ma10 < ma20)
+    macd_aligned = diff > 0.0 if is_long else diff < 0.0
+    macd_opposite = diff < 0.0 if is_long else diff > 0.0
+    macd_improving = (
+        hist > prev_hist if is_long else hist < prev_hist
+    ) if hist is not None and prev_hist is not None else False
+
+    if ma_aligned:
+        ma_score = 100.0
+    elif ma_opposite:
+        ma_score = 0.0
+    elif fast_aligned and slow_support:
+        ma_score = 78.0
+    elif fast_aligned:
+        ma_score = 62.0
+    else:
+        ma_score = 35.0
+
+    if macd_aligned and macd_improving:
+        macd_score = 100.0
+    elif macd_aligned:
+        macd_score = 86.0
+    elif macd_improving:
+        macd_score = 62.0
+    elif macd_opposite:
+        macd_score = 12.0
+    else:
+        macd_score = 40.0
+
+    score = round((ma_score * 0.55) + (macd_score * 0.45), 1)
+    clear_conflict = bool(
+        (ma_aligned and macd_opposite and not macd_improving)
+        or (ma_opposite and macd_aligned)
+    )
+    if ma_aligned and macd_aligned:
+        state, label = "RESONANT", "MACD／MA 同向趨勢排列完成"
+    elif clear_conflict:
+        state, label = "CONFLICT", "MACD／MA 方向仍互相衝突"
+    elif score >= 55.0:
+        state, label = "FORMING", "MACD／MA 其中一項先行，等待另一項同向"
+    else:
+        state, label = "WEAK", "MACD／MA 尚未形成同向趨勢"
+
+    return {
+        "state": state,
+        "label": label,
+        "score": score,
+        "timeframe": trigger_tf,
+        "ma_aligned": ma_aligned,
+        "ma_fast_aligned": fast_aligned,
+        "macd_aligned": macd_aligned,
+        "macd_improving": macd_improving,
+        "ma_score": round(ma_score, 1),
+        "macd_score": round(macd_score, 1),
+        "policy": "MACD_MA_ANY_ORDER_RESONANCE_V1",
+    }
+
+
+def _weighted_pipeline(item, direction, alignment, payload):
+    """Five-step quality funnel. Only trend resonance/alignment can gate entry."""
+    trend = _technical_trend_resonance(item, direction)
+    trend_score = trend.get("score")
+    trend_points = 0.0 if trend_score is None else float(trend_score) * 0.30
+
+    alignment_score = (
+        100.0 if alignment.get("passed") is True
+        else 0.0 if alignment.get("required") is True
+        else 50.0
+    )
+    alignment_points = alignment_score * 0.25
+
+    continuation = _core._mapping(payload.get("continuation_confirmation", {}))
+    flow_key = str(continuation.get("key") or "UNKNOWN").upper()
+    flow_score = {
+        "CONFIRMED": 100.0,
+        "FORMING": 70.0,
+        "WEAK": 42.0,
+        "CONFLICT": 10.0,
+        "UNKNOWN": 30.0,
+    }.get(flow_key, 30.0)
+    flow_points = flow_score * 0.25
+
+    metrics = _core._mapping(_core._read(item, "market_metrics", {}))
+    raw = _core._mapping(metrics.get("raw_indicators", {}))
+    trigger_tf = str(trend.get("timeframe") or ("15m" if str(_core._read(item, "radar_horizon", "SHORT")).upper() == "SHORT" else "1H"))
+    trigger_frame = _core._mapping(raw.get(trigger_tf, {}))
+    adx = _core._number(trigger_frame.get("adx14"))
+    adx_score = (
+        100.0 if adx is not None and adx >= 25.0
+        else 82.0 if adx is not None and adx >= 20.0
+        else 62.0 if adx is not None and adx >= 15.0
+        else 35.0 if adx is not None
+        else 40.0
+    )
+    resonance = _core._mapping(metrics.get("market_resonance", {}))
+    resonance_priority = _core._number(resonance.get("priority"))
+    relative_score = (
+        max(0.0, min(100.0, float(resonance_priority) / 4.0 * 100.0))
+        if resonance_priority is not None
+        else 50.0
+    )
+    if resonance.get("strength_confirmed") is True:
+        relative_score = max(relative_score, 90.0)
+    if str(resonance.get("path_state") or "").upper() == "NOT_APPLICABLE":
+        relative_score = 50.0
+    strength_score = round((adx_score * 0.55) + (relative_score * 0.45), 1)
+    strength_points = strength_score * 0.10
+
+    execution = _core._mapping(_core._read(item, "execution_quality", {}))
+    execution_score = _core._number(execution.get("score"))
+    execution_score = 45.0 if execution_score is None else max(0.0, min(100.0, execution_score))
+    entry = _core._mapping(_core._read(item, "entry_eligibility", {}))
+    remaining_rr = _core._number(entry.get("remaining_rr"))
+    if remaining_rr is None:
+        remaining_rr = _core._number(_core._read(item, "risk_reward", None))
+    rr_score = (
+        100.0 if remaining_rr is not None and remaining_rr >= 2.5
+        else 86.0 if remaining_rr is not None and remaining_rr >= 2.0
+        else 68.0 if remaining_rr is not None and remaining_rr >= 1.5
+        else 45.0 if remaining_rr is not None and remaining_rr >= 1.0
+        else 25.0 if remaining_rr is not None
+        else 40.0
+    )
+    trade_score = round((execution_score * 0.60) + (rr_score * 0.40), 1)
+    trade_points = trade_score * 0.10
+
+    total = round(
+        trend_points
+        + alignment_points
+        + flow_points
+        + strength_points
+        + trade_points,
+        1,
+    )
+    if trend.get("state") == "RESONANT" and alignment.get("passed") is True and flow_score >= 90:
+        stage, label = "STRONG", "趨勢共振＋資金確認"
+    elif trend.get("state") == "RESONANT" and alignment.get("passed") is True:
+        stage, label = "CONFIRMED", "趨勢共振完成｜檢查資金品質"
+    elif trend.get("state") in {"FORMING", "WEAK"}:
+        stage, label = "FORMING", "趨勢形成中｜等待 MACD × MA 同向"
+    else:
+        stage, label = "CONFLICT", "趨勢條件互相衝突"
+
+    return {
+        "score": total,
+        "stage": stage,
+        "label": label,
+        "weights": {
+            "trend_resonance": 30,
+            "timeframe_alignment": 25,
+            "capital_flow": 25,
+            "trend_strength": 10,
+            "trade_quality": 10,
+        },
+        "layers": {
+            "trend_resonance": {**trend, "weighted_points": round(trend_points, 1)},
+            "timeframe_alignment": {
+                "score": alignment_score,
+                "passed": alignment.get("passed"),
+                "state": alignment.get("state"),
+                "weighted_points": round(alignment_points, 1),
+            },
+            "capital_flow": {
+                "score": flow_score,
+                "state": flow_key,
+                "weighted_points": round(flow_points, 1),
+                "basis": "OI + Taker/CVD + closed-candle volume",
+            },
+            "trend_strength": {
+                "score": strength_score,
+                "adx14": adx,
+                "relative_strength_score": round(relative_score, 1),
+                "weighted_points": round(strength_points, 1),
+            },
+            "trade_quality": {
+                "score": trade_score,
+                "execution_score": round(execution_score, 1),
+                "remaining_rr": remaining_rr,
+                "weighted_points": round(trade_points, 1),
+            },
+        },
+        "policy": "WEIGHTED_TREND_FUNNEL_V1",
+        "ranking_only_after_required_gates": True,
+    }
+
+
 _core._hard_gate = _hard_gate
 _core._anomalies = _anomalies
 _core._conflict_layer = _conflict_layer
@@ -409,6 +626,47 @@ def build_decision_context(*args, **kwargs):
         })
 
     final["timeframe_alignment"] = alignment
+
+    # Apply the user's ordered quality funnel. MACD and MA may lead in either
+    # order, but a formal new entry waits until they are both aligned on the
+    # trigger timeframe. The remaining data layers rank quality rather than
+    # fabricating a new direction.
+    weighted_pipeline = _weighted_pipeline(item, direction, alignment, payload) if item is not None else {}
+    payload["weighted_pipeline"] = weighted_pipeline
+    final["weighted_score"] = weighted_pipeline.get("score")
+    final["weighted_stage"] = weighted_pipeline.get("stage")
+    trend_layer = _core._mapping(
+        _core._mapping(weighted_pipeline.get("layers", {})).get("trend_resonance", {})
+    )
+    if (
+        str(final.get("status") or "").upper() == "ENTER"
+        and trend_layer.get("state") not in {"UNKNOWN", "RESONANT"}
+    ):
+        trigger_tf = str(trend_layer.get("timeframe") or "Trigger")
+        final.update({
+            "status": "WAIT",
+            "label": f"{trigger_tf} 趨勢形成中｜等待 MACD × MA 同向",
+            "new_entry_allowed": False,
+            "wait_reason": {
+                "code": "TECHNICAL_TREND_RESONANCE",
+                "label": str(trend_layer.get("label") or "等待 MACD 與 MA5/10/20 同向排列"),
+            },
+            "reasons": _core._unique([
+                str(trend_layer.get("label") or ""),
+                *list(final.get("reasons", []) or []),
+            ])[:3],
+        })
+
+    continuation_payload = _core._mapping(payload.get("continuation_confirmation", {}))
+    if continuation_payload:
+        payload["continuation_confirmation"] = {
+            **continuation_payload,
+            "meaning": (
+                "OI、Taker/CVD、成交量作為第二階段資金品質權重；"
+                "不單獨建立方向或 Trigger，也不改寫 Entry／SL／TP。"
+            ),
+        }
+
     # Keep OI observer outside the canonical final decision object so enriching
     # advisory OI data cannot mutate the decision contract.  UI/API consumers
     # can read it from the top-level decision context.
