@@ -435,7 +435,8 @@ def _public_metrics(
     payload = _select(metrics, fields)
     resonance = _select(_read(metrics, "market_resonance", {}), (
         "state", "label", "path_state", "path_label", "priority",
-        "market_direction", "market_bias_score", "relative_strength_pct",
+        "market_direction", "market_bias_score", "benchmark_change_pct",
+        "relative_strength_pct", "relative_strength_24h_pct",
         "strength_confirmed", "reason", "policy", "affects_trigger",
     ))
     if resonance:
