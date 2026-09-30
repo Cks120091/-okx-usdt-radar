@@ -234,7 +234,7 @@ def _timeframe_direction_alignment(item, direction):
     frame = _core._mapping(raw.get(direction_tf, {}))
     if horizon == "SHORT":
         from .short_direction import POLICY, hourly_direction
-        hourly = hourly_direction(frame.get("fusion_long_score"))
+        hourly = hourly_direction(frame)
         bias = hourly["direction"]
         passed = bias in {"LONG", "SHORT"} and bias == direction
         if bias in {"UNKNOWN", "NEUTRAL"}:
