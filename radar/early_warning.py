@@ -82,7 +82,7 @@ def preflight_early_warning(signal, payload, *, scan_at=None, source="STORED_SCA
             or mapping(payload.get("signal_lifecycle")).get("terminal") is True):
         return {}
     raw = mapping(mapping(getattr(signal, "market_metrics", {})).get("raw_indicators"))
-    hourly = hourly_direction(mapping(raw.get("1H")).get("fusion_long_score"))
+    hourly = hourly_direction(mapping(raw.get("1H")))
     side = hourly["direction"]
     story = mapping(getattr(signal, "market_story", {}))
     observation = mapping(mapping(story.get("raw")).get("early_observation"))
