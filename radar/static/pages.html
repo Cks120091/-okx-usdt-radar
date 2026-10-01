@@ -1803,9 +1803,11 @@ renderSignals(quality80,'#quality80Box','本輪沒有交易品質 80 分以上�
       try{
         const data=await api('/api/instrument/scan',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({inst_id:instId,horizon,direction_lock:direction}),signal:controller.signal});
         if(sequence!==singleScanSequence||!dialog.open)return;
-        const result=horizon==='LONG'?data.long:data.short,item=result?.item;
+        const result=horizon==='LONG'?data.long:data.short,item=result?.item,promotion=result?.promotion||{};
+        if(promotion.synced_to_market_report===true)await loadReport({history:false});
+        const promotionHtml=promotion.moved_to_triggered===true?`<div class="entry-callout notice"><b>✅ 已完整觸發，已移動到「訊號已觸發」</b><br><span>主報告已同步這張卡；不需要重新掃描其他幣種。</span><div class="quick-links"><button class="quick-link" type="button" data-go-triggered="${horizon}">前往訊號已觸發</button></div></div>`:'';
         box.scrollTop=0;
-        box.innerHTML=`<p class="intraday-note">本次更新 ${esc(taiwanTime(data.analyzed_at))}；${direction?'原卡方向固定，不會直接翻向。':'只掃此幣，不清空另一個雷達。'}</p>${item?`<div class="badges">${directionBadge(item)}${marketResonanceBadge(item)} · ${esc(stageName[item.signal_stage||item.status]||'觀察')}</div>${item.entry_low?decisionPanel(item):`${primaryReasons(item,result.message||'尚未形成正式價格事件')}`}${itemDataPage(item)}`:`<p>${esc(result?.message||'核心資料不足')}</p>`}${result?.opposite_warning?`<p class="entry-callout wait">${esc(result.opposite_warning.message)}</p>`:''}${intradayFlowPanel(data.cross_timeframe,item?.direction||direction||'NEUTRAL')}${exitReviewPanel(result?.exit_review,item||{})}`;
+        box.innerHTML=`<p class="intraday-note">本次更新 ${esc(taiwanTime(data.analyzed_at))}；${direction?'原卡方向固定，不會直接翻向。':'只掃此幣，不清空另一個雷達。'}</p>${promotionHtml}${item?`<div class="badges">${directionBadge(item)}${marketResonanceBadge(item)} · ${esc(stageName[item.signal_stage||item.status]||'觀察')}</div>${item.entry_low?decisionPanel(item):`${primaryReasons(item,result.message||'尚未形成正式價格事件')}`}${itemDataPage(item)}`:`<p>${esc(result?.message||'核心資料不足')}</p>`}${result?.opposite_warning?`<p class="entry-callout wait">${esc(result.opposite_warning.message)}</p>`:''}${intradayFlowPanel(data.cross_timeframe,item?.direction||direction||'NEUTRAL')}${exitReviewPanel(result?.exit_review,item||{})}`;
       }catch(error){if(sequence===singleScanSequence&&dialog.open)box.textContent=error.name==='AbortError'?'本次查詢逾時；未冒充取得新資料。':error.message}
       finally{clearTimeout(timer);singleScanBusy=false}
     }
@@ -2034,6 +2036,7 @@ renderSignals(quality80,'#quality80Box','本輪沒有交易品質 80 分以上�
 
     $('#singleSearch').addEventListener('click',()=>{const instId=normalizeInstrumentQuery($('#globalSearch').value);if(!instId){$('#globalSearch').focus();return}const horizon=state.activeGroup==='long'?'LONG':'SHORT',item=activePreflightSignal(instId,horizon);openSingleScan(instId,horizon,item?.direction||'')});
     document.addEventListener('click',event=>{const button=event.target.closest?.('[data-single-id]');if(button)openSingleScan(button.dataset.singleId,button.dataset.singleHorizon,button.dataset.singleDirection)});
+    document.addEventListener('click',event=>{const button=event.target.closest?.('[data-go-triggered]');if(!button)return;const horizon=normalizedHorizon(button.dataset.goTriggered||'SHORT',false);if($('#singleScanDialog').open){singleScanReturnFocus=null;$('#singleScanDialog').close()}activateTab(horizon==='LONG'?'longSignals':'fifteenAll')});
     document.addEventListener('click',event=>{
       const open=event.target.closest?.('button[data-detail-key]');if(open){openDataPage(open.dataset.detailKey);return}
       const tab=event.target.closest?.('[data-flow-window]');if(tab){const view=dataViews.get($('#dataDetailDialog').dataset.detailKey);if(view?.payload){$('#dataDetailContent').innerHTML=flowDetailBody(view.payload,tab.dataset.flowWindow);$('#dataDetailContent').querySelector(`[data-flow-window="${tab.dataset.flowWindow}"]`)?.focus()}}
