@@ -10,7 +10,7 @@ from .short_direction import (\n    LONG_POLICY as LONG_DIRECTION_POLICY,\n    P
 from .early_warning import short_scan_observation, short_scan_preparation
 
 
-STRATEGY_VERSION = "V3.4_CONTEXT"
+STRATEGY_VERSION = "V3.6_MACD_MA_HIERARCHY"
 FEATURE_SCHEMA_VERSION = "3.4.0"
 
 
@@ -590,7 +590,7 @@ class MarketStoryEngine:
             "missing_sources": [],
         }
         raw = {
-            "entry_policy_version": "SHORT_CONTEXT_WINDOW_V2" if horizon == "SHORT" else "SWING_UNCHANGED",
+            "entry_policy_version": "SHORT_CONTEXT_WINDOW_V2" if horizon == "SHORT" else "SWING_4H_MACD_MA_V2",
             "direction_long_score": round(long_score, 1),
             "higher_long_score": round(higher_long, 1),
             "bias_long_score": round(bias_long, 1),
