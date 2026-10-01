@@ -6,7 +6,7 @@ from typing import Any
 
 from .indicators import TimeframeFeatures, atr, ema_series, features
 from .models import Candle, MarketContext
-from .short_direction import POLICY as SHORT_DIRECTION_POLICY, hourly_direction
+from .short_direction import (\n    LONG_POLICY as LONG_DIRECTION_POLICY,\n    POLICY as SHORT_DIRECTION_POLICY,\n    hourly_direction,\n    swing_direction,\n)
 from .early_warning import short_scan_observation, short_scan_preparation
 
 
@@ -206,10 +206,19 @@ class MarketStoryEngine:
             else bias_long * 0.60 + core_long * 0.40
         )
         direction, direction_state, direction_label = _direction_state(long_score)
-        hourly = hourly_direction(tf_bias) if horizon == "SHORT" else None
-        if hourly is not None:
-            bias_long = long_score = hourly["score"] if hourly["score"] is not None else 50.0
-            direction, direction_state, direction_label = hourly["direction"], hourly["state"], hourly["label"]
+        canonical_bias = (
+            hourly_direction(tf_bias)
+            if horizon == "SHORT"
+            else swing_direction(tf_bias)
+        )
+        bias_long = long_score = (
+            canonical_bias["score"]
+            if canonical_bias["score"] is not None
+            else 50.0
+        )
+        direction = canonical_bias["direction"]
+        direction_state = canonical_bias["state"]
+        direction_label = canonical_bias["label"]
 
         zones = _dynamic_zones(core_candles, tf_core)
         location = _price_location(tf_core.close, tf_core.atr14, zones)
@@ -242,11 +251,9 @@ class MarketStoryEngine:
         # Direction ownership is explicit and symmetric:
         # SHORT: 1H owns direction, 15m only triggers.
         # LONG: 4H owns direction/setup, 1H only triggers; 1D is background.
-        long_bias_direction = _direction_state(bias_long)[0]
-        if hourly is not None and hourly["direction"] in ("LONG", "SHORT"):
-            selected = dict(candidates[hourly["direction"]])
-        elif horizon == "LONG" and long_bias_direction in ("LONG", "SHORT"):
-            selected = dict(candidates[long_bias_direction])
+        long_bias_direction = canonical_bias["direction"]
+        if canonical_bias["direction"] in ("LONG", "SHORT"):
+            selected = dict(candidates[canonical_bias["direction"]])
         else:
             selected = dict(_select_candidate(candidates, long_bias_direction))
             selected.update(
@@ -261,10 +268,11 @@ class MarketStoryEngine:
                 if horizon == "SHORT"
                 else "4H 方向尚未確定；1H 價格變化只供觀察。"
             )
-        if hourly is not None:
-            selected["direction_policy"] = SHORT_DIRECTION_POLICY
-        elif horizon == "LONG":
-            selected["direction_policy"] = "LONG_4H_DIRECTION_1H_TRIGGER_V1"
+        selected["direction_policy"] = (
+            SHORT_DIRECTION_POLICY
+            if horizon == "SHORT"
+            else LONG_DIRECTION_POLICY
+        )
         trigger_direction = str(selected.get("direction", "NEUTRAL"))
         stage = str(selected.get("stage", "WATCH"))
         freshness = str(selected.get("freshness", "NONE"))
@@ -526,8 +534,11 @@ class MarketStoryEngine:
         )
         if horizon == "SHORT":
             timeframe_states["1H"].update(
-                role="方向｜決定多空", direction=hourly["direction"],
-                label=hourly["label"], score=hourly["score"], can_block_trigger=True,
+                role="MACD／MA 篩選＋方向｜決定多空",
+                direction=canonical_bias["direction"],
+                label=canonical_bias["label"],
+                score=canonical_bias["score"],
+                can_block_trigger=True,
             )
             background = timeframe_states["4H"]
             # Describe the internal leg without claiming an unfinished 4H close.
@@ -540,6 +551,22 @@ class MarketStoryEngine:
             background["label"] += "｜" + phase
             background["phase"] = phase
             background["phase_basis"] = "最近4根已收線15m；非未完成4H的最終結果"
+        else:
+            timeframe_states["1D"].update(
+                role="大環境背景",
+                can_block_trigger=False,
+            )
+            timeframe_states["4H"].update(
+                role="MACD／MA 篩選＋方向／Setup",
+                direction=canonical_bias["direction"],
+                label=canonical_bias["label"],
+                score=canonical_bias["score"],
+                can_block_trigger=True,
+            )
+            timeframe_states["1H"].update(
+                role="正式 Trigger",
+                can_block_trigger=True,
+            )
         summary = _human_summary(
             trigger_direction,
             stage,
