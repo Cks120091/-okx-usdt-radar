@@ -560,16 +560,47 @@ class MarketScanner:
             )
 
         long_results: dict[str, AnalysisResult] = {}
+        long_prefilter: dict[str, dict[str, Any]] = {}
         long_radar_supported = callable(getattr(self.engine, "analyze_long", None))
         long_radar_enabled = include_long and long_radar_supported
         if long_radar_enabled:
+            # Swing radar uses the same first-layer MACD/MA screening contract
+            # as the short radar, shifted one timeframe higher:
+            # SHORT = 1H prefilter -> 15m Trigger
+            # LONG  = 4H prefilter -> 1H Trigger
+            # An already-active LONG episode bypasses the prefilter so an open
+            # plan is still reconciled instead of disappearing from tracking.
+            for inst_id, bundle in bundles.items():
+                try:
+                    long_prefilter[inst_id] = self._macd_ma_prefilter(
+                        bundle.get("4H", []),
+                        timeframe="4H",
+                    )
+                except Exception as exc:
+                    analysis_failures[f"{inst_id}:LONG_PREFILTER"] = (
+                        f"4H MACD／MA 前置篩選錯誤：{exc}"
+                    )
+            long_candidate_ids = {
+                inst_id
+                for inst_id in bundles
+                if long_prefilter.get(inst_id, {}).get("passed") is True
+                or self.repository.load_active_signal(inst_id, "LONG") is not None
+            }
+            self._progress(
+                progress,
+                "LONG_PREFILTER",
+                0,
+                len(long_candidate_ids),
+                f"4H MACD／MA 方向初篩通過 {len(long_candidate_ids)} 個；準備送入 1H Trigger",
+            )
+
             if include_short:
                 self._progress(
                     progress,
                     "LONG_CANDLES",
                     0,
-                    len(bundles),
-                    "15m 已發布；正在補 1D 與長線雷達",
+                    len(long_candidate_ids),
+                    "15m 已發布；正在為 4H 初篩候選補 1D 背景",
                 )
                 with ThreadPoolExecutor(
                     max_workers=max(1, self.config.workers)
@@ -580,7 +611,7 @@ class MarketScanner:
                             inst_id,
                             ("1D",),
                         ): inst_id
-                        for inst_id in bundles
+                        for inst_id in long_candidate_ids
                     }
                     for completed, future in enumerate(as_completed(future_map), 1):
                         inst_id = future_map[future]
@@ -597,19 +628,21 @@ class MarketScanner:
                             progress,
                             "LONG_CANDLES",
                             completed,
-                            len(bundles),
-                            "15m 已發布；正在補 1D 資料",
+                            len(long_candidate_ids),
+                            "正在補 4H 初篩候選的 1D 背景資料",
                         )
 
             long_ready = [
-                inst_id for inst_id, bundle in bundles.items() if "1D" in bundle
+                inst_id
+                for inst_id in long_candidate_ids
+                if "1D" in bundles.get(inst_id, {})
             ]
             self._progress(
                 progress,
                 "LONG_ANALYSIS",
                 0,
                 len(long_ready),
-                "正在判定長線 1H Trigger（1D 背景／4H 方向）",
+                "正在判定長線 1H Trigger（4H MACD／MA 初篩；1D 背景）",
             )
             for index, inst_id in enumerate(sorted(long_ready), 1):
                 try:
@@ -631,9 +664,9 @@ class MarketScanner:
                     index,
                     len(long_ready),
                     (
-                        "15m 已發布；長線 1H Trigger 分析中（1D 背景／4H 方向）"
+                        "15m 已發布；長線 1H Trigger 分析中（4H MACD／MA 初篩）"
                         if include_short
-                        else "長線 1H Trigger 分析中（1D 背景／4H 方向）"
+                        else "長線 1H Trigger 分析中（4H MACD／MA 初篩）"
                     ),
                 )
 
@@ -4894,12 +4927,16 @@ class MarketScanner:
         )
 
     @staticmethod
-    def _macd_ma_prefilter(candles: list[Candle]) -> dict[str, Any]:
-        """Cheap 1H direction filter before the 15m Market Story core.
+    def _macd_ma_prefilter(
+        candles: list[Candle],
+        timeframe: str = "1H",
+    ) -> dict[str, Any]:
+        """Cheap MACD/MA direction filter before the horizon's Trigger core.
 
-        MACD is 12/26/9 and MA5/10/20 defines the 1H trend state.  Either
-        family may lead first; this function never judges the 15m Trigger.
-        Exact equality/touching is deliberately not a cross.
+        MACD is 12/26/9 and MA5/10/20 defines the trend state on the supplied
+        timeframe.  Either family may lead first.  The short radar supplies 1H
+        before its 15m Trigger; the swing radar supplies 4H before its 1H
+        Trigger.  Exact equality/touching is deliberately not a cross.
         """
         if len(candles) < 61:
             return {"passed": False, "state": "INSUFFICIENT", "direction": "NEUTRAL"}
@@ -4958,6 +4995,7 @@ class MarketScanner:
             "ma_fast_state": "BULL" if bull_ma_fast else "BEAR" if bear_ma_fast else "MIXED",
             "trend_resonance": bull_resonant or bear_resonant,
             "policy": "MACD_MA_ANY_ORDER_RESONANCE_V1",
+            "timeframe": str(timeframe or "1H"),
         }
 
     def _passes_output_liquidity(
