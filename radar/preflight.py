@@ -232,7 +232,15 @@ def _separate_signal_and_position(payload, signal):
         result.update(verdict=verdict, signal_lifecycle=lifecycle, plan_state=plan)
         return result
 
-    blockers = [str(k).upper() for k in verdict.get("hard_blockers", []) if str(k).upper() not in POSITION_CODES]
+    blockers = [
+        str(k).upper()
+        for k in verdict.get("hard_blockers", [])
+        if str(k).upper() not in POSITION_CODES
+        and str(k).upper() != "TIMEFRAME_DIRECTION_ALIGNMENT"
+    ]
+    # Recompute timeframe alignment from the current canonical policy below.
+    # Any blocker emitted by the retained legacy core must not outrank the
+    # latest SHORT 1H->15m / LONG 4H->1H same-direction contract.
     story = mapping(getattr(signal, "market_story", {}))
     trigger = mapping(story.get("trigger"))
     if signal.signal_stage not in ACTIVE_SIGNAL_STAGES or (trigger.get("triggered") is False and trigger.get("active_episode_preserved") is not True):
