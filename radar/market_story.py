@@ -239,18 +239,32 @@ class MarketStoryEngine:
             )
             for candidate_direction in ("LONG", "SHORT")
         }
-        # 1H owns SHORT direction. A fresher/stronger opposite 15m candidate
-        # cannot win selection; weakening is not permission to reverse it.
-        selection_direction = _direction_state(core_long)[0] if horizon in ("SHORT", "LONG") else direction
+        # Direction ownership is explicit and symmetric:
+        # SHORT: 1H owns direction, 15m only triggers.
+        # LONG: 4H owns direction/setup, 1H only triggers; 1D is background.
+        long_bias_direction = _direction_state(bias_long)[0]
         if hourly is not None and hourly["direction"] in ("LONG", "SHORT"):
             selected = dict(candidates[hourly["direction"]])
+        elif horizon == "LONG" and long_bias_direction in ("LONG", "SHORT"):
+            selected = dict(candidates[long_bias_direction])
         else:
-            selected = dict(_select_candidate(candidates, selection_direction))
-            if hourly is not None:
-                selected.update(triggered=False, type="NONE", stage="WATCH", freshness="NONE", direction="NEUTRAL")
-                selected.setdefault("neutral", []).append("1H 方向尚未確定；15m 價格變化只供觀察。")
+            selected = dict(_select_candidate(candidates, long_bias_direction))
+            selected.update(
+                triggered=False,
+                type="NONE",
+                stage="WATCH",
+                freshness="NONE",
+                direction="NEUTRAL",
+            )
+            selected.setdefault("neutral", []).append(
+                "1H 方向尚未確定；15m 價格變化只供觀察。"
+                if horizon == "SHORT"
+                else "4H 方向尚未確定；1H 價格變化只供觀察。"
+            )
         if hourly is not None:
             selected["direction_policy"] = SHORT_DIRECTION_POLICY
+        elif horizon == "LONG":
+            selected["direction_policy"] = "LONG_4H_DIRECTION_1H_TRIGGER_V1"
         trigger_direction = str(selected.get("direction", "NEUTRAL"))
         stage = str(selected.get("stage", "WATCH"))
         freshness = str(selected.get("freshness", "NONE"))
