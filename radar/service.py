@@ -3205,8 +3205,6 @@ class RadarRuntime:
                         "radar_horizon",
                         "trigger_id",
                         "trigger_type",
-                        "signal_stage",
-                        "freshness",
                         "generated_at",
                     ):
                         setattr(item, field, deepcopy(getattr(stored_signal, field)))
@@ -3417,6 +3415,77 @@ class RadarRuntime:
             else:
                 message = "核心資料無法形成可判讀的 Market Story，沒有使用假資料。"
                 kind = "UNAVAILABLE"
+            formal_stages = {"CONFIRMED", "REENTRY", "TRENDING", "EXTENDED"}
+            new_stage = str(getattr(item, "signal_stage", "") or "").upper()
+            old_stage = str(
+                getattr(stored_signal, "signal_stage", "") or ""
+            ).upper() if stored_signal is not None else ""
+            old_entry_status = str(
+                dict(getattr(stored_signal, "entry_eligibility", {}) or {}).get("status")
+                or ""
+            ).upper() if stored_signal is not None else ""
+            new_entry_status = str(
+                dict(getattr(item, "entry_eligibility", {}) or {}).get("status")
+                or ""
+            ).upper() if item is not None else ""
+            became_formal = bool(
+                is_signal_item
+                and new_stage in formal_stages
+                and old_stage not in formal_stages
+            )
+            left_wait_retest = bool(
+                is_signal_item
+                and new_stage in formal_stages
+                and old_entry_status == "WAIT_RETEST"
+                and new_entry_status != "WAIT_RETEST"
+            )
+            new_formal_from_candidate = bool(
+                is_signal_item
+                and new_stage in formal_stages
+                and stored_signal is None
+            )
+            moved_to_triggered = bool(
+                became_formal or left_wait_retest or new_formal_from_candidate
+            )
+            synced_to_report = False
+            if is_signal_item and new_stage in formal_stages and item is not None:
+                updated_report = None
+                with self._state_lock:
+                    current_report = self._latest
+                    if current_report is not None:
+                        signal_field = "long_signals" if horizon == "LONG" else "signals"
+                        watch_field = "long_watchlist" if horizon == "LONG" else "watchlist"
+                        current_signals = list(getattr(current_report, signal_field) or [])
+                        current_watch = list(getattr(current_report, watch_field) or [])
+                        current_signals = [
+                            candidate for candidate in current_signals
+                            if candidate.inst_id != normalized_id
+                        ]
+                        current_signals.append(deepcopy(item))
+                        current_watch = [
+                            candidate for candidate in current_watch
+                            if candidate.inst_id != normalized_id
+                        ]
+                        updated_report = replace(
+                            current_report,
+                            **{
+                                signal_field: current_signals,
+                                watch_field: current_watch,
+                                "observer_updated_at": analysis.analyzed_at,
+                            },
+                        )
+                        self._latest = updated_report
+                        synced_to_report = True
+                if updated_report is not None:
+                    try:
+                        save_report(updated_report, self.config.data_dir)
+                    except Exception:
+                        LOGGER.exception(
+                            "Failed to persist single-scan formal promotion for %s %s",
+                            normalized_id,
+                            horizon,
+                        )
+
             return {
                 "horizon": horizon,
                 "horizon_label": "4H 長線" if horizon == "LONG" else "15m 短線",
@@ -3439,6 +3508,17 @@ class RadarRuntime:
                 "preflight": preflight,
                 "latest_confirmation": confirmation,
                 "decision_context": canonical_decision,
+                "promotion": {
+                    "moved_to_triggered": moved_to_triggered,
+                    "synced_to_market_report": synced_to_report,
+                    "from_stage": old_stage or None,
+                    "to_stage": new_stage or None,
+                    "message": (
+                        "已完整觸發，已移動到「訊號已觸發」"
+                        if moved_to_triggered
+                        else ""
+                    ),
+                },
                 "direction_lock": requested_direction_lock,
                 "opposite_warning": (
                     {
@@ -3455,6 +3535,12 @@ class RadarRuntime:
                 ),
             }
 
+        short_payload = horizon_payload(analysis.short_result, "SHORT")
+        long_payload = horizon_payload(analysis.long_result, "LONG")
+        report_synced = any(
+            bool(dict(payload.get("promotion", {}) or {}).get("synced_to_market_report"))
+            for payload in (short_payload, long_payload)
+        )
         return {
             "inst_id": analysis.inst_id,
             "analyzed_at": analysis.analyzed_at,
@@ -3463,20 +3549,21 @@ class RadarRuntime:
             "requested_horizon": requested_horizon,
             "direction_lock": requested_direction_lock,
             "current_price": analysis.ticker.last,
-            "short": horizon_payload(analysis.short_result, "SHORT"),
-            "long": horizon_payload(analysis.long_result, "LONG"),
+            "short": short_payload,
+            "long": long_payload,
             "warnings": list(analysis.errors),
             "safety": {
                 "analysis_only": True,
                 "auto_ordering": False,
                 "full_market_scan": False,
                 "persisted_signal_episode": True,
-                "persisted_to_market_report": False,
-                "persisted_to_report": False,
+                "persisted_to_market_report": report_synced,
+                "persisted_to_report": report_synced,
                 "card_direction_locked": requested_direction_lock is not None,
                 "note": (
-                    "只掃描這一個幣；Signal Episode 會安全延續，但結果不加入"
-                    "全市場排行，也不在伺服器記憶體保留完整單幣分析。"
+                    "只掃描這一個幣；正式 Trigger 會同步到目前主報告分類，"
+                    "但不重新計算全市場排行或其他幣種。"
+                    "未完整確認的候選只保留在原觀察區。"
                     "卡片方向鎖定時，反向候選只提示；真正反向卡只由大掃描建立。"
                 ),
             },
