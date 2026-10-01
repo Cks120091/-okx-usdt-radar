@@ -281,7 +281,7 @@ class V33ContractTests(unittest.TestCase):
         self.assertIn("Setup 起始（台灣 UTC+8）", html)
         self.assertIn("正式觸發確認（台灣 UTC+8）", html)
         self.assertNotIn("status!=='ENTRY_READY'&&status!=='MISSED_ENTRY'", html)
-        self.assertIn("okx-radar-shell-v4.34-market-relation", service_worker)
+        self.assertIn("okx-radar-shell-v4.35-trigger-times", service_worker)
         self.assertIn("$('#preflightRefresh').addEventListener('click',()=>loadPreflight(true))", html)
         self.assertIn("${decisionPanel(item)}", html)
         self.assertNotIn("showPreflight", html)
