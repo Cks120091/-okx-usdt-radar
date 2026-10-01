@@ -633,7 +633,7 @@ class MarketStoryEngine:
             direction=direction,
             direction_state=direction_state,
             direction_label=direction_label,
-            bias_direction=hourly["direction"] if hourly is not None else "LONG" if bias_long >= 56.0 else "SHORT" if bias_long <= 44.0 else "NEUTRAL",
+            bias_direction=canonical_bias["direction"],
             trigger_direction=trigger_direction,
             trigger_type=str(selected.get("type", "NONE")),
             stage=stage,
@@ -1396,7 +1396,7 @@ def _trigger_candidate(
     if price_action_trigger:
         bias_aligned = hourly_direction(tf_bias)["direction"] == direction
     else:
-        bias_aligned = bias_score >= 55.0 if is_long else bias_score <= 45.0
+        bias_aligned = swing_direction(tf_bias)["direction"] == direction
     compression_block = compression.get("blocks_direction") == direction
 
     # SHORT horizon: 1H MA/MACD lives in tf_bias and sets directional bias.
