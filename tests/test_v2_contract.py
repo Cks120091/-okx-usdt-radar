@@ -93,7 +93,10 @@ class V33ContractTests(unittest.TestCase):
         self.assertIn("entry_eligibility", html)
         self.assertIn("長線訊號", html)
         self.assertIn("4H 長線訊號已觸發", html)
-        self.assertNotIn("longEarlySignals", html)
+        self.assertIn("longEarlySignals", html)
+        self.assertIn("longEarlySignalsBox", html)
+        self.assertIn("earlySignalsBox", html)
+        self.assertIn("尚未完整確認｜不視為正式可進", html)
         self.assertNotIn("longReadySignals", html)
         self.assertIn("longWaitRetest", html)
         self.assertIn("longMissedSignals", html)
@@ -657,15 +660,15 @@ class V33ContractTests(unittest.TestCase):
         self.assertNotIn("liveReady=activeShort.filter(itemCurrentEntryReady)", report)
         self.assertNotIn("itemWasEntryReady", report)
         self.assertIn(
-            "'本輪沒有 1H 與 15m 同向且條件成立的正式訊號；可到預備區查看候選。',shortReadOnlyReason",
+            "'本輪沒有 1H 與 15m 同向且完整確認的正式訊號；可到「早期訊號」或預備區查看候選。',shortReadOnlyReason",
             report,
         )
-        self.assertIn("'本輪沒有同向且條件成立的長線正式訊號；可到預備區查看候選。',longReadOnlyReason", report)
+        self.assertIn("'本輪沒有完整確認的長線正式訊號；可到「早期訊號」或預備區查看候選。',longReadOnlyReason", report)
         self.assertIn(
             "renderContextCoverage(report,shortTransient||longTransient,preview)", report
         )
         self.assertIn(
-            "earlyCount=activeShort.filter(x=>!isPreviewItem(x)&&x.signal_stage==='EARLY_SIGNAL').length",
+            "earlyCount=shortEarly.length",
             report,
         )
         self.assertIn("allShort=[...activeShort].sort(signalSortComparator)", report)
@@ -682,7 +685,7 @@ class V33ContractTests(unittest.TestCase):
         self.assertNotIn("liveLongReady=activeLong.filter(itemCurrentEntryReady)", report)
         self.assertIn("longConfirmedCount=activeLong.filter", report)
         self.assertIn(
-            "longEarlyCount=activeLong.filter(x=>!isPreviewItem(x)&&x.signal_stage==='EARLY_SIGNAL').length",
+            "longEarlyCount=longEarly.length",
             report,
         )
         self.assertIn(
