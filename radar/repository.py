@@ -1628,7 +1628,7 @@ class SignalRepository:
                     completed_at,
                 )
             return self._unchanged_projection(persisted)
-        interval_ms = 900_000 if signal.radar_horizon == "SHORT" else 14_400_000
+        interval_ms = 900_000 if signal.radar_horizon == "SHORT" else 3_600_000
         age_bars = max(0, int((data_ts - event_ts) / interval_ms)) if data_ts and event_ts else int(signal.market_story.get("trigger", {}).get("event_age_bars", 0) or 0)
         (
             mfe_r,
@@ -2265,7 +2265,7 @@ class SignalRepository:
         outcome = row["outcome"]
         final_r = row["final_r"]
         order = row["tp_sl_order"]
-        interval_ms = 900_000 if signal.radar_horizon == "SHORT" else 14_400_000
+        interval_ms = 900_000 if signal.radar_horizon == "SHORT" else 3_600_000
         if (
             bars
             and last_evaluated > 0
