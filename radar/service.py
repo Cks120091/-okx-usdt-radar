@@ -3428,27 +3428,17 @@ class RadarRuntime:
                 dict(getattr(item, "entry_eligibility", {}) or {}).get("status")
                 or ""
             ).upper() if item is not None else ""
-            became_formal = bool(
+            # Source-tab agnostic promotion rule:
+            # wherever this coin came from (early / wait retest / wait new
+            # signal / preparation / other candidate), a fresh formal Trigger
+            # is projected into the current formal signal collection.
+            formal_triggered = bool(
                 is_signal_item
                 and new_stage in formal_stages
-                and old_stage not in formal_stages
             )
-            left_wait_retest = bool(
-                is_signal_item
-                and new_stage in formal_stages
-                and old_entry_status == "WAIT_RETEST"
-                and new_entry_status != "WAIT_RETEST"
-            )
-            new_formal_from_candidate = bool(
-                is_signal_item
-                and new_stage in formal_stages
-                and stored_signal is None
-            )
-            moved_to_triggered = bool(
-                became_formal or left_wait_retest or new_formal_from_candidate
-            )
+            moved_to_triggered = formal_triggered
             synced_to_report = False
-            if is_signal_item and new_stage in formal_stages and item is not None:
+            if formal_triggered and item is not None:
                 updated_report = None
                 with self._state_lock:
                     current_report = self._latest
@@ -3509,13 +3499,18 @@ class RadarRuntime:
                 "latest_confirmation": confirmation,
                 "decision_context": canonical_decision,
                 "promotion": {
-                    "moved_to_triggered": moved_to_triggered,
+                    "formal_triggered": formal_triggered,
+                    "moved_to_triggered": bool(
+                        moved_to_triggered and synced_to_report
+                    ),
                     "synced_to_market_report": synced_to_report,
                     "from_stage": old_stage or None,
+                    "from_entry_status": old_entry_status or None,
                     "to_stage": new_stage or None,
+                    "to_entry_status": new_entry_status or None,
                     "message": (
                         "已完整觸發，已移動到「訊號已觸發」"
-                        if moved_to_triggered
+                        if moved_to_triggered and synced_to_report
                         else ""
                     ),
                 },
