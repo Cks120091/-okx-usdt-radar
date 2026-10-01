@@ -869,6 +869,57 @@ class MarketStoryV34Tests(unittest.TestCase):
         self.assertEqual(aligned.trigger_direction, "LONG")
         self.assertFalse(opposed.triggered)
 
+    def test_long_radar_accepts_4h_early_direction_when_1h_trigger_is_same_side(self):
+        _, setup, trigger = valid_breakout_frames()
+        candles_4h_setup = [
+            replace(c, ts=1_700_000_000_000 + i * 14_400_000)
+            for i, c in enumerate(setup)
+        ]
+        candles_1h_trigger = [
+            replace(c, ts=1_700_000_000_000 + i * 3_600_000)
+            for i, c in enumerate(trigger)
+        ]
+        candles_1d = story_candles(
+            [80 + index * 0.10 for index in range(100)],
+            86_400_000,
+        )
+
+        original = indicator_features(candles_4h_setup)
+        early_long_4h = replace(
+            original,
+            sma5=max(original.sma5, original.sma20 + 2.0),
+            sma10=max(original.sma10, original.sma20 + 1.0),
+            macd_line=-0.2,
+            macd_signal=0.1,
+            macd_hist=-0.3,
+            macd_prev_hist=-0.4,
+        )
+
+        def measured(rows):
+            if rows is candles_4h_setup:
+                return early_long_4h
+            return indicator_features(rows)
+
+        with patch("radar.market_story.features", side_effect=measured):
+            story = self.engine.analyze_long(
+                candles_1d,
+                candles_4h_setup,
+                candles_1h_trigger,
+            )
+
+        self.assertTrue(story.triggered)
+        self.assertEqual(story.direction, "LONG")
+        self.assertEqual(story.direction_state, "LONG_EARLY")
+        self.assertEqual(story.trigger_direction, "LONG")
+        self.assertEqual(
+            story.timeframe_states["4H"]["direction"],
+            "LONG",
+        )
+        self.assertEqual(
+            story.timeframe_states["1H"]["role"],
+            "正式 Trigger",
+        )
+
     def test_long_radar_waits_when_4h_macd_ma_is_not_resonant(self):
         _, setup, trigger = valid_breakout_frames()
         candles_4h_setup = [
