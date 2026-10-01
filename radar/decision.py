@@ -220,14 +220,15 @@ def _timeframe_direction_alignment(item, direction):
     """Require the direction timeframe to agree with the formal Trigger.
 
     SHORT: completed 1H direction + 15m Trigger; 4H is background.
-    LONG: completed 1D macro direction + 4H setup + 1H Trigger.
+    LONG: completed 4H direction/setup + 1H Trigger; 1D is background.
     The hidden fusion consolidates correlated EMA/RSI/MACD observations.
     """
     horizon = str(_core._read(item, "radar_horizon", "SHORT")).upper()
     if horizon not in {"SHORT", "LONG"} or direction not in {"LONG", "SHORT"}:
         return {"required": False, "passed": True, "state": "NOT_APPLICABLE"}
 
-    direction_tf = "1H" if horizon == "SHORT" else "1D"
+    direction_tf = "1H" if horizon == "SHORT" else "4H"
+    background_tf = "4H" if horizon == "SHORT" else "1D"
     trigger_tf = "15m" if horizon == "SHORT" else "1H"
     metrics = _core._mapping(_core._read(item, "market_metrics", {}))
     raw = _core._mapping(metrics.get("raw_indicators", {}))
@@ -259,6 +260,7 @@ def _timeframe_direction_alignment(item, direction):
             "passed": False if direction_tf in raw else None,
             "state": "UNKNOWN",
             "timeframe": direction_tf,
+            "background_timeframe": background_tf,
             "trigger_timeframe": trigger_tf,
             "reason": f"{direction_tf} 方向資料不足；最新掃描需重新取得方向確認。",
         }
@@ -278,6 +280,7 @@ def _timeframe_direction_alignment(item, direction):
             else "NOT_ALIGNED"
         ),
         "timeframe": direction_tf,
+        "background_timeframe": background_tf,
         "trigger_timeframe": trigger_tf,
         "timeframe_direction": timeframe_direction,
         "trigger_direction": direction,
@@ -603,7 +606,8 @@ def build_decision_context(*args, **kwargs):
         warnings.append(str(maturity.get("reason") or "行情已走一段，追價風險較高。"))
         final["risk_warnings"] = _core._unique(warnings)[:3]
 
-    # SHORT: 1H direction -> 15m trigger; LONG: 1D bias, 4H setup, 1H trigger.
+    # SHORT: 4H background -> 1H direction -> 15m trigger.
+    # LONG: 1D background -> 4H direction/setup -> 1H trigger.
     if (
         str(final.get("status") or "").upper() == "ENTER"
         and alignment.get("required") is True
