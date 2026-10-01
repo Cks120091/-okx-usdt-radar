@@ -23,6 +23,7 @@ def signal_dict(direction="LONG", horizon="SHORT", quote=100.0):
     item["market_metrics"].update(
         last_price=100.0, entry_execution_price=quote,
         raw_indicators={"1H": {"fusion_long_score": 65 if direction == "LONG" else 35},
+                        "4H": {"fusion_long_score": 65 if direction == "LONG" else 35},
                         "1D": {"fusion_long_score": 65 if direction == "LONG" else 35}},
     )
     item["data_quality"]["closed_candle"] = True
@@ -42,6 +43,7 @@ def preflight_signal(direction="LONG", horizon="SHORT"):
                    data_quality={"core": "AVAILABLE", "closed_candle": True},
                    market_metrics={**signal.market_metrics, "raw_indicators": {
                        "1H": {"fusion_long_score": 65 if direction == "LONG" else 35},
+                       "4H": {"fusion_long_score": 65 if direction == "LONG" else 35},
                        "1D": {"fusion_long_score": 65 if direction == "LONG" else 35}}},
                    market_story={**signal.market_story, "trigger": {
                        **signal.market_story["trigger"], "triggered": True}},
@@ -77,7 +79,7 @@ class SignalPositionSeparationTests(unittest.TestCase):
                             self.assertEqual(item, before)
 
     def test_mtf_mismatch_always_wins_over_position(self):
-        for horizon, timeframe in (("SHORT", "1H"), ("LONG", "1D")):
+        for horizon, timeframe in (("SHORT", "1H"), ("LONG", "4H")):
             for direction in ("LONG", "SHORT"):
                 item = signal_dict(direction, horizon, 101)
                 item["market_metrics"]["raw_indicators"][timeframe]["fusion_long_score"] = 35 if direction == "LONG" else 65
@@ -86,15 +88,27 @@ class SignalPositionSeparationTests(unittest.TestCase):
                 self.assertFalse(result["new_entry_allowed"])
                 self.assertEqual(result["wait_reason"]["code"], "TIMEFRAME_DIRECTION_ALIGNMENT")
 
+    def test_long_uses_4h_direction_while_1d_is_background_only(self):
+        item = signal_dict("LONG", "LONG", 100.0)
+        item["market_metrics"]["raw_indicators"]["4H"]["fusion_long_score"] = 65
+        item["market_metrics"]["raw_indicators"]["1D"]["fusion_long_score"] = 35
+        result = build_decision_context(item)
+        alignment = result["final"]["timeframe_alignment"]
+        self.assertEqual(alignment["timeframe"], "4H")
+        self.assertEqual(alignment["background_timeframe"], "1D")
+        self.assertEqual(alignment["trigger_timeframe"], "1H")
+        self.assertTrue(alignment["passed"])
+        self.assertTrue(result["final"]["new_entry_allowed"])
+
     def test_present_but_corrupt_direction_data_does_not_grant_permission(self):
         for bad in (None, "bad", float("nan"), 101, -1):
-            for timeframe, horizon in (("1H", "SHORT"), ("1D", "LONG")):
+            for timeframe, horizon in (("1H", "SHORT"), ("4H", "LONG")):
                 item = signal_dict(horizon=horizon)
                 item["market_metrics"]["raw_indicators"][timeframe]["fusion_long_score"] = bad
                 self.assertFalse(build_decision_context(item)["final"]["new_entry_allowed"])
 
     def test_neutral_direction_waits_in_both_horizons(self):
-        for timeframe, horizon in (("1H", "SHORT"), ("1D", "LONG")):
+        for timeframe, horizon in (("1H", "SHORT"), ("4H", "LONG")):
             item = signal_dict(horizon=horizon)
             item["market_metrics"]["raw_indicators"][timeframe]["fusion_long_score"] = 50
             final = build_decision_context(item)["final"]
