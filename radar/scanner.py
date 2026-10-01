@@ -663,7 +663,12 @@ class MarketScanner:
         horizon_market_bias = {
             "SHORT": market_bias,
             "LONG": (
-                self._calculate_market_bias(long_results)
+                self._calculate_horizon_market_bias(
+                    bundles,
+                    tickers,
+                    long_results,
+                    "4H",
+                )
                 if include_long
                 else {}
             ),
@@ -3128,6 +3133,7 @@ class MarketScanner:
             "market_direction": market_direction,
             "market_bias_score": round(score, 1) if score is not None else None,
             "benchmark_change_pct": benchmark_change,
+            "comparison_timeframe": str(bias.get("comparison_timeframe") or ""),
             "relative_strength_pct": relative_strength,
             "relative_strength_24h_pct": relative_24h,
             "strength_confirmed": strength_confirmed,
@@ -4964,55 +4970,89 @@ class MarketScanner:
         del item, require_context
         return True
 
-    def _calculate_short_market_bias(self, bundles, tickers, candidates):
-        """Market breadth uses every fetched market, independently of entry screening.
+    def _calculate_horizon_market_bias(
+        self,
+        bundles,
+        tickers,
+        candidates,
+        comparison_bar: str,
+    ):
+        """Build broad-market context on the exact radar comparison timeframe.
 
-        MA5/10/20 and MACD describe direction only; these observations never
-        become candidates or create/persist signal episodes.
+        SHORT compares every crypto market on 15m; LONG compares on 4H.
+        This benchmark is independent from a symbol's entry Trigger timeframe,
+        so broad-market resonance never mixes 15m and 4H backgrounds.
         """
         observations = {}
         for inst_id, bundle in bundles.items():
             if inst_id == XAU_INST_ID:
                 continue
-            candles = [c for c in bundle.get("15m", []) if c.confirmed]
+            candles = [c for c in bundle.get(comparison_bar, []) if c.confirmed]
             if len(candles) < 60:
+                continue
+            ticker = tickers.get(inst_id)
+            if ticker is None:
                 continue
             tf = features(candles)
             direction = (
-                "LONG" if tf.sma5 > tf.sma10 > tf.sma20 and tf.macd_line > tf.macd_signal
-                else "SHORT" if tf.sma5 < tf.sma10 < tf.sma20 and tf.macd_line < tf.macd_signal
+                "LONG"
+                if tf.sma5 > tf.sma10 > tf.sma20 and tf.macd_line > tf.macd_signal
+                else "SHORT"
+                if tf.sma5 < tf.sma10 < tf.sma20 and tf.macd_line < tf.macd_signal
                 else "NEUTRAL"
             )
-            ticker = tickers[inst_id]
             hourly = [c for c in bundle.get("1H", []) if c.confirmed]
             price_change_24h_pct = (
                 (ticker.last / hourly[-25].close - 1) * 100
                 if len(hourly) >= 25 and hourly[-25].close > 0
                 else None
             )
+            timeframe_change_pct = (
+                (candles[-1].close / candles[-2].close - 1) * 100
+                if candles[-2].close > 0
+                else None
+            )
             state = MarketState(
-                inst_id=inst_id, regime="TREND" if direction != "NEUTRAL" else "RANGE",
-                direction=direction, preferred_strategy="NONE", readiness_score=0.0,
-                status="WATCH", missing_conditions=[], spread_pct=ticker.spread_pct,
+                inst_id=inst_id,
+                regime="TREND" if direction != "NEUTRAL" else "RANGE",
+                direction=direction,
+                preferred_strategy="NONE",
+                readiness_score=0.0,
+                status="WATCH",
+                missing_conditions=[],
+                spread_pct=ticker.spread_pct,
                 quote_volume_24h=ticker.quote_volume_24h or 0.0,
                 closed_candle_ts=candles[-1].ts,
                 market_metrics={
                     "rsi_core": tf.rsi14,
                     "rsi_24h": _completed_24h_rsi(bundle.get("1H", [])),
-                    "price_change_core_pct": (candles[-1].close / candles[-2].close - 1) * 100
-                    if candles[-2].close > 0 else None,
+                    "price_change_core_pct": timeframe_change_pct,
                     "price_change_24h_pct": price_change_24h_pct,
+                    "market_relation_timeframe": comparison_bar,
                 },
             )
             candidate = candidates.get(inst_id)
             observations[inst_id] = AnalysisResult(
                 signal=candidate.signal if candidate else None,
-                reason="MARKET_CONTEXT_ONLY", market_state=state,
+                reason="MARKET_CONTEXT_ONLY",
+                market_state=state,
             )
         bias = self._calculate_market_bias(observations)
+        bias["comparison_timeframe"] = comparison_bar
+        bias["comparison_basis"] = (
+            f"全市場 {comparison_bar} 已收盤 K：MA5/10/20 × MACD 方向與同週期漲跌"
+        )
         if not observations:
             bias.update(score=None, label="資料不足")
         return bias
+
+    def _calculate_short_market_bias(self, bundles, tickers, candidates):
+        return self._calculate_horizon_market_bias(
+            bundles,
+            tickers,
+            candidates,
+            "15m",
+        )
 
     def _calculate_market_bias(self, results: dict[str, object]) -> dict[str, object]:
         # One exclusion protects both RSI samples and the separately computed
