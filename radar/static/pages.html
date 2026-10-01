@@ -697,6 +697,7 @@
   <div id="filterShell" class="filter-shell" hidden>
     <nav class="filter-tabs" data-group-filters="fifteen" aria-label="15m 訊號篩選" hidden>
       <button class="filter-tab active" type="button" data-tab="fifteenAll" aria-controls="fifteenAll">訊號已觸發</button>
+      <button class="filter-tab" type="button" data-tab="earlySignals" aria-controls="earlySignals">早期訊號</button>
       <button class="filter-tab" type="button" data-tab="quality80" aria-controls="quality80">⭐ 80分以上</button>
       <button class="filter-tab" type="button" data-tab="waitRetest" aria-controls="waitRetest">等待回踩</button>
       <button class="filter-tab" type="button" data-tab="missedSignals" aria-controls="missedSignals">等待新訊號</button>
@@ -704,6 +705,7 @@
     </nav>
     <nav class="filter-tabs" data-group-filters="long" aria-label="長線訊號篩選" hidden>
       <button class="filter-tab active" type="button" data-tab="longSignals" aria-controls="longSignals">訊號已觸發</button>
+      <button class="filter-tab" type="button" data-tab="longEarlySignals" aria-controls="longEarlySignals">早期訊號</button>
       <button class="filter-tab" type="button" data-tab="longQuality80" aria-controls="longQuality80">⭐ 80分以上</button>
       <button class="filter-tab" type="button" data-tab="longWaitRetest" aria-controls="longWaitRetest">等待回踩</button>
       <button class="filter-tab" type="button" data-tab="longMissedSignals" aria-controls="longMissedSignals">等待新訊號</button>
@@ -780,6 +782,10 @@
       <div class="section-title"><h2>15m 訊號已觸發</h2><span>1H 與 15m 同向且條件成立 · 其餘候選放在預備</span></div>
       <div id="fifteenAllBox"><div class="empty">等待最新掃描。</div></div>
     </section>
+    <section id="earlySignals" class="section">
+      <div class="section-title"><h2>15m 早期訊號</h2><span>方向／型態已開始成立 · 尚未完整確認，不視為正式可進</span></div>
+      <div id="earlySignalsBox"><div class="empty">等待最新掃描。</div></div>
+    </section>
     <section id="quality80" class="section">
       <div class="section-title"><h2>15m ⭐ 80分以上</h2><span>正式訊號 · 交易品質 80 分以上</span></div>
       <div id="quality80Box"><div class="empty">等待最新掃描。</div></div>
@@ -795,6 +801,10 @@
     <section id="longSignals" class="section">
       <div class="section-title"><h2>4H 長線訊號已觸發</h2><span>方向同向且條件成立 · 其餘候選放在預備</span></div>
       <div id="longSignalsBox"><div class="empty">等待最新掃描。</div></div>
+    </section>
+    <section id="longEarlySignals" class="section">
+      <div class="section-title"><h2>4H 長線早期訊號</h2><span>波段條件開始成立 · 尚未完整確認，不視為正式可進</span></div>
+      <div id="longEarlySignalsBox"><div class="empty">等待最新掃描。</div></div>
     </section>
     <section id="longQuality80" class="section">
       <div class="section-title"><h2>4H ⭐ 80分以上</h2><span>正式訊號 · 交易品質 80 分以上</span></div>
@@ -861,7 +871,7 @@
       <div class="section-title"><h2>使用手冊</h2><span>先看結論，再看風險與證據</span></div>
       <div class="manual-grid">
         <section class="manual-section"><div class="manual-section-title"><span>01</span><div><h3>開始使用</h3><p>掃描什麼、資料何時有效</p></div></div>
-          <details class="manual-card" open><summary>快速開始／三種掃描</summary><div class="manual-body"><p>選擇 <span class="manual-term">15m 掃描</span>、<span class="manual-term">4H 掃描</span>，或<span class="manual-term">全市場掃描（15m＋4H）</span>建立正式交易計畫。所有正式 Trigger 都集中在「訊號已觸發」，卡片頂端另標示「早期／完整確認／回踩再發動」；價格是掃描快照，不是即時報價。下單前按「進場前更新」，重新檢查價格、深度、滑價、成本與歷史 OI（未平倉量） 持倉動向，不會改寫原方向或 Entry（進場）／SL（止損）／TP（止盈）。雷達只分析、不自動下單。</p></div></details>
+          <details class="manual-card" open><summary>快速開始／三種掃描</summary><div class="manual-body"><p>選擇 <span class="manual-term">15m 掃描</span>、<span class="manual-term">4H 掃描</span>，或<span class="manual-term">全市場掃描（15m＋4H）</span>建立正式交易計畫。早期訊號集中在獨立「早期訊號」分頁，只供觀察；完整確認／合法再發動才進「訊號已觸發」；價格是掃描快照，不是即時報價。下單前按「進場前更新」，重新檢查價格、深度、滑價、成本與歷史 OI（未平倉量） 持倉動向，不會改寫原方向或 Entry（進場）／SL（止損）／TP（止盈）。雷達只分析、不自動下單。</p></div></details>
           <details class="manual-card"><summary>掃描市場範圍</summary><div class="manual-body"><p>全市場雷達掃描 OKX 分類為加密資產的 USDT 永續合約（instCategory＝1），另僅加入 XAU 黃金永續（XAUUSDT.P／XAU-USDT-SWAP）。兩者皆對 24H USDT 成交額使用「上 200 萬、向下緩衝 50 萬」規則：新標的達 200 萬就納入；已經納入的標的，跌破 150 萬才移除。這樣不會在 200 萬附近一下出現、一下消失，而且未通過者不抓多週期 K 線。股票型永續合約（instCategory＝3）與 XAU 以外的非加密分類仍在合約清單入口排除。XAU 獨立判讀，不計入加密市場整體 RSI、方向分布或大盤共振。手動指定單幣仍可查看分析；未達成交額建議線時會醒目提示流動性風險，但不替使用者禁止進場，也不會因此加入全市場 Universe。</p></div></details>
           <details class="manual-card"><summary>15m 短線／4H 波段</summary><div class="manual-body"><p>短線固定採用 <span class="manual-term">1H 決定多空方向</span>、<span class="manual-term">15m 同方向觸發</span>。1H 偏多只做多、偏空只做空；轉弱不等於反向，方向不明先等待。4H 只看背景，5m 只補充 Timing（進場時機），不單獨翻向。4H 波段則是獨立交易計畫，兩套 Entry（進場）／SL（止損）／TP（止盈） 不串台。</p></div></details>
           <details class="manual-card"><summary>掃描中／資料期限</summary><div class="manual-body"><p>掃描哪個週期，該週期先不顯示上一輪卡片；完成後一次換成最新結果。未被掃描的另一週期若仍是 Fresh（最新）就照常有效，不會被誤標為只供參考。只有 STALE（超過 30 分鐘）、本次錯誤或初步預覽才不可直接進場。</p></div></details>
@@ -1075,7 +1085,7 @@
       finally{state.pushLoading=false;renderPushState($('#pushMessage').textContent)}
     }
 
-    function setScanResultsBusy(scanning,mode='FULL'){const shortIds=['rankingBox','marketHeat','fifteenAllBox','waitRetestBox','missedSignalsBox','watchBox','anomalyBox','mapBox'],longIds=['rankingBox','longSignalsBox','longQuality80Box','longWaitRetestBox','longMissedSignalsBox','longWatchBox'],selected=mode==='SHORT'?shortIds:mode==='LONG'?longIds:[...new Set([...shortIds,...longIds])],all=[...new Set([...shortIds,...longIds])];all.forEach(id=>{const element=document.getElementById(id);if(element)element.setAttribute('aria-busy',String(Boolean(scanning&&selected.includes(id))))})}
+    function setScanResultsBusy(scanning,mode='FULL'){const shortIds=['rankingBox','marketHeat','fifteenAllBox','earlySignalsBox','quality80Box','waitRetestBox','missedSignalsBox','watchBox','anomalyBox','mapBox'],longIds=['rankingBox','longSignalsBox','longEarlySignalsBox','longQuality80Box','longWaitRetestBox','longMissedSignalsBox','longWatchBox'],selected=mode==='SHORT'?shortIds:mode==='LONG'?longIds:[...new Set([...shortIds,...longIds])],all=[...new Set([...shortIds,...longIds])];all.forEach(id=>{const element=document.getElementById(id);if(element)element.setAttribute('aria-busy',String(Boolean(scanning&&selected.includes(id))))})}
     function syncScanControls(key){
       const scanning=key==='SCANNING',needsLargeAction=key==='BOOTING'||key==='STALE'||key==='ERROR';
       const activeMode=state.status?.system_status==='SCANNING'?(state.status.scan_mode||state.scanRequestedMode):(state.scanRequestedMode||'FULL');$$('[data-scan-mode]').forEach(button=>{button.disabled=scanning;button.classList.toggle('scan-active',scanning&&button.dataset.scanMode===activeMode)});
@@ -1133,7 +1143,7 @@
     function readOnlyReferenceBanner(reason,horizon){if(!reason)return '';const normalized=String(reason).toUpperCase(),cls=normalized==='ERROR'?'error':normalized==='STALE'?'stale':'';return `<div class="read-only-reference ${cls}" role="status">${tech(readOnlyReferenceText(normalized,horizon))}</div>`}
 
     function renderHorizonUnavailable(horizon,message){
-      const selectors=horizon==='LONG'?['#longSignalsBox','#longWaitRetestBox','#longMissedSignalsBox','#longWatchBox']:['#fifteenAllBox','#waitRetestBox','#missedSignalsBox','#watchBox'];
+      const selectors=horizon==='LONG'?['#longSignalsBox','#longEarlySignalsBox','#longQuality80Box','#longWaitRetestBox','#longMissedSignalsBox','#longWatchBox']:['#fifteenAllBox','#earlySignalsBox','#quality80Box','#waitRetestBox','#missedSignalsBox','#watchBox'];
       selectors.forEach(selector=>{$(selector).innerHTML=`<div class="empty">${esc(message)}</div>`});
       const statusLabel=message.includes('執行中')||message.includes('掃描中')?'掃描中':message.includes('失敗')?'更新失敗':'尚未掃描';
       if(horizon==='LONG'){$('#longSignalCount').textContent='—';$('#longSignalCountNote').textContent=statusLabel;return}
@@ -1208,14 +1218,14 @@
 
     function renderContextCoverage(report,transient=null,preview=false){const quality=isRecord(report?.data_quality)?report.data_quality:{},target=metricNumber(quality.deep_target_count)??metricNumber(report?.context_target_count)??0,complete=metricNumber(quality.deep_complete_count),enriched=metricNumber(quality.deep_enriched_count)??metricNumber(report?.context_enriched_count)??0,sourcePct=metricNumber(quality.deep_source_completeness_pct),label=$('#contextCountLabel'),value=$('#contextCount'),note=$('#contextSourceCoverage');label.textContent='深度資料完整';if(transient){value.textContent=transient==='ERROR'?'更新失敗':'掃描中';note.textContent='本輪完成後統一更新';return}if(preview){value.textContent='補充中';note.textContent='深度與風險資料尚未完成';return}if(target<=0){value.textContent='尚無候選';note.textContent='本輪沒有深度候選標的';return}if(complete!==null){value.textContent=`${num(complete,0)} / ${num(target,0)}`;note.textContent=sourcePct===null?'來源完整率未知':`五項來源完整率 ${num(sourcePct,1)}%`;return}value.textContent=`— / ${num(target,0)}`;note.textContent=enriched>0?`已取得部分資料 ${num(enriched,0)} / ${num(target,0)}（非完整）`:'來源完整率未知'}
     function reportRenderFingerprint(report){const short=report?.horizon_freshness?.SHORT||{},long=report?.horizon_freshness?.LONG||{},quality=report?.data_quality||{},signalState=items=>(items||[]).map(item=>{const decision=item.decision_context||{},final=decision.final||{},hardGate=decision.hard_gate||{},conflict=decision.conflict||{},continuation=decision.continuation_confirmation||{},votes=continuation.core_votes||{},observer=continuation.observer||{},windows=observer.windows||{},capital=observer.capital_flow||{},capitalWindows=capital.windows||{};return [item.historical_performance,item.timeframe_states,item.trigger_type,item.trigger_id,item.inst_id,item.signal_stage,item.entry_eligibility?.status,item.entry_eligibility?.original_status,item.entry_eligibility?.new_entry_allowed,item.lifecycle?.status,item.lifecycle?.age_bars,item.lifecycle?.entry_ready_once,item.lifecycle?.closed_at,item.lifecycle?.retention_until,item.actionable,item.read_only_reason,final.status,final.label,final.new_entry_allowed,final.reasons,final.position_advisory,final.timeframe_alignment,final.swing_maturity,item.market_metrics?.entry_execution_price,hardGate.status,hardGate.blocked,hardGate.reasons,conflict.countertrend,conflict.items,continuation.key,votes.OI?.state,votes.OI?.detail,votes.TAKER_CVD?.state,votes.TAKER_CVD?.detail,votes.VOLUME?.state,votes.VOLUME?.detail,observer.algorithm_version,observer.source_mode,observer.status,observer.bucket_count,observer.as_of_close_ms,observer.updated_at_ms,windows['5m']?.state,windows['5m']?.bucket_count,windows['10m']?.state,windows['10m']?.bucket_count,windows['30m']?.state,windows['30m']?.bucket_count,windows['60m']?.state,windows['60m']?.bucket_count,capital.algorithm_version,capital.status,capital.as_of_close_ms,capital.detected,capital.headline_state,capital.strongest_window,capitalWindows['1h']?.state,capitalWindows['1h']?.change_pct,capitalWindows['1h']?.change_vs_average_ratio,capitalWindows['2h']?.state,capitalWindows['2h']?.change_pct,capitalWindows['2h']?.change_vs_average_ratio,capitalWindows['4h']?.state,capitalWindows['4h']?.change_pct,capitalWindows['4h']?.change_vs_average_ratio]});return JSON.stringify([report?.generated_at,report?.completed_at,report?.observer_updated_at,report?.runtime_status,report?.scan_request_mode,report?.context_enriched_count,quality.deep_target_count,quality.deep_complete_count,quality.deep_source_completeness_pct,signalState(report?.signals),signalState(report?.closed_signals),signalState(report?.long_signals),signalState(report?.long_closed_signals),(report?.watchlist||[]).length,(report?.long_watchlist||[]).length,short.completed_at,short.expired,long.completed_at,long.expired,state.scanStarting,state.currentPreviewGeneratedAt,state.status?.system_status,state.status?.scan_mode,horizonReadOnlyReason(report,'SHORT'),horizonReadOnlyReason(report,'LONG'),horizonTransientState(report,'SHORT'),horizonTransientState(report,'LONG')])}
-    function reportCardEntries(){const boxes=['fifteenAllBox','quality80Box','waitRetestBox','missedSignalsBox','watchBox','longSignalsBox','longWaitRetestBox','longMissedSignalsBox','longWatchBox','closedSignalsBox','closedShortBox','closedLongBox'];return boxes.flatMap(boxId=>{const box=document.getElementById(boxId);return box?[...box.querySelectorAll(':scope > article')].map((card,index)=>({card,key:`${boxId}|${card.dataset.triggerId||String(card.querySelector('.symbol')?.textContent||index).replace(/^\d+\.\s*/,'')}`})):[]})}
+    function reportCardEntries(){const boxes=['fifteenAllBox','earlySignalsBox','quality80Box','waitRetestBox','missedSignalsBox','watchBox','longSignalsBox','longEarlySignalsBox','longQuality80Box','longWaitRetestBox','longMissedSignalsBox','longWatchBox','closedSignalsBox','closedShortBox','closedLongBox'];return boxes.flatMap(boxId=>{const box=document.getElementById(boxId);return box?[...box.querySelectorAll(':scope > article')].map((card,index)=>({card,key:`${boxId}|${card.dataset.triggerId||String(card.querySelector('.symbol')?.textContent||index).replace(/^\d+\.\s*/,'')}`})):[]})}
     function captureReportUiState(){const shell=$('.shell'),entries=reportCardEntries(),opened=[];entries.forEach(({card,key})=>{[...card.querySelectorAll('details')].forEach((detail,index)=>{if(detail.open)opened.push([key,index])})});const active=document.activeElement;let focus=null;if(active&&active!==document.body){const entry=entries.find(({card})=>card.contains(active)),detail=active.closest?.('details');if(entry&&active.tagName==='SUMMARY'&&detail)focus={kind:'summary',cardKey:entry.key,index:[...entry.card.querySelectorAll('details')].indexOf(detail)};else if(entry){for(const name of ['preflightId','favorite']){if(active.dataset?.[name]){focus={kind:'control',cardKey:entry.key,name,value:active.dataset[name]};break}}}}return {opened,focus,scrollTop:shell?.scrollTop||0}}
     function restoreReportUiState(saved){if(!saved)return;const entries=reportCardEntries(),cardFor=key=>entries.find(entry=>entry.key===key)?.card;saved.opened.forEach(([key,index])=>{const detail=cardFor(key)?.querySelectorAll('details')?.[index];if(detail)detail.open=true});if(saved.focus){const card=cardFor(saved.focus.cardKey);let target=null;if(saved.focus.kind==='summary')target=card?.querySelectorAll('details')?.[saved.focus.index]?.querySelector('summary');else if(card)target=[...card.querySelectorAll('button,a')].find(element=>element.dataset?.[saved.focus.name]===saved.focus.value);try{target?.focus({preventScroll:true})}catch(_){target?.focus()}}const shell=$('.shell');if(shell)shell.scrollTop=saved.scrollTop}
 
     function isFormalSignal(item,horizon=item.radar_horizon==='LONG'?'LONG':'SHORT'){
       const final=itemFinalDecision(item),alignment=final.timeframe_alignment||{},long=horizon==='LONG';
       return !isTerminalSignal(item)&&!isPreviewItem(item)&&!isExpiredSnapshot(item)&&!itemReadOnlyReason(item)
-        && ['EARLY_SIGNAL','CONFIRMED','REENTRY','TRENDING','EXTENDED'].includes(item.signal_stage)
+        && ['CONFIRMED','REENTRY','TRENDING','EXTENDED'].includes(item.signal_stage)
         && final.status==='ENTER'&&final.new_entry_allowed===true
         && alignment.required===true&&alignment.passed===true
         && alignment.timeframe===(long?'1D':'1H')&&alignment.trigger_timeframe===(long?'1H':'15m')
@@ -1225,13 +1235,14 @@
     function signalGroups(report,horizon){
       const long=horizon==='LONG',belongs=item=>long?item.radar_horizon!=='SHORT':item.radar_horizon!=='LONG';
       const signals=(report[long?'long_signals':'signals']||[]).filter(item=>belongs(item)&&!isTerminalSignal(item));
+      const early=signals.filter(item=>String(item.signal_stage||'').toUpperCase()==='EARLY_SIGNAL'&&!isPreviewItem(item)&&!isTerminalSignal(item));
       const formal=signals.filter(item=>isFormalSignal(item,horizon));
-      const seen=new Set(formal.map(item=>item.inst_id)),preparing=[];
+      const seen=new Set([...formal,...early].map(item=>item.inst_id)),preparing=[];
       for(const item of [...signals,...(report[long?'long_watchlist':'watchlist']||[])]){
         if(!belongs(item)||isTerminalSignal(item)||seen.has(item.inst_id))continue;
         seen.add(item.inst_id);preparing.push(item);
       }
-      return {formal,preparing};
+      return {formal,early,preparing};
     }
     function shortSignalGroups(report){return signalGroups(report,'SHORT')}
     function longSignalGroups(report){return signalGroups(report,'LONG')}
@@ -1645,9 +1656,9 @@ renderSignals(quality80,'#quality80Box','本輪沒有交易品質 80 分以上�
     function normalizedHorizon(value,allowBoth=true){const raw=String(value||'').toUpperCase();if(raw==='LONG'||raw==='SHORT')return raw;return allowBoth?'BOTH':'SHORT'}
     function cancelPreflightRequest(){state.preflightRequestSeq+=1;if(state.preflightAbort)state.preflightAbort.abort();state.preflightAbort=null;state.preflightLoading=false;state.preflightLoadingKey=null}
     function preflightRequestIsCurrent(token,instId,horizon,triggerId){return token===state.preflightRequestSeq&&state.preflight?.instId===instId&&state.preflight?.horizon===horizon&&state.preflight?.triggerId===triggerId&&!$('#preflightPage').hidden}
-    function activePreflightSignal(instId,horizon){const normalized=normalizedHorizon(horizon,false),items=normalized==='LONG'?(state.report?.long_signals||[]):(state.report?.signals||[]);return items.find(item=>item?.inst_id===instId&&item?.trigger_id&&!isTerminalSignal(item)&&!isPreviewItem(item))||null}
+    function activePreflightSignal(instId,horizon){const normalized=normalizedHorizon(horizon,false),items=normalized==='LONG'?(state.report?.long_signals||[]):(state.report?.signals||[]);return items.find(item=>item?.inst_id===instId&&item?.trigger_id&&!isTerminalSignal(item)&&!isPreviewItem(item)&&String(item.signal_stage||'').toUpperCase()!=='EARLY_SIGNAL')||null}
     function signalDataUnavailable(signal){const statuses=[signal?.freshness,signal?.entry_eligibility?.status,signal?.data_quality?.status,signal?.data_quality?.core,signal?.data_quality?.core_status,signal?.lifecycle?.transition].map(value=>String(value||'').toUpperCase());return signal?.read_only===true||signal?.lifecycle?.read_only===true||statuses.includes('DATA_UNAVAILABLE')}
-    function preflightSignalUsable(signal){return Boolean(signal?.trigger_id&&!isTerminalSignal(signal)&&!isPreviewItem(signal)&&!isExpiredSnapshot(signal)&&!itemReadOnlyReason(signal)&&!signalDataUnavailable(signal))}
+    function preflightSignalUsable(signal){return Boolean(signal?.trigger_id&&!isTerminalSignal(signal)&&!isPreviewItem(signal)&&String(signal.signal_stage||'').toUpperCase()!=='EARLY_SIGNAL'&&!isExpiredSnapshot(signal)&&!itemReadOnlyReason(signal)&&!signalDataUnavailable(signal))}
     function preferredPreflightSignal(instId){const preferred=state.activeGroup==='long'?'LONG':state.activeGroup==='fifteen'?'SHORT':null,candidates=preferred?[activePreflightSignal(instId,preferred),activePreflightSignal(instId,preferred==='LONG'?'SHORT':'LONG')]:[activePreflightSignal(instId,'SHORT'),activePreflightSignal(instId,'LONG')];return candidates.find(preflightSignalUsable)||null}
     function preflightDisabledLabel(item){if(isTerminalSignal(item))return '舊交易計畫已結束';if(isPreviewItem(item))return '等待正式掃描結果';if(item?.trigger_id&&(signalDataUnavailable(item)||isExpiredSnapshot(item)||itemReadOnlyReason(item)))return '更新市場後可檢查';return '尚無正式交易計畫'}
     function preflightButton(instId,horizon,item=null,compact=true){const normalized=normalizedHorizon(horizon,false),explicit=item&&item.radar_horizon&&(item.radar_horizon==='LONG'?'LONG':'SHORT')===normalized?item:null,hasExplicitEpisode=Boolean(explicit&&Object.prototype.hasOwnProperty.call(explicit,'trigger_id')),signal=hasExplicitEpisode?explicit:activePreflightSignal(instId,normalized),enabled=preflightSignalUsable(signal),frame=normalized==='LONG'?'4H':'15m',label=enabled?`⚡ ${frame} 進場前更新`:preflightDisabledLabel(signal||explicit),attrs=enabled?`data-preflight-id="${esc(instId)}" data-preflight-horizon="${normalized}" data-preflight-trigger-id="${esc(signal.trigger_id)}"`:`disabled title="${esc(label)}"`;return `<button class="preflight-link${compact?' compact':''}" type="button" ${attrs}>${esc(label)}</button>`}
