@@ -611,13 +611,13 @@ class MarketStoryEngine:
             "core_return_pct": _pct_change(core_candles[-1].close, core_candles[-2].close),
             "noise": selected.get("noise", {}),
         }
-        if hourly is not None:
+        if horizon == "SHORT":
             raw["preparation"] = short_scan_preparation(
-                hourly, candidates,
+                canonical_bias, candidates,
                 closed=bool(core_candles[-1].confirmed and bias_candles[-1].confirmed),
             )
             raw["early_observation"] = short_scan_observation(
-                hourly, candidates,
+                canonical_bias, candidates,
                 closed=bool(core_candles[-1].confirmed and bias_candles[-1].confirmed),
                 max_age_bars=self.early_signal_max_age_bars,
             )
