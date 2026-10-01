@@ -609,7 +609,7 @@ class MarketScanner:
                 "LONG_ANALYSIS",
                 0,
                 len(long_ready),
-                "正在判定長線 4H Trigger",
+                "正在判定長線 1H Trigger（1D 背景／4H 方向）",
             )
             for index, inst_id in enumerate(sorted(long_ready), 1):
                 try:
@@ -631,9 +631,9 @@ class MarketScanner:
                     index,
                     len(long_ready),
                     (
-                        "15m 已發布；長線 4H Trigger 分析中"
+                        "15m 已發布；長線 1H Trigger 分析中（1D 背景／4H 方向）"
                         if include_short
-                        else "長線 4H Trigger 分析中"
+                        else "長線 1H Trigger 分析中（1D 背景／4H 方向）"
                     ),
                 )
 
