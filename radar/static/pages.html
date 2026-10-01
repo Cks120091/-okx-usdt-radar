@@ -1168,7 +1168,7 @@
       $('#rankingBox').innerHTML=`<div class="empty">${esc(message)}</div>`;
       $('#marketHeat').innerHTML=`<div class="empty">${esc(message)}</div>`;
       $('#anomalyBox').innerHTML=`<div class="empty">${esc(message)}</div>`;
-      const scanning=message.includes('執行中')||message.includes('掃描中'),label=scanning?'掃描中':message.includes('失敗')?'更新失敗':'尚未掃描';$('#marketStrip').innerHTML=['BTC','ETH'].map(symbol=>`<div class="pulse-card"><div class="pulse-head"><strong>${symbol}</strong><span>${label}</span></div><div class="pulse-price">—</div><div class="change flat">${esc(message)}</div></div>`).join('');
+      renderMarketStrip(state.report,message);
     }
 
     function isRecord(value){return Boolean(value)&&typeof value==='object'&&!Array.isArray(value)}
@@ -1305,18 +1305,21 @@ renderSignals(quality80,'#quality80Box','本輪沒有交易品質 80 分以上�
 
     function renderOverview(report){
       const markets=(report.market_map||[]).filter(item=>item.status!=='FILTERED');
-      renderMarketStrip(markets);
+      renderMarketStrip(report);
       renderMarketHeat(markets);
       renderRankings(report.signals||[],[]);
       renderAnomalies(markets);
     }
 
-    function renderMarketStrip(markets){
+    function renderMarketStrip(report,fallbackMessage='尚無 24H 市場資料'){
+      const shortAt=Date.parse(report?.short_completed_at||'')||0,longAt=Date.parse(report?.long_completed_at||'')||0;
+      const shortMarkets=(report?.market_map||[]).filter(item=>item.status!=='FILTERED'),longMarkets=(report?.long_market_map||[]).filter(item=>item.status!=='FILTERED');
       $('#marketStrip').innerHTML=['BTC','ETH'].map(symbol=>{
-        const item=markets.find(x=>x.inst_id===`${symbol}-USDT-SWAP`);const m=item?.market_metrics||{};
-        if(!item)return `<div class="pulse-card"><div class="pulse-head"><strong>${symbol}</strong><span>資料不足</span></div><div class="pulse-price">—</div><div class="change flat">本輪無法判讀</div></div>`;
-        const c1=m.price_change_1h_pct,c24=m.price_change_24h_pct,expired=isExpiredSnapshot(item);const direction=directionName[item.direction]||'中性';
-        return `<div class="pulse-card"><div class="pulse-head"><strong>${symbol}</strong><span>${expired?'⏱ 資料已過期':`${esc(direction)} · ${esc(regimeName[item.regime]||item.regime)}`}</span></div><div class="pulse-price">${price(m.last_price,item)}</div><div class="change ${expired?'flat':changeClass(c1)}">${expired?'過期快照 · ':''}15m RSI（相對強弱指標） ${metricNumber(m.rsi_15m)===null?'—':num(m.rsi_15m,1)} · 1H ${signed(c1)} · 24H ${signed(c24)}</div></div>`;
+        const id=`${symbol}-USDT-SWAP`,shortItem=shortMarkets.find(x=>x.inst_id===id),longItem=longMarkets.find(x=>x.inst_id===id);
+        const item=(longItem&&(!shortItem||longAt>=shortAt))?longItem:shortItem||longItem;const m=item?.market_metrics||{};
+        if(!item)return `<div class="pulse-card"><div class="pulse-head"><strong>${symbol}</strong><span>24H</span></div><div class="pulse-price">—</div><div class="change flat">${esc(fallbackMessage)}</div></div>`;
+        const c24=metricNumber(m.price_change_24h_pct),rsi24=metricNumber(m.rsi_24h),expired=isExpiredSnapshot(item),state=c24===null?'24H 資料不足':c24>0?'24H 上漲':c24<0?'24H 下跌':'24H 持平';
+        return `<div class="pulse-card"><div class="pulse-head"><strong>${symbol}</strong><span>${expired?'⏱ 24H 快照過期':esc(state)}</span></div><div class="pulse-price">${price(m.last_price,item)}</div><div class="change ${expired?'flat':changeClass(c24)}">${expired?'過期快照 · ':''}24H 漲跌 ${signed(c24)} · 24H RSI ${rsi24===null?'—':num(rsi24,1)}</div></div>`;
       }).join('');
     }
 
