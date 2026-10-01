@@ -6,7 +6,12 @@ from typing import Any
 
 from .indicators import TimeframeFeatures, atr, ema_series, features
 from .models import Candle, MarketContext
-from .short_direction import (\n    LONG_POLICY as LONG_DIRECTION_POLICY,\n    POLICY as SHORT_DIRECTION_POLICY,\n    hourly_direction,\n    swing_direction,\n)
+from .short_direction import (
+    LONG_POLICY as LONG_DIRECTION_POLICY,
+    POLICY as SHORT_DIRECTION_POLICY,
+    hourly_direction,
+    swing_direction,
+)
 from .early_warning import short_scan_observation, short_scan_preparation
 
 
