@@ -659,6 +659,77 @@
     .preflight-quality-explanation summary{cursor:pointer;color:#bdcddd}.preflight-quality-explanation p{font-size:12px;margin-top:5px;color:var(--muted)}
     .preflight-early-warning{margin-top:12px;padding-left:10px;border-left:2px solid #d1ad68;font-size:12px;line-height:1.6;color:#d8c9a8;overflow-wrap:anywhere}
     .preflight-early-warning b{font-size:11px;color:#dec184}.preflight-early-warning p{margin:3px 0;font-size:12px}.preflight-early-warning small{display:block;font-size:10px;color:var(--muted)}
+
+    /* Single-coin scan mobile layout authority.
+       Keep one scroll container and prevent action buttons from being clipped. */
+    .intraday-dialog[open]{
+      position:fixed!important;
+      inset:0!important;
+      display:grid!important;
+      grid-template-rows:auto minmax(0,1fr)!important;
+      box-sizing:border-box!important;
+      width:100vw!important;
+      max-width:100vw!important;
+      height:100dvh!important;
+      max-height:100dvh!important;
+      margin:0!important;
+      padding:0!important;
+      overflow:hidden!important;
+      border-radius:0!important
+    }
+    .intraday-dialog-head{
+      position:relative!important;
+      top:auto!important;
+      flex:none!important;
+      box-sizing:border-box;
+      min-width:0;
+      padding:max(12px,env(safe-area-inset-top)) max(16px,env(safe-area-inset-right)) 12px max(16px,env(safe-area-inset-left))!important;
+      border-bottom:1px solid var(--line);
+      background:var(--panel);
+      z-index:2
+    }
+    #singleScanContent{
+      position:relative!important;
+      display:block!important;
+      box-sizing:border-box!important;
+      width:100%!important;
+      min-width:0!important;
+      min-height:0!important;
+      height:auto!important;
+      max-height:none!important;
+      overflow-x:hidden!important;
+      overflow-y:auto!important;
+      touch-action:pan-y!important;
+      overscroll-behavior-y:contain!important;
+      -webkit-overflow-scrolling:touch!important;
+      padding:14px max(16px,env(safe-area-inset-right)) calc(36px + env(safe-area-inset-bottom)) max(16px,env(safe-area-inset-left))!important
+    }
+    .intraday-dialog .decision-primary-action{
+      display:block;
+      min-width:0;
+      min-height:52px;
+      margin:14px 0;
+      overflow:visible
+    }
+    .intraday-dialog .decision-primary-action .preflight-link{
+      display:flex!important;
+      align-items:center!important;
+      justify-content:center!important;
+      box-sizing:border-box!important;
+      width:100%!important;
+      min-height:52px!important;
+      height:auto!important;
+      margin:0!important;
+      padding:11px 14px!important;
+      line-height:1.35!important;
+      white-space:normal!important;
+      overflow:visible!important
+    }
+    @media(max-width:600px){
+      .intraday-dialog-head h2{font-size:17px;line-height:1.35}
+      .intraday-dialog-head .quick-link{min-height:44px;padding:8px 14px}
+      #singleScanContent{padding-top:14px!important}
+    }
 </style>
   <link rel="stylesheet" href="/history-replay.css">
   <script src="/history-replay.js"></script>
