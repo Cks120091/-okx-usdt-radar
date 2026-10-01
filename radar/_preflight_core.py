@@ -692,7 +692,7 @@ def _trigger_age_bars(signal: Signal, reference_ms: int | None) -> int | None:
     if event_ts is None or event_ts <= 0:
         return _original_age_bars(signal)
     current_ms = int(reference_ms or time.time() * 1000)
-    interval_ms = 14_400_000 if signal.radar_horizon == "LONG" else 900_000
+    interval_ms = 3_600_000 if signal.radar_horizon == "LONG" else 900_000
     return max(0, int((current_ms - int(event_ts)) // interval_ms))
 
 
