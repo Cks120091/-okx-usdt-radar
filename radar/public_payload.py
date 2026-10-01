@@ -236,6 +236,8 @@ def public_report_payload(report: Any) -> dict[str, Any]:
                 "market_rsi_24h_state",
                 "market_rsi_24h_label",
                 "market_rsi_24h_basis",
+                "comparison_timeframe",
+                "comparison_basis",
             ),
         )
         for key in ("btc", "resonance", "exposure_warning"):
@@ -438,7 +440,7 @@ def _public_metrics(
     resonance = _select(_read(metrics, "market_resonance", {}), (
         "state", "label", "path_state", "path_label", "priority",
         "market_direction", "market_bias_score", "benchmark_change_pct",
-        "relative_strength_pct", "relative_strength_24h_pct",
+        "comparison_timeframe", "relative_strength_pct", "relative_strength_24h_pct",
         "strength_confirmed", "reason", "policy", "affects_trigger",
     ))
     if resonance:
