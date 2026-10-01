@@ -252,48 +252,46 @@ def _timeframe_direction_alignment(item, direction):
             "trigger_direction": direction, "long_score": hourly["score"],
             "policy": POLICY, "reason": reason,
         }
-    long_score = _core._number(frame.get("fusion_long_score"))
-    if long_score is None or not 0.0 <= long_score <= 100.0:
-        return {
-            "required": True,
-            # A present but corrupt direction frame is not a legacy omission.
-            "passed": False if direction_tf in raw else None,
-            "state": "UNKNOWN",
-            "timeframe": direction_tf,
-            "background_timeframe": background_tf,
-            "trigger_timeframe": trigger_tf,
-            "reason": f"{direction_tf} 方向資料不足；最新掃描需重新取得方向確認。",
-        }
-
-    timeframe_direction = (
-        "LONG" if long_score >= 55.0
-        else "SHORT" if long_score <= 45.0
-        else "NEUTRAL"
-    )
-    passed = timeframe_direction == direction
+    from .short_direction import LONG_POLICY, swing_direction
+    swing = swing_direction(frame)
+    bias = swing["direction"]
+    passed = bias in {"LONG", "SHORT"} and bias == direction
+    if bias in {"UNKNOWN", "NEUTRAL"}:
+        reason = (
+            "4H 方向資料不足，請重新掃描確認；1H 不單獨決定多空。"
+            if bias == "UNKNOWN"
+            else "4H MACD／MA 尚未共振，等待方向明確後再由 1H 同向觸發。"
+        )
+    elif passed:
+        reason = (
+            f"4H {swing['label']}，1H "
+            f"{'做多' if direction == 'LONG' else '做空'}觸發同向。"
+        )
+    else:
+        reason = (
+            f"4H {swing['label']}，只允許"
+            f"{'做多' if bias == 'LONG' else '做空'}；"
+            "1H 反向 Trigger 僅供觀察，不允許反向新進場。"
+        )
     return {
         "required": True,
         "passed": passed,
         "state": (
-            "ALIGNED" if passed and timeframe_direction in {"LONG", "SHORT"}
-            else "TRANSITIONAL" if passed
+            "ALIGNED"
+            if passed
+            else "UNKNOWN"
+            if bias == "UNKNOWN"
             else "NOT_ALIGNED"
         ),
-        "timeframe": direction_tf,
-        "background_timeframe": background_tf,
-        "trigger_timeframe": trigger_tf,
-        "timeframe_direction": timeframe_direction,
+        "timeframe": "4H",
+        "background_timeframe": "1D",
+        "trigger_timeframe": "1H",
+        "timeframe_direction": bias,
+        "bias_state": swing["state"],
         "trigger_direction": direction,
-        "long_score": round(long_score, 1),
-        "reason": (
-            (
-                f"{direction_tf} 明確{'偏多' if timeframe_direction == 'LONG' else '偏空'}，與 {trigger_tf} 訊號同向。"
-                if timeframe_direction in {"LONG", "SHORT"} and passed
-                else f"{direction_tf} 正在{'多頭轉弱' if timeframe_direction == 'LONG_WEAKENING' else '空頭轉弱' if timeframe_direction == 'SHORT_WEAKENING' else '方向轉換'}；{trigger_tf} 已出現{'做多' if direction == 'LONG' else '做空'}價格訊號，列為早期轉向觀察，不把轉換期當成明確反向。"
-                if passed
-                else f"{direction_tf} 仍明確{'偏多' if timeframe_direction == 'LONG' else '偏空'}，但 {trigger_tf} 出現{'做空' if direction == 'SHORT' else '做多'}訊號；目前屬真正逆勢，先不要當完整同向進場。"
-            )
-        ),
+        "long_score": swing["score"],
+        "policy": LONG_POLICY,
+        "reason": reason,
     }
 
 
@@ -643,7 +641,7 @@ def build_decision_context(*args, **kwargs):
         _core._mapping(weighted_pipeline.get("layers", {})).get("trend_resonance", {})
     )
     if (
-        str(_core._read(item, "radar_horizon", "SHORT") or "SHORT").upper() == "SHORT"
+        str(_core._read(item, "radar_horizon", "SHORT") or "SHORT").upper() in {"SHORT", "LONG"}
         and str(final.get("status") or "").upper() == "ENTER"
         and trend_layer.get("state") not in {"UNKNOWN", "RESONANT"}
     ):
