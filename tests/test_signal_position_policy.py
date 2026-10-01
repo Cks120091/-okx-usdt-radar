@@ -100,6 +100,58 @@ class SignalPositionSeparationTests(unittest.TestCase):
         self.assertTrue(alignment["passed"])
         self.assertTrue(result["final"]["new_entry_allowed"])
 
+    def test_long_requires_4h_macd_ma_and_1h_trigger_same_direction(self):
+        item = signal_dict("LONG", "LONG", 100.0)
+        item["market_metrics"]["raw_indicators"]["4H"].update({
+            "ma5": 105.0,
+            "ma10": 103.0,
+            "ma20": 100.0,
+            "macd_line": 1.0,
+            "macd_signal": 0.5,
+            "macd_hist": 0.5,
+            "macd_prev_hist": 0.3,
+            # Deliberately conflict with the canonical MACD/MA direction.
+            "fusion_long_score": 10.0,
+        })
+        aligned = build_decision_context(item)["final"]
+        self.assertTrue(aligned["timeframe_alignment"]["passed"])
+        self.assertEqual(
+            aligned["timeframe_alignment"]["timeframe_direction"],
+            "LONG",
+        )
+        self.assertEqual(aligned["status"], "ENTER")
+
+        opposite = signal_dict("SHORT", "LONG", 100.0)
+        opposite["market_metrics"]["raw_indicators"]["4H"].update(
+            item["market_metrics"]["raw_indicators"]["4H"]
+        )
+        blocked = build_decision_context(opposite)["final"]
+        self.assertFalse(blocked["timeframe_alignment"]["passed"])
+        self.assertEqual(blocked["status"], "WAIT")
+        self.assertFalse(blocked["new_entry_allowed"])
+        self.assertEqual(
+            blocked["wait_reason"]["code"],
+            "TIMEFRAME_DIRECTION_ALIGNMENT",
+        )
+
+    def test_long_4h_forming_never_allows_1h_formal_trigger(self):
+        item = signal_dict("LONG", "LONG", 100.0)
+        item["market_metrics"]["raw_indicators"]["4H"].update({
+            "ma5": 105.0,
+            "ma10": 103.0,
+            "ma20": 100.0,
+            "macd_line": -0.2,
+            "macd_signal": 0.1,
+            "macd_hist": -0.3,
+            "macd_prev_hist": -0.4,
+            "fusion_long_score": 90.0,
+        })
+        final = build_decision_context(item)["final"]
+        self.assertFalse(final["timeframe_alignment"]["passed"])
+        self.assertEqual(final["timeframe_alignment"]["timeframe_direction"], "NEUTRAL")
+        self.assertEqual(final["status"], "WAIT")
+        self.assertFalse(final["new_entry_allowed"])
+
     def test_present_but_corrupt_direction_data_does_not_grant_permission(self):
         for bad in (None, "bad", float("nan"), 101, -1):
             for timeframe, horizon in (("1H", "SHORT"), ("4H", "LONG")):
