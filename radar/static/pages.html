@@ -730,6 +730,24 @@
       .intraday-dialog-head .quick-link{min-height:44px;padding:8px 14px}
       #singleScanContent{padding-top:14px!important}
     }
+
+    /* Compact single-scan decision header: keep signal label closer to state
+       and show remaining RR inside the current-price box. */
+    .decision-price{display:grid!important;grid-template-columns:minmax(0,1fr)!important;gap:6px!important}
+    .decision-price-row{display:grid;grid-template-columns:minmax(0,1fr) auto;align-items:center;gap:10px;min-width:0}
+    .decision-price-row>span{min-width:0;margin:0!important;line-height:1.45}
+    .decision-price-row>b{min-width:0;text-align:right;white-space:nowrap}
+    .decision-price-rr{padding-top:6px;border-top:1px solid rgba(158,172,192,.22)}
+    .decision-price-rr>span{font-size:10px!important;color:var(--muted)!important;font-weight:800}
+    .decision-price-rr>b{font-size:15px!important;color:var(--blue)!important}
+    .intraday-dialog .decision-panel{margin-top:4px!important}
+    .intraday-dialog .decision-top{margin-top:0!important}
+    .intraday-dialog .decision-kicker{margin-top:0!important}
+    @media(max-width:600px){
+      .intraday-dialog .decision-top{gap:6px!important}
+      .intraday-dialog .decision-price{padding:9px 10px!important}
+      .intraday-dialog .decision-price-row{gap:8px}
+    }
 </style>
   <link rel="stylesheet" href="/history-replay.css">
   <script src="/history-replay.js"></script>
@@ -1693,10 +1711,10 @@ renderSignals(quality80,'#quality80Box','本輪沒有交易品質 80 分以上�
       const side=item.direction==='LONG'?'做多':item.direction==='SHORT'?'做空':'方向待確認';
       const label=terminal?(terminal==='TAKE_PROFIT'?'止盈已達｜計畫結束':terminal==='STOP_LOSS'?'止損已達｜訊號失效':'計畫已關閉'):preview?'訊號建立中':expired?'資料已過期｜請重新掃描':readOnly?snapshot.label:active?side+'訊號已觸發｜'+entryReasonLabel(item):final.label||snapshot.label;
       const reason=terminal?'舊計畫僅供紀錄，不可再次沿用。':preview?'等待本輪掃描完成。':expired||readOnly?snapshot.detail:active?(position.note||'可進位置是參考區間，不是訊號成立條件。'):(final.wait_reason?.label||final.reasons?.[0]||snapshot.detail);
-      const metrics=item.market_metrics||{},preflight=item.preflight_snapshot||{},executionPrice=metricNumber(preflight.live_price)??metricNumber(metrics.entry_execution_price)??metricNumber(metrics.last_price),source=String(preflight.price_source||metrics.entry_execution_price_source||'').toUpperCase(),hasPreflight=String(preflight.source||'').toUpperCase()==='PREFLIGHT',executionLabel=hasPreflight?(source==='ASK'?'進場前更新 Ask（賣方報價／買入參考）':source==='BID'?'進場前更新 Bid（買方報價／賣出參考）':'進場前更新價格'):(source==='ASK'?'掃描快照 Ask（賣方報價／買入參考）':source==='BID'?'掃描快照 Bid（買方報價／賣出參考）':'掃描快照價格');
+      const metrics=item.market_metrics||{},preflight=item.preflight_snapshot||{},entry=item.entry_eligibility||{},executionPrice=metricNumber(preflight.live_price)??metricNumber(metrics.entry_execution_price)??metricNumber(metrics.last_price),source=String(preflight.price_source||metrics.entry_execution_price_source||'').toUpperCase(),hasPreflight=String(preflight.source||'').toUpperCase()==='PREFLIGHT',executionLabel=hasPreflight?(source==='ASK'?'進場前更新 Ask（賣方報價／買入參考）':source==='BID'?'進場前更新 Bid（買方報價／賣出參考）':'進場前更新價格'):(source==='ASK'?'掃描快照 Ask（賣方報價／買入參考）':source==='BID'?'掃描快照 Bid（買方報價／賣出參考）':'掃描快照價格'),remaining=entry.remaining_rr_applicable===false?null:metricNumber(entry.remaining_rr),remainingText=remaining===null?'—':`${num(remaining,2)}R`;
       const maturity=final.swing_maturity||{},matureNote=active&&maturity.state==='MATURE'?'<small class="signal-position-note">行情已'+(item.direction==='SHORT'?'跌':'漲')+'一段，追價風險較高（僅提醒）。</small>':'';
       const primaryAction=preflightButton(item.inst_id,horizon,item,false)+chartLinks(item.inst_id);
-      return `<div class="decision-panel ${terminal?'closed':active?'ready':snapshot.panel}" data-signal-position-policy="${esc(decision.entry_policy_version||'legacy')}"><div class="decision-top"><div><span class="decision-kicker">訊號與可進位置</span><div class="decision-state" aria-live="polite">${esc(label)}</div></div><div class="decision-price"><span>${esc(executionLabel)}</span><b>${price(executionPrice,item)}</b></div></div><p class="signal-position-note">${esc(reason)}</p>${matureNote}${signalTradeGrid(item,{original:Boolean(terminal),preview})}<small class="signal-position-note">可進位置僅供參考；Entry（進場）／SL（止損）／TP（止盈） 固定。快照不是持續即時報價。</small><div class="decision-primary-action">${primaryAction}</div>${suggestedActionPanel(item)}</div>`;
+      return `<div class="decision-panel ${terminal?'closed':active?'ready':snapshot.panel}" data-signal-position-policy="${esc(decision.entry_policy_version||'legacy')}"><div class="decision-top"><div><span class="decision-kicker">訊號與可進位置</span><div class="decision-state" aria-live="polite">${esc(label)}</div></div><div class="decision-price"><div class="decision-price-row"><span>${esc(executionLabel)}</span><b>${price(executionPrice,item)}</b></div><div class="decision-price-row decision-price-rr"><span>剩餘 RR｜至第一止盈</span><b>${remainingText}</b></div></div></div><p class="signal-position-note">${esc(reason)}</p>${matureNote}${signalTradeGrid(item,{original:Boolean(terminal),preview})}<small class="signal-position-note">可進位置僅供參考；Entry（進場）／SL（止損）／TP（止盈） 固定。快照不是持續即時報價。</small><div class="decision-primary-action">${primaryAction}</div>${suggestedActionPanel(item)}</div>`;
     }
 
     function timeframeGrid(item){const frames=item.timeframe_states||{};const order=item.radar_horizon==='LONG'?['1D','4H','1H']:['4H','1H','15m','5m'];return `<div class="tf-grid">${order.map(tf=>{const d=frames[tf]||{};return `<div class="tf"><b>${tf}</b><span>${tech(d.label||'資料未知')}</span></div>`}).join('')}</div>`}
