@@ -1343,10 +1343,22 @@ class SignalRepository:
             return self._terminal_projection(latest_closed)
 
         signal_id = str(uuid.uuid4())
-        triggered_at = _iso_from_millis(raw.market_story.get("trigger", {}).get("event_ts")) or completed_at
+        trigger_payload = raw.market_story.get("trigger", {})
+        setup_started_at = _iso_from_millis(trigger_payload.get("event_ts")) or completed_at
+        trigger_confirmed_at = (
+            _iso_from_millis(trigger_payload.get("confirmation_ts"))
+            or setup_started_at
+        )
+        # Keep triggered_at as the legacy setup/event timestamp for database
+        # compatibility. Public/UI surfaces expose the setup and formal
+        # confirmation timestamps separately so a pullback start is not
+        # mistaken for the actual entry confirmation.
+        triggered_at = setup_started_at
         lifecycle = {
             "first_seen_at": completed_at,
             "triggered_at": triggered_at,
+            "setup_started_at": setup_started_at,
+            "trigger_confirmed_at": trigger_confirmed_at,
             "last_seen_at": completed_at,
             "previous_stage": None,
             "current_stage": raw.signal_stage,
@@ -2953,6 +2965,28 @@ class SignalRepository:
             display_source = dict(stored_payload)
             display_source["risk_reward"] = item.get("risk_reward")
             item.update(signal_plan_display_fields(display_source))
+            stored_trigger = (
+                stored_payload.get("market_story", {}).get("trigger", {})
+                if isinstance(stored_payload.get("market_story"), dict)
+                else {}
+            )
+            lifecycle = (
+                stored_payload.get("lifecycle", {})
+                if isinstance(stored_payload.get("lifecycle"), dict)
+                else {}
+            )
+            setup_ms = stored_trigger.get("event_ts")
+            confirm_ms = stored_trigger.get("confirmation_ts")
+            item["setup_started_at"] = (
+                lifecycle.get("setup_started_at")
+                or _iso_from_millis(setup_ms)
+                or item.get("triggered_at")
+            )
+            item["trigger_confirmed_at"] = (
+                lifecycle.get("trigger_confirmed_at")
+                or _iso_from_millis(confirm_ms)
+                or item["setup_started_at"]
+            )
             history.append(item)
         return history
 
