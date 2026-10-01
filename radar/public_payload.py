@@ -332,6 +332,8 @@ def _public_candidate(item: Any, *, signal: bool) -> dict[str, Any]:
         (
             "age_bars",
             "triggered_at",
+            "setup_started_at",
+            "trigger_confirmed_at",
             "closed_at",
             "retention_until",
             "status",
@@ -471,6 +473,9 @@ def _public_market_story(story: Any) -> dict[str, Any]:
             (
                 "type",
                 "direction",
+                "event_ts",
+                "confirmation_ts",
+                "confirmation_level",
                 "event_age_bars",
                 "opposite_warning_only",
                 "active_episode_preserved",
