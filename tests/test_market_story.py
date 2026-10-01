@@ -3,6 +3,7 @@ import unittest
 from dataclasses import replace
 from unittest.mock import patch
 
+from radar.indicators import features as indicator_features
 from radar.market_story import (
     DynamicZone,
     MarketStoryEngine,
@@ -822,11 +823,57 @@ class MarketStoryV34Tests(unittest.TestCase):
         self.assertIsNotNone(result.signal, result.reason)
         self.assertEqual(result.signal.radar_horizon, "LONG")
         self.assertEqual(result.signal.trigger_type, "BREAKOUT")
-        self.assertEqual(result.signal.timeframe_states["1D"]["role"], "大方向 Bias")
-        self.assertFalse(result.signal.timeframe_states["4H"]["can_block_trigger"])
-        self.assertEqual(result.signal.timeframe_states["4H"]["role"], "Bias／Setup")
+        self.assertEqual(result.signal.timeframe_states["1D"]["role"], "大環境背景")
+        self.assertTrue(result.signal.timeframe_states["4H"]["can_block_trigger"])
+        self.assertEqual(result.signal.timeframe_states["4H"]["role"], "MACD／MA 篩選＋方向／Setup")
         self.assertTrue(result.signal.timeframe_states["1H"]["can_block_trigger"])
-        self.assertEqual(result.signal.timeframe_states["1H"]["role"], "核心 Trigger")
+        self.assertEqual(result.signal.timeframe_states["1H"]["role"], "正式 Trigger")
+
+
+    def test_long_radar_waits_when_4h_macd_ma_is_not_resonant(self):
+        _, setup, trigger = valid_breakout_frames()
+        candles_4h_setup = [
+            replace(c, ts=1_700_000_000_000 + i * 14_400_000)
+            for i, c in enumerate(setup)
+        ]
+        candles_1h_trigger = [
+            replace(c, ts=1_700_000_000_000 + i * 3_600_000)
+            for i, c in enumerate(trigger)
+        ]
+        candles_1d = story_candles(
+            [80 + index * 0.10 for index in range(100)],
+            86_400_000,
+        )
+
+        original = indicator_features(candles_4h_setup)
+        neutral_4h = replace(
+            original,
+            sma5=original.sma20,
+            sma10=original.sma20,
+            macd_line=original.macd_signal,
+        )
+
+        def measured(rows):
+            if rows is candles_4h_setup:
+                return neutral_4h
+            return indicator_features(rows)
+
+        with patch("radar.market_story.features", side_effect=measured):
+            story = self.engine.analyze_long(
+                candles_1d,
+                candles_4h_setup,
+                candles_1h_trigger,
+            )
+
+        self.assertFalse(story.triggered)
+        self.assertEqual(story.trigger_direction, "NEUTRAL")
+        self.assertEqual(story.timeframe_states["1D"]["role"], "大環境背景")
+        self.assertEqual(
+            story.timeframe_states["4H"]["role"],
+            "MACD／MA 篩選＋方向／Setup",
+        )
+        self.assertEqual(story.timeframe_states["4H"]["direction"], "NEUTRAL")
+        self.assertEqual(story.timeframe_states["1H"]["role"], "正式 Trigger")
 
 
 if __name__ == "__main__":
