@@ -5,6 +5,7 @@ import math
 from collections.abc import Mapping
 
 POLICY = "SHORT_1H_MACD_MA_RESONANCE_15M_TRIGGER_V2"
+LONG_POLICY = "LONG_4H_MACD_MA_RESONANCE_1H_TRIGGER_V2"
 
 
 def _finite(value):
@@ -42,14 +43,15 @@ def _legacy_fusion_direction(value):
             "policy": "LEGACY_FUSION_FALLBACK"}
 
 
-def hourly_direction(value):
-    """Use MA5/10/20 x MACD resonance as the canonical completed-1H direction.
+def macd_ma_direction(value, *, timeframe="1H", policy=POLICY):
+    """Use MA5/10/20 x MACD resonance as the canonical timeframe direction.
 
-    MACD or MA may lead first.  A formal 1H direction exists only when the
-    complete MA stack and MACD agree.  If only one family leads, the state is
-    TRANSITION and 15m may prepare but may not open a new position.
-    Numeric input is retained only for old stored payloads.
+    MACD or MA may lead first. A formal direction exists only when the complete
+    MA stack and MACD agree. If only one family leads, the state remains
+    forming/transition so the lower timeframe may prepare but may not create a
+    new formal position.
     """
+
     if not isinstance(value, Mapping) and not hasattr(value, "sma5"):
         return _legacy_fusion_direction(value)
 
@@ -62,7 +64,7 @@ def hourly_direction(value):
             if "fusion_long_score" in value:
                 return _legacy_fusion_direction(value.get("fusion_long_score"))
             return {"direction": "UNKNOWN", "state": "UNKNOWN", "label": "方向資料不足",
-                    "score": None, "policy": POLICY}
+                    "score": None, "policy": policy}
 
     ma5 = _finite(_read(value, "ma5"))
     if not math.isfinite(ma5):
@@ -84,7 +86,7 @@ def hourly_direction(value):
         if fallback is not None:
             return _legacy_fusion_direction(fallback)
         return {"direction": "UNKNOWN", "state": "UNKNOWN", "label": "方向資料不足",
-                "score": None, "policy": POLICY}
+                "score": None, "policy": policy}
 
     bull_ma = ma5 > ma10 > ma20
     bear_ma = ma5 < ma10 < ma20
@@ -99,13 +101,13 @@ def hourly_direction(value):
         return {
             "direction": "LONG", "state": "LONG", "label": "多頭共振",
             "score": 100.0, "ma_state": "BULL", "macd_state": "BULL",
-            "leading": "BOTH", "policy": POLICY,
+            "leading": "BOTH", "policy": policy,
         }
     if bear_ma and bear_macd:
         return {
             "direction": "SHORT", "state": "SHORT", "label": "空頭共振",
             "score": 0.0, "ma_state": "BEAR", "macd_state": "BEAR",
-            "leading": "BOTH", "policy": POLICY,
+            "leading": "BOTH", "policy": policy,
         }
 
     bull_forming = (
@@ -126,7 +128,7 @@ def hourly_direction(value):
             "label": "多頭形成中｜等待 MACD × MA 共振",
             "score": 55.0, "ma_state": "BULL" if bull_ma else "MIXED",
             "macd_state": "BULL" if bull_macd else "FORMING",
-            "leading": leading, "policy": POLICY,
+            "leading": leading, "policy": policy,
         }
     if bear_forming and not bull_forming:
         leading = "MA" if bear_ma and not bear_macd else "MACD" if bear_macd and not bear_ma else "MIXED"
@@ -135,13 +137,23 @@ def hourly_direction(value):
             "label": "空頭形成中｜等待 MACD × MA 共振",
             "score": 45.0, "ma_state": "BEAR" if bear_ma else "MIXED",
             "macd_state": "BEAR" if bear_macd else "FORMING",
-            "leading": leading, "policy": POLICY,
+            "leading": leading, "policy": policy,
         }
 
     return {
         "direction": "NEUTRAL", "state": "TRANSITION",
-        "label": "1H 趨勢未共振", "score": 50.0,
+        "label": f"{timeframe} 趨勢未共振", "score": 50.0,
         "ma_state": "BULL" if bull_ma else "BEAR" if bear_ma else "MIXED",
         "macd_state": "BULL" if bull_macd else "BEAR" if bear_macd else "NEUTRAL",
-        "leading": "NONE", "policy": POLICY,
+        "leading": "NONE", "policy": policy,
     }
+
+
+def hourly_direction(value):
+    """Backward-compatible completed-1H direction used by the short radar."""
+    return macd_ma_direction(value, timeframe="1H", policy=POLICY)
+
+
+def swing_direction(value):
+    """Canonical completed-4H MACD/MA direction used by the swing radar."""
+    return macd_ma_direction(value, timeframe="4H", policy=LONG_POLICY)
