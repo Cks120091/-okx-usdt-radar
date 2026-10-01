@@ -5,7 +5,7 @@ import math
 from collections.abc import Mapping
 
 POLICY = "SHORT_1H_MACD_MA_RESONANCE_15M_TRIGGER_V2"
-LONG_POLICY = "LONG_4H_MACD_MA_RESONANCE_1H_TRIGGER_V2"
+LONG_POLICY = "LONG_4H_EARLY_DIRECTION_1H_TRIGGER_V3"
 
 
 def _finite(value):
@@ -155,5 +155,29 @@ def hourly_direction(value):
 
 
 def swing_direction(value):
-    """Canonical completed-4H MACD/MA direction used by the swing radar."""
-    return macd_ma_direction(value, timeframe="4H", policy=LONG_POLICY)
+    """4H owns swing direction; 1H still owns the formal Trigger.
+
+    Full MACD x MA resonance is the strongest 4H direction state. A clear
+    one-family lead may also establish an EARLY direction when the other
+    family is improving and there is no complete opposite MA stack. This keeps
+    the swing radar early without allowing 1H to choose the opposite side.
+    """
+    result = dict(
+        macd_ma_direction(value, timeframe="4H", policy=LONG_POLICY)
+    )
+    state = str(result.get("state") or "")
+    if state == "LONG_FORMING":
+        result.update(
+            direction="LONG",
+            state="LONG_EARLY",
+            label="4H 多頭早期方向｜MACD／MA 形成中",
+            policy=LONG_POLICY,
+        )
+    elif state == "SHORT_FORMING":
+        result.update(
+            direction="SHORT",
+            state="SHORT_EARLY",
+            label="4H 空頭早期方向｜MACD／MA 形成中",
+            policy=LONG_POLICY,
+        )
+    return result
