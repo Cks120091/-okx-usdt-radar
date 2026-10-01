@@ -1914,6 +1914,16 @@ class PreflightTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as directory:
             item = make_signal()
             item.radar_horizon = "LONG"
+            item.market_metrics["raw_indicators"]["4H"] = {
+                "ma5": 105.0,
+                "ma10": 103.0,
+                "ma20": 100.0,
+                "macd_line": 1.0,
+                "macd_signal": 0.5,
+                "macd_hist": 0.5,
+                "macd_prev_hist": 0.3,
+                "fusion_long_score": 65.0,
+            }
             runtime = RadarRuntime(
                 PreflightScanner(PreflightClient()),
                 AppConfig(data_dir=directory),
