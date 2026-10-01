@@ -284,3 +284,55 @@ class ScannerTests(_legacy.ScannerTests):
         self.assertTrue(persisted.entry_eligibility.get("new_entry_allowed"))
         self.assertTrue(persisted.lifecycle.get("entry_ready_once"))
         self.assertEqual(persisted.decision_context.get("final", {}).get("status"), "ENTER")
+
+
+class LongMacdMaPrefilterRegressionTests(_legacy.unittest.TestCase):
+    def test_long_market_scan_uses_4h_prefilter_before_1h_trigger(self):
+        class LongPrefilterClient(_legacy.FakeClient):
+            def get_candles(self, inst_id, bar, limit=100):
+                self.candle_requests.append((inst_id, bar, limit))
+                if inst_id == "BBB-USDT-SWAP" and bar == "4H":
+                    return [
+                        _legacy.Candle(
+                            index,
+                            100.0,
+                            100.0,
+                            100.0,
+                            100.0,
+                            10.0,
+                            1_000_000.0,
+                            True,
+                        )
+                        for index in range(limit)
+                    ]
+                return _legacy.candles(limit)
+
+        scanner = _legacy.MarketScanner(
+            LongPrefilterClient(),
+            _legacy.ScannerConfig(
+                workers=1,
+                min_quote_volume_24h=0,
+            ),
+        )
+
+        with _legacy.patch.object(
+            scanner,
+            "_analyze_long_v33",
+            wraps=scanner._analyze_long_v33,
+        ) as analyze_long:
+            scanner.scan_once(scan_mode="LONG")
+
+        analyzed_ids = [call.args[0].inst_id for call in analyze_long.call_args_list]
+        self.assertEqual(analyzed_ids, ["AAA-USDT-SWAP"])
+
+    def test_prefilter_reports_supplied_timeframe(self):
+        scanner = _legacy.MarketScanner(
+            _legacy.FakeClient(),
+            _legacy.ScannerConfig(min_quote_volume_24h=0),
+        )
+        result = scanner._macd_ma_prefilter(
+            _legacy.candles(100),
+            timeframe="4H",
+        )
+        self.assertEqual(result["timeframe"], "4H")
+        self.assertTrue(result["passed"])
