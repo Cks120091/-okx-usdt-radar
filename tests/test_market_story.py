@@ -830,6 +830,45 @@ class MarketStoryV34Tests(unittest.TestCase):
         self.assertEqual(result.signal.timeframe_states["1H"]["role"], "正式 Trigger")
 
 
+    def test_long_radar_does_not_allow_1h_trigger_opposite_to_4h_direction(self):
+        _, setup, trigger = valid_breakout_frames()
+        candles_4h_setup = [
+            replace(c, ts=1_700_000_000_000 + i * 14_400_000)
+            for i, c in enumerate(setup)
+        ]
+        candles_1h_trigger = [
+            replace(c, ts=1_700_000_000_000 + i * 3_600_000)
+            for i, c in enumerate(trigger)
+        ]
+        candles_1d = story_candles(
+            [80 + index * 0.10 for index in range(100)],
+            86_400_000,
+        )
+
+        aligned = self.engine.analyze_long(
+            candles_1d,
+            candles_4h_setup,
+            candles_1h_trigger,
+        )
+        opposed = self.engine.analyze_long(
+            candles_1d,
+            candles_4h_setup,
+            [
+                replace(
+                    candle,
+                    open=300 - candle.open,
+                    high=300 - candle.low,
+                    low=300 - candle.high,
+                    close=300 - candle.close,
+                )
+                for candle in candles_1h_trigger
+            ],
+        )
+
+        self.assertTrue(aligned.triggered)
+        self.assertEqual(aligned.trigger_direction, "LONG")
+        self.assertFalse(opposed.triggered)
+
     def test_long_radar_waits_when_4h_macd_ma_is_not_resonant(self):
         _, setup, trigger = valid_breakout_frames()
         candles_4h_setup = [
