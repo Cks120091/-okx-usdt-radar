@@ -3767,8 +3767,21 @@ class MarketScanner:
             if isinstance(resonance, dict)
             else 0
         )
+        resonance_state = (
+            str(
+                resonance.get("path_state")
+                or resonance.get("state")
+                or ""
+            ).upper()
+            if isinstance(resonance, dict)
+            else ""
+        )
         continuation = str(signal.trigger_type or "").upper() == "CONTINUATION"
-        has_market_resonance = resonance_priority > 0
+        has_market_resonance = resonance_state in {
+            "ALIGNED",
+            "RECOVERY_RESONANCE",
+            "LEADING_RESONANCE",
+        }
         # User-facing priority contract:
         # 6 continuation + market resonance + quality >= 80
         # 5 continuation + quality >= 80
