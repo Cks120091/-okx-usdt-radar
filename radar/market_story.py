@@ -15,8 +15,8 @@ from .short_direction import (
 from .early_warning import short_scan_observation, short_scan_preparation
 
 
-STRATEGY_VERSION = "V3.7_SWING_1H_PRICE_TRIGGER"
-FEATURE_SCHEMA_VERSION = "3.4.0"
+STRATEGY_VERSION = "V3.8_MACD_MA_CROSS_RESONANCE"
+FEATURE_SCHEMA_VERSION = "3.5.0"
 
 
 @dataclass(frozen=True)
@@ -203,26 +203,23 @@ class MarketStoryEngine:
         higher_long = _direction_score(tf_higher)
         bias_long = _direction_score(tf_bias)
         core_long = _direction_score(tf_core)
-        long_score = (
-            higher_long * 0.20 + bias_long * 0.40 + core_long * 0.40
-            if horizon == "SHORT"
-            else bias_long * 0.60 + core_long * 0.40
-        )
-        direction, direction_state, direction_label = _direction_state(long_score)
 
-        # SHORT keeps today's canonical 1H MACD/MA direction contract.
-        # LONG intentionally restores the Sep-30 swing contract: 4H + 1H
-        # weighted direction, with 1H retaining its original Trigger logic.
-        canonical_bias = hourly_direction(tf_bias) if horizon == "SHORT" else None
-        if canonical_bias is not None:
-            bias_long = long_score = (
-                canonical_bias["score"]
-                if canonical_bias["score"] is not None
-                else 50.0
-            )
-            direction = canonical_bias["direction"]
-            direction_state = canonical_bias["state"]
-            direction_label = canonical_bias["label"]
+        # Both horizons use the same architecture, shifted one timeframe:
+        # SHORT: 4H background -> 1H MACD/MA resonance -> 15m Trigger.
+        # LONG:  1D background -> 4H MACD/MA resonance -> 1H Trigger.
+        canonical_bias = (
+            hourly_direction(tf_bias)
+            if horizon == "SHORT"
+            else swing_direction(tf_bias)
+        )
+        bias_long = long_score = (
+            canonical_bias["score"]
+            if canonical_bias.get("score") is not None
+            else 50.0
+        )
+        direction = canonical_bias["direction"]
+        direction_state = canonical_bias["state"]
+        direction_label = canonical_bias["label"]
 
         zones = _dynamic_zones(core_candles, tf_core)
         location = _price_location(tf_core.close, tf_core.atr14, zones)
@@ -234,65 +231,56 @@ class MarketStoryEngine:
         compression = _compression_state(core_candles, tf_core, zones, efficiencies)
         confirmation_window = _confirmation_window(regime, tf_core)
 
-        if horizon == "SHORT":
-            candidates = {
-                candidate_direction: _trigger_candidate(
-                    candidate_direction,
-                    core_candles,
-                    tf_core,
-                    tf_bias,
-                    zones,
-                    location,
-                    efficiencies,
-                    compression,
-                    regime,
-                    confirmation_window,
-                    self.early_signal_max_age_bars,
-                    self.max_early_entry_extension_atr,
-                    price_action_trigger=True,
-                    bias_direction=canonical_bias["direction"],
-                    trigger_timeframe=frame_names[2],
-                )
-                for candidate_direction in ("LONG", "SHORT")
-            }
-            if canonical_bias["direction"] in ("LONG", "SHORT"):
-                selected = dict(candidates[canonical_bias["direction"]])
-            else:
-                selected = dict(
-                    _select_candidate(candidates, canonical_bias["direction"])
-                )
-                selected.update(
-                    triggered=False,
-                    type="NONE",
-                    stage="WATCH",
-                    freshness="NONE",
-                    direction="NEUTRAL",
-                )
-                selected.setdefault("neutral", []).append(
-                    "1H 方向尚未確定；15m 價格變化只供觀察。"
-                )
-            selected["direction_policy"] = SHORT_DIRECTION_POLICY
+        candidates = {
+            candidate_direction: _trigger_candidate(
+                candidate_direction,
+                core_candles,
+                tf_core,
+                tf_bias,
+                zones,
+                location,
+                efficiencies,
+                compression,
+                regime,
+                confirmation_window,
+                self.early_signal_max_age_bars,
+                self.max_early_entry_extension_atr,
+                price_action_trigger=True,
+                bias_direction=canonical_bias["direction"],
+                trigger_timeframe=frame_names[2],
+            )
+            for candidate_direction in ("LONG", "SHORT")
+        }
+
+        if canonical_bias["direction"] in ("LONG", "SHORT"):
+            selected = dict(candidates[canonical_bias["direction"]])
         else:
-            candidates = {
-                candidate_direction: _trigger_candidate(
-                    candidate_direction,
-                    core_candles,
-                    tf_core,
-                    tf_bias,
-                    zones,
-                    location,
-                    efficiencies,
-                    compression,
-                    regime,
-                    confirmation_window,
-                    self.early_signal_max_age_bars,
-                    self.max_early_entry_extension_atr,
-                    price_action_trigger=False,
+            pending = str(canonical_bias.get("pending_direction") or "NEUTRAL")
+            selected = dict(
+                _select_candidate(
+                    candidates,
+                    pending if pending in ("LONG", "SHORT") else "NEUTRAL",
                 )
-                for candidate_direction in ("LONG", "SHORT")
-            }
-            selection_direction = _direction_state(core_long)[0]
-            selected = dict(_select_candidate(candidates, selection_direction))
+            )
+            selected.update(
+                triggered=False,
+                type="NONE",
+                stage="WATCH",
+                freshness="NONE",
+                direction="NEUTRAL",
+            )
+            direction_tf = frame_names[1]
+            trigger_tf = frame_names[2]
+            selected.setdefault("neutral", []).append(
+                f"{direction_tf} MACD／MA 尚未同向共振；"
+                f"{trigger_tf} 只保留觀察，不形成正式訊號。"
+            )
+
+        selected["direction_policy"] = (
+            SHORT_DIRECTION_POLICY
+            if horizon == "SHORT"
+            else LONG_DIRECTION_POLICY
+        )
 
         trigger_direction = str(selected.get("direction", "NEUTRAL"))
         stage = str(selected.get("stage", "WATCH"))
@@ -555,25 +543,33 @@ class MarketStoryEngine:
             tf_timing,
             trigger_direction,
         )
-        if horizon == "SHORT":
-            timeframe_states["1H"].update(
-                role="MACD／MA 篩選＋方向｜決定多空",
-                direction=canonical_bias["direction"],
-                label=canonical_bias["label"],
-                score=canonical_bias["score"],
-                can_block_trigger=True,
-            )
-            background = timeframe_states["4H"]
-            # Describe the internal leg without claiming an unfinished 4H close.
-            leg_return = _pct_change(core_candles[-1].close, core_candles[-5].close)
-            phase = (
-                "多頭背景中的短線回落" if background["direction"] == "LONG" and leg_return < -0.05
-                else "空頭背景中的短線反彈" if background["direction"] == "SHORT" and leg_return > 0.05
-                else "短線走勢未明顯逆向"
-            )
-            background["label"] += "｜" + phase
-            background["phase"] = phase
-            background["phase_basis"] = "最近4根已收線15m；非未完成4H的最終結果"
+        direction_tf = "1H" if horizon == "SHORT" else "4H"
+        trigger_tf = "15m" if horizon == "SHORT" else "1H"
+        background_tf = "4H" if horizon == "SHORT" else "1D"
+
+        timeframe_states[background_tf].update(
+            role="背景 Context",
+            can_block_trigger=False,
+        )
+        timeframe_states[direction_tf].update(
+            role="MACD／MA 交叉共振方向｜決定多空",
+            direction=canonical_bias["direction"],
+            label=canonical_bias["label"],
+            score=canonical_bias["score"],
+            can_block_trigger=True,
+            resonance=bool(canonical_bias.get("resonance")),
+            strength=canonical_bias.get("strength"),
+            pending_direction=canonical_bias.get("pending_direction"),
+            ma_state=canonical_bias.get("ma_state"),
+            macd_state=canonical_bias.get("macd_state"),
+            ma20_state=canonical_bias.get("ma20_state"),
+            ma90_state=canonical_bias.get("ma90_state"),
+            leading=canonical_bias.get("leading"),
+        )
+        timeframe_states[trigger_tf].update(
+            role="條件 Trigger",
+            can_block_trigger=True,
+        )
 
         summary = _human_summary(
             trigger_direction,
@@ -598,7 +594,11 @@ class MarketStoryEngine:
             "missing_sources": [],
         }
         raw = {
-            "entry_policy_version": "SHORT_CONTEXT_WINDOW_V2" if horizon == "SHORT" else "SWING_UNCHANGED",
+            "entry_policy_version": (
+                "SHORT_4H_BG_1H_RESONANCE_15M_TRIGGER_V3"
+                if horizon == "SHORT"
+                else "LONG_1D_BG_4H_RESONANCE_1H_TRIGGER_V3"
+            ),
             "direction_long_score": round(long_score, 1),
             "higher_long_score": round(higher_long, 1),
             "bias_long_score": round(bias_long, 1),
@@ -641,15 +641,7 @@ class MarketStoryEngine:
             direction=direction,
             direction_state=direction_state,
             direction_label=direction_label,
-            bias_direction=(
-                canonical_bias["direction"]
-                if canonical_bias is not None
-                else "LONG"
-                if bias_long >= 56.0
-                else "SHORT"
-                if bias_long <= 44.0
-                else "NEUTRAL"
-            ),
+            bias_direction=canonical_bias["direction"],
             trigger_direction=trigger_direction,
             trigger_type=str(selected.get("type", "NONE")),
             stage=stage,
@@ -2577,15 +2569,17 @@ def _context_conflicts(
 ) -> list[str]:
     if trigger_direction not in ("LONG", "SHORT"):
         return []
-    direction_score = bias_long if trigger_direction == "LONG" else 100.0 - bias_long
-    higher_score = higher_long if trigger_direction == "LONG" else 100.0 - higher_long
-    output = []
-    if direction_score < 35.0:
-        output.append(f"{'1H' if horizon == 'SHORT' else '1D'} 背景反向，屬逆勢 Trigger")
-    if horizon == "SHORT" and higher_score < 30.0:
-        output.append("更高週期背景明顯反向；只列 Conflict，不取消核心 Trigger")
-    return output
-
+    # The direction frame is already a hard MACD x MA resonance gate.
+    # Only the higher frame remains contextual: 4H for SHORT, 1D for LONG.
+    higher_score = (
+        higher_long if trigger_direction == "LONG" else 100.0 - higher_long
+    )
+    if higher_score < 30.0:
+        background_tf = "4H" if horizon == "SHORT" else "1D"
+        return [
+            f"{background_tf} 背景明顯反向；列為 Conflict，但不改寫方向層共振。"
+        ]
+    return []
 
 def _number_or_none(value: Any) -> float | None:
     try:
