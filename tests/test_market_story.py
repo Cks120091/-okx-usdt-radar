@@ -827,8 +827,55 @@ class MarketStoryV34Tests(unittest.TestCase):
         self.assertTrue(result.signal.timeframe_states["4H"]["can_block_trigger"])
         self.assertEqual(result.signal.timeframe_states["4H"]["role"], "MACD／MA 篩選＋方向／Setup")
         self.assertTrue(result.signal.timeframe_states["1H"]["can_block_trigger"])
-        self.assertEqual(result.signal.timeframe_states["1H"]["role"], "正式 Trigger")
+        self.assertEqual(result.signal.timeframe_states["1H"]["role"], "純價格行為正式 Trigger｜MACD／MA 不設門檻")
 
+
+    def test_long_1h_macd_ma_never_vetoes_same_direction_price_trigger(self):
+        _, setup, trigger = valid_breakout_frames()
+        candles_4h_setup = [
+            replace(c, ts=1_700_000_000_000 + i * 14_400_000)
+            for i, c in enumerate(setup)
+        ]
+        candles_1h_trigger = [
+            replace(c, ts=1_700_000_000_000 + i * 3_600_000)
+            for i, c in enumerate(trigger)
+        ]
+        candles_1d = story_candles(
+            [80 + index * 0.10 for index in range(100)],
+            86_400_000,
+        )
+
+        one_hour = indicator_features(candles_1h_trigger)
+        opposed_1h_momentum = replace(
+            one_hour,
+            sma5=one_hour.sma20 - 2.0,
+            sma10=one_hour.sma20 - 1.0,
+            macd_line=one_hour.macd_signal - 1.0,
+            macd_hist=-1.0,
+            macd_prev_hist=-0.8,
+        )
+
+        def measured(rows):
+            if rows is candles_1h_trigger:
+                return opposed_1h_momentum
+            return indicator_features(rows)
+
+        with patch("radar.market_story.features", side_effect=measured):
+            story = self.engine.analyze_long(
+                candles_1d,
+                candles_4h_setup,
+                candles_1h_trigger,
+            )
+
+        self.assertTrue(story.triggered)
+        self.assertEqual(story.trigger_direction, "LONG")
+        self.assertEqual(
+            story.trigger["trigger_model"],
+            "4H_DIRECTION_1H_PRICE_ACTION",
+        )
+        self.assertTrue(
+            any("1H MA／MACD 僅顯示參考" in item for item in story.neutral)
+        )
 
     def test_long_radar_does_not_allow_1h_trigger_opposite_to_4h_direction(self):
         _, setup, trigger = valid_breakout_frames()
@@ -963,7 +1010,7 @@ class MarketStoryV34Tests(unittest.TestCase):
             "MACD／MA 篩選＋方向／Setup",
         )
         self.assertEqual(story.timeframe_states["4H"]["direction"], "NEUTRAL")
-        self.assertEqual(story.timeframe_states["1H"]["role"], "正式 Trigger")
+        self.assertEqual(story.timeframe_states["1H"]["role"], "純價格行為正式 Trigger｜MACD／MA 不設門檻")
 
 
 if __name__ == "__main__":
