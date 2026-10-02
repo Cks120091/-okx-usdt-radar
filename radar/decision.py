@@ -188,28 +188,9 @@ def _fusion_snapshot(item, direction):
 
 def _conflict_layer(item, direction, groups):
     result = dict(_original_conflict_layer(item, direction, groups))
-    horizon = str(_core._read(item, "radar_horizon", "SHORT")).upper()
-    short_scope = horizon == "SHORT"
+    short_scope = str(_core._read(item, "radar_horizon", "SHORT")).upper() == "SHORT"
     fusion = _fusion_snapshot(item, direction)
     result["fusion_core"] = fusion
-
-    # LONG contract: 4H MACD/MA owns direction; 1H owns price Trigger only.
-    # Any 1H trend/momentum conflict stays visible as quality context, but it
-    # can never pair with price structure to become a hidden entry veto.
-    if horizon == "LONG" and result.get("blocks_entry"):
-        blocking = set(result.get("blocking_domains", []) or [])
-        if "TREND_MOMENTUM" in blocking:
-            blocking.discard("TREND_MOMENTUM")
-            # POSITION_STRUCTURE alone was never a blocking domain; it only
-            # became blocking when paired with TREND_MOMENTUM in the legacy
-            # swing policy. Restore it to advisory after removing that pair.
-            if blocking == {"POSITION_STRUCTURE"}:
-                blocking.clear()
-            result["blocking_domains"] = sorted(blocking)
-            result["blocks_entry"] = bool(blocking)
-            result["swing_1h_indicator_gate_disabled"] = True
-        return result
-
     if not short_scope or not fusion or not result.get("blocks_entry"):
         return result
 
@@ -239,7 +220,7 @@ def _timeframe_direction_alignment(item, direction):
     """Require the direction timeframe to agree with the formal Trigger.
 
     SHORT: completed 1H direction + 15m Trigger; 4H is background.
-    LONG: completed 4H MACD/MA owns direction; 1H price action owns Trigger; 1D is background.
+    LONG: completed 4H direction/setup + 1H Trigger; 1D is background.
     The hidden fusion consolidates correlated EMA/RSI/MACD observations.
     """
     horizon = str(_core._read(item, "radar_horizon", "SHORT")).upper()
@@ -279,18 +260,18 @@ def _timeframe_direction_alignment(item, direction):
         reason = (
             "4H 方向資料不足，請重新掃描確認；1H 不單獨決定多空。"
             if bias == "UNKNOWN"
-            else "4H MACD／MA 方向尚未成立，1H 價格變化只供觀察。"
+            else "4H MACD／MA 尚未共振，等待方向明確後再由 1H 同向觸發。"
         )
     elif passed:
         reason = (
-            f"4H {swing['label']}，1H 純價格 "
-            f"{'做多' if direction == 'LONG' else '做空'} Trigger 同向成立。"
+            f"4H {swing['label']}，1H "
+            f"{'做多' if direction == 'LONG' else '做空'}觸發同向。"
         )
     else:
         reason = (
             f"4H {swing['label']}，只允許"
             f"{'做多' if bias == 'LONG' else '做空'}；"
-            "1H 反向價格 Trigger 不允許新進場。"
+            "1H 反向 Trigger 僅供觀察，不允許反向新進場。"
         )
     return {
         "required": True,
@@ -624,7 +605,7 @@ def build_decision_context(*args, **kwargs):
         final["risk_warnings"] = _core._unique(warnings)[:3]
 
     # SHORT: 4H background -> 1H direction -> 15m trigger.
-    # LONG: 1D background -> 4H MACD/MA direction -> 1H price trigger.
+    # LONG: 1D background -> 4H direction/setup -> 1H trigger.
     if (
         str(final.get("status") or "").upper() == "ENTER"
         and alignment.get("required") is True
@@ -648,9 +629,10 @@ def build_decision_context(*args, **kwargs):
 
     final["timeframe_alignment"] = alignment
 
-    # Apply the ordered quality funnel. SHORT keeps 1H MACD/MA as its formal
-    # direction layer. LONG never uses 1H MACD/MA as a gate: 4H owns direction
-    # and 1H contributes price-action Trigger facts only.
+    # Apply the ordered quality funnel. For SHORT, MACD and MA5/10/20 belong
+    # to the completed 1H direction layer; 15m remains price-action / retest /
+    # Trigger only.  MACD or MA may lead first, but 1H direction is formal only
+    # after both families resonate in the same direction.
     weighted_pipeline = _weighted_pipeline(item, direction, alignment, payload) if item is not None else {}
     payload["weighted_pipeline"] = weighted_pipeline
     final["weighted_score"] = weighted_pipeline.get("score")
