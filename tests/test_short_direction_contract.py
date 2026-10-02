@@ -103,7 +103,7 @@ class ShortDirectionContractTests(unittest.TestCase):
         self.assertTrue(result["resonance"])
         self.assertEqual(result["strength"], "WEAK")
         self.assertEqual(result["state"], "LONG_WEAK")
-        self.assertEqual(result["ma20_state"], "MIXED")
+        self.assertEqual(result["ma20_state"], "BELOW_BOTH")
 
     def test_ma20_only_grades_strength_and_sequence_does_not_matter(self):
         # MA5/10 may already be above MA20 before the second crossover arrives,
@@ -126,7 +126,7 @@ class ShortDirectionContractTests(unittest.TestCase):
         self.assertEqual(result["direction"], "LONG")
         self.assertEqual(result["strength"], "STRONG")
         self.assertEqual(result["state"], "LONG_STRONG")
-        self.assertEqual(result["ma20_state"], "BULL_STACK")
+        self.assertEqual(result["ma20_state"], "ABOVE_BOTH")
         # MA90 is reference only and must not veto the formal resonance.
         self.assertEqual(result["ma90_state"], "BELOW")
         self.assertTrue(result["resonance"])
@@ -149,7 +149,7 @@ class ShortDirectionContractTests(unittest.TestCase):
         self.assertEqual(result["direction"], "SHORT")
         self.assertEqual(result["strength"], "STRONG")
         self.assertEqual(result["state"], "SHORT_STRONG")
-        self.assertEqual(result["ma20_state"], "BEAR_STACK")
+        self.assertEqual(result["ma20_state"], "BELOW_BOTH")
         self.assertTrue(result["resonance"])
 
     def test_swing_4h_uses_exact_same_cross_resonance_engine(self):
