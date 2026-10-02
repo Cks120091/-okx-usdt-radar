@@ -1193,6 +1193,32 @@ class V33ContractTests(unittest.TestCase):
         self.assertIn("signalTradeGrid(item,{original:Boolean(terminal),preview})", html)
         self.assertRegex(worker, r'const SHELL_CACHE = "okx-radar-shell-v[0-9.]+-[a-z-]+";')
 
+    def test_long_episode_tracking_uses_1h_trigger_bars(self):
+        root = Path(__file__).parents[1]
+        strategy = (root / "radar" / "_strategy_core.py").read_text(encoding="utf-8")
+        block = strategy.split("def _analyze_v33", 1)[1].split("def _v33_plan", 1)[0]
+
+        self.assertIn("tracking_candles = (", block)
+        self.assertIn('else candles_timing', block)
+        self.assertIn('"core_timeframe": "15m" if horizon == "SHORT" else "1H"', block)
+        self.assertIn('"plan_timeframe": "15m" if horizon == "SHORT" else "4H"', block)
+        self.assertIn("for item in tracking_candles", block)
+        self.assertIn("closed_candle_ts=tracking_candles[-1].ts", block)
+        self.assertIn("tracking_candles[-1].ts,\n            story,", block)
+
+    def test_backend_resonance_priority_excludes_counter_strong(self):
+        root = Path(__file__).parents[1]
+        scanner = (root / "radar" / "scanner.py").read_text(encoding="utf-8")
+        block = scanner.split("def _signal_sort_key", 1)[1].split(
+            "def _refresh_entry_eligibility", 1
+        )[0]
+
+        self.assertIn("resonance_state in {", block)
+        self.assertIn('"ALIGNED"', block)
+        self.assertIn('"RECOVERY_RESONANCE"', block)
+        self.assertIn('"LEADING_RESONANCE"', block)
+        self.assertNotIn("has_market_resonance = resonance_priority > 0", block)
+
     def test_market_scan_has_no_github_schedule(self):
         root = Path(__file__).parents[1]
         workflows = "\n".join(
