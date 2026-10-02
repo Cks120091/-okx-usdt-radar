@@ -23,7 +23,7 @@ function env(payload){
 }
 const payload={inst_id:'CFX-USDT-SWAP',trigger_id:'cfx-1',horizon:'SHORT',direction:'LONG',entry_policy_version:'SIGNAL_POSITION_SEPARATED_V1',original:{quality_score:90},live:{quality_score:65,price:.05669},verdict:{status:'HARD_GATE_BLOCKED',new_entry_allowed:false,label:'核心訊號條件未成立',reason:'核心條件：NO_FORMAL_TRIGGER',hard_blockers:['NO_FORMAL_TRIGGER']},signal_lifecycle:{status:'ACTIVE',terminal:false}};
 function longSignal(direction='SHORT'){
-  return {inst_id:'LONG-TEST-USDT-SWAP',trigger_id:'original-long-plan',radar_horizon:'LONG',direction,signal_stage:'CONFIRMED',execution_quality:{score:95},entry_low:.6061,entry_high:.6086,stop_loss:.6553,take_profit_1:.4954,take_profit_2:.3895,decision_context:{final:{status:'ENTER',new_entry_allowed:true,timeframe_alignment:{required:true,passed:true,state:'ALIGNED',timeframe:'1D',trigger_timeframe:'1H',timeframe_direction:direction,trigger_direction:direction}}}};
+  return {inst_id:'LONG-TEST-USDT-SWAP',trigger_id:'original-long-plan',radar_horizon:'LONG',direction,signal_stage:'CONFIRMED',execution_quality:{score:95},entry_low:.6061,entry_high:.6086,stop_loss:.6553,take_profit_1:.4954,take_profit_2:.3895,decision_context:{final:{status:'ENTER',new_entry_allowed:true,timeframe_alignment:{required:true,passed:true,state:'ALIGNED',timeframe:'4H',trigger_timeframe:'1H',timeframe_direction:direction,trigger_direction:direction}}}};
 }
 let passed=0;
 async function test(name,fn){await fn();passed++;console.log('PASS '+name);}
