@@ -2574,6 +2574,64 @@ class ScannerTests(unittest.TestCase):
             ],
         )
 
+    def test_signal_sort_prioritizes_continuation_resonance_high_quality_composite(self):
+        def candidate(inst_id, *, trigger_type, quality, resonance_priority):
+            signal = qualified_signal(inst_id)
+            return replace(
+                signal,
+                trigger_type=trigger_type,
+                execution_quality={**signal.execution_quality, "score": quality},
+                market_metrics={
+                    **signal.market_metrics,
+                    "market_resonance": {
+                        "priority": resonance_priority,
+                        "path_state": "ALIGNED" if resonance_priority else "COUNTER",
+                    },
+                },
+                decision_context={
+                    "final": {
+                        "status": "ENTER",
+                        "new_entry_allowed": True,
+                    },
+                    "weighted_pipeline": {"score": 99.0},
+                },
+            )
+
+        best = candidate(
+            "BEST-COMPOSITE",
+            trigger_type="CONTINUATION",
+            quality=80.0,
+            resonance_priority=2,
+        )
+        continuation_high = candidate(
+            "CONTINUATION-HIGH",
+            trigger_type="CONTINUATION",
+            quality=95.0,
+            resonance_priority=0,
+        )
+        resonance_high = candidate(
+            "RESONANCE-HIGH",
+            trigger_type="BREAKOUT",
+            quality=99.0,
+            resonance_priority=4,
+        )
+        ordinary = candidate(
+            "ORDINARY",
+            trigger_type="BREAKOUT",
+            quality=100.0,
+            resonance_priority=0,
+        )
+
+        ordered = sorted(
+            [ordinary, resonance_high, continuation_high, best],
+            key=MarketScanner._signal_sort_key,
+            reverse=True,
+        )
+        self.assertEqual(
+            [item.inst_id for item in ordered],
+            ["BEST-COMPOSITE", "CONTINUATION-HIGH", "RESONANCE-HIGH", "ORDINARY"],
+        )
+
     def test_signal_sort_never_uses_advisory_continuation_to_select_cards(self):
         def candidate(inst_id, continuation, quality):
             signal = qualified_signal(inst_id)
