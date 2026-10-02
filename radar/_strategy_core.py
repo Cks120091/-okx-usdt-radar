@@ -2614,12 +2614,17 @@ class AdaptiveStrategyEngine:
         )
 
     @staticmethod
-    def _feature_metrics(tf: TimeframeFeatures) -> dict[str, float]:
+    def _feature_metrics(tf: TimeframeFeatures) -> dict[str, object]:
         return {
             "close": round(tf.close, 10),
             "ma5": round(tf.sma5, 10),
             "ma10": round(tf.sma10, 10),
             "ma20": round(tf.sma20, 10),
+            "ma90": round(tf.sma90, 10) if math.isfinite(tf.sma90) else None,
+            "ma_last_cross_direction": tf.ma_last_cross_direction,
+            "ma_last_cross_bars_ago": tf.ma_last_cross_bars_ago,
+            "macd_last_cross_direction": tf.macd_last_cross_direction,
+            "macd_last_cross_bars_ago": tf.macd_last_cross_bars_ago,
             "ema21": round(tf.ema21, 10),
             "ema55": round(tf.ema55, 10),
             "ema21_slope_atr": round(tf.ema21_slope_atr, 4),
