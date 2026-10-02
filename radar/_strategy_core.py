@@ -190,6 +190,16 @@ class AdaptiveStrategyEngine:
             candles_bias if horizon == "SHORT" else candles_timing or candles_bias
         )
         hourly_source = candles_bias if horizon == "SHORT" else candles_timing or []
+        # Episode/lifecycle tracking must follow the formal Trigger timeframe:
+        # SHORT uses 15m; LONG uses 1H.  The LONG risk/plan frame remains 4H
+        # through tf_core/candles_core below.
+        tracking_candles = (
+            candles_core
+            if horizon == "SHORT"
+            else candles_timing
+            if candles_timing is not None and len(candles_timing) > 0
+            else candles_core
+        )
         quote_volume_24h = sum(item.quote_volume for item in volume_source[-24:])
         metrics = {
             "last_price": ticker.last,
@@ -230,16 +240,18 @@ class AdaptiveStrategyEngine:
             "volume_ratio_15m": round(tf_core.volume_ratio, 2) if horizon == "SHORT" else None,
             "volume_ratio_5m": round(tf_timing.volume_ratio, 2) if horizon == "SHORT" and tf_timing else None,
             "atr_pct_core": round(tf_core.atr_pct, 3),
-            "core_high": candles_core[-1].high,
-            "core_low": candles_core[-1].low,
-            "core_close": candles_core[-1].close,
-            "core_timestamp": candles_core[-1].ts,
+            "core_high": tracking_candles[-1].high,
+            "core_low": tracking_candles[-1].low,
+            "core_close": tracking_candles[-1].close,
+            "core_timestamp": tracking_candles[-1].ts,
+            "core_timeframe": "15m" if horizon == "SHORT" else "1H",
+            "plan_timeframe": "15m" if horizon == "SHORT" else "4H",
             # Internal ledger input. Scanner/DB serializers remove underscore
             # fields before publishing, while the repository can still recover
             # every closed bar between two on-demand scans.
             "_core_path": [
                 [item.ts, item.high, item.low, item.close]
-                for item in candles_core
+                for item in tracking_candles
             ],
             "trigger_event_ts": story.event_ts,
             "trigger_age_bars": story.event_age_bars,
@@ -292,7 +304,7 @@ class AdaptiveStrategyEngine:
             missing_conditions=_unique([*story.conflicts, *story.neutral])[:10],
             spread_pct=round(ticker.spread_pct, 4),
             quote_volume_24h=round(quote_volume_24h, 2),
-            closed_candle_ts=candles_core[-1].ts,
+            closed_candle_ts=tracking_candles[-1].ts,
             passed_conditions=story.supporting[:10],
             factor_scores={key: float(group["score"]) for key, group in story.groups.items()},
             market_metrics=metrics,
@@ -390,7 +402,7 @@ class AdaptiveStrategyEngine:
             instrument,
             ticker,
             quote_volume_24h,
-            candles_core[-1].ts,
+            tracking_candles[-1].ts,
             story,
             market_state,
             plan,
