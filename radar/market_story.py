@@ -15,7 +15,7 @@ from .short_direction import (
 from .early_warning import short_scan_observation, short_scan_preparation
 
 
-STRATEGY_VERSION = "V3.7_SWING_4H_TRIGGER"
+STRATEGY_VERSION = "V3.7_SWING_1H_PRICE_TRIGGER"
 FEATURE_SCHEMA_VERSION = "3.4.0"
 
 
@@ -1539,7 +1539,7 @@ def _trigger_candidate(
             pre_trigger_missing.append("支撐／壓力拒絕")
         if not opponent_declining:
             pre_trigger_missing.append("原攻擊方衰退")
-        if not control.get("transferred"):
+        if not (trigger_control if price_action_trigger else control.get("transferred")):
             pre_trigger_missing.append("控制權轉移")
         if not price_action_trigger and not momentum.get("confirmed"):
             pre_trigger_missing.append("MA／MACD 完整確認")
@@ -1558,33 +1558,64 @@ def _trigger_candidate(
     pullback_confirmation_index = (
         int(pullback.get("event_index", 0)) if continuation else 0
     )
-    confirmation_index = max(
-        momentum_index,
-        acceptance_index if (breakout or breakout_retest) else 0,
-        pullback_confirmation_index,
-    )
-    if breakout or breakout_retest:
-        onset_indices = [
-            index
-            for index in (acceptance_index, momentum_index)
-            if index > 0
-        ]
-        event_index = min(onset_indices, default=confirmation_index)
-    elif continuation:
-        event_index = int(pullback.get("touch_index", 0)) or confirmation_index
+    if trigger_timeframe == "1H":
+        # Swing 1H is price-action only. MA/MACD must not move the event
+        # timestamp, confirmation timestamp, or confirmation level.
+        confirmation_index = max(
+            acceptance_index if (breakout or breakout_retest) else 0,
+            pullback_confirmation_index,
+            len(candles) - 1 if reversal and trigger_control else 0,
+        )
+        if breakout or breakout_retest:
+            event_index = acceptance_index or confirmation_index
+        elif continuation:
+            event_index = int(pullback.get("touch_index", 0)) or confirmation_index
+        elif reversal:
+            event_index = confirmation_index
+        else:
+            event_index = confirmation_index
+        full = bool(
+            acceptance["state"] == "ROLE_REVERSAL_RETEST"
+            or control.get("follow_through")
+            or (
+                continuation
+                and pullback.get("reactivated")
+                and control.get("micro_defense_broken")
+            )
+            or (
+                reversal
+                and trigger_control
+                and opponent_declining
+            )
+        )
     else:
-        event_index = confirmation_index
+        confirmation_index = max(
+            momentum_index,
+            acceptance_index if (breakout or breakout_retest) else 0,
+            pullback_confirmation_index,
+        )
+        if breakout or breakout_retest:
+            onset_indices = [
+                index
+                for index in (acceptance_index, momentum_index)
+                if index > 0
+            ]
+            event_index = min(onset_indices, default=confirmation_index)
+        elif continuation:
+            event_index = int(pullback.get("touch_index", 0)) or confirmation_index
+        else:
+            event_index = confirmation_index
+        full = bool(momentum.get("full_confirmation")) and (
+            acceptance["state"] == "ROLE_REVERSAL_RETEST"
+            or control.get("follow_through")
+            or (continuation and momentum.get("confirmed"))
+        )
     event_index = min(max(event_index, 0), len(candles) - 1)
     confirmation_index = min(
         max(confirmation_index, event_index),
         len(candles) - 1,
     )
     event_age = len(candles) - 1 - event_index
-    full = bool(momentum.get("full_confirmation")) and (
-        acceptance["state"] == "ROLE_REVERSAL_RETEST"
-        or control.get("follow_through")
-        or (continuation and momentum.get("confirmed"))
-    )
     if early_breakout and not full_breakout:
         full = False
     entry_reference = (
@@ -1687,7 +1718,9 @@ def _trigger_candidate(
         neutral.append("已出現推離，但控制權尚在轉移")
     else:
         neutral.append("對手尚未展現真實推離能力")
-    if momentum["confirmed"]:
+    if trigger_timeframe == "1H":
+        neutral.append("1H MA／MACD 僅顯示參考，不參與 Trigger、階段或品質放行")
+    elif momentum["confirmed"]:
         supporting.append(momentum["label"])
     elif momentum["partial"]:
         neutral.append(momentum["label"])
@@ -1771,12 +1804,27 @@ def _trigger_candidate(
         launch_missing.append("原方向開始推離")
     if not launch_facts["micro_defense_broken"]:
         launch_missing.append("突破微型防守")
+    price_fact_score = (
+        85.0
+        if at_reversal_zone
+        or acceptance["state"] in ("ACCEPTED", "ROLE_REVERSAL_RETEST")
+        or pullback.get("reactivated")
+        else 45.0
+    )
     explainability_score = round(
         _clamp(
-            (85.0 if at_reversal_zone or acceptance["state"] in ("ACCEPTED", "ROLE_REVERSAL_RETEST") else 45.0) * 0.30
-            + float(control["score"]) * 0.35
-            + float(momentum["score"]) * 0.25
-            + (75.0 if opponent_declining or bias_aligned else 45.0) * 0.10,
+            (
+                price_fact_score * 0.40
+                + float(control["score"]) * 0.45
+                + (75.0 if opponent_declining or bias_aligned else 45.0) * 0.15
+            )
+            if trigger_timeframe == "1H"
+            else (
+                price_fact_score * 0.30
+                + float(control["score"]) * 0.35
+                + float(momentum["score"]) * 0.25
+                + (75.0 if opponent_declining or bias_aligned else 45.0) * 0.10
+            ),
             0.0,
             100.0,
         ),
@@ -1849,15 +1897,15 @@ def _trigger_candidate(
         "trigger_model": (
             "1H_BIAS_15M_PRICE_ACTION"
             if trigger_timeframe == "15m"
-            else "4H_DIRECTION_4H_PRICE_ACTION"
-            if trigger_timeframe == "4H"
+            else "4H_DIRECTION_1H_PRICE_ACTION"
+            if trigger_timeframe == "1H"
             else "CORE_PRICE_ACTION"
         ),
         "permission_note": (
             "15m 短線：1H MA／MACD 定方向，15m 價格行為建立 Trigger；15m MA／MACD 僅供觀察。"
             if trigger_timeframe == "15m"
-            else "4H 波段：1D 僅作背景，4H MACD／MA 定方向並由 4H 價格行為建立正式 Trigger；不使用 1H 作交易判定。"
-            if trigger_timeframe == "4H"
+            else "4H 波段：1D 僅作背景，4H MACD／MA 定方向；1H 只用價格行為建立正式 Trigger，1H MA／MACD 不參與放行、否決、階段或品質。"
+            if trigger_timeframe == "1H"
             else "Trigger 只由核心價格事實決定；Context 與 Execution Quality 無權取消。"
         ),
     }
