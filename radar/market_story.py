@@ -15,7 +15,7 @@ from .short_direction import (
 from .early_warning import short_scan_observation, short_scan_preparation
 
 
-STRATEGY_VERSION = "V3.6_MACD_MA_HIERARCHY"
+STRATEGY_VERSION = "V3.7_SWING_4H_TRIGGER"
 FEATURE_SCHEMA_VERSION = "3.4.0"
 
 
@@ -165,20 +165,21 @@ class MarketStoryEngine:
         self,
         candles_1d: list[Candle],
         candles_4h: list[Candle],
-        candles_1h: list[Candle],
+        candles_1h: list[Candle] | None = None,
         previous_story: dict[str, Any] | None = None,
     ) -> StoryAssessment:
-        # LONG radar V3.5: 1D keeps the macro bias, 4H is the setup/location
-        # context, and the completed 1H candle becomes the formal price Trigger.
-        # This makes the swing radar earlier without letting 1H trigger freely:
-        # the 4H frame remains part of directional/setup scoring.
+        # LONG radar V3.7: 1D is background only. 4H owns both direction and
+        # the formal price Trigger. The 1H series is accepted only for backward
+        # compatibility with callers and is deliberately ignored by the swing
+        # signal path.
+        del candles_1h
         return self._analyze(
             horizon="LONG",
             higher_candles=candles_1d,
             bias_candles=candles_4h,
-            core_candles=candles_1h,
+            core_candles=candles_4h,
             timing_candles=None,
-            frame_names=("1D", "4H", "1H", "—"),
+            frame_names=("1D", "4H", "4H", "—"),
             previous_story=previous_story,
         )
 
@@ -249,13 +250,15 @@ class MarketStoryEngine:
                 confirmation_window,
                 self.early_signal_max_age_bars,
                 self.max_early_entry_extension_atr,
-                price_action_trigger=(horizon == "SHORT"),
+                price_action_trigger=True,
+                bias_direction=canonical_bias["direction"],
+                trigger_timeframe=frame_names[2],
             )
             for candidate_direction in ("LONG", "SHORT")
         }
-        # Direction ownership is explicit and symmetric:
-        # SHORT: 1H owns direction, 15m only triggers.
-        # LONG: 4H owns direction/setup, 1H only triggers; 1D is background.
+        # Direction ownership is explicit:
+        # SHORT: 1H owns direction, 15m triggers.
+        # LONG: 1D is background; 4H owns both direction and formal Trigger.
         long_bias_direction = canonical_bias["direction"]
         if canonical_bias["direction"] in ("LONG", "SHORT"):
             selected = dict(candidates[canonical_bias["direction"]])
@@ -562,15 +565,16 @@ class MarketStoryEngine:
                 can_block_trigger=False,
             )
             timeframe_states["4H"].update(
-                role="MACD／MA 篩選＋方向／Setup",
+                role="MACD／MA 方向＋正式 Trigger",
                 direction=canonical_bias["direction"],
-                label=canonical_bias["label"],
+                label=(
+                    f"{canonical_bias['label']}｜"
+                    f"{_stage_label(stage, trigger_direction)}"
+                ),
                 score=canonical_bias["score"],
                 can_block_trigger=True,
-            )
-            timeframe_states["1H"].update(
-                role="正式 Trigger",
-                can_block_trigger=True,
+                trigger_stage=stage,
+                trigger_direction=trigger_direction,
             )
         summary = _human_summary(
             trigger_direction,
@@ -595,7 +599,7 @@ class MarketStoryEngine:
             "missing_sources": [],
         }
         raw = {
-            "entry_policy_version": "SHORT_CONTEXT_WINDOW_V2" if horizon == "SHORT" else "SWING_4H_MACD_MA_V2",
+            "entry_policy_version": "SHORT_CONTEXT_WINDOW_V2" if horizon == "SHORT" else "SWING_4H_SELF_TRIGGER_V3",
             "direction_long_score": round(long_score, 1),
             "higher_long_score": round(higher_long, 1),
             "bias_long_score": round(bias_long, 1),
@@ -1372,6 +1376,8 @@ def _trigger_candidate(
     early_signal_max_age_bars: int,
     max_early_entry_extension_atr: float,
     price_action_trigger: bool = False,
+    bias_direction: str | None = None,
+    trigger_timeframe: str = "CORE",
 ) -> dict[str, Any]:
     is_long = direction == "LONG"
     side_zone = zones.get("support" if is_long else "resistance")
@@ -1398,7 +1404,9 @@ def _trigger_candidate(
     opponent_declining = opposing.get("state") == "DECLINING"
     pullback = _pullback_reactivation(candles, tf, direction, side_zone)
     bias_score = _direction_score(tf_bias)
-    if price_action_trigger:
+    if bias_direction in {"LONG", "SHORT"}:
+        bias_aligned = bias_direction == direction
+    elif price_action_trigger:
         bias_aligned = hourly_direction(tf_bias)["direction"] == direction
     else:
         bias_aligned = swing_direction(tf_bias)["direction"] == direction
@@ -1514,9 +1522,11 @@ def _trigger_candidate(
             pre_trigger_missing.append("回踩重新啟動")
         if not control.get("push_away"):
             pre_trigger_missing.append("原方向 Push-Away")
-        if not momentum.get("partial"):
+        if not price_action_trigger and not momentum.get("partial"):
             pre_trigger_missing.append("MA／MACD 動能呼應")
-        if not (control.get("micro_defense_broken") or momentum.get("confirmed")):
+        if not control.get("micro_defense_broken") and (
+            not price_action_trigger and not momentum.get("confirmed")
+        ):
             pre_trigger_missing.append("微型防守突破／完整動能確認")
     elif pre_trigger_type == "BREAKOUT":
         if acceptance["state"] not in ("ACCEPTED", "ROLE_REVERSAL_RETEST"):
@@ -1534,7 +1544,7 @@ def _trigger_candidate(
             pre_trigger_missing.append("原攻擊方衰退")
         if not control.get("transferred"):
             pre_trigger_missing.append("控制權轉移")
-        if not momentum.get("confirmed"):
+        if not price_action_trigger and not momentum.get("confirmed"):
             pre_trigger_missing.append("MA／MACD 完整確認")
 
     pre_trigger = pre_trigger_type != "NONE"
@@ -1685,7 +1695,10 @@ def _trigger_candidate(
     elif momentum["partial"]:
         neutral.append(momentum["label"])
     elif price_action_trigger:
-        neutral.append("15m MA／MACD 僅供觀察；短線 Trigger 由 1H 方向＋15m 價格行為決定")
+        neutral.append(
+            f"{trigger_timeframe} MA／MACD 僅供觀察；正式 Trigger 由上層方向＋"
+            f"{trigger_timeframe} 價格行為決定"
+        )
     else:
         conflicts.append("MA／MACD 尚未在合理窗口呼應")
     if compression_block:
