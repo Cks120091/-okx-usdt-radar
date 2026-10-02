@@ -155,7 +155,7 @@ class V33ContractTests(unittest.TestCase):
         self.assertIn('<body data-active-group="home">', html)
         self.assertIn('body:not([data-active-group="home"]) .command-deck', html)
         self.assertIn("document.body.dataset.activeGroup=group", html)
-        self.assertIn("okx-radar-shell-v4.42-priority-composite", service_worker)
+        self.assertIn("okx-radar-shell-v4.43-quality-first", service_worker)
         self.assertIn("市場方向 · 24H 全市場平均 RSI", html)
         self.assertIn("bias.market_average_rsi", html)
         self.assertIn("rsi24.market_rsi_24h_label", html)
@@ -284,7 +284,7 @@ class V33ContractTests(unittest.TestCase):
         self.assertIn("Setup 起始（台灣 UTC+8）", html)
         self.assertIn("正式觸發確認（台灣 UTC+8）", html)
         self.assertNotIn("status!=='ENTRY_READY'&&status!=='MISSED_ENTRY'", html)
-        self.assertIn("okx-radar-shell-v4.42-priority-composite", service_worker)
+        self.assertIn("okx-radar-shell-v4.43-quality-first", service_worker)
         self.assertIn("$('#preflightRefresh').addEventListener('click',()=>loadPreflight(true))", html)
         self.assertIn("${decisionPanel(item)}", html)
         self.assertNotIn("showPreflight", html)
@@ -384,11 +384,11 @@ class V33ContractTests(unittest.TestCase):
         self.assertIn("tierDiff", comparator)
         self.assertIn("resonanceDiff", comparator)
         self.assertLess(
-            comparator.index("tierDiff="),
             comparator.index("qualityDiff="),
+            comparator.index("tierDiff="),
         )
         self.assertLess(
-            comparator.index("qualityDiff="),
+            comparator.index("tierDiff="),
             comparator.index("resonanceDiff="),
         )
         self.assertIn("highQuality=quality(item)>=80", comparator)
@@ -1218,6 +1218,8 @@ class V33ContractTests(unittest.TestCase):
         self.assertIn('"RECOVERY_RESONANCE"', block)
         self.assertIn('"LEADING_RESONANCE"', block)
         self.assertNotIn("has_market_resonance = resonance_priority > 0", block)
+        sort_tuple = block.split("return (", 1)[1].split(")", 1)[0]
+        self.assertLess(sort_tuple.index("execution_score"), sort_tuple.index("composite_priority"))
 
     def test_market_scan_has_no_github_schedule(self):
         root = Path(__file__).parents[1]
