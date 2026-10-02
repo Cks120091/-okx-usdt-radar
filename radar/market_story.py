@@ -1481,7 +1481,6 @@ def _trigger_candidate(
             ),
             "indicator_confirmation_required": False,
         }
-    )
     trigger_control = (
         price_control_transferred if price_action_trigger else bool(control["transferred"])
     )
