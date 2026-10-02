@@ -134,39 +134,7 @@ class SignalPositionSeparationTests(unittest.TestCase):
             "TIMEFRAME_DIRECTION_ALIGNMENT",
         )
 
-    def test_long_1h_macd_ma_conflict_never_becomes_hidden_entry_veto(self):
-        item = signal_dict("LONG", "LONG", 100.0)
-        item["market_metrics"]["raw_indicators"]["4H"].update({
-            "ma5": 105.0,
-            "ma10": 103.0,
-            "ma20": 100.0,
-            "macd_line": 1.0,
-            "macd_signal": 0.5,
-            "macd_hist": 0.5,
-            "macd_prev_hist": 0.3,
-        })
-        item["evidence_groups"]["position_structure"].update({
-            "stance": "CONFLICT",
-            "conflicts": ["價格結構仍有回撤"],
-        })
-        item["evidence_groups"]["trend_momentum"].update({
-            "stance": "CONFLICT",
-            "conflicts": ["1H MACD／MA 暫時反向"],
-            "source_timeframe": "4H_DIRECTION+1H_PRICE",
-            "evidence_scope": "QUALITY_ONLY",
-            "indicator_gate": False,
-        })
-
-        result = build_decision_context(item)
-
-        self.assertFalse(result["conflict"]["blocks_entry"])
-        self.assertTrue(
-            result["conflict"].get("swing_1h_indicator_gate_disabled")
-        )
-        self.assertEqual(result["final"]["status"], "ENTER")
-        self.assertTrue(result["final"]["new_entry_allowed"])
-
-    def test_long_4h_forming_can_set_early_direction_for_same_side_1h_trigger(self):
+    def test_long_4h_forming_never_allows_1h_formal_trigger(self):
         item = signal_dict("LONG", "LONG", 100.0)
         item["market_metrics"]["raw_indicators"]["4H"].update({
             "ma5": 105.0,
@@ -176,23 +144,13 @@ class SignalPositionSeparationTests(unittest.TestCase):
             "macd_signal": 0.1,
             "macd_hist": -0.3,
             "macd_prev_hist": -0.4,
-            "fusion_long_score": 10.0,
+            "fusion_long_score": 90.0,
         })
         final = build_decision_context(item)["final"]
-        self.assertTrue(final["timeframe_alignment"]["passed"])
-        self.assertEqual(final["timeframe_alignment"]["timeframe_direction"], "LONG")
-        self.assertEqual(final["timeframe_alignment"]["bias_state"], "LONG_EARLY")
-        self.assertEqual(final["status"], "ENTER")
-        self.assertTrue(final["new_entry_allowed"])
-
-        opposite = signal_dict("SHORT", "LONG", 100.0)
-        opposite["market_metrics"]["raw_indicators"]["4H"].update(
-            item["market_metrics"]["raw_indicators"]["4H"]
-        )
-        blocked = build_decision_context(opposite)["final"]
-        self.assertFalse(blocked["timeframe_alignment"]["passed"])
-        self.assertEqual(blocked["status"], "WAIT")
-        self.assertFalse(blocked["new_entry_allowed"])
+        self.assertFalse(final["timeframe_alignment"]["passed"])
+        self.assertEqual(final["timeframe_alignment"]["timeframe_direction"], "NEUTRAL")
+        self.assertEqual(final["status"], "WAIT")
+        self.assertFalse(final["new_entry_allowed"])
 
     def test_present_but_corrupt_direction_data_does_not_grant_permission(self):
         for bad in (None, "bad", float("nan"), 101, -1):
