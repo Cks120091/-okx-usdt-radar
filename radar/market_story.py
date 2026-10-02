@@ -524,11 +524,19 @@ class MarketStoryEngine:
             supporting,
             conflicts,
             neutral,
+            price_only_core=(horizon == "LONG"),
         )
         if horizon == "SHORT":
             for key in ("position_structure", "trend_momentum"):
                 groups[key]["source_timeframe"] = "15m"
                 groups[key]["evidence_scope"] = "CORE"
+        else:
+            groups["trend_momentum"].update(
+                source_timeframe="4H_DIRECTION+1H_PRICE",
+                evidence_scope="QUALITY_ONLY",
+                indicator_gate=False,
+                note="1H MACD／MA 不參與波段 Trigger 或品質放行",
+            )
         timeframe_states = _timeframe_states(
             horizon,
             frame_names,
@@ -1381,7 +1389,25 @@ def _trigger_candidate(
     breakout_zone = zones.get("resistance" if is_long else "support")
     micro_zone = zones.get("micro_resistance" if is_long else "micro_support")
     acceptance = _price_acceptance(candles, breakout_zone, direction, tf.atr14)
-    momentum = _momentum_confirmation(candles, direction, confirmation_window)
+    price_only_swing_trigger = trigger_timeframe == "1H"
+    momentum = (
+        {
+            "confirmed": False,
+            "partial": False,
+            "full_confirmation": False,
+            "ma_response": False,
+            "macd_response": False,
+            "event_index": 0,
+            "window_bars": 0,
+            "score": 50.0,
+            "label": "1H 僅判讀價格行為；MACD／MA 不參與波段 Trigger",
+            "ignored": True,
+            "affects_trigger": False,
+            "affects_quality": False,
+        }
+        if price_only_swing_trigger
+        else _momentum_confirmation(candles, direction, confirmation_window)
+    )
     control = _control_transfer(
         candles,
         tf,
@@ -1399,7 +1425,13 @@ def _trigger_candidate(
     )
     rejection = tf.lower_wick_ratio >= 0.32 if is_long else tf.upper_wick_ratio >= 0.32
     opponent_declining = opposing.get("state") == "DECLINING"
-    pullback = _pullback_reactivation(candles, tf, direction, side_zone)
+    pullback = _pullback_reactivation(
+        candles,
+        tf,
+        direction,
+        side_zone,
+        allow_ma_touch=not price_only_swing_trigger,
+    )
     bias_score = _direction_score(tf_bias)
     if bias_direction in {"LONG", "SHORT"}:
         bias_aligned = bias_direction == direction
@@ -1409,9 +1441,10 @@ def _trigger_candidate(
         bias_aligned = swing_direction(tf_bias)["direction"] == direction
     compression_block = compression.get("blocks_direction") == direction
 
-    # SHORT horizon: 1H MA/MACD lives in tf_bias and sets directional bias.
-    # The 15m core Trigger is price-action first; its own MA/MACD remains
-    # telemetry only and must not delay REVERSAL / BREAKOUT / CONTINUATION.
+    # Direction lives on the parent timeframe. The lower Trigger timeframe is
+    # price-action first. For LONG specifically, 1H MACD/MA is excluded from
+    # Trigger, stage and quality permission because a healthy 4H trend may
+    # naturally contain a 1H pullback.
     price_control_transferred = bool(
         control["push_away"]
         and (
@@ -1419,6 +1452,35 @@ def _trigger_candidate(
             or acceptance["state"] in ("ACCEPTED", "ROLE_REVERSAL_RETEST")
         )
         and not control["opponent_reclaimed"]
+    )
+    if price_only_swing_trigger:
+        control = {
+            **control,
+            "transferred": price_control_transferred,
+            "state": (
+                "LONG_CONTROL"
+                if price_control_transferred and is_long
+                else "SHORT_CONTROL"
+                if price_control_transferred
+                else "TRANSFERRING"
+                if control["push_away"]
+                else "UNRESOLVED"
+            ),
+            "label": (
+                f"{'買方' if is_long else '賣方'}開始取得價格控制"
+                if price_control_transferred
+                else "價格控制權轉移中"
+                if control["push_away"]
+                else "尚未出現真實價格控制權轉移"
+            ),
+            "score": (
+                (35.0 if control["push_away"] else 0.0)
+                + (30.0 if control["micro_defense_broken"] else 0.0)
+                + (20.0 if not control["opponent_reclaimed"] else 0.0)
+                + (15.0 if control["follow_through"] else 0.0)
+            ),
+            "indicator_confirmation_required": False,
+        }
     )
     trigger_control = (
         price_control_transferred if price_action_trigger else bool(control["transferred"])
@@ -1676,10 +1738,15 @@ def _trigger_candidate(
         else:
             stage, freshness = "EXTENDED", "EXTENDED"
     else:
+        trigger_progress = (
+            bool(control["micro_defense_broken"])
+            if price_only_swing_trigger
+            else bool(momentum["partial"])
+        )
         near_facts = sum(
             (
                 at_reversal_zone or acceptance["state"] in ("BREAKING", "ACCEPTED"),
-                bool(momentum["partial"]),
+                trigger_progress,
                 bool(control["push_away"]),
                 opponent_declining or bias_aligned,
             )
@@ -2203,6 +2270,8 @@ def _pullback_reactivation(
     tf: TimeframeFeatures,
     direction: str,
     zone: DynamicZone | None,
+    *,
+    allow_ma_touch: bool = True,
 ) -> dict[str, Any]:
     is_long = direction == "LONG"
     touched_zone = False
@@ -2216,7 +2285,9 @@ def _pullback_reactivation(
             and candle.low <= zone.upper
             and candle.high >= zone.lower
         )
-        ma_touch = candle.low <= tf.sma10 <= candle.high
+        ma_touch = bool(
+            allow_ma_touch and candle.low <= tf.sma10 <= candle.high
+        )
         counter_move = (
             candle.close < candle.open or candle.close < candles[index - 1].close
             if is_long
@@ -2327,15 +2398,26 @@ def _evidence_groups(
     supporting: list[str],
     conflicts: list[str],
     neutral: list[str],
+    *,
+    price_only_core: bool = False,
 ) -> dict[str, dict[str, Any]]:
     position_score = 80.0 if candidate.get("position_valid") else 50.0 if location["key"] != "RANGE_MIDDLE" else 25.0
     trend_direction_score = direction_score if direction == "LONG" else 100.0 - direction_score
-    trend_score = _clamp(
-        trend_direction_score * 0.35
-        + float(candidate.get("momentum_confirmation", {}).get("score", 50.0)) * 0.35
-        + float(candidate.get("control_transfer", {}).get("score", 50.0)) * 0.30,
-        0.0,
-        100.0,
+    trend_score = (
+        _clamp(
+            trend_direction_score * 0.55
+            + float(candidate.get("control_transfer", {}).get("score", 50.0)) * 0.45,
+            0.0,
+            100.0,
+        )
+        if price_only_core
+        else _clamp(
+            trend_direction_score * 0.35
+            + float(candidate.get("momentum_confirmation", {}).get("score", 50.0)) * 0.35
+            + float(candidate.get("control_transfer", {}).get("score", 50.0)) * 0.30,
+            0.0,
+            100.0,
+        )
     )
     return {
         "position_structure": _group(
