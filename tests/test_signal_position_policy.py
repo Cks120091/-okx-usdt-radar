@@ -79,7 +79,7 @@ class SignalPositionSeparationTests(unittest.TestCase):
                             self.assertEqual(item, before)
 
     def test_mtf_mismatch_always_wins_over_position(self):
-        for horizon, timeframe in (("SHORT", "1H"), ("LONG", "1D")):
+        for horizon, timeframe in (("SHORT", "1H"), ("LONG", "4H")):
             for direction in ("LONG", "SHORT"):
                 item = signal_dict(direction, horizon, 101)
                 item["market_metrics"]["raw_indicators"][timeframe]["fusion_long_score"] = 35 if direction == "LONG" else 65
@@ -90,13 +90,13 @@ class SignalPositionSeparationTests(unittest.TestCase):
 
     def test_present_but_corrupt_direction_data_does_not_grant_permission(self):
         for bad in (None, "bad", float("nan"), 101, -1):
-            for timeframe, horizon in (("1H", "SHORT"), ("1D", "LONG")):
+            for timeframe, horizon in (("1H", "SHORT"), ("4H", "LONG")):
                 item = signal_dict(horizon=horizon)
                 item["market_metrics"]["raw_indicators"][timeframe]["fusion_long_score"] = bad
                 self.assertFalse(build_decision_context(item)["final"]["new_entry_allowed"])
 
     def test_neutral_direction_waits_in_both_horizons(self):
-        for timeframe, horizon in (("1H", "SHORT"), ("1D", "LONG")):
+        for timeframe, horizon in (("1H", "SHORT"), ("4H", "LONG")):
             item = signal_dict(horizon=horizon)
             item["market_metrics"]["raw_indicators"][timeframe]["fusion_long_score"] = 50
             final = build_decision_context(item)["final"]
