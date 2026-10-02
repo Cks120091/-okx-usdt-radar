@@ -4983,6 +4983,16 @@ class MarketScanner:
             "formal_direction": formal_direction,
             "pending_direction": pending_direction,
             "resonance": resonance,
+            "macd_cross": (
+                str(direction_info.get("macd_last_cross_direction") or "NONE")
+                if int(direction_info.get("macd_last_cross_bars_ago", -1) or -1) == 0
+                else "NONE"
+            ),
+            "ma_cross": (
+                str(direction_info.get("ma_last_cross_direction") or "NONE")
+                if int(direction_info.get("ma_last_cross_bars_ago", -1) or -1) == 0
+                else "NONE"
+            ),
             "timeframe": str(timeframe or "1H"),
         }
 
