@@ -27,6 +27,7 @@ from .continuation import (
 from .intraday_flow import summarize_intraday_flow
 from .entry_window import can_continue as entry_window_can_continue
 from .indicators import features
+from .short_direction import LONG_POLICY, POLICY, macd_ma_direction
 from .decision import build_decision_context
 from .models import Candle, Instrument, MarketContext, MarketState, RadarReport, Signal, Ticker
 from .market_scope import XAU_INST_ID
@@ -4898,72 +4899,48 @@ class MarketScanner:
         candles: list[Candle],
         timeframe: str = "1H",
     ) -> dict[str, Any]:
-        """Cheap MACD/MA direction filter before the horizon's Trigger core.
+        """Admit formal or forming MACD/MA crossover candidates.
 
-        MACD is 12/26/9 and MA5/10/20 defines the trend state on the supplied
-        timeframe.  Either family may lead first.  The short radar supplies 1H
-        before its 15m Trigger; the swing radar supplies 4H before its 1H
-        Trigger.  Exact equality/touching is deliberately not a cross.
+        One family crossing first is allowed into analysis as FORMING so the
+        radar can wait for the second family.  Only Market Story / Decision may
+        grant formal direction after same-side resonance.
         """
-        if len(candles) < 61:
-            return {"passed": False, "state": "INSUFFICIENT", "direction": "NEUTRAL"}
+        if len(candles) < 60:
+            return {
+                "passed": False,
+                "state": "INSUFFICIENT",
+                "direction": "NEUTRAL",
+                "formal_direction": "NEUTRAL",
+                "resonance": False,
+            }
         current = features(candles)
-        previous = features(candles[:-1])
-
-        prev_diff = previous.macd_line - previous.macd_signal
-        curr_diff = current.macd_line - current.macd_signal
-        bull_cross = prev_diff < 0.0 and curr_diff > 0.0
-        bear_cross = prev_diff > 0.0 and curr_diff < 0.0
-
-        bull_ma = current.sma5 > current.sma10 > current.sma20
-        bear_ma = current.sma5 < current.sma10 < current.sma20
-        bull_ma_fast = current.sma5 > current.sma10
-        bear_ma_fast = current.sma5 < current.sma10
-        bull_macd = curr_diff > 0.0
-        bear_macd = curr_diff < 0.0
-        bull_macd_improving = curr_diff > prev_diff
-        bear_macd_improving = curr_diff < prev_diff
-
-        # Trend-first prefilter: MACD or MA may lead.  Do not require a fixed
-        # order.  A single leading family is admitted as FORMING only when the
-        # other family is not already in a clear opposite full-stack trend.
-        # Formal entry later requires same-direction MACD x MA resonance.
-        bull_resonant = bull_macd and bull_ma
-        bear_resonant = bear_macd and bear_ma
-        bull_leading = (
-            (bull_macd and not bear_ma)
-            or (bull_ma and bull_macd_improving)
-            or (bull_ma_fast and bull_macd_improving and not bear_ma)
+        policy = POLICY if str(timeframe).upper() == "1H" else LONG_POLICY
+        direction_info = macd_ma_direction(
+            current,
+            timeframe=str(timeframe or "1H"),
+            policy=policy,
         )
-        bear_leading = (
-            (bear_macd and not bull_ma)
-            or (bear_ma and bear_macd_improving)
-            or (bear_ma_fast and bear_macd_improving and not bull_ma)
+        formal_direction = str(direction_info.get("direction") or "NEUTRAL")
+        pending_direction = str(
+            direction_info.get("pending_direction") or "NEUTRAL"
         )
-        bullish = bull_resonant or bull_leading
-        bearish = bear_resonant or bear_leading
-        if bullish and not bearish:
-            direction = "LONG"
-            state = "CONFIRMED" if bull_resonant and bull_cross else "CONTINUING" if bull_resonant else "FORMING"
-        elif bearish and not bullish:
-            direction = "SHORT"
-            state = "CONFIRMED" if bear_resonant and bear_cross else "CONTINUING" if bear_resonant else "FORMING"
-        else:
-            direction = "NEUTRAL"
-            state = "REJECTED"
+        candidate_direction = (
+            formal_direction
+            if formal_direction in {"LONG", "SHORT"}
+            else pending_direction
+            if pending_direction in {"LONG", "SHORT"}
+            else "NEUTRAL"
+        )
         return {
-            "passed": direction in {"LONG", "SHORT"},
-            "state": state,
-            "direction": direction,
-            "macd_cross": "BULL" if bull_cross else "BEAR" if bear_cross else "NONE",
-            "macd_state": "BULL" if bull_macd else "BEAR" if bear_macd else "NEUTRAL",
-            "macd_improving": bull_macd_improving if direction == "LONG" else bear_macd_improving if direction == "SHORT" else False,
-            "ma_state": "BULL" if bull_ma else "BEAR" if bear_ma else "MIXED",
-            "ma_fast_state": "BULL" if bull_ma_fast else "BEAR" if bear_ma_fast else "MIXED",
-            "trend_resonance": bull_resonant or bear_resonant,
-            "policy": "MACD_MA_ANY_ORDER_RESONANCE_V1",
+            **direction_info,
+            "passed": candidate_direction in {"LONG", "SHORT"},
+            "direction": candidate_direction,
+            "formal_direction": formal_direction,
+            "pending_direction": pending_direction,
+            "resonance": bool(direction_info.get("resonance")),
             "timeframe": str(timeframe or "1H"),
         }
+
 
     def _passes_output_liquidity(
         self,
