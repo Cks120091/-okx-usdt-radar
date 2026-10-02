@@ -3250,9 +3250,19 @@ class MarketScanner:
                     if isinstance(state.trigger, dict)
                     else ""
                 ).upper()
-                continuation_priority = 1 if trigger_type == "CONTINUATION" else 0
+                continuation = trigger_type == "CONTINUATION"
+                has_market_resonance = resonance_priority > 0
+                primary_tier = (
+                    3
+                    if continuation and has_market_resonance
+                    else 2
+                    if continuation
+                    else 1
+                    if has_market_resonance
+                    else 0
+                )
                 rank = (
-                    continuation_priority,
+                    primary_tier,
                     resonance_priority,
                     freshness_priority,
                     stage_priority.get(state.status, 0),
