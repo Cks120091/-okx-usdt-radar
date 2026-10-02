@@ -220,7 +220,7 @@ def _timeframe_direction_alignment(item, direction):
     """Require the direction timeframe to agree with the formal Trigger.
 
     SHORT: completed 1H direction + 15m Trigger; 4H is background.
-    LONG: 1D is background; completed 4H owns both direction and Trigger.
+    LONG: completed 4H MACD/MA owns direction; 1H price action owns Trigger; 1D is background.
     The hidden fusion consolidates correlated EMA/RSI/MACD observations.
     """
     horizon = str(_core._read(item, "radar_horizon", "SHORT")).upper()
@@ -229,7 +229,7 @@ def _timeframe_direction_alignment(item, direction):
 
     direction_tf = "1H" if horizon == "SHORT" else "4H"
     background_tf = "4H" if horizon == "SHORT" else "1D"
-    trigger_tf = "15m" if horizon == "SHORT" else "4H"
+    trigger_tf = "15m" if horizon == "SHORT" else "1H"
     metrics = _core._mapping(_core._read(item, "market_metrics", {}))
     raw = _core._mapping(metrics.get("raw_indicators", {}))
     frame = _core._mapping(raw.get(direction_tf, {}))
@@ -258,20 +258,20 @@ def _timeframe_direction_alignment(item, direction):
     passed = bias in {"LONG", "SHORT"} and bias == direction
     if bias in {"UNKNOWN", "NEUTRAL"}:
         reason = (
-            "4H 方向資料不足，請重新掃描確認。"
+            "4H 方向資料不足，請重新掃描確認；1H 不單獨決定多空。"
             if bias == "UNKNOWN"
-            else "4H MACD／MA 方向尚未成立，等待 4H 自身完成正式 Trigger。"
+            else "4H MACD／MA 方向尚未成立，1H 價格變化只供觀察。"
         )
     elif passed:
         reason = (
-            f"4H {swing['label']}，4H 價格 Trigger "
-            f"{'做多' if direction == 'LONG' else '做空'}同向成立。"
+            f"4H {swing['label']}，1H 純價格 "
+            f"{'做多' if direction == 'LONG' else '做空'} Trigger 同向成立。"
         )
     else:
         reason = (
             f"4H {swing['label']}，只允許"
             f"{'做多' if bias == 'LONG' else '做空'}；"
-            "4H 價格 Trigger 與方向不一致，不允許新進場。"
+            "1H 反向價格 Trigger 不允許新進場。"
         )
     return {
         "required": True,
@@ -285,7 +285,7 @@ def _timeframe_direction_alignment(item, direction):
         ),
         "timeframe": "4H",
         "background_timeframe": "1D",
-        "trigger_timeframe": "4H",
+        "trigger_timeframe": "1H",
         "timeframe_direction": bias,
         "bias_state": swing["state"],
         "trigger_direction": direction,
@@ -605,7 +605,7 @@ def build_decision_context(*args, **kwargs):
         final["risk_warnings"] = _core._unique(warnings)[:3]
 
     # SHORT: 4H background -> 1H direction -> 15m trigger.
-    # LONG: 1D background -> 4H direction + 4H trigger.
+    # LONG: 1D background -> 4H MACD/MA direction -> 1H price trigger.
     if (
         str(final.get("status") or "").upper() == "ENTER"
         and alignment.get("required") is True
