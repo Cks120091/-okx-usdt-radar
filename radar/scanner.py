@@ -4960,13 +4960,29 @@ class MarketScanner:
             if pending_direction in {"LONG", "SHORT"}
             else "NEUTRAL"
         )
+        resonance = bool(direction_info.get("resonance"))
+        latest_cross_now = (
+            int(direction_info.get("ma_last_cross_bars_ago", -1) or -1) == 0
+            or int(direction_info.get("macd_last_cross_bars_ago", -1) or -1) == 0
+        )
+        scan_state = (
+            "CONFIRMED"
+            if resonance and latest_cross_now
+            else "CONTINUING"
+            if resonance
+            else "FORMING"
+            if candidate_direction in {"LONG", "SHORT"}
+            else "REJECTED"
+        )
         return {
             **direction_info,
             "passed": candidate_direction in {"LONG", "SHORT"},
+            "state": scan_state,
+            "direction_state": direction_info.get("state"),
             "direction": candidate_direction,
             "formal_direction": formal_direction,
             "pending_direction": pending_direction,
-            "resonance": bool(direction_info.get("resonance")),
+            "resonance": resonance,
             "timeframe": str(timeframe or "1H"),
         }
 
