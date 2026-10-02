@@ -185,7 +185,7 @@ async function test(name,fn){await fn();passed++;console.log('PASS '+name);}
     for(const change of [{signal_stage:'PRE_TRIGGER'},{preview:true},{expired:true},{read_only:true}]){
       const item={...aligned,...change};assert.equal(c.longSignalGroups({long_signals:[item]}).formal.length,0);assert.ok(!c.currentEntryBadge(item).includes('訊號已觸發'));
     }
-    for(const change of [{passed:false,timeframe_direction:'NEUTRAL'},{passed:null,state:'UNKNOWN'},{timeframe:'4H'},{timeframe_direction:'LONG'}]){
+    for(const change of [{passed:false,timeframe_direction:'NEUTRAL'},{passed:null,state:'UNKNOWN'},{timeframe:'1D'},{timeframe_direction:'LONG'}]){
       const item=structuredClone(aligned);Object.assign(item.decision_context.final.timeframe_alignment,change);
       assert.equal(c.longSignalGroups({long_signals:[item]}).formal.length,0);assert.ok(!c.currentEntryBadge(item).includes('訊號已觸發'));
     }
