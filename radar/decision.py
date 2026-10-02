@@ -188,9 +188,28 @@ def _fusion_snapshot(item, direction):
 
 def _conflict_layer(item, direction, groups):
     result = dict(_original_conflict_layer(item, direction, groups))
-    short_scope = str(_core._read(item, "radar_horizon", "SHORT")).upper() == "SHORT"
+    horizon = str(_core._read(item, "radar_horizon", "SHORT")).upper()
+    short_scope = horizon == "SHORT"
     fusion = _fusion_snapshot(item, direction)
     result["fusion_core"] = fusion
+
+    # LONG contract: 4H MACD/MA owns direction; 1H owns price Trigger only.
+    # Any 1H trend/momentum conflict stays visible as quality context, but it
+    # can never pair with price structure to become a hidden entry veto.
+    if horizon == "LONG" and result.get("blocks_entry"):
+        blocking = set(result.get("blocking_domains", []) or [])
+        if "TREND_MOMENTUM" in blocking:
+            blocking.discard("TREND_MOMENTUM")
+            # POSITION_STRUCTURE alone was never a blocking domain; it only
+            # became blocking when paired with TREND_MOMENTUM in the legacy
+            # swing policy. Restore it to advisory after removing that pair.
+            if blocking == {"POSITION_STRUCTURE"}:
+                blocking.clear()
+            result["blocking_domains"] = sorted(blocking)
+            result["blocks_entry"] = bool(blocking)
+            result["swing_1h_indicator_gate_disabled"] = True
+        return result
+
     if not short_scope or not fusion or not result.get("blocks_entry"):
         return result
 
@@ -629,10 +648,9 @@ def build_decision_context(*args, **kwargs):
 
     final["timeframe_alignment"] = alignment
 
-    # Apply the ordered quality funnel. For SHORT, MACD and MA5/10/20 belong
-    # to the completed 1H direction layer; 15m remains price-action / retest /
-    # Trigger only.  MACD or MA may lead first, but 1H direction is formal only
-    # after both families resonate in the same direction.
+    # Apply the ordered quality funnel. SHORT keeps 1H MACD/MA as its formal
+    # direction layer. LONG never uses 1H MACD/MA as a gate: 4H owns direction
+    # and 1H contributes price-action Trigger facts only.
     weighted_pipeline = _weighted_pipeline(item, direction, alignment, payload) if item is not None else {}
     payload["weighted_pipeline"] = weighted_pipeline
     final["weighted_score"] = weighted_pipeline.get("score")
