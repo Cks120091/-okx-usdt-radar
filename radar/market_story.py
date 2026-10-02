@@ -250,15 +250,7 @@ class MarketStoryEngine:
                     self.early_signal_max_age_bars,
                     self.max_early_entry_extension_atr,
                     price_action_trigger=True,
-                    bias_direction=(
-                canonical_bias["direction"]
-                if canonical_bias is not None
-                else "LONG"
-                if bias_long >= 56.0
-                else "SHORT"
-                if bias_long <= 44.0
-                else "NEUTRAL"
-            ),
+                    bias_direction=canonical_bias["direction"],
                     trigger_timeframe=frame_names[2],
                 )
                 for candidate_direction in ("LONG", "SHORT")
@@ -649,7 +641,15 @@ class MarketStoryEngine:
             direction=direction,
             direction_state=direction_state,
             direction_label=direction_label,
-            bias_direction=canonical_bias["direction"],
+            bias_direction=(
+                canonical_bias["direction"]
+                if canonical_bias is not None
+                else "LONG"
+                if bias_long >= 56.0
+                else "SHORT"
+                if bias_long <= 44.0
+                else "NEUTRAL"
+            ),
             trigger_direction=trigger_direction,
             trigger_type=str(selected.get("type", "NONE")),
             stage=stage,
