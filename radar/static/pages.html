@@ -1317,7 +1317,7 @@
         && ['CONFIRMED','REENTRY','TRENDING','EXTENDED'].includes(item.signal_stage)
         && final.status==='ENTER'&&final.new_entry_allowed===true
         && alignment.required===true&&alignment.passed===true
-        && alignment.timeframe===(long?'1D':'1H')&&alignment.trigger_timeframe===(long?'1H':'15m')
+        && alignment.timeframe===(long?'4H':'1H')&&alignment.trigger_timeframe===(long?'1H':'15m')
         && ['LONG','SHORT'].includes(item.direction)
         && alignment.timeframe_direction===item.direction&&alignment.trigger_direction===item.direction;
     }
@@ -1337,7 +1337,7 @@
     function longSignalGroups(report){return signalGroups(report,'LONG')}
     function shortPreparationView(item){return signalPreparationView(item,'SHORT')}
     function signalPreparationView(item,horizon=item.radar_horizon==='LONG'?'LONG':'SHORT'){
-      const final=itemFinalDecision(item),alignment=final.timeframe_alignment||{},long=horizon==='LONG',pair=long?'1D 與 1H':'1H 與 15m',preparation=long?{}:item.market_story?.preparation||item.market_story?.raw?.preparation||{};
+      const final=itemFinalDecision(item),alignment=final.timeframe_alignment||{},long=horizon==='LONG',pair=long?'4H 與 1H':'1H 與 15m',preparation=long?{}:item.market_story?.preparation||item.market_story?.raw?.preparation||{};
       if(isPreviewItem(item))return {label:'預備｜掃描中',reason:'等待本輪掃描完成，尚不可新進場。'};
       if(isExpiredSnapshot(item)||itemReadOnlyReason(item))return {label:'待更新｜重新掃描',reason:'這是保留的掃描資料；重新掃描後再確認方向與觸發條件。'};
       if(final.status==='DATA_UNAVAILABLE'||alignment.state==='UNKNOWN'||(item.trigger_id&&alignment.required!==true))return {label:'待更新｜資料不足',reason:'方向或核心資料不足；請重新掃描，尚不可新進場。'};
@@ -1657,7 +1657,7 @@ renderSignals(quality80,'#quality80Box','本輪沒有交易品質 80 分以上�
     }
     function compactCoreCard(item){
       if(isPreviewItem(item)||terminalSignalOutcome(item))return '';
-      const frames=isRecord(item?.timeframe_states)?item.timeframe_states:{},long=item?.radar_horizon==='LONG',directionTf=long?'1D':'1H',triggerTf=long?'4H':'15m',direction=item?.direction,side=direction==='LONG'?'多':direction==='SHORT'?'空':'中性',decision=itemDecisionContext(item),final=decision?.final||{},align=final.timeframe_alignment||{},maturity=final.swing_maturity||{},snapshot=itemSnapshotEntryState(item),funds=compactFundingText(item);
+      const frames=isRecord(item?.timeframe_states)?item.timeframe_states:{},long=item?.radar_horizon==='LONG',directionTf=long?'4H':'1H',triggerTf=long?'1H':'15m',direction=item?.direction,side=direction==='LONG'?'多':direction==='SHORT'?'空':'中性',decision=itemDecisionContext(item),final=decision?.final||{},align=final.timeframe_alignment||{},maturity=final.swing_maturity||{},snapshot=itemSnapshotEntryState(item),funds=compactFundingText(item);
       const alignment=String(align.state||'').toUpperCase()==='ALIGNED'?directionTf+' '+side+' ✓ → '+triggerTf+' '+side+' ✓':directionTf+' → '+triggerTf+'｜方向待確認';
       const maturityAtr=metricNumber(maturity.extension_atr),position=maturity.state==='MATURE'?'⚠️ 行情已走 '+num(maturityAtr,2)+' ATR｜追價風險較高':snapshot.key==='RETEST'?'🟡 已離進場區｜等待回踩':snapshot.key==='VERIFY'?'🟢 位置可接受｜進場前更新':'🟡 '+snapshot.label;
       const triggerType=String(item?.trigger_type||item?.market_story?.trigger?.type||'').toUpperCase(),triggerLabel={BREAKOUT:'突破',BREAKOUT_RETEST:'突破回踩',CONTINUATION:'續走／回踩再發動',REENTRY:'回踩再發動',REVERSAL:'反轉'}[triggerType]||stageName[item?.signal_stage]||'價格 Trigger';
