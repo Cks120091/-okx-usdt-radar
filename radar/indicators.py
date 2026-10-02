@@ -87,6 +87,56 @@ def macd(values: list[float], fast: int = 12, slow: int = 26, signal: int = 9) -
     return macd_line[-1], signal_line[-1], hist, prev_hist
 
 
+def _latest_cross(values: list[float], *, start_index: int = 1) -> tuple[str, int]:
+    """Return the most recent strict sign-cross and bars since it.
+
+    Equality is treated as a touch, not a cross.  This lets the direction
+    engine preserve "one family crossed first; wait for the other" semantics
+    without forcing both crosses to happen on the same candle.
+    """
+    previous_sign = 0
+    last_direction = "NONE"
+    last_index = -1
+    for index, value in enumerate(values):
+        if index < start_index or not math.isfinite(value):
+            continue
+        sign = 1 if value > 0 else -1 if value < 0 else 0
+        if sign == 0:
+            continue
+        if previous_sign and sign != previous_sign:
+            last_direction = "BULL" if sign > 0 else "BEAR"
+            last_index = index
+        previous_sign = sign
+    bars_ago = len(values) - 1 - last_index if last_index >= 0 else -1
+    return last_direction, bars_ago
+
+
+def _ma_cross_history(values: list[float]) -> tuple[str, int]:
+    diffs = [math.nan] * len(values)
+    for index in range(9, len(values)):
+        end = index + 1
+        ma5 = sum(values[end - 5:end]) / 5.0
+        ma10 = sum(values[end - 10:end]) / 10.0
+        diffs[index] = ma5 - ma10
+    return _latest_cross(diffs, start_index=9)
+
+
+def _macd_cross_history(
+    values: list[float],
+    fast: int = 12,
+    slow: int = 26,
+    signal: int = 9,
+) -> tuple[str, int]:
+    if len(values) < slow + signal:
+        return "NONE", -1
+    fast_line = ema_series(values, fast)
+    slow_line = ema_series(values, slow)
+    macd_line = [a - b for a, b in zip(fast_line, slow_line)]
+    signal_line = ema_series(macd_line, signal)
+    diffs = [line - sig for line, sig in zip(macd_line, signal_line)]
+    return _latest_cross(diffs, start_index=slow + signal - 2)
+
+
 def true_ranges(candles: list[Candle]) -> list[float]:
     if not candles:
         return []
@@ -328,6 +378,13 @@ class TimeframeFeatures:
     lower_wick_ratio: float
     upper_wick_ratio: float
     atr_pct: float
+    # User-defined MACD/MA direction telemetry.  MA90 is context only;
+    # direction is still determined by MACD x MA5/10 resonance.
+    sma90: float = math.nan
+    ma_last_cross_direction: str = "NONE"
+    ma_last_cross_bars_ago: int = -1
+    macd_last_cross_direction: str = "NONE"
+    macd_last_cross_bars_ago: int = -1
     # Hidden/non-gating fusion telemetry.  Defaults preserve tests and any
     # callers that construct TimeframeFeatures manually.
     ema7: float = math.nan
@@ -356,6 +413,8 @@ def features(candles: list[Candle]) -> TimeframeFeatures:
     ema55_values = ema_series(closes, 55)
     current_atr = atr(candles, 14)
     macd_line, macd_signal, histogram, previous_histogram = macd(closes)
+    ma_cross_direction, ma_cross_bars_ago = _ma_cross_history(closes)
+    macd_cross_direction, macd_cross_bars_ago = _macd_cross_history(closes)
     fusion = _fusion_components(
         candles,
         closes,
@@ -449,6 +508,11 @@ def features(candles: list[Candle]) -> TimeframeFeatures:
         lower_wick_ratio=lower_wick_ratio,
         upper_wick_ratio=upper_wick_ratio,
         atr_pct=(current_atr / closes[-1] * 100.0) if closes[-1] > 0 else float("inf"),
+        sma90=sma(closes, 90),
+        ma_last_cross_direction=ma_cross_direction,
+        ma_last_cross_bars_ago=ma_cross_bars_ago,
+        macd_last_cross_direction=macd_cross_direction,
+        macd_last_cross_bars_ago=macd_cross_bars_ago,
         ema7=float(fusion["ema7"]),
         ema12=float(fusion["ema12"]),
         ema144=float(fusion["ema144"]),
