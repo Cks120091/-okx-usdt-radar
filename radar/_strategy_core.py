@@ -123,9 +123,6 @@ class AdaptiveStrategyEngine:
         previous_story: dict[str, object] | None = None,
         excursion_profile_loader: Callable[[str, str], dict[str, Any]] | None = None,
     ) -> AnalysisResult:
-        # LONG: 1D background -> 4H MACD/MA direction -> 1H price Trigger.
-        # The strategy core keeps 4H as the swing risk/plan frame while the
-        # MarketStory engine receives completed 1H candles as its Trigger frame.
         return self._analyze_v33(
             instrument,
             ticker,
@@ -214,11 +211,7 @@ class AdaptiveStrategyEngine:
                 volume_source[-25].close if len(volume_source) >= 25 else volume_source[0].close,
             ),
             "adx_core": round(tf_core.adx14, 1),
-            "adx_1h": (
-                round(tf_bias.adx14, 1)
-                if horizon == "SHORT"
-                else round(tf_timing.adx14, 1) if tf_timing else None
-            ),
+            "adx_1h": round(tf_bias.adx14, 1),
             "rsi_core": round(tf_core.rsi14, 1),
             "rsi_15m": round(tf_core.rsi14, 1) if horizon == "SHORT" else None,
             # Exactly 24 completed one-hour changes (25 closes).  This is kept
@@ -248,14 +241,8 @@ class AdaptiveStrategyEngine:
                 ("1H" if horizon == "SHORT" else "4H"): self._feature_metrics(tf_bias),
                 ("15m" if horizon == "SHORT" else "4H_TRIGGER"): self._feature_metrics(tf_core),
                 **(
-                    {"5m": self._feature_metrics(tf_timing)}
-                    if horizon == "SHORT" and tf_timing is not None
-                    else {
-                        "1H_TRIGGER": self._feature_metrics(tf_timing),
-                        # Backward-compatible alias for stored/UI consumers.
-                        "1H_TIMING": self._feature_metrics(tf_timing),
-                    }
-                    if horizon == "LONG" and tf_timing is not None
+                    {("5m" if horizon == "SHORT" else "1H_TIMING"): self._feature_metrics(tf_timing)}
+                    if tf_timing is not None
                     else {}
                 ),
             },
