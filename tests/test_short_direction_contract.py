@@ -14,7 +14,7 @@ from radar.scanner import MarketScanner, ScannerConfig
 from radar.service import RadarRuntime, _canonical_single_decision
 import radar.service as service
 from radar.service_entry_policy import apply_service_entry_policy
-from radar.short_direction import POLICY, hourly_direction
+from radar.short_direction import LONG_POLICY, POLICY, hourly_direction, swing_direction
 from tests.legacy_scanner_cases import FakeClient
 from tests.legacy_service_cases import SingleInstrumentScanner, report
 from tests.test_market_story import valid_breakout_frames
@@ -62,6 +62,116 @@ class ShortDirectionContractTests(unittest.TestCase):
     def test_rounding_matches_saved_direction_precision(self):
         for score in (51.994, 51.996, 48.004, 48.006):
             self.assertEqual(hourly_direction(score), hourly_direction(round(score, 2)))
+
+    def test_one_family_cross_waits_for_same_side_resonance(self):
+        frame = {
+            "close": 104.0,
+            "ma5": 105.0,
+            "ma10": 103.0,
+            "ma20": 100.0,
+            "ma90": 95.0,
+            "macd_line": -0.4,
+            "macd_signal": 0.1,
+            "ma_last_cross_direction": "BULL",
+            "ma_last_cross_bars_ago": 0,
+            "macd_last_cross_direction": "BEAR",
+            "macd_last_cross_bars_ago": 8,
+        }
+        result = hourly_direction(frame)
+        self.assertEqual(result["direction"], "NEUTRAL")
+        self.assertEqual(result["pending_direction"], "LONG")
+        self.assertEqual(result["state"], "LONG_FORMING")
+        self.assertEqual(result["leading"], "MA")
+        self.assertFalse(result["resonance"])
+
+    def test_same_side_crosses_resonate_before_ma20_strength_confirmation(self):
+        frame = {
+            "close": 99.0,
+            "ma5": 99.0,
+            "ma10": 98.0,
+            "ma20": 105.0,
+            "ma90": 120.0,
+            "macd_line": 0.5,
+            "macd_signal": 0.1,
+            "ma_last_cross_direction": "BULL",
+            "ma_last_cross_bars_ago": 6,
+            "macd_last_cross_direction": "BULL",
+            "macd_last_cross_bars_ago": 2,
+        }
+        result = hourly_direction(frame)
+        self.assertEqual(result["direction"], "LONG")
+        self.assertTrue(result["resonance"])
+        self.assertEqual(result["strength"], "WEAK")
+        self.assertEqual(result["state"], "LONG_WEAK")
+        self.assertEqual(result["ma20_state"], "MIXED")
+
+    def test_ma20_only_grades_strength_and_sequence_does_not_matter(self):
+        # MA5/10 may already be above MA20 before the second crossover arrives,
+        # or they may cross MA20 later; the current completed arrangement grades
+        # strength while MACD x MA5/10 resonance owns direction.
+        frame = {
+            "close": 106.0,
+            "ma5": 105.0,
+            "ma10": 103.0,
+            "ma20": 100.0,
+            "ma90": 200.0,
+            "macd_line": 0.8,
+            "macd_signal": 0.2,
+            "ma_last_cross_direction": "BULL",
+            "ma_last_cross_bars_ago": 9,
+            "macd_last_cross_direction": "BULL",
+            "macd_last_cross_bars_ago": 1,
+        }
+        result = hourly_direction(frame)
+        self.assertEqual(result["direction"], "LONG")
+        self.assertEqual(result["strength"], "STRONG")
+        self.assertEqual(result["state"], "LONG_STRONG")
+        self.assertEqual(result["ma20_state"], "BULL_STACK")
+        # MA90 is reference only and must not veto the formal resonance.
+        self.assertEqual(result["ma90_state"], "BELOW")
+        self.assertTrue(result["resonance"])
+
+    def test_death_cross_resonance_and_ma20_bear_stack_is_strong_short(self):
+        frame = {
+            "close": 94.0,
+            "ma5": 95.0,
+            "ma10": 97.0,
+            "ma20": 100.0,
+            "ma90": 90.0,
+            "macd_line": -0.8,
+            "macd_signal": -0.2,
+            "ma_last_cross_direction": "BEAR",
+            "ma_last_cross_bars_ago": 3,
+            "macd_last_cross_direction": "BEAR",
+            "macd_last_cross_bars_ago": 7,
+        }
+        result = hourly_direction(frame)
+        self.assertEqual(result["direction"], "SHORT")
+        self.assertEqual(result["strength"], "STRONG")
+        self.assertEqual(result["state"], "SHORT_STRONG")
+        self.assertEqual(result["ma20_state"], "BEAR_STACK")
+        self.assertTrue(result["resonance"])
+
+    def test_swing_4h_uses_exact_same_cross_resonance_engine(self):
+        frame = {
+            "close": 106.0,
+            "ma5": 105.0,
+            "ma10": 103.0,
+            "ma20": 100.0,
+            "ma90": 98.0,
+            "macd_line": 0.8,
+            "macd_signal": 0.2,
+            "ma_last_cross_direction": "BULL",
+            "ma_last_cross_bars_ago": 4,
+            "macd_last_cross_direction": "BULL",
+            "macd_last_cross_bars_ago": 1,
+        }
+        short_direction = hourly_direction(frame)
+        long_direction = swing_direction(frame)
+        self.assertEqual(long_direction["direction"], short_direction["direction"])
+        self.assertEqual(long_direction["strength"], short_direction["strength"])
+        self.assertEqual(long_direction["resonance"], short_direction["resonance"])
+        self.assertEqual(long_direction["policy"], LONG_POLICY)
 
     def test_real_breakout_cannot_override_opposing_hourly_direction(self):
         four, hourly, core = valid_breakout_frames()
