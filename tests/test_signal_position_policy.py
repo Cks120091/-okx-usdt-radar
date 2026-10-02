@@ -79,7 +79,7 @@ class SignalPositionSeparationTests(unittest.TestCase):
                             self.assertEqual(item, before)
 
     def test_mtf_mismatch_always_wins_over_position(self):
-        for horizon, timeframe in (("SHORT", "1H"), ("LONG", "4H")):
+        for horizon, timeframe in (("SHORT", "1H"), ("LONG", "1D")):
             for direction in ("LONG", "SHORT"):
                 item = signal_dict(direction, horizon, 101)
                 item["market_metrics"]["raw_indicators"][timeframe]["fusion_long_score"] = 35 if direction == "LONG" else 65
@@ -88,121 +88,15 @@ class SignalPositionSeparationTests(unittest.TestCase):
                 self.assertFalse(result["new_entry_allowed"])
                 self.assertEqual(result["wait_reason"]["code"], "TIMEFRAME_DIRECTION_ALIGNMENT")
 
-    def test_long_uses_4h_direction_while_1d_is_background_only(self):
-        item = signal_dict("LONG", "LONG", 100.0)
-        item["market_metrics"]["raw_indicators"]["4H"]["fusion_long_score"] = 65
-        item["market_metrics"]["raw_indicators"]["1D"]["fusion_long_score"] = 35
-        result = build_decision_context(item)
-        alignment = result["final"]["timeframe_alignment"]
-        self.assertEqual(alignment["timeframe"], "4H")
-        self.assertEqual(alignment["background_timeframe"], "1D")
-        self.assertEqual(alignment["trigger_timeframe"], "1H")
-        self.assertTrue(alignment["passed"])
-        self.assertTrue(result["final"]["new_entry_allowed"])
-
-    def test_long_requires_4h_macd_ma_and_1h_trigger_same_direction(self):
-        item = signal_dict("LONG", "LONG", 100.0)
-        item["market_metrics"]["raw_indicators"]["4H"].update({
-            "ma5": 105.0,
-            "ma10": 103.0,
-            "ma20": 100.0,
-            "macd_line": 1.0,
-            "macd_signal": 0.5,
-            "macd_hist": 0.5,
-            "macd_prev_hist": 0.3,
-            # Deliberately conflict with the canonical MACD/MA direction.
-            "fusion_long_score": 10.0,
-        })
-        aligned = build_decision_context(item)["final"]
-        self.assertTrue(aligned["timeframe_alignment"]["passed"])
-        self.assertEqual(
-            aligned["timeframe_alignment"]["timeframe_direction"],
-            "LONG",
-        )
-        self.assertEqual(aligned["status"], "ENTER")
-
-        opposite = signal_dict("SHORT", "LONG", 100.0)
-        opposite["market_metrics"]["raw_indicators"]["4H"].update(
-            item["market_metrics"]["raw_indicators"]["4H"]
-        )
-        blocked = build_decision_context(opposite)["final"]
-        self.assertFalse(blocked["timeframe_alignment"]["passed"])
-        self.assertEqual(blocked["status"], "WAIT")
-        self.assertFalse(blocked["new_entry_allowed"])
-        self.assertEqual(
-            blocked["wait_reason"]["code"],
-            "TIMEFRAME_DIRECTION_ALIGNMENT",
-        )
-
-    def test_long_1h_macd_ma_conflict_never_becomes_hidden_entry_veto(self):
-        item = signal_dict("LONG", "LONG", 100.0)
-        item["market_metrics"]["raw_indicators"]["4H"].update({
-            "ma5": 105.0,
-            "ma10": 103.0,
-            "ma20": 100.0,
-            "macd_line": 1.0,
-            "macd_signal": 0.5,
-            "macd_hist": 0.5,
-            "macd_prev_hist": 0.3,
-        })
-        item["evidence_groups"]["position_structure"].update({
-            "stance": "CONFLICT",
-            "conflicts": ["價格結構仍有回撤"],
-        })
-        item["evidence_groups"]["trend_momentum"].update({
-            "stance": "CONFLICT",
-            "conflicts": ["1H MACD／MA 暫時反向"],
-            "source_timeframe": "4H_DIRECTION+1H_PRICE",
-            "evidence_scope": "QUALITY_ONLY",
-            "indicator_gate": False,
-        })
-
-        result = build_decision_context(item)
-
-        self.assertFalse(result["conflict"]["blocks_entry"])
-        self.assertTrue(
-            result["conflict"].get("swing_1h_indicator_gate_disabled")
-        )
-        self.assertEqual(result["final"]["status"], "ENTER")
-        self.assertTrue(result["final"]["new_entry_allowed"])
-
-    def test_long_4h_forming_can_set_early_direction_for_same_side_1h_trigger(self):
-        item = signal_dict("LONG", "LONG", 100.0)
-        item["market_metrics"]["raw_indicators"]["4H"].update({
-            "ma5": 105.0,
-            "ma10": 103.0,
-            "ma20": 100.0,
-            "macd_line": -0.2,
-            "macd_signal": 0.1,
-            "macd_hist": -0.3,
-            "macd_prev_hist": -0.4,
-            "fusion_long_score": 10.0,
-        })
-        final = build_decision_context(item)["final"]
-        self.assertTrue(final["timeframe_alignment"]["passed"])
-        self.assertEqual(final["timeframe_alignment"]["timeframe_direction"], "LONG")
-        self.assertEqual(final["timeframe_alignment"]["bias_state"], "LONG_EARLY")
-        self.assertEqual(final["status"], "ENTER")
-        self.assertTrue(final["new_entry_allowed"])
-
-        opposite = signal_dict("SHORT", "LONG", 100.0)
-        opposite["market_metrics"]["raw_indicators"]["4H"].update(
-            item["market_metrics"]["raw_indicators"]["4H"]
-        )
-        blocked = build_decision_context(opposite)["final"]
-        self.assertFalse(blocked["timeframe_alignment"]["passed"])
-        self.assertEqual(blocked["status"], "WAIT")
-        self.assertFalse(blocked["new_entry_allowed"])
-
     def test_present_but_corrupt_direction_data_does_not_grant_permission(self):
         for bad in (None, "bad", float("nan"), 101, -1):
-            for timeframe, horizon in (("1H", "SHORT"), ("4H", "LONG")):
+            for timeframe, horizon in (("1H", "SHORT"), ("1D", "LONG")):
                 item = signal_dict(horizon=horizon)
                 item["market_metrics"]["raw_indicators"][timeframe]["fusion_long_score"] = bad
                 self.assertFalse(build_decision_context(item)["final"]["new_entry_allowed"])
 
     def test_neutral_direction_waits_in_both_horizons(self):
-        for timeframe, horizon in (("1H", "SHORT"), ("4H", "LONG")):
+        for timeframe, horizon in (("1H", "SHORT"), ("1D", "LONG")):
             item = signal_dict(horizon=horizon)
             item["market_metrics"]["raw_indicators"][timeframe]["fusion_long_score"] = 50
             final = build_decision_context(item)["final"]
