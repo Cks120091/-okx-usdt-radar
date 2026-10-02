@@ -179,9 +179,9 @@ def macd_ma_direction(value, *, timeframe="1H", policy=POLICY):
     long_above_20 = ma5 > ma20 and ma10 > ma20
     short_below_20 = ma5 < ma20 and ma10 < ma20
     ma20_state = (
-        "BULL_STACK"
+        "ABOVE_BOTH"
         if long_above_20
-        else "BEAR_STACK"
+        else "BELOW_BOTH"
         if short_below_20
         else "MIXED"
     )
