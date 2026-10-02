@@ -830,7 +830,7 @@ class MarketStoryV34Tests(unittest.TestCase):
         self.assertEqual(result.signal.timeframe_states["1H"]["role"], "純價格行為正式 Trigger｜MACD／MA 不設門檻")
 
 
-    def test_long_1h_macd_ma_never_vetoes_same_direction_price_trigger(self):
+    def test_long_1h_macd_ma_is_not_consulted_for_price_trigger(self):
         _, setup, trigger = valid_breakout_frames()
         candles_4h_setup = [
             replace(c, ts=1_700_000_000_000 + i * 14_400_000)
@@ -845,22 +845,12 @@ class MarketStoryV34Tests(unittest.TestCase):
             86_400_000,
         )
 
-        one_hour = indicator_features(candles_1h_trigger)
-        opposed_1h_momentum = replace(
-            one_hour,
-            sma5=one_hour.sma20 - 2.0,
-            sma10=one_hour.sma20 - 1.0,
-            macd_line=one_hour.macd_signal - 1.0,
-            macd_hist=-1.0,
-            macd_prev_hist=-0.8,
-        )
-
-        def measured(rows):
-            if rows is candles_1h_trigger:
-                return opposed_1h_momentum
-            return indicator_features(rows)
-
-        with patch("radar.market_story.features", side_effect=measured):
+        # If LONG 1H ever consults MA/MACD momentum again, this test fails
+        # immediately instead of silently reducing swing signals.
+        with patch(
+            "radar.market_story._momentum_confirmation",
+            side_effect=AssertionError("LONG 1H must be price-only"),
+        ):
             story = self.engine.analyze_long(
                 candles_1d,
                 candles_4h_setup,
@@ -873,8 +863,15 @@ class MarketStoryV34Tests(unittest.TestCase):
             story.trigger["trigger_model"],
             "4H_DIRECTION_1H_PRICE_ACTION",
         )
+        self.assertTrue(story.trigger["momentum_confirmation"]["ignored"])
+        self.assertFalse(
+            story.trigger["momentum_confirmation"]["affects_trigger"]
+        )
+        self.assertFalse(
+            story.trigger["momentum_confirmation"]["affects_quality"]
+        )
         self.assertTrue(
-            any("1H MA／MACD 僅顯示參考" in item for item in story.neutral)
+            any("1H MA／MACD" in item for item in story.neutral)
         )
 
     def test_long_radar_does_not_allow_1h_trigger_opposite_to_4h_direction(self):
@@ -964,7 +961,7 @@ class MarketStoryV34Tests(unittest.TestCase):
         )
         self.assertEqual(
             story.timeframe_states["1H"]["role"],
-            "正式 Trigger",
+            "純價格行為正式 Trigger｜MACD／MA 不設門檻",
         )
 
     def test_long_radar_waits_when_4h_macd_ma_is_not_resonant(self):
