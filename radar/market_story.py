@@ -165,21 +165,18 @@ class MarketStoryEngine:
         self,
         candles_1d: list[Candle],
         candles_4h: list[Candle],
-        candles_1h: list[Candle] | None = None,
+        candles_1h: list[Candle],
         previous_story: dict[str, Any] | None = None,
     ) -> StoryAssessment:
-        # LONG radar V3.7: 1D is background only. 4H owns both direction and
-        # the formal price Trigger. The 1H series is accepted only for backward
-        # compatibility with callers and is deliberately ignored by the swing
-        # signal path.
-        del candles_1h
+        # LONG: 1D background -> 4H MACD/MA direction -> 1H price Trigger.
+        # 1H MACD/MA is telemetry only and must never gate the formal Trigger.
         return self._analyze(
             horizon="LONG",
             higher_candles=candles_1d,
             bias_candles=candles_4h,
-            core_candles=candles_4h,
+            core_candles=candles_1h,
             timing_candles=None,
-            frame_names=("1D", "4H", "4H", "—"),
+            frame_names=("1D", "4H", "1H", "—"),
             previous_story=previous_story,
         )
 
@@ -258,7 +255,8 @@ class MarketStoryEngine:
         }
         # Direction ownership is explicit:
         # SHORT: 1H owns direction, 15m triggers.
-        # LONG: 1D is background; 4H owns both direction and formal Trigger.
+        # LONG: 1D is background; 4H owns MACD/MA direction and 1H is
+        # price-action Trigger only.
         long_bias_direction = canonical_bias["direction"]
         if canonical_bias["direction"] in ("LONG", "SHORT"):
             selected = dict(candidates[canonical_bias["direction"]])
@@ -274,7 +272,7 @@ class MarketStoryEngine:
             selected.setdefault("neutral", []).append(
                 "1H 方向尚未確定；15m 價格變化只供觀察。"
                 if horizon == "SHORT"
-                else "4H 方向尚未確定；不建立波段正式 Trigger。"
+                else "4H 方向尚未確定；1H 價格變化只供觀察。"
             )
         selected["direction_policy"] = (
             SHORT_DIRECTION_POLICY
@@ -565,16 +563,15 @@ class MarketStoryEngine:
                 can_block_trigger=False,
             )
             timeframe_states["4H"].update(
-                role="MACD／MA 方向＋正式 Trigger",
+                role="MACD／MA 篩選＋方向／Setup",
                 direction=canonical_bias["direction"],
-                label=(
-                    f"{canonical_bias['label']}｜"
-                    f"{_stage_label(stage, trigger_direction)}"
-                ),
+                label=canonical_bias["label"],
                 score=canonical_bias["score"],
                 can_block_trigger=True,
-                trigger_stage=stage,
-                trigger_direction=trigger_direction,
+            )
+            timeframe_states["1H"].update(
+                role="純價格行為正式 Trigger｜MACD／MA 不設門檻",
+                can_block_trigger=True,
             )
         summary = _human_summary(
             trigger_direction,
@@ -599,7 +596,7 @@ class MarketStoryEngine:
             "missing_sources": [],
         }
         raw = {
-            "entry_policy_version": "SHORT_CONTEXT_WINDOW_V2" if horizon == "SHORT" else "SWING_4H_SELF_TRIGGER_V3",
+            "entry_policy_version": "SHORT_CONTEXT_WINDOW_V2" if horizon == "SHORT" else "SWING_4H_DIRECTION_1H_PRICE_TRIGGER_V3",
             "direction_long_score": round(long_score, 1),
             "higher_long_score": round(higher_long, 1),
             "bias_long_score": round(bias_long, 1),
