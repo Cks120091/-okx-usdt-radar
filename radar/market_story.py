@@ -274,7 +274,7 @@ class MarketStoryEngine:
             selected.setdefault("neutral", []).append(
                 "1H 方向尚未確定；15m 價格變化只供觀察。"
                 if horizon == "SHORT"
-                else "4H 方向尚未確定；1H 價格變化只供觀察。"
+                else "4H 方向尚未確定；不建立波段正式 Trigger。"
             )
         selected["direction_policy"] = (
             SHORT_DIRECTION_POLICY
@@ -1535,7 +1535,7 @@ def _trigger_candidate(
             pre_trigger_missing.append("突破後 Push-Away")
         if not control.get("micro_defense_broken"):
             pre_trigger_missing.append("微型防守突破")
-        if not momentum.get("partial"):
+        if not price_action_trigger and not momentum.get("partial"):
             pre_trigger_missing.append("MA／MACD 動能呼應")
     elif pre_trigger_type == "REVERSAL":
         if not rejection:
@@ -1707,7 +1707,9 @@ def _trigger_candidate(
         conflicts.append("觸發方向自身攻擊效率仍偏弱")
     noise = _noise_state(candles, tf)
     if noise["high"] and not acceptance["state"] in ("ACCEPTED", "ROLE_REVERSAL_RETEST"):
-        conflicts.append("15m 雜訊高；需依價格事實而非小型交叉")
+        conflicts.append(
+            f"{trigger_timeframe} 雜訊高；需依價格事實而非小型交叉"
+        )
         if not control["transferred"]:
             triggered = False
             stage = "WATCH"
@@ -1847,10 +1849,18 @@ def _trigger_candidate(
         "neutral": _unique(neutral),
         "noise": noise,
         "explainability_score": explainability_score,
-        "trigger_model": "1H_BIAS_15M_PRICE_ACTION" if price_action_trigger else "CORE_PRICE_PLUS_MOMENTUM",
+        "trigger_model": (
+            "1H_BIAS_15M_PRICE_ACTION"
+            if trigger_timeframe == "15m"
+            else "4H_DIRECTION_4H_PRICE_ACTION"
+            if trigger_timeframe == "4H"
+            else "CORE_PRICE_ACTION"
+        ),
         "permission_note": (
             "15m 短線：1H MA／MACD 定方向，15m 價格行為建立 Trigger；15m MA／MACD 僅供觀察。"
-            if price_action_trigger
+            if trigger_timeframe == "15m"
+            else "4H 波段：1D 僅作背景，4H MACD／MA 定方向並由 4H 價格行為建立正式 Trigger；不使用 1H 作交易判定。"
+            if trigger_timeframe == "4H"
             else "Trigger 只由核心價格事實決定；Context 與 Execution Quality 無權取消。"
         ),
     }
