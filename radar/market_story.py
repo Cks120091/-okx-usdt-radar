@@ -1440,7 +1440,9 @@ def _trigger_candidate(
     elif price_action_trigger:
         bias_aligned = hourly_direction(tf_bias)["direction"] == direction
     else:
-        bias_aligned = swing_direction(tf_bias)["direction"] == direction
+        # Sep-30 swing contract: LONG continuation aligns to the 4H weighted
+        # direction score, not the later swing_direction() MACD/MA hard gate.
+        bias_aligned = bias_score >= 55.0 if is_long else bias_score <= 45.0
     compression_block = compression.get("blocks_direction") == direction
 
     # Direction lives on the parent timeframe. The lower Trigger timeframe is
