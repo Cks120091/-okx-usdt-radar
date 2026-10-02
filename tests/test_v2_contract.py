@@ -388,9 +388,13 @@ class V33ContractTests(unittest.TestCase):
             comparator.index("qualityDiff="),
         )
         self.assertLess(
-            comparator.index("resonanceDiff="),
             comparator.index("qualityDiff="),
+            comparator.index("resonanceDiff="),
         )
+        self.assertIn("highQuality=quality(item)>=80", comparator)
+        self.assertIn("continuation&&resonance&&highQuality", comparator)
+        self.assertIn("continuation&&highQuality", comparator)
+        self.assertIn("resonance&&highQuality", comparator)
         self.assertLess(
             comparator.index("qualityDiff="),
             comparator.index("readyDiff="),
