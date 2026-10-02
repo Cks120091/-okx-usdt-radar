@@ -248,8 +248,14 @@ class AdaptiveStrategyEngine:
                 ("1H" if horizon == "SHORT" else "4H"): self._feature_metrics(tf_bias),
                 ("15m" if horizon == "SHORT" else "4H_TRIGGER"): self._feature_metrics(tf_core),
                 **(
-                    {("5m" if horizon == "SHORT" else "1H_TIMING"): self._feature_metrics(tf_timing)}
-                    if tf_timing is not None
+                    {"5m": self._feature_metrics(tf_timing)}
+                    if horizon == "SHORT" and tf_timing is not None
+                    else {
+                        "1H_TRIGGER": self._feature_metrics(tf_timing),
+                        # Backward-compatible alias for stored/UI consumers.
+                        "1H_TIMING": self._feature_metrics(tf_timing),
+                    }
+                    if horizon == "LONG" and tf_timing is not None
                     else {}
                 ),
             },
