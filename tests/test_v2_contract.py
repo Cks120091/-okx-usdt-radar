@@ -380,10 +380,16 @@ class V33ContractTests(unittest.TestCase):
         comparator_start = html.index("function signalSortComparator")
         comparator_end = html.index("function terminalSortComparator", comparator_start)
         comparator = html[comparator_start:comparator_end]
-        self.assertIn("continuationDiff", comparator)
+        self.assertIn("primaryTier", comparator)
+        self.assertIn("tierDiff", comparator)
+        self.assertIn("resonanceDiff", comparator)
         self.assertLess(
-            comparator.index("continuationDiff="),
-            comparator.index("readyDiff="),
+            comparator.index("tierDiff="),
+            comparator.index("qualityDiff="),
+        )
+        self.assertLess(
+            comparator.index("resonanceDiff="),
+            comparator.index("qualityDiff="),
         )
         self.assertLess(
             comparator.index("qualityDiff="),
