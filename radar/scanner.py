@@ -3760,48 +3760,46 @@ class MarketScanner:
             else None
         )
         weighted_available = weighted_score is not None
-        high_execution_quality = int(execution_score >= 75.0)
-        continuation_high_quality_priority = int(
-            str(signal.trigger_type or "").upper() == "CONTINUATION"
-            and high_execution_quality == 1
-            and final_status == "ENTER"
-            and str(signal.direction or "").upper() in {"LONG", "SHORT"}
-        )
+        high_execution_quality = execution_score >= 80.0
         resonance = signal.market_metrics.get("market_resonance", {})
         resonance_priority = (
             int(resonance.get("priority", 0))
             if isinstance(resonance, dict)
             else 0
         )
-        if not weighted_available:
-            # Backward-compatible fallback for stored/synthetic episodes that
-            # predate WEIGHTED_TREND_FUNNEL_V1.
-            return (
-                0,
-                execution_score,
-                continuation_high_quality_priority,
-                permission_priority,
-                status_priority,
-                resonance_priority,
-                freshness_timestamp,
-                freshness_priority.get(signal.freshness, 0),
-                -int(signal.lifecycle.get("age_bars", 0) or 0),
-                remaining_rr,
-                -slippage,
-                _finite_number(signal.quote_volume_24h)
-                if _finite_number(signal.quote_volume_24h) is not None
-                else -math.inf,
-                stage_priority.get(signal.signal_stage, 0),
-                signal.score,
-            )
+        continuation = str(signal.trigger_type or "").upper() == "CONTINUATION"
+        has_market_resonance = resonance_priority > 0
+        # User-facing priority contract:
+        # 6 continuation + market resonance + quality >= 80
+        # 5 continuation + quality >= 80
+        # 4 continuation + market resonance
+        # 3 continuation
+        # 2 market resonance + quality >= 80
+        # 1 market resonance
+        # 0 everything else
+        composite_priority = (
+            6
+            if continuation and has_market_resonance and high_execution_quality
+            else 5
+            if continuation and high_execution_quality
+            else 4
+            if continuation and has_market_resonance
+            else 3
+            if continuation
+            else 2
+            if has_market_resonance and high_execution_quality
+            else 1
+            if has_market_resonance
+            else 0
+        )
+        weighted_rank = weighted_score if weighted_available else -math.inf
         return (
-            1,
-            weighted_score,
-            permission_priority,
-            status_priority,
-            continuation_high_quality_priority,
+            composite_priority,
             execution_score,
             resonance_priority,
+            permission_priority,
+            status_priority,
+            weighted_rank,
             freshness_timestamp,
             freshness_priority.get(signal.freshness, 0),
             -int(signal.lifecycle.get("age_bars", 0) or 0),
