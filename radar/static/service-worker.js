@@ -1,4 +1,4 @@
-const SHELL_CACHE = "okx-radar-shell-v4.41-durable-long-trigger";
+const SHELL_CACHE = "okx-radar-shell-v4.42-priority-composite";
 const SHELL_ASSETS = ["/", "/manifest.webmanifest", "/radar-icon.svg"];
 
 self.addEventListener("install", event => {
