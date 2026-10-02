@@ -1314,11 +1314,18 @@
 
     function isFormalSignal(item,horizon=item.radar_horizon==='LONG'?'LONG':'SHORT'){
       const final=itemFinalDecision(item),alignment=final.timeframe_alignment||{},long=horizon==='LONG';
+      const formalStage=['CONFIRMED','REENTRY','TRENDING','EXTENDED'].includes(String(item.signal_stage||'').toUpperCase());
+      // LONG: once the backend has created a real 1H Trigger episode, keep it
+      // in "訊號已觸發". Current entry permission/alignment is a card state
+      // (等待回踩／重新確認／禁止追價), not a reason to demote it to 預備.
+      if(long)return !isTerminalSignal(item)&&!isPreviewItem(item)
+        && Boolean(item.trigger_id)&&formalStage
+        && ['LONG','SHORT'].includes(item.direction);
       return !isTerminalSignal(item)&&!isPreviewItem(item)&&!isExpiredSnapshot(item)&&!itemReadOnlyReason(item)
-        && ['CONFIRMED','REENTRY','TRENDING','EXTENDED'].includes(item.signal_stage)
+        && formalStage
         && final.status==='ENTER'&&final.new_entry_allowed===true
         && alignment.required===true&&alignment.passed===true
-        && alignment.timeframe===(long?'4H':'1H')&&alignment.trigger_timeframe===(long?'1H':'15m')
+        && alignment.timeframe==='1H'&&alignment.trigger_timeframe==='15m'
         && ['LONG','SHORT'].includes(item.direction)
         && alignment.timeframe_direction===item.direction&&alignment.trigger_direction===item.direction;
     }
