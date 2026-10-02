@@ -123,13 +123,15 @@ class AdaptiveStrategyEngine:
         previous_story: dict[str, object] | None = None,
         excursion_profile_loader: Callable[[str, str], dict[str, Any]] | None = None,
     ) -> AnalysisResult:
+        # 1H is retained in the public signature only for compatibility.
+        # Swing signal logic is now 1D background -> 4H direction + 4H Trigger.
         return self._analyze_v33(
             instrument,
             ticker,
             candles_1d,
             candles_4h,
             candles_4h,
-            candles_1h,
+            None,
             previous_story,
             horizon="LONG",
             excursion_profile_loader=excursion_profile_loader,
@@ -183,11 +185,13 @@ class AdaptiveStrategyEngine:
             if candles_timing is not None and len(candles_timing) >= 60
             else None
         )
-        volume_source = (
-            candles_bias if horizon == "SHORT" else candles_timing or candles_bias
+        volume_source = candles_bias
+        hourly_source = candles_bias if horizon == "SHORT" else []
+        quote_volume_24h = (
+            sum(item.quote_volume for item in volume_source[-24:])
+            if horizon == "SHORT"
+            else float(ticker.quote_volume_24h or 0.0)
         )
-        hourly_source = candles_bias if horizon == "SHORT" else candles_timing or []
-        quote_volume_24h = sum(item.quote_volume for item in volume_source[-24:])
         metrics = {
             "last_price": ticker.last,
             # Internal formatting input for the deep-data target adaptation.
@@ -202,16 +206,23 @@ class AdaptiveStrategyEngine:
                 if horizon == "SHORT"
                 else None
             ),
-            "price_change_1h_pct": _price_change_pct(
-                ticker.last,
-                (candles_bias if horizon == "SHORT" else candles_timing or candles_bias)[-2].close,
+            "price_change_1h_pct": (
+                _price_change_pct(ticker.last, candles_bias[-2].close)
+                if horizon == "SHORT"
+                else None
             ),
-            "price_change_24h_pct": _price_change_pct(
-                ticker.last,
-                volume_source[-25].close if len(volume_source) >= 25 else volume_source[0].close,
+            "price_change_24h_pct": (
+                _price_change_pct(
+                    ticker.last,
+                    volume_source[-25].close
+                    if len(volume_source) >= 25
+                    else volume_source[0].close,
+                )
+                if horizon == "SHORT"
+                else None
             ),
             "adx_core": round(tf_core.adx14, 1),
-            "adx_1h": round(tf_bias.adx14, 1),
+            "adx_1h": round(tf_bias.adx14, 1) if horizon == "SHORT" else None,
             "rsi_core": round(tf_core.rsi14, 1),
             "rsi_15m": round(tf_core.rsi14, 1) if horizon == "SHORT" else None,
             # Exactly 24 completed one-hour changes (25 closes).  This is kept
