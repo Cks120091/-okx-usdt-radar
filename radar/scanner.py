@@ -567,7 +567,7 @@ class MarketScanner:
             # Swing radar uses the same first-layer MACD/MA screening contract
             # as the short radar, shifted one timeframe higher:
             # SHORT = 1H prefilter -> 15m Trigger
-            # LONG  = 4H MACD/MA prefilter+direction -> 1H price Trigger
+            # LONG  = 4H prefilter -> 1H Trigger
             # An already-active LONG episode bypasses the prefilter so an open
             # plan is still reconciled instead of disappearing from tracking.
             for inst_id, bundle in bundles.items():
@@ -591,7 +591,7 @@ class MarketScanner:
                 "LONG_PREFILTER",
                 0,
                 len(long_candidate_ids),
-                f"4H MACD／MA 方向初篩通過 {len(long_candidate_ids)} 個；準備送入 1H 純價格 Trigger",
+                f"4H MACD／MA 方向初篩通過 {len(long_candidate_ids)} 個；準備送入 1H Trigger",
             )
 
             if include_short:
@@ -642,7 +642,7 @@ class MarketScanner:
                 "LONG_ANALYSIS",
                 0,
                 len(long_ready),
-                "正在判定長線 1H 純價格 Trigger（1D 背景；4H MACD／MA 定方向）",
+                "正在判定長線 1H Trigger（4H MACD／MA 初篩；1D 背景）",
             )
             for index, inst_id in enumerate(sorted(long_ready), 1):
                 try:
@@ -664,9 +664,9 @@ class MarketScanner:
                     index,
                     len(long_ready),
                     (
-                        "15m 已發布；長線 1H 純價格 Trigger 分析中"
+                        "15m 已發布；長線 1H Trigger 分析中（4H MACD／MA 初篩）"
                         if include_short
-                        else "長線 1H 純價格 Trigger 分析中"
+                        else "長線 1H Trigger 分析中（4H MACD／MA 初篩）"
                     ),
                 )
 
