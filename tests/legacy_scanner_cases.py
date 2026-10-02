@@ -2600,7 +2600,7 @@ class ScannerTests(unittest.TestCase):
         best = candidate(
             "BEST-COMPOSITE",
             trigger_type="CONTINUATION",
-            quality=80.0,
+            quality=95.0,
             resonance_priority=2,
         )
         continuation_high = candidate(
@@ -2612,36 +2612,50 @@ class ScannerTests(unittest.TestCase):
         resonance_high = candidate(
             "RESONANCE-HIGH",
             trigger_type="BREAKOUT",
-            quality=99.0,
+            quality=95.0,
             resonance_priority=4,
         )
         counter_strong = candidate(
             "COUNTER-STRONG",
             trigger_type="BREAKOUT",
-            quality=100.0,
+            quality=96.0,
             resonance_priority=3,
             path_state="COUNTER_STRONG",
         )
         ordinary = candidate(
             "ORDINARY",
             trigger_type="BREAKOUT",
-            quality=99.0,
+            quality=95.0,
             resonance_priority=0,
+        )
+        low_quality_best_type = candidate(
+            "LOW-QUALITY-BEST-TYPE",
+            trigger_type="CONTINUATION",
+            quality=59.0,
+            resonance_priority=2,
         )
 
         ordered = sorted(
-            [ordinary, counter_strong, resonance_high, continuation_high, best],
+            [
+                ordinary,
+                counter_strong,
+                resonance_high,
+                continuation_high,
+                best,
+                low_quality_best_type,
+            ],
             key=MarketScanner._signal_sort_key,
             reverse=True,
         )
         self.assertEqual(
             [item.inst_id for item in ordered],
             [
+                "COUNTER-STRONG",
                 "BEST-COMPOSITE",
                 "CONTINUATION-HIGH",
                 "RESONANCE-HIGH",
-                "COUNTER-STRONG",
                 "ORDINARY",
+                "LOW-QUALITY-BEST-TYPE",
             ],
         )
 
