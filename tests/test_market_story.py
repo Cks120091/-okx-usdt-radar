@@ -793,7 +793,7 @@ class MarketStoryV34Tests(unittest.TestCase):
         self.assertFalse(story.control_transfer["transferred"])
         self.assertEqual(story.trigger_type, "NONE")
 
-    def test_long_radar_uses_1d_bias_4h_setup_and_1h_trigger(self):
+    def test_long_radar_uses_1d_background_4h_resonance_and_1h_trigger(self):
         _, setup, trigger = valid_breakout_frames()
         candles_4h_setup = [replace(c, ts=1_700_000_000_000 + i * 14_400_000) for i, c in enumerate(setup)]
         candles_1h_trigger = [replace(c, ts=1_700_000_000_000 + i * 3_600_000) for i, c in enumerate(trigger)]
@@ -823,11 +823,16 @@ class MarketStoryV34Tests(unittest.TestCase):
         self.assertIsNotNone(result.signal, result.reason)
         self.assertEqual(result.signal.radar_horizon, "LONG")
         self.assertEqual(result.signal.trigger_type, "BREAKOUT")
-        self.assertEqual(result.signal.timeframe_states["1D"]["role"], "大方向 Bias")
-        self.assertFalse(result.signal.timeframe_states["4H"]["can_block_trigger"])
-        self.assertEqual(result.signal.timeframe_states["4H"]["role"], "Bias／Setup")
+        self.assertEqual(result.signal.timeframe_states["1D"]["role"], "背景 Context")
+        self.assertFalse(result.signal.timeframe_states["1D"]["can_block_trigger"])
+        self.assertTrue(result.signal.timeframe_states["4H"]["can_block_trigger"])
+        self.assertEqual(
+            result.signal.timeframe_states["4H"]["role"],
+            "MACD／MA 交叉共振方向｜決定多空",
+        )
+        self.assertTrue(result.signal.timeframe_states["4H"]["resonance"])
         self.assertTrue(result.signal.timeframe_states["1H"]["can_block_trigger"])
-        self.assertEqual(result.signal.timeframe_states["1H"]["role"], "核心 Trigger")
+        self.assertEqual(result.signal.timeframe_states["1H"]["role"], "條件 Trigger")
 
 
 if __name__ == "__main__":
