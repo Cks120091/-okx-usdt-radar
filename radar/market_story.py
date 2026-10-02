@@ -570,6 +570,19 @@ class MarketStoryEngine:
             role="條件 Trigger",
             can_block_trigger=True,
         )
+        if horizon == "SHORT":
+            background = timeframe_states["4H"]
+            leg_return = _pct_change(core_candles[-1].close, core_candles[-5].close)
+            phase = (
+                "多頭背景中的短線回落"
+                if background["direction"] == "LONG" and leg_return < -0.05
+                else "空頭背景中的短線反彈"
+                if background["direction"] == "SHORT" and leg_return > 0.05
+                else "短線走勢未明顯逆向"
+            )
+            background["label"] += "｜" + phase
+            background["phase"] = phase
+            background["phase_basis"] = "最近4根已收線15m；非未完成4H的最終結果"
 
         summary = _human_summary(
             trigger_direction,
