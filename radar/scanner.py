@@ -3806,9 +3806,11 @@ class MarketScanner:
             else 0
         )
         weighted_rank = weighted_score if weighted_available else -math.inf
+        # Quality is the primary ordering key across every signal class.
+        # Composite type priority only breaks ties between equal-quality signals.
         return (
-            composite_priority,
             execution_score,
+            composite_priority,
             resonance_priority,
             permission_priority,
             status_priority,
