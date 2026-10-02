@@ -567,7 +567,7 @@ class MarketScanner:
             # Swing radar uses the same first-layer MACD/MA screening contract
             # as the short radar, shifted one timeframe higher:
             # SHORT = 1H prefilter -> 15m Trigger
-            # LONG  = 4H prefilter -> 4H formal Trigger
+            # LONG  = 4H MACD/MA prefilter+direction -> 1H price Trigger
             # An already-active LONG episode bypasses the prefilter so an open
             # plan is still reconciled instead of disappearing from tracking.
             for inst_id, bundle in bundles.items():
@@ -591,7 +591,7 @@ class MarketScanner:
                 "LONG_PREFILTER",
                 0,
                 len(long_candidate_ids),
-                f"4H MACD／MA 方向初篩通過 {len(long_candidate_ids)} 個；準備判定 4H 正式 Trigger",
+                f"4H MACD／MA 方向初篩通過 {len(long_candidate_ids)} 個；準備送入 1H 純價格 Trigger",
             )
 
             if include_short:
@@ -642,7 +642,7 @@ class MarketScanner:
                 "LONG_ANALYSIS",
                 0,
                 len(long_ready),
-                "正在判定長線 4H Trigger（1D 背景；4H 方向＋價格行為）",
+                "正在判定長線 1H 純價格 Trigger（1D 背景；4H MACD／MA 定方向）",
             )
             for index, inst_id in enumerate(sorted(long_ready), 1):
                 try:
@@ -664,9 +664,9 @@ class MarketScanner:
                     index,
                     len(long_ready),
                     (
-                        "15m 已發布；長線 4H Trigger 分析中"
+                        "15m 已發布；長線 1H 純價格 Trigger 分析中"
                         if include_short
-                        else "長線 4H Trigger 分析中"
+                        else "長線 1H 純價格 Trigger 分析中"
                     ),
                 )
 
@@ -949,7 +949,7 @@ class MarketScanner:
                 previous_micro = self.repository.load_microstructure(inst_id)
                 for horizon, results, timing in (
                     ("SHORT", short_results, micro_candles.get(inst_id)),
-                    ("LONG", long_results, bundles[inst_id]["4H"]),
+                    ("LONG", long_results, bundles[inst_id]["1H"]),
                 ):
                     result = results.get(inst_id)
                     if result is None or result.market_state is None:
@@ -2131,7 +2131,7 @@ class MarketScanner:
             except Exception as exc:
                 context_errors.append(f"5m: {exc}")
         else:
-            timing = bundle["4H"]
+            timing = bundle["1H"]
 
         oi_history_loader = getattr(self.client, "get_open_interest_history", None)
         taker_history_loader = getattr(
