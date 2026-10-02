@@ -3233,15 +3233,29 @@ class MarketScanner:
                     "EXTENDED": 1,
                 }.get(state.freshness, 0)
                 resonance = state.market_metrics.get("market_resonance", {})
-                resonance_priority = (
-                    int(resonance.get("priority", 0))
+                resonance_state = (
+                    str(resonance.get("path_state") or resonance.get("state") or "").upper()
                     if isinstance(resonance, dict)
-                    else 0
+                    else ""
                 )
+                resonance_priority = {
+                    "LEADING_RESONANCE": 4,
+                    "RECOVERY_RESONANCE": 3,
+                    "ALIGNED": 2,
+                }.get(resonance_state, 0)
+                trigger_type = str(
+                    getattr(result.signal, "trigger_type", "")
+                    if result.signal is not None
+                    else state.trigger.get("type", "")
+                    if isinstance(state.trigger, dict)
+                    else ""
+                ).upper()
+                continuation_priority = 1 if trigger_type == "CONTINUATION" else 0
                 rank = (
+                    continuation_priority,
+                    resonance_priority,
                     freshness_priority,
                     stage_priority.get(state.status, 0),
-                    resonance_priority,
                     result.signal is not None,
                     state.direction in ("LONG", "SHORT"),
                     horizon_priority,
