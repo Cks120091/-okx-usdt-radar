@@ -2575,7 +2575,7 @@ class ScannerTests(unittest.TestCase):
         )
 
     def test_signal_sort_prioritizes_continuation_resonance_high_quality_composite(self):
-        def candidate(inst_id, *, trigger_type, quality, resonance_priority):
+        def candidate(inst_id, *, trigger_type, quality, resonance_priority, path_state=None):
             signal = qualified_signal(inst_id)
             return replace(
                 signal,
@@ -2585,7 +2585,7 @@ class ScannerTests(unittest.TestCase):
                     **signal.market_metrics,
                     "market_resonance": {
                         "priority": resonance_priority,
-                        "path_state": "ALIGNED" if resonance_priority else "COUNTER",
+                        "path_state": path_state or ("ALIGNED" if resonance_priority else "COUNTER"),
                     },
                 },
                 decision_context={
@@ -2615,21 +2615,34 @@ class ScannerTests(unittest.TestCase):
             quality=99.0,
             resonance_priority=4,
         )
+        counter_strong = candidate(
+            "COUNTER-STRONG",
+            trigger_type="BREAKOUT",
+            quality=100.0,
+            resonance_priority=3,
+            path_state="COUNTER_STRONG",
+        )
         ordinary = candidate(
             "ORDINARY",
             trigger_type="BREAKOUT",
-            quality=100.0,
+            quality=99.0,
             resonance_priority=0,
         )
 
         ordered = sorted(
-            [ordinary, resonance_high, continuation_high, best],
+            [ordinary, counter_strong, resonance_high, continuation_high, best],
             key=MarketScanner._signal_sort_key,
             reverse=True,
         )
         self.assertEqual(
             [item.inst_id for item in ordered],
-            ["BEST-COMPOSITE", "CONTINUATION-HIGH", "RESONANCE-HIGH", "ORDINARY"],
+            [
+                "BEST-COMPOSITE",
+                "CONTINUATION-HIGH",
+                "RESONANCE-HIGH",
+                "COUNTER-STRONG",
+                "ORDINARY",
+            ],
         )
 
     def test_signal_sort_never_uses_advisory_continuation_to_select_cards(self):
