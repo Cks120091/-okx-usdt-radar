@@ -4,11 +4,13 @@ from __future__ import annotations
 import argparse
 import json
 import logging
+import os
 import sys
 from pathlib import Path
 from urllib.request import Request, urlopen
 
 from radar.api import OKXPublicClient
+from radar.always_on import AlwaysOnMonitor
 from radar.config import AppConfig
 from radar.reporting import report_markdown
 from radar.scanner import MarketScanner, ScannerConfig
@@ -131,7 +133,18 @@ def main() -> int:
             report = runtime.scan_blocking()
             print(report_markdown(report))
             return 2 if report.status == "DATA_INCOMPLETE" else 0
-        serve(runtime, config.host, config.port)
+        # Disabled by default; never activate automatically on the current service.
+        # When enabled, run beside the *same* RadarRuntime and saved reports.
+        monitor = None
+        if os.environ.get("RADAR_ALWAYS_ON", "0").strip().lower() in {"1", "true", "yes", "on"}:
+            monitor = AlwaysOnMonitor(runtime)
+            runtime.always_on_monitor = monitor
+            monitor.start()
+        try:
+            serve(runtime, config.host, config.port)
+        finally:
+            if monitor is not None:
+                monitor.stop()
         return 0
     except Exception as exc:
         logging.exception("Radar failed")
