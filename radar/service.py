@@ -2322,6 +2322,11 @@ class RadarRuntime:
                 "scan_mode_label": _SCAN_MODE_LABELS[self._scan_mode],
                 "horizon_freshness": horizon_freshness,
                 "progress": dict(self._progress),
+                "always_on_monitor": (
+                    self.always_on_monitor.status()
+                    if getattr(self, "always_on_monitor", None) is not None
+                    else {"enabled": False, "analysis_only": True, "auto_ordering": False}
+                ),
                 "observer_running": bool(
                     self._observer_thread is not None
                     and self._observer_thread.is_alive()
