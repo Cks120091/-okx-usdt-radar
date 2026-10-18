@@ -2,7 +2,7 @@ name: OKX Radar V3.3 CI
 
 on:
   push:
-    branches: [main]
+    branches: [main, "feature/always-on-market-monitor"]
   pull_request:
   workflow_dispatch:
 
