@@ -40,7 +40,7 @@
     .metric{min-width:0;background:linear-gradient(145deg,var(--panel2),var(--panel));border:1px solid var(--line);border-radius:15px;padding:12px;box-shadow:var(--shadow)}
     .metric .k{color:var(--muted);font-size:11px;margin-bottom:5px}.metric .v{font-size:19px;font-weight:850;overflow-wrap:anywhere}.metric-note{display:block;margin-top:3px;color:var(--muted);font-size:9px;line-height:1.35}.metric.wide{grid-column:1/-1}.metric.wide .v{font-size:14px}
     .notice{display:none;border-radius:15px;padding:13px 14px;margin:0 0 12px;font-size:14px;font-weight:700;line-height:1.55;border:1px solid}
-    .notice.show{display:block}.notice.scan{color:#d9ebff;background:#0c2949;border-color:#295d91}.notice.danger{color:#ffe5e8;background:#39151e;border-color:#7a2b3b}
+    .notice.show{display:block}.notice.scan{color:#d9ebff;background:#0c2949;border-color:#295d91}.notice.danger{color:#ffe5e8;background:#39151e;border-color:#7a2b3b}.notice.monitor{color:#c9f6ed;background:#0b302b;border-color:#22665c}
     .push-panel{display:flex;align-items:center;justify-content:space-between;gap:12px;margin:0 0 12px;padding:12px 13px;border:1px solid #294764;border-radius:15px;background:#0a192a}.push-copy{min-width:0}.push-copy b{display:block;font-size:13px}.push-copy span{display:block;margin-top:4px;color:var(--muted);font-size:10px;line-height:1.45}.push-button{flex:0 0 auto;min-width:92px;min-height:44px;padding:8px 11px;border:1px solid #426e9f;border-radius:12px;background:#16304e;color:#fff;font-size:12px;font-weight:850}.push-button.on{color:#052016;border-color:var(--green);background:var(--green)}.push-button:disabled{color:var(--gray);border-color:#34475d;background:#26384d}
     .market-strip{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:10px;margin-bottom:10px}.pulse-card{background:#091827;border:1px solid var(--line);border-radius:14px;padding:11px 12px;min-width:0}.pulse-head{display:flex;align-items:center;justify-content:space-between;gap:7px;font-size:11px;color:var(--muted)}.pulse-head strong{font-size:13px;color:#fff}.pulse-price{font-size:17px;font-weight:900;margin:5px 0 3px}.change{font-size:11px;font-weight:800}.up{color:var(--green)}.down{color:var(--red)}.flat{color:var(--gray)}
     .search-tools{display:flex;gap:8px;margin-bottom:12px}.global-search{width:100%;min-width:0;min-height:46px;border:1px solid var(--line);border-radius:13px;background:var(--panel);color:#fff;padding:10px 12px;font-size:16px}.search-button{min-width:68px;border:1px solid #426e9f;border-radius:13px;background:#16304e;color:#fff;font-weight:850}
@@ -851,6 +851,7 @@
       <div id="scanMessage">正在掃描 OKX 最新市場</div>
       <div id="scanProgress" class="progress indeterminate" role="progressbar" aria-labelledby="scanMessage"><i></i></div>
     </div>
+    <div id="liveMonitorNotice" class="notice monitor" role="status" aria-live="polite"></div>
     <div id="dangerNotice" class="notice danger" role="alert"></div>
     <div id="searchFeedback" class="notice danger" role="alert"></div>
     <section id="overview" class="section active">
@@ -1191,6 +1192,14 @@
     function renderStatus(status){
       state.status=status;const key=status.system_status||status.runtime_status||'BOOTING';document.body.dataset.runtimeStatus=key;
       const pill=$('#statusPill');pill.textContent=statusName[key]||'尚無資料';pill.className=`status-pill ${String(key).toLowerCase()}`;
+      const live=status.always_on_monitor||{},liveNotice=$('#liveMonitorNotice');
+      if(live.enabled){
+        const recent=Array.isArray(live.recent_warnings)?live.recent_warnings:[],warning=recent[recent.length-1];
+        const heartbeat=live.websocket_fresh?'連線正常':'連線中／行情未更新';
+        const detail=warning?('｜最近觀察：'+String(warning.symbol||'')+' '+(warning.direction==='LONG'?'偏多':'偏空')+'價格加速 '+String(warning.change_pct||0)+'%；僅預警、不能當成正式進場訊號'):'｜等待候選市場觀察事件';
+        liveNotice.textContent='24 小時行情監控｜'+heartbeat+'｜訂閱 '+String(live.selected_symbols||0)+' 幣'+detail;
+        liveNotice.classList.add('show');
+      }else{liveNotice.textContent='';liveNotice.classList.remove('show')}
       const scanning=key==='SCANNING';syncScanControls(key);
       const notice=$('#scanNotice');notice.classList.toggle('show',scanning);
       if(scanning){const p=status.progress||{};$('#scanMessage').textContent=p.message||`${status.scan_mode_label||'市場掃描'}執行中`;const bar=$('#scanProgress');const has=Number.isFinite(Number(p.percent));bar.classList.toggle('indeterminate',!has);bar.querySelector('i').style.width=has?`${Math.max(3,Math.min(100,Number(p.percent)))}%`:'35%';if(has){bar.setAttribute('aria-valuemin','0');bar.setAttribute('aria-valuemax','100');bar.setAttribute('aria-valuenow',String(Math.max(0,Math.min(100,Number(p.percent)))))}else{bar.removeAttribute('aria-valuemin');bar.removeAttribute('aria-valuemax');bar.removeAttribute('aria-valuenow')}}
