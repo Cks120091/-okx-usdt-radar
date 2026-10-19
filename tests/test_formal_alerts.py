@@ -107,6 +107,15 @@ class FormalAlertsTests(unittest.TestCase):
         self.sender.fail = False
         self.assertEqual(len(self.tracker.process(self.report())), 1)
 
+    def test_unconfigured_channel_does_not_mark_event_delivered(self):
+        tracker = FormalSignalTracker(
+            self.directory,
+            sender=TelegramFormalSender(token="", chat_id=""),
+            clock=lambda: self.now,
+        )
+        self.assertFalse(tracker.process(self.report()))
+        self.assertFalse((Path(self.directory) / "formal_alert_seen.json").exists())
+
     def test_unconfigured_telegram_keeps_sensitive_fields_private(self):
         sender = TelegramFormalSender(token="", chat_id="")
         self.assertFalse(sender.enabled)
