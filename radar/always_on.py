@@ -34,7 +34,8 @@ class MonitorConfig:
     warning_cooldown_seconds: int = 1800
     stale_tick_seconds: int = 20
     short_scan_seconds: int = 900
-    long_scan_seconds: int = 14400
+    # LONG uses 1H closed-price Trigger; 4H is direction filter, not scan clock.
+    long_scan_seconds: int = 3600
     scan_settle_seconds: int = 10
     retry_seconds: int = 60
 
@@ -59,8 +60,9 @@ class MonitorConfig:
             raise ValueError("advisory_move_pct out of range")
         if not 0 < self.min_observation_seconds <= self.momentum_window_seconds:
             raise ValueError("invalid observation window")
-        if self.stale_tick_seconds <= 0 or self.retry_seconds <= 0:
-            raise ValueError("invalid timeout")
+        if (self.stale_tick_seconds <= 0 or self.retry_seconds <= 0 or
+                self.short_scan_seconds <= 0 or self.long_scan_seconds <= 0):
+            raise ValueError("invalid timeout or scan cadence")
 
 
 class AlwaysOnMonitor:
