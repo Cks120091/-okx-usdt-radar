@@ -118,7 +118,7 @@ class FormalSignalTracker:
             for signal in getattr(report, field, []) or []:
                 if getattr(signal, "actionable", True) is False:
                     continue
-                if str(getattr(signal, "signal_stage", "CONFIRMED")).upper() != "CONFIRMED":
+                if str(getattr(signal, "signal_stage", "")).upper() not in {"CONFIRMED", "REENTRY"}:
                     continue
                 lifecycle = getattr(signal, "lifecycle", None) or {}
                 if not isinstance(lifecycle, dict) or lifecycle.get("terminal") is True:
@@ -137,7 +137,7 @@ class FormalSignalTracker:
                 except (ValueError, TypeError, OverflowError):
                     continue
                 # Candle timestamp can represent its open: allow up to two bars.
-                max_age = 2 * (900 if horizon == "SHORT" else 14400)
+                max_age = 2 * (900 if horizon == "SHORT" else 3600)
                 age = now - candle_ms / 1000
                 if candle_ms <= 0 or not math.isfinite(age) or age < -60 or age > max_age:
                     continue
