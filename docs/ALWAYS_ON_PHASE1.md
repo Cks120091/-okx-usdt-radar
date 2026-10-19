@@ -9,7 +9,7 @@
 ## 基本架構
 
 - WebSocket：`wss://ws.okx.com/ws/v5/public`（443 埠），對每輪掃描合格的標的訂閱 `tickers`。優先觀察清單／正式訊號，再補成交額最高的市場；預設最多 **80 個**，不是整個市場全部逐筆追蹤。
-- 正式掃描：新模組只呼叫同一個 `RadarRuntime.scan_blocking()`，而非複製另一套策略；15m 短線每根收線後重新掃描一次，4H 波段每根收線後重新掃描一次。掃描使用既有鎖，遇到人工掃描或進場前更新時不搶占。
+- 正式掃描：新模組只呼叫同一個 `RadarRuntime.scan_blocking()`，而非複製另一套策略；15m 短線每根收線後重新掃描一次，1H 波段 Trigger 每根 1H 收線後重新掃描一次（4H 仍是方向濾網）。掃描使用既有鎖，遇到人工掃描或進場前更新時不搶占。
 - 即時觀察：對 *上一輪正式掃描列入 watchlist* 的標的，若 3 分鐘窗內至少有 60 秒可用行情且同向變動達預設 0.5%，產生 `WATCHLIST_PRICE_ACCELERATION` 觀察事件。
 - 事件一定是 `advisory_only=true`、`entry_permitted=false`；**不新增正式 Trigger、不改 Entry/SL/TP、不授權交易**。
 - 當前監控狀態與最近觀察事件可由 `GET /api/status` 中的 `always_on_monitor` 取得；原網頁在監控啟用時顯示綠色監控狀態與最後一次觀察提示。事件另寫入 `data/monitor_warnings.jsonl`（依 `RADAR_DATA_DIR`），方便日後統計。
@@ -28,7 +28,7 @@
 
 ## 限制、上線前驗收
 
-1. **這是基礎監控測試版，不是完整 WebSocket 全市場深度引擎。** 它只能持續訂閱受限制的候選標的；新候選由下一輪全市場掃描發現。短線 15m、波段 4H 正式觸發週期沿用目前程式設計，沒有改變原有策略。
+1. **這是基礎監控測試版，不是完整 WebSocket 全市場深度引擎。** 它只能持續訂閱受限制的候選標的；新候選由下一輪全市場掃描發現。短線 15m、波段 1H 正式觸發週期沿用目前程式設計，沒有改變原有策略。
 2. 目前只在頁面/狀態 API 顯示預警，並儲存 JSONL；**關閉手機後的獨立 Web Push 主動預警尚未提供**。現有 Web Push 仍只負責單次手動掃描完成通知；已提供可選的 Telegram 正式訊號通知（見下節），但需要部署並由使用者自行設定 Bot Token 與 Chat ID。
 3. 本機 JSONL 與原有 SQLite/報告使用相同 `data_dir`；若 Render 使用 Free 的非持久化檔案系統，重啟可能遺失資料。**未升級可靠常駐運算與持久化儲存前，不能宣稱服務能真正 24 小時不間斷。**
 4. WebSocket 只供行情「觀察」，不能用 ticker 內盤中價格代替已收盤 K 線。每輪 15m 掃描還是會呼叫完整既有策略，需測量 CPU、耗時、OKX API 配額與並發；正式 24h 運作前做負載測試。
@@ -48,7 +48,7 @@ python -m unittest tests.test_always_on -v
 
 ## 已增補：正式訊號通知（獨立於價格加速觀察）
 
-- 目前版本只對既有掃描器的 `signals`（SHORT）及 `long_signals`（LONG）中 `signal_stage=CONFIRMED`、未終止且在合理收線時間窗內的新 Signal Episode 建立 `FORMAL_TRIGGER_CONFIRMED` 事件。
+- 目前版本只對既有掃描器的 `signals`（SHORT）及 `long_signals`（LONG）中 `signal_stage=CONFIRMED/REENTRY`、未終止且在合理收線時間窗內的新 Signal Episode 建立 `FORMAL_TRIGGER_CONFIRMED` 事件。
 - 正式掃描完成才會評估通知；**不是每筆 WebSocket tick 重新判定正式訊號**。早期預警不能升格為正式訊號，不改動價格結構或現有策略。通知仍需檢查最新價與追價條件才能考慮人工下單。
 - 去重依（時間級別、標的、多空、Trigger ID／收線時間）；最近已通知身份保存至 `formal_alert_seen.json`，正式事件追加到 `formal_alerts.jsonl`。目錄要持久化，否則重啟可能再次通知。
 - 如要在手機關閉網頁時收正式通知，可**自行選擇性**設定 `RADAR_TELEGRAM_BOT_TOKEN` 和 `RADAR_TELEGRAM_CHAT_ID`；不設定只保留伺服器端事件，**不會有手機推播**。Token 必須放在主機秘密環境變數，不可以提交到 GitHub、截圖或聊天內容。
