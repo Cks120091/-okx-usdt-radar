@@ -111,6 +111,17 @@ class AlwaysOnTests(unittest.TestCase):
             with self.assertRaises(ValueError):
                 AlwaysOnMonitor(self.runtime, config)
 
+    def test_swing_scan_runs_on_hourly_trigger_close(self):
+        self.assertEqual(self.monitor.config.long_scan_seconds, 3600)
+        self.monitor._last_success["SHORT"] = self.now[0]
+        self.monitor._last_success["LONG"] = self.now[0] - 3601
+        class StopOnScan:
+            def is_set(inner): return len(self.runtime.scanned) > 0
+            def wait(inner, _seconds): return None
+        self.monitor._stop = StopOnScan()
+        self.monitor._scan_loop()
+        self.assertEqual(self.runtime.scanned, ["LONG"])
+
     def test_scan_uses_existing_runtime_without_order(self):
         class StopOnScan:
             def is_set(inner): return len(self.runtime.scanned) > 0
