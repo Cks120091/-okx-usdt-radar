@@ -109,6 +109,10 @@ class FormalSignalTracker:
 
     def process(self, report: Any) -> list[dict[str, Any]]:
         """Report is the output of the existing formal scanner, not live tickers."""
+        # An unconfigured sender is not a delivered notification. Do not
+        # mark episodes seen during installation/dry-run before Telegram setup.
+        if not getattr(self.sender, "enabled", False):
+            return []
         if (str(getattr(report, "status", "")).upper() == "DATA_INCOMPLETE"
                 or getattr(report, "actionable", True) is False):
             return []
