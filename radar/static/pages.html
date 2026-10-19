@@ -1330,13 +1330,12 @@
       if(long)return !isTerminalSignal(item)&&!isPreviewItem(item)
         && Boolean(item.trigger_id)&&formalStage
         && ['LONG','SHORT'].includes(item.direction);
+      // Formal Trigger is historical episode identity; entry permission is
+      // separate. WAIT_RETEST/NO_CHASE must not demote a confirmed short signal
+      // to the preparation tab. Entry controls still check final decision.
       return !isTerminalSignal(item)&&!isPreviewItem(item)&&!isExpiredSnapshot(item)&&!itemReadOnlyReason(item)
-        && formalStage
-        && final.status==='ENTER'&&final.new_entry_allowed===true
-        && alignment.required===true&&alignment.passed===true
-        && alignment.timeframe==='1H'&&alignment.trigger_timeframe==='15m'
-        && ['LONG','SHORT'].includes(item.direction)
-        && alignment.timeframe_direction===item.direction&&alignment.trigger_direction===item.direction;
+        && Boolean(item.trigger_id)&&formalStage
+        && ['LONG','SHORT'].includes(item.direction);
     }
     function signalGroups(report,horizon){
       const long=horizon==='LONG',belongs=item=>long?item.radar_horizon!=='SHORT':item.radar_horizon!=='LONG';
