@@ -18,6 +18,8 @@ from pathlib import Path
 from typing import Any, Callable
 from urllib.parse import urlparse
 
+from .formal_alerts import FormalSignalTracker
+
 LOG = logging.getLogger("okx_radar.always_on")
 PUBLIC_WS = "wss://ws.okx.com/ws/v5/public"
 
@@ -79,6 +81,7 @@ class AlwaysOnMonitor:
         self._clock = clock
         self._ws_factory = ws_factory
         self._on_warning = on_warning
+        self._formal_alerts = FormalSignalTracker(runtime.config.data_dir, clock=clock)
         self._stop = threading.Event()
         self._lock = threading.RLock()
         self._scan_thread: threading.Thread | None = None
@@ -138,6 +141,7 @@ class AlwaysOnMonitor:
                     for h, t in self._last_success.items()
                 },
                 "recent_warnings": list(self._recent_warnings)[-10:],
+                "formal_alert_notifications": self._formal_alerts.status(),
                 "last_error": self._last_error,
                 "analysis_only": True,
                 "auto_ordering": False,
@@ -314,6 +318,9 @@ class AlwaysOnMonitor:
                             self._last_success[horizon] = completed
                         self._last_error = None
                     self.refresh_targets(report)
+                    # Notify only about existing closed-candle formal triggers.
+                    # Price-acceleration advisories must never reach this path.
+                    self._formal_alerts.process(report)
                 except RuntimeError as exc:
                     if "already running" not in str(exc):
                         LOG.warning("Background scan unavailable: %s", exc)
