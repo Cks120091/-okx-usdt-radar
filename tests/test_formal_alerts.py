@@ -83,13 +83,22 @@ class FormalAlertsTests(unittest.TestCase):
     def test_new_episode_and_long_signal_each_get_own_notice(self):
         short = self.signal()
         long = self.signal(trigger_id="btc-long-001",
-                           closed_candle_ts=int((self.now-14400)*1000))
+                           closed_candle_ts=int((self.now-3600)*1000))
         self.tracker.process(self.report(signals=[short], long_signals=[long]))
         self.assertEqual(len(self.sender.events), 2)
         self.assertEqual({x["horizon"] for x in self.sender.events}, {"SHORT","LONG"})
         self.tracker.process(self.report(signals=[self.signal(trigger_id="new-episode")],
                                          long_signals=[]))
         self.assertEqual(len(self.sender.events), 3)
+
+    def test_reentry_is_formal_and_stale_long_is_not_notified(self):
+        reentry = self.signal(signal_stage="REENTRY", trigger_id="reentry-001")
+        self.assertEqual(len(self.tracker.process(self.report(signals=[reentry]))), 1)
+        self.assertEqual(self.sender.events[-1]["trigger_id"], "reentry-001")
+        old_long = self.signal(trigger_id="old-long",
+                               closed_candle_ts=int((self.now-10800)*1000))
+        self.assertFalse(self.tracker.process(self.report(signals=[], long_signals=[old_long])))
+        self.assertEqual(len(self.sender.events), 1)
 
     def test_delivery_failure_retries_without_marking_seen(self):
         self.sender.fail = True
