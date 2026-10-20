@@ -11,6 +11,7 @@ import logging
 import math
 import os
 import re
+import threading
 import time
 from collections import deque
 from datetime import datetime, timezone
@@ -81,6 +82,7 @@ class FormalSignalTracker:
         self._seen_path = self._directory / "formal_alert_seen.json"
         self._event_path = self._directory / "formal_alerts.jsonl"
         self._clock = clock
+        self._delivery_lock = threading.Lock()
         self.sender = sender if sender is not None else TelegramFormalSender()
         self._seen = self._load_seen()
         self._recent: deque[dict[str, Any]] = deque(maxlen=30)
@@ -111,6 +113,11 @@ class FormalSignalTracker:
         }
 
     def process(self, report: Any) -> list[dict[str, Any]]:
+        """Serialize overlapping candidate and scheduled notification passes."""
+        with self._delivery_lock:
+            return self._process_locked(report)
+
+    def _process_locked(self, report: Any) -> list[dict[str, Any]]:
         """Report is the output of the existing formal scanner, not live tickers."""
         # An unconfigured sender is not a delivered notification. Do not
         # mark episodes seen during installation/dry-run before Telegram setup.
@@ -156,7 +163,10 @@ class FormalSignalTracker:
                 # have no explicit trigger ID.
                 story = getattr(signal, "market_story", {}) or {}
                 trigger = story.get("trigger", {}) if isinstance(story, dict) else {}
-                confirmation_ms = int(trigger.get("confirmation_ts") or 0) if isinstance(trigger, dict) else 0
+                try:
+                    confirmation_ms = int(trigger.get("confirmation_ts") or 0) if isinstance(trigger, dict) else 0
+                except (TypeError, ValueError, OverflowError):
+                    confirmation_ms = 0
                 # Multiple independent continuation reentries in one old
                 # episode have distinct confirmation timestamps, not fake plans.
                 confirmed_reentry = str(getattr(signal, "signal_stage", "")).upper() == "REENTRY"
