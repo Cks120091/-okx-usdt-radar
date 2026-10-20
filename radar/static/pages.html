@@ -1331,12 +1331,10 @@
     // Never classify a mere BREAKOUT momentum move as confirmation.
     function isContinuationFocus(item){
       if(String(item?.trigger_type||'').toUpperCase()==='CONTINUATION')return true;
-      const trigger=item?.market_story?.trigger||{};
-      return String(item?.signal_stage||'').toUpperCase()==='REENTRY'
-        &&String(trigger.type||'').toUpperCase()==='CONTINUATION'
-        &&trigger.triggered===true
-        &&Number.isFinite(Number(trigger.confirmation_ts))
-        &&Number(trigger.confirmation_ts)>0;
+      // Only genuine REENTRY acceptance can set this repository marker.
+      // Do not promote a stale breakout just because market_story moved.
+      const event=Number(item?.lifecycle?.continuation_promotion_confirmation_ms);
+      return Number.isFinite(event)&&event>0;
     }
     function isBackupPattern(item){return Boolean(item?.trigger_id)&&!isContinuationFocus(item)}
     function isFormalSignal(item,horizon=item.radar_horizon==='LONG'?'LONG':'SHORT'){
