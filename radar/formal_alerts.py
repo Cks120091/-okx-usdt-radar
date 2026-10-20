@@ -18,6 +18,8 @@ from pathlib import Path
 from typing import Any, Callable
 from urllib.request import Request, urlopen
 
+from .continuation_focus import is_continuation_focus, is_continuation_promotion
+
 LOG = logging.getLogger("okx_radar.formal_alerts")
 _TELEGRAM_TOKEN_RE = re.compile(r"^[0-9]+:[A-Za-z0-9_-]+$")
 _TELEGRAM_CHAT_RE = re.compile(r"^-?[0-9]+$")
@@ -50,12 +52,13 @@ class TelegramFormalSender:
         if not self.enabled:
             return
         direction = "做多" if event["direction"] == "LONG" else "做空"
-        text = ("🔔 OKX 雷達｜正式訊號已觸發\n"
+        text = ("🔔 OKX 雷達｜趨勢延續已觸發\n"
                 f"{event['symbol']} · {direction} · {event['horizon']}\n"
                 f"Entry：{_value(event['entry_low'])} ～ {_value(event['entry_high'])}\n"
                 f"SL：{_value(event['stop_loss'])}\n"
                 "這是已收線正式掃描訊號，非自動下單。\n"
-                "下單前仍需更新現價、檢查可進場／禁止追價與交易成本。")
+                "下單前仍需更新現價、檢查可進場／禁止追價與交易成本。\n"
+                + ("⚠️ 原始突破／反轉交易計畫價位並未重算；請以進場前更新為準。" if event.get("original_plan_retained") else ""))
         request = Request(
             f"https://api.telegram.org/bot{self._token}/sendMessage",
             data=json.dumps({"chat_id": self._chat_id, "text": text},
@@ -124,6 +127,10 @@ class FormalSignalTracker:
                     continue
                 if str(getattr(signal, "signal_stage", "")).upper() not in {"CONFIRMED", "REENTRY"}:
                     continue
+                # Breakout and reversal are reserve-only. A later confirmed
+                # continuation REENTRY may promote an original reserve Episode.
+                if not is_continuation_focus(signal):
+                    continue
                 lifecycle = getattr(signal, "lifecycle", None) or {}
                 if not isinstance(lifecycle, dict) or lifecycle.get("terminal") is True:
                     continue
@@ -147,7 +154,18 @@ class FormalSignalTracker:
                     continue
                 # Fall back to closed candle timestamp only when older Episodes
                 # have no explicit trigger ID.
-                identity = f"{horizon}|{symbol}|{direction}|{trigger_id or candle_ms}"
+                story = getattr(signal, "market_story", {}) or {}
+                trigger = story.get("trigger", {}) if isinstance(story, dict) else {}
+                confirmation_ms = int(trigger.get("confirmation_ts") or 0) if isinstance(trigger, dict) else 0
+                # Multiple independent continuation reentries in one old
+                # episode have distinct confirmation timestamps, not fake plans.
+                confirmed_reentry = str(getattr(signal, "signal_stage", "")).upper() == "REENTRY"
+                event_marker = (
+                    f"{trigger_id or candle_ms}:REENTRY:{confirmation_ms}"
+                    if confirmed_reentry and confirmation_ms > 0
+                    else (trigger_id or candle_ms)
+                )
+                identity = f"{horizon}|{symbol}|{direction}|{event_marker}"
                 if identity in self._seen:
                     continue
                 event = {
@@ -163,7 +181,14 @@ class FormalSignalTracker:
                     "stop_loss": getattr(signal, "stop_loss", None),
                     "analysis_only": True,
                     "auto_ordering": False,
-                    "message": "正式收線訊號已確認；入場仍須更新現價與風控。",
+                    "signal_type": "CONTINUATION",
+                    "promoted_from_backup": is_continuation_promotion(signal),
+                    "original_plan_retained": is_continuation_promotion(signal),
+                    "message": (
+                        "備用型態後續已獨立確認趨勢延續；原 Entry/SL/TP 為舊交易計畫，必須重新確認現價與可進場資格。"
+                        if is_continuation_promotion(signal)
+                        else "趨勢延續正式收線訊號已確認；入場仍須更新現價與風控。"
+                    ),
                 }
                 try:
                     self.sender.send(event)
