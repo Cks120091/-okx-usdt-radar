@@ -1194,10 +1194,15 @@
       const pill=$('#statusPill');pill.textContent=statusName[key]||'尚無資料';pill.className=`status-pill ${String(key).toLowerCase()}`;
       const live=status.always_on_monitor||{},liveNotice=$('#liveMonitorNotice');
       if(live.enabled){
-        const recent=Array.isArray(live.recent_warnings)?live.recent_warnings:[],warning=recent[recent.length-1];
-        const heartbeat=live.websocket_fresh?'連線正常':'連線中／行情未更新';
-        const detail=warning?('｜最近觀察：'+String(warning.symbol||'')+' '+(warning.direction==='LONG'?'偏多':'偏空')+'價格加速 '+String(warning.change_pct||0)+'%；僅預警、不能當成正式進場訊號'):'｜等待候選市場觀察事件';
-        liveNotice.textContent='24 小時行情監控｜'+heartbeat+'｜訂閱 '+String(live.selected_symbols||0)+' 幣'+detail;
+        const market=live.market_stream||{},full=market.mode==='FULL_UNIVERSE';
+        const candidates=Array.isArray(live.recent_candidates)?live.recent_candidates:[],recent=Array.isArray(live.recent_warnings)?live.recent_warnings:[];
+        const warning=candidates[candidates.length-1]||recent[recent.length-1];
+        const heartbeat=live.websocket_fresh?'行情連線正常':full&&!market.coverage_complete?'訂閱尚未完整／部分斷線':'行情未更新／連線異常';
+        const coverage=full?'｜訂閱確認 '+String(market.acknowledged_symbols||0)+'／'+String(market.listed_symbols||0)+' 檔（'+String(market.subscription_coverage_pct||0)+'%）':'｜訂閱 '+String(live.selected_symbols||0)+' 幣';
+        const deep=live.candidate_analysis||{};
+        const analysis=deep.enabled?'｜待深入分析 '+String(deep.queued||0)+' 檔':'';
+        const detail=warning?('｜最近候選：'+String(warning.symbol||'')+' '+(warning.direction==='LONG'?'偏多':'偏空')+' '+String(warning.change_pct||0)+'%；仍待正式收線確認'):'｜等待行情異動';
+        liveNotice.textContent='24 小時行情監控｜'+heartbeat+coverage+analysis+detail;
         liveNotice.classList.add('show');
       }else{liveNotice.textContent='';liveNotice.classList.remove('show')}
       const scanning=key==='SCANNING';syncScanControls(key);
