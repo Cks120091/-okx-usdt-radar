@@ -215,7 +215,7 @@ class FormalSignalTracker:
                     "signal_type": "CONTINUATION",
                     "promoted_from_backup": promoted,
                     "original_plan_retained": promoted,
-                    "entry_permitted": bool(getattr(signal, "actionable", False)) and not promoted,
+                    "entry_permitted": False,  # notice is never permission to open an order
                     "message": (
                         "備用型態後續已獨立確認趨勢延續；原 Entry/SL/TP 為舊交易計畫，必須重新確認現價與可進場資格。"
                         if is_continuation_promotion(signal)
