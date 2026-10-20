@@ -20,6 +20,7 @@ from .context import (
     detect_anomaly,
     summarize_flow_history,
 )
+from .continuation_focus import is_continuation_focus
 from .continuation import (
     CAPITAL_FLOW_HISTORY_LIMIT,
     summarize_closed_lookback_samples,
@@ -1141,10 +1142,16 @@ class MarketScanner:
         statistics_states = [*short_states, *long_states]
         short_states = [_without_internal_metrics(item) for item in short_states]
         long_states = [_without_internal_metrics(item) for item in long_states]
-        short_signals = sorted(short_signals, key=self._signal_sort_key, reverse=True)[
+        # Reserve the scarce 20 visible slots for continuation opportunities;
+        # within both primary/reserve classes, retain the quality-first sort.
+        short_signals = sorted(short_signals, key=lambda x: (
+            int(is_continuation_focus(x)), self._signal_sort_key(x)
+        ), reverse=True)[
             : min(max(self.config.max_signals, 0), 20)
         ]
-        long_signals = sorted(long_signals, key=self._signal_sort_key, reverse=True)[
+        long_signals = sorted(long_signals, key=lambda x: (
+            int(is_continuation_focus(x)), self._signal_sort_key(x)
+        ), reverse=True)[
             : min(max(self.config.max_signals, 0), 20)
         ]
         # Historical card win-rate sampling is intentionally disabled.
