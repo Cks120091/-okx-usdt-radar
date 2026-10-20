@@ -21,11 +21,18 @@ def is_continuation_focus(signal: Any) -> bool:
         return False
     story = getattr(signal, "market_story", None)
     trigger = story.get("trigger") if isinstance(story, dict) else None
-    return bool(
+    if not (
         isinstance(trigger, dict)
         and trigger.get("triggered") is True
         and str(trigger.get("type") or "").upper() == "CONTINUATION"
-    )
+    ):
+        return False
+    # REENTRY must carry a newer, independently confirmed candle event.
+    try:
+        confirmation = int(trigger.get("confirmation_ts") or 0)
+    except (TypeError, ValueError, OverflowError):
+        return False
+    return confirmation > 0
 
 
 def is_continuation_promotion(signal: Any) -> bool:
