@@ -144,6 +144,29 @@ class FormalAlertsTests(unittest.TestCase):
         )
         self.assertEqual(len(self.tracker.process(self.report(signals=[later]))), 1)
 
+    def test_later_continuation_event_notifies_even_when_old_plan_extended(self):
+        old = self.signal(
+            trigger_type="BREAKOUT", trigger_id="breakout-now-extended",
+            signal_stage="EXTENDED", actionable=False,
+            lifecycle={"terminal": False, "status": "ACTIVE",
+                       "continuation_promotion_confirmation_ms": int((self.now - 300)*1000)},
+            closed_candle_ts=int((self.now - 900)*1000),
+        )
+        events = self.tracker.process(self.report(signals=[old]))
+        self.assertEqual(len(events), 1)
+        self.assertEqual(events[0]["type"], "CONTINUATION_PROMOTION_CONFIRMED")
+        self.assertFalse(events[0]["entry_permitted"])
+        self.assertTrue(events[0]["original_plan_retained"])
+        self.assertFalse(self.tracker.process(self.report(signals=[old])))
+        self.now += 900
+        later = self.signal(
+            trigger_type="BREAKOUT", trigger_id="breakout-now-extended",
+            signal_stage="EXTENDED", actionable=False,
+            lifecycle={"terminal": False, "status": "ACTIVE",
+                       "continuation_promotion_confirmation_ms": int((self.now - 10800)*1000)},
+        )
+        self.assertFalse(self.tracker.process(self.report(signals=[later])))
+
     def test_mere_continuation_story_without_confirmed_reentry_stays_backup(self):
         invalid = self.signal(
             trigger_type="BREAKOUT", trigger_id="unconfirmed-change",
