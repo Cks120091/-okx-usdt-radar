@@ -1894,6 +1894,26 @@ class SignalRepository:
         if refreshed_trigger:
             market_story["trigger"] = refreshed_trigger
         lifecycle = dict(existing.lifecycle)
+        # An earlier BREAKOUT / REVERSAL Episode may become a genuine
+        # continuation only after the core's independent REENTRY event. Store
+        # the accepted confirmation as durable metadata, without modifying
+        # the original trigger_type, Episode ID, Entry, SL, TP or R:R.
+        raw_trigger = raw.market_story.get("trigger", {})
+        if (
+            existing.trigger_type != "CONTINUATION"
+            and raw.trigger_type == "CONTINUATION"
+            and raw.signal_stage == "REENTRY"
+            and isinstance(raw_trigger, dict)
+            and raw_trigger.get("type") == "CONTINUATION"
+            and raw_trigger.get("triggered") is True
+        ):
+            try:
+                promotion_ms = int(raw_trigger.get("confirmation_ts") or 0)
+            except (ValueError, TypeError, OverflowError):
+                promotion_ms = 0
+            if promotion_ms > int(lifecycle.get("continuation_promotion_confirmation_ms") or 0):
+                lifecycle["continuation_promotion_confirmation_ms"] = promotion_ms
+                lifecycle["continuation_promotion_from"] = existing.trigger_type
         event_keys = [
             str(value)
             for value in lifecycle.get("event_keys", [])
