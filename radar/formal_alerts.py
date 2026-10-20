@@ -130,14 +130,17 @@ class FormalSignalTracker:
         alerts = []
         for horizon, field in (("SHORT", "signals"), ("LONG", "long_signals")):
             for signal in getattr(report, field, []) or []:
-                if getattr(signal, "actionable", True) is False:
-                    continue
-                if str(getattr(signal, "signal_stage", "")).upper() not in {"CONFIRMED", "REENTRY"}:
-                    continue
-                # Breakout and reversal are reserve-only. A later confirmed
-                # continuation REENTRY may promote an original reserve Episode.
+                # An old BREAKOUT plan can be marked EXTENDED even when a
+                # distinct new continuation is genuinely confirmed. Notify
+                # about that *event*, not about permission to reuse old Entry.
+                promoted = is_continuation_promotion(signal)
                 if not is_continuation_focus(signal):
                     continue
+                if not promoted:
+                    if getattr(signal, "actionable", True) is False:
+                        continue
+                    if str(getattr(signal, "signal_stage", "")).upper() not in {"CONFIRMED", "REENTRY"}:
+                        continue
                 lifecycle = getattr(signal, "lifecycle", None) or {}
                 if not isinstance(lifecycle, dict) or lifecycle.get("terminal") is True:
                     continue
@@ -156,8 +159,16 @@ class FormalSignalTracker:
                     continue
                 # Candle timestamp can represent its open: allow up to two bars.
                 max_age = 2 * (900 if horizon == "SHORT" else 3600)
-                age = now - candle_ms / 1000
-                if candle_ms <= 0 or not math.isfinite(age) or age < -60 or age > max_age:
+                reference_ms = candle_ms
+                if promoted:
+                    try:
+                        reference_ms = int(
+                            lifecycle.get("continuation_promotion_confirmation_ms") or 0
+                        )
+                    except (TypeError, ValueError, OverflowError):
+                        continue
+                age = now - reference_ms / 1000
+                if reference_ms <= 0 or not math.isfinite(age) or age < -60 or age > max_age:
                     continue
                 # Fall back to closed candle timestamp only when older Episodes
                 # have no explicit trigger ID.
@@ -189,7 +200,7 @@ class FormalSignalTracker:
                 if identity in self._seen:
                     continue
                 event = {
-                    "type": "FORMAL_TRIGGER_CONFIRMED",
+                    "type": "CONTINUATION_PROMOTION_CONFIRMED" if promoted else "FORMAL_TRIGGER_CONFIRMED",
                     "symbol": symbol,
                     "direction": direction,
                     "horizon": horizon,
@@ -202,8 +213,9 @@ class FormalSignalTracker:
                     "analysis_only": True,
                     "auto_ordering": False,
                     "signal_type": "CONTINUATION",
-                    "promoted_from_backup": is_continuation_promotion(signal),
-                    "original_plan_retained": is_continuation_promotion(signal),
+                    "promoted_from_backup": promoted,
+                    "original_plan_retained": promoted,
+                    "entry_permitted": bool(getattr(signal, "actionable", False)) and not promoted,
                     "message": (
                         "備用型態後續已獨立確認趨勢延續；原 Entry/SL/TP 為舊交易計畫，必須重新確認現價與可進場資格。"
                         if is_continuation_promotion(signal)
