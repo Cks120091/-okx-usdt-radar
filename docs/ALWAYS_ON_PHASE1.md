@@ -52,3 +52,14 @@ python -m unittest discover -s tests -v
 ### 回滾
 
 只要取消 `RADAR_ALWAYS_ON` 即可停用所有常駐掃描，原本手動掃描介面仍可使用。此階段僅 GitHub `feature/always-on-market-monitor` 分支，不自動部署、不改 `main`。
+
+## 趨勢延續專用雷達（測試策略，未部署）
+
+- **正式主畫面、前 20 檔名額及 Telegram 正式通知優先提供趨勢延續（CONTINUATION）**，同類型之間仍按原交易品質分數排序。品質／執行成本等原有風控沒有降低。
+- **BREAKOUT、BREAKOUT_RETEST、REVERSAL** 等其他形態仍在底層完整分析並保留在預備／備用觀察，不會單獨產生主力正式通知。
+- 原本備用型態若**真正形成獨立、已收盤確認的 CONTINUATION/REENTRY 事件**，經原本的 Episode 事件時間檢查後，由 repository 將 `continuation_promotion_confirmation_ms` 寫入原始 Episode 的 lifecycle，才會升級主訊號；不能只憑市價上漲或 `market_story` 的文字變化觸發。
+- **原有 Episode 的 Entry／SL／TP／R:R 不會被新延續覆蓋**。如果此前突破計畫已延伸到不可進位置，新的延續確認通知是**行情觀察事件，不代表原交易計畫可以重新進場**；通知與主卡會明確警示先更新現價、檢查禁止追價。未來要有全新 Entry／SL／TP，仍需要另行設計符合核心 Episode 約束的新計畫產生方式。
+- 相同 Episode 不會因每次重新掃描而重發通知；只有 repository 新接受的獨立確認時間戳才可能產生新的升級事件。上一個訊號若終止或資料過期，一律不得把舊計畫復活。
+- 這項選擇過濾**尚未證明能提高勝率**；需以回測及實際觀察驗證，不能把品質分數視為歷史勝率。
+
+離線單元測試：`python -m unittest tests.test_continuation_focus tests.test_formal_alerts -v`。
