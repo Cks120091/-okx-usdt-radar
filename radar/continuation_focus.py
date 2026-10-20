@@ -17,22 +17,18 @@ def is_continuation_focus(signal: Any) -> bool:
     """
     if str(getattr(signal, "trigger_type", "") or "").upper() == "CONTINUATION":
         return True
-    if str(getattr(signal, "signal_stage", "") or "").upper() != "REENTRY":
+    lifecycle = getattr(signal, "lifecycle", None)
+    if not isinstance(lifecycle, dict):
         return False
-    story = getattr(signal, "market_story", None)
-    trigger = story.get("trigger") if isinstance(story, dict) else None
-    if not (
-        isinstance(trigger, dict)
-        and trigger.get("triggered") is True
-        and str(trigger.get("type") or "").upper() == "CONTINUATION"
-    ):
-        return False
-    # REENTRY must carry a newer, independently confirmed candle event.
+    # Only the core repository can set this persistent marker after a true
+    # newer, independently confirmed continuation REENTRY.
     try:
-        confirmation = int(trigger.get("confirmation_ts") or 0)
+        accepted_confirmation = int(
+            lifecycle.get("continuation_promotion_confirmation_ms") or 0
+        )
     except (TypeError, ValueError, OverflowError):
         return False
-    return confirmation > 0
+    return accepted_confirmation > 0
 
 
 def is_continuation_promotion(signal: Any) -> bool:
