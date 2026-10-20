@@ -9,9 +9,20 @@ from radar.continuation_focus import (
 
 def event(original, stage="CONFIRMED", new_type=None, triggered=True,
           confirmation_ts=1800000000000):
+    # Simulate the repository's accepted REENTRY metadata only for
+    # genuinely confirmed distinct continuation events.
+    accepted = (
+        original != "CONTINUATION"
+        and stage == "REENTRY"
+        and new_type == "CONTINUATION"
+        and triggered is True
+        and isinstance(confirmation_ts, int)
+        and confirmation_ts > 0
+    )
     return SimpleNamespace(
         trigger_type=original,
         signal_stage=stage,
+        lifecycle={"continuation_promotion_confirmation_ms": confirmation_ts} if accepted else {},
         market_story={"trigger": {
             "type": new_type or original,
             "triggered": triggered,
