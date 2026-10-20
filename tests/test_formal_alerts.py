@@ -120,6 +120,8 @@ class FormalAlertsTests(unittest.TestCase):
         continuation = self.signal(
             trigger_type="BREAKOUT", trigger_id="original-breakout",
             signal_stage="REENTRY",
+            lifecycle={"terminal": False, "status": "ACTIVE",
+                       "continuation_promotion_confirmation_ms": int((self.now - 300)*1000)},
             market_story={"trigger": {
                 "type": "CONTINUATION", "triggered": True,
                 "confirmation_ts": int((self.now - 300) * 1000),
@@ -133,6 +135,8 @@ class FormalAlertsTests(unittest.TestCase):
         later = self.signal(
             trigger_type="BREAKOUT", trigger_id="original-breakout",
             signal_stage="REENTRY",
+            lifecycle={"terminal": False, "status": "ACTIVE",
+                       "continuation_promotion_confirmation_ms": int((self.now - 180)*1000)},
             market_story={"trigger": {
                 "type": "CONTINUATION", "triggered": True,
                 "confirmation_ts": int((self.now - 180) * 1000),
