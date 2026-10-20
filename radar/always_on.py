@@ -19,6 +19,7 @@ from typing import Any, Callable
 from urllib.parse import urlparse
 
 from .formal_alerts import FormalSignalTracker
+from .full_market_stream import FullMarketStream
 
 LOG = logging.getLogger("okx_radar.always_on")
 PUBLIC_WS = "wss://ws.okx.com/ws/v5/public"
@@ -28,6 +29,10 @@ PUBLIC_WS = "wss://ws.okx.com/ws/v5/public"
 class MonitorConfig:
     websocket_url: str = PUBLIC_WS
     max_symbols: int = 80
+    full_universe: bool = False
+    ws_shard_size: int = 80
+    universe_refresh_seconds: int = 300
+    candidate_min_volume_usdt: float = 2_000_000.0
     momentum_window_seconds: int = 180
     min_observation_seconds: int = 60
     advisory_move_pct: float = 0.5
@@ -44,6 +49,10 @@ class MonitorConfig:
         return cls(
             websocket_url=os.getenv("RADAR_PUBLIC_WS_URL", PUBLIC_WS),
             max_symbols=int(os.getenv("RADAR_MONITOR_MAX_SYMBOLS", "80")),
+            full_universe=os.getenv("RADAR_MONITOR_ALL_SYMBOLS", "1").strip().lower() in {"1", "true", "yes", "on"},
+            ws_shard_size=int(os.getenv("RADAR_MONITOR_WS_SHARD_SIZE", "80")),
+            universe_refresh_seconds=int(os.getenv("RADAR_MONITOR_UNIVERSE_REFRESH_SECONDS", "300")),
+            candidate_min_volume_usdt=float(os.getenv("RADAR_MONITOR_CANDIDATE_MIN_VOLUME", "2000000")),
             advisory_move_pct=float(os.getenv("RADAR_MONITOR_MOVE_PCT", "0.5")),
         )
 
@@ -56,6 +65,10 @@ class MonitorConfig:
             raise ValueError("Official public OKX WebSocket on port 443 required")
         if not 1 <= self.max_symbols <= 150:
             raise ValueError("max_symbols out of range")
+        if not 1 <= self.ws_shard_size <= 120 or self.universe_refresh_seconds < 60:
+            raise ValueError("invalid market subscription limits")
+        if not 0 <= self.candidate_min_volume_usdt <= 1_000_000_000_000:
+            raise ValueError("invalid candidate turnover threshold")
         if not 0 < self.advisory_move_pct <= 20:
             raise ValueError("advisory_move_pct out of range")
         if not 0 < self.min_observation_seconds <= self.momentum_window_seconds:
@@ -84,6 +97,16 @@ class AlwaysOnMonitor:
         self._ws_factory = ws_factory
         self._on_warning = on_warning
         self._formal_alerts = FormalSignalTracker(runtime.config.data_dir, clock=clock)
+        self._full_stream = None
+        if self.config.full_universe:
+            client = getattr(getattr(runtime, "scanner", None), "client", None)
+            if client is None:
+                raise ValueError("Full-universe monitoring requires a public OKX client")
+            self._full_stream = FullMarketStream(
+                client, self.config.websocket_url, self.handle_frame,
+                ws_factory=ws_factory, shard_size=self.config.ws_shard_size,
+                refresh_seconds=self.config.universe_refresh_seconds, clock=clock,
+            )
         self._stop = threading.Event()
         self._lock = threading.RLock()
         self._scan_thread: threading.Thread | None = None
@@ -94,9 +117,11 @@ class AlwaysOnMonitor:
         self._samples: dict[str, deque[tuple[int, float]]] = {}
         self._last_warning: dict[tuple[str, str, str], float] = {}
         self._recent_warnings: deque[dict[str, Any]] = deque(maxlen=30)
+        self._recent_candidates: deque[dict[str, Any]] = deque(maxlen=40)
         self._last_tick_at: float | None = None
         self._last_success: dict[str, float] = {"SHORT": 0.0, "LONG": 0.0}
         self._last_attempt: dict[str, float] = {"SHORT": 0.0, "LONG": 0.0}
+        self._last_success_bucket: dict[str, int] = {"SHORT": -1, "LONG": -1}
         self._connected = False
         self._last_error: str | None = None
 
@@ -107,13 +132,19 @@ class AlwaysOnMonitor:
             self._stop.clear()
             self._scan_thread = threading.Thread(
                 target=self._scan_loop, daemon=True, name="radar-continuous-scan")
-            self._ws_thread = threading.Thread(
-                target=self._ws_loop, daemon=True, name="radar-public-tickers")
+            if self._full_stream is None:
+                self._ws_thread = threading.Thread(
+                    target=self._ws_loop, daemon=True, name="radar-public-tickers")
             self._scan_thread.start()
-            self._ws_thread.start()
+            if self._full_stream is not None:
+                self._full_stream.start()
+            elif self._ws_thread is not None:
+                self._ws_thread.start()
 
     def stop(self) -> None:
         self._stop.set()
+        if self._full_stream is not None:
+            self._full_stream.stop()
         with self._lock:
             sock = self._socket
         if sock is not None:
@@ -128,16 +159,20 @@ class AlwaysOnMonitor:
     def status(self) -> dict[str, Any]:
         with self._lock:
             now, last = self._clock(), self._last_tick_at
+            market = self._full_stream.status() if self._full_stream is not None else None
             return {
                 "enabled": True,
                 "running": bool(self._scan_thread and self._scan_thread.is_alive()),
-                "websocket_connected": self._connected,
+                "websocket_connected": market["connected_shards"] > 0 if market else self._connected,
+                "market_stream": market,
                 "websocket_fresh": bool(
-                    self._connected and last is not None and
+                    (market["coverage_complete"] if market else self._connected)
+                    and last is not None and
                     now - last <= self.config.stale_tick_seconds),
                 "last_tick_at": datetime.fromtimestamp(last, timezone.utc).isoformat()
                 if last else None,
-                "selected_symbols": len(self._targets),
+                "selected_symbols": market["listed_symbols"] if market else len(self._targets),
+                "recent_candidates": list(self._recent_candidates)[-12:],
                 "latest_scan_at": {
                     h: datetime.fromtimestamp(t, timezone.utc).isoformat() if t else None
                     for h, t in self._last_success.items()
@@ -150,7 +185,7 @@ class AlwaysOnMonitor:
             }
 
     def refresh_targets(self, report: Any) -> None:
-        """Only scanner-qualified instruments are eligible for subscription."""
+        """Cache formal-scan watch sides; never narrow a full-market subscription."""
         eligible = set(getattr(report, "target_instruments", []) or [])
         prioritized: list[str] = []
         watch: dict[str, set[tuple[str, str]]] = {}
@@ -180,10 +215,12 @@ class AlwaysOnMonitor:
             changed = chosen != self._targets
             self._targets = chosen
             self._watch_sides = {
-                key: val for key, val in watch.items() if key in chosen}
-            self._samples = {
-                key: val for key, val in self._samples.items() if key in chosen}
-            sock = self._socket if changed else None
+                key: val for key, val in watch.items()
+                if (self._full_stream is not None or key in chosen)}
+            if self._full_stream is None:
+                self._samples = {
+                    key: val for key, val in self._samples.items() if key in chosen}
+            sock = self._socket if changed and self._full_stream is None else None
         if sock is not None:
             sock.close()
 
@@ -225,7 +262,7 @@ class AlwaysOnMonitor:
                 continue
             warnings = []
             with self._lock:
-                if symbol not in self._targets:
+                if symbol not in (self._full_stream.symbols if self._full_stream else self._targets):
                     continue
                 self._last_tick_at = now
                 samples = self._samples.setdefault(symbol, deque())
@@ -241,6 +278,33 @@ class AlwaysOnMonitor:
                     continue
                 reference = samples[0][1]
                 change_pct = (last / reference - 1) * 100
+                # Observe every subscribed contract, but only promote sufficiently
+                # liquid ones to candidate analysis. This never creates a Trigger.
+                if self._full_stream is not None:
+                    turnover = self._full_stream.quote_volume(symbol)
+                    if (turnover is not None
+                            and turnover >= self.config.candidate_min_volume_usdt
+                            and abs(change_pct) >= self.config.advisory_move_pct):
+                        side = "LONG" if change_pct > 0 else "SHORT"
+                        key = (symbol, "CANDIDATE", side)
+                        if now - self._last_warning.get(key, float("-inf")) >= self.config.warning_cooldown_seconds:
+                            self._last_warning[key] = now
+                            candidate = {
+                                "type": "MARKET_PRICE_ACCELERATION_CANDIDATE",
+                                "advisory_only": True,
+                                "entry_permitted": False,
+                                "symbol": symbol,
+                                "direction": side,
+                                "horizon": "CANDIDATE",
+                                "price": last,
+                                "change_pct": round(change_pct, 3),
+                                "quote_volume_24h": round(turnover, 2),
+                                "exchange_ts": ts,
+                                "observed_at": datetime.fromtimestamp(now, timezone.utc).isoformat(),
+                                "message": "全市場價格加速候選；尚未通過 MA/MACD/收線正式觸發。",
+                            }
+                            self._recent_candidates.append(candidate)
+                            warnings.append(candidate)
                 for horizon, side in self._watch_sides.get(symbol, ()):
                     if ((side == "LONG" and
                             change_pct < self.config.advisory_move_pct) or
@@ -299,9 +363,7 @@ class AlwaysOnMonitor:
                     previous = self._last_success[horizon]
                     attempted = self._last_attempt[horizon]
                 bucket = int((now - self.config.scan_settle_seconds) // seconds)
-                last_bucket = int(
-                    (previous - self.config.scan_settle_seconds) // seconds
-                ) if previous else -1
+                last_bucket = self._last_success_bucket[horizon] if previous else -1
                 if (bucket > last_bucket and
                         now - attempted >= self.config.retry_seconds):
                     due.append(horizon)
@@ -318,6 +380,12 @@ class AlwaysOnMonitor:
                     with self._lock:
                         for horizon in due:
                             self._last_success[horizon] = completed
+                            # Use the bucket that was scanned, NOT completion time:
+                            # a 3-minute scan can straddle the next bar open.
+                            self._last_success_bucket[horizon] = int(
+                                (now - self.config.scan_settle_seconds) //
+                                (self.config.short_scan_seconds if horizon == "SHORT"
+                                 else self.config.long_scan_seconds))
                         self._last_error = None
                     self.refresh_targets(report)
                     # Notify only about existing closed-candle formal triggers.
