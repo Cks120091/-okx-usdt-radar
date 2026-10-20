@@ -155,6 +155,33 @@ class AlwaysOnTests(unittest.TestCase):
         self.assertFalse(candidates[0]["entry_permitted"])
         self.assertEqual(candidates[0]["type"], "MARKET_PRICE_ACCELERATION_CANDIDATE")
 
+    def test_candidate_deep_analysis_uses_existing_single_coin_method(self):
+        from types import SimpleNamespace
+        from tempfile import TemporaryDirectory
+        class StubClient:
+            pass
+        self.runtime.scanner = SimpleNamespace(client=StubClient())
+        self.runtime._latest = None
+        self.runtime._state_lock = __import__("threading").RLock()
+        analyzed = []
+        self.runtime.scan_instrument_dict = lambda symbol, mode: (
+            analyzed.append((symbol, mode)) or {"inst_id": symbol}
+        )
+        monitor = AlwaysOnMonitor(
+            self.runtime, MonitorConfig(full_universe=True),
+            clock=lambda: self.now[0],
+        )
+        monitor._candidate_queue.append("BTC-USDT-SWAP")
+        monitor._candidate_queued.add("BTC-USDT-SWAP")
+        class StopAfterOne:
+            def is_set(inner): return len(analyzed) >= 1
+            def wait(inner, seconds): return None
+        monitor._stop = StopAfterOne()
+        monitor._candidate_loop()
+        self.assertEqual(analyzed, [("BTC-USDT-SWAP", "BOTH")])
+        self.assertEqual(monitor.status()["candidate_analysis"]["completed"], 1)
+        self.assertEqual(monitor.status()["candidate_analysis"]["queued"], 0)
+
     def test_scan_uses_existing_runtime_without_order(self):
         class StopOnScan:
             def is_set(inner): return len(self.runtime.scanned) > 0
