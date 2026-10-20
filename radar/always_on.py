@@ -33,6 +33,8 @@ class MonitorConfig:
     ws_shard_size: int = 80
     universe_refresh_seconds: int = 300
     candidate_min_volume_usdt: float = 2_000_000.0
+    candidate_deep_scan: bool = True
+    candidate_scan_interval_seconds: int = 90
     momentum_window_seconds: int = 180
     min_observation_seconds: int = 60
     advisory_move_pct: float = 0.5
@@ -53,6 +55,8 @@ class MonitorConfig:
             ws_shard_size=int(os.getenv("RADAR_MONITOR_WS_SHARD_SIZE", "80")),
             universe_refresh_seconds=int(os.getenv("RADAR_MONITOR_UNIVERSE_REFRESH_SECONDS", "300")),
             candidate_min_volume_usdt=float(os.getenv("RADAR_MONITOR_CANDIDATE_MIN_VOLUME", "2000000")),
+            candidate_deep_scan=os.getenv("RADAR_MONITOR_CANDIDATE_DEEP_SCAN", "1").strip().lower() in {"1", "true", "yes", "on"},
+            candidate_scan_interval_seconds=int(os.getenv("RADAR_MONITOR_CANDIDATE_SCAN_INTERVAL", "90")),
             advisory_move_pct=float(os.getenv("RADAR_MONITOR_MOVE_PCT", "0.5")),
         )
 
@@ -67,6 +71,8 @@ class MonitorConfig:
             raise ValueError("max_symbols out of range")
         if not 1 <= self.ws_shard_size <= 120 or self.universe_refresh_seconds < 60:
             raise ValueError("invalid market subscription limits")
+        if self.candidate_scan_interval_seconds < 30:
+            raise ValueError("candidate deep-scan interval must be at least 30 seconds")
         if not 0 <= self.candidate_min_volume_usdt <= 1_000_000_000_000:
             raise ValueError("invalid candidate turnover threshold")
         if not 0 < self.advisory_move_pct <= 20:
@@ -111,6 +117,12 @@ class AlwaysOnMonitor:
         self._lock = threading.RLock()
         self._scan_thread: threading.Thread | None = None
         self._ws_thread: threading.Thread | None = None
+        self._candidate_thread: threading.Thread | None = None
+        self._candidate_queue: deque[str] = deque(maxlen=24)
+        self._candidate_queued: set[str] = set()
+        self._deep_scans_done = 0
+        self._deep_scan_last_at: float | None = None
+        self._deep_scan_last_error: str | None = None
         self._socket: Any = None
         self._targets: tuple[str, ...] = ()
         self._watch_sides: dict[str, set[tuple[str, str]]] = {}
@@ -136,6 +148,11 @@ class AlwaysOnMonitor:
                 self._ws_thread = threading.Thread(
                     target=self._ws_loop, daemon=True, name="radar-public-tickers")
             self._scan_thread.start()
+            if self._full_stream is not None and self.config.candidate_deep_scan:
+                self._candidate_thread = threading.Thread(
+                    target=self._candidate_loop, daemon=True,
+                    name="radar-candidate-deep-analyzer")
+                self._candidate_thread.start()
             if self._full_stream is not None:
                 self._full_stream.start()
             elif self._ws_thread is not None:
@@ -152,7 +169,7 @@ class AlwaysOnMonitor:
                 sock.close()
             except Exception:
                 LOG.exception("WebSocket close failed")
-        for thread in (self._ws_thread, self._scan_thread):
+        for thread in (self._ws_thread, self._scan_thread, self._candidate_thread):
             if thread is not None and thread.is_alive():
                 thread.join(timeout=3)
 
@@ -173,6 +190,15 @@ class AlwaysOnMonitor:
                 if last else None,
                 "selected_symbols": market["listed_symbols"] if market else len(self._targets),
                 "recent_candidates": list(self._recent_candidates)[-12:],
+                "candidate_analysis": {
+                    "enabled": bool(self._full_stream is not None and self.config.candidate_deep_scan),
+                    "queued": len(self._candidate_queue),
+                    "completed": self._deep_scans_done,
+                    "last_completed_at": (
+                        datetime.fromtimestamp(self._deep_scan_last_at, timezone.utc).isoformat()
+                        if self._deep_scan_last_at else None),
+                    "last_error": self._deep_scan_last_error,
+                },
                 "latest_scan_at": {
                     h: datetime.fromtimestamp(t, timezone.utc).isoformat() if t else None
                     for h, t in self._last_success.items()
@@ -304,6 +330,11 @@ class AlwaysOnMonitor:
                                 "message": "全市場價格加速候選；尚未通過 MA/MACD/收線正式觸發。",
                             }
                             self._recent_candidates.append(candidate)
+                            if (self.config.candidate_deep_scan and
+                                    symbol not in self._candidate_queued and
+                                    len(self._candidate_queue) < self._candidate_queue.maxlen):
+                                self._candidate_queue.append(symbol)
+                                self._candidate_queued.add(symbol)
                             warnings.append(candidate)
                 for horizon, side in self._watch_sides.get(symbol, ()):
                     if ((side == "LONG" and
@@ -350,6 +381,52 @@ class AlwaysOnMonitor:
                 self._on_warning(warning)
             except Exception:
                 LOG.exception("Warning callback failed")
+
+    def _candidate_loop(self) -> None:
+        """Rate-limited single-symbol deep analysis, never live-tick Triggering.
+
+        The existing scanner reuses CLOSED K lines and the same Signal Episode
+        repository. Manual scan and full-market scan take precedence.
+        """
+        while not self._stop.is_set():
+            with self._lock:
+                symbol = self._candidate_queue.popleft() if self._candidate_queue else None
+                if symbol:
+                    self._candidate_queued.discard(symbol)
+            if not symbol:
+                self._stop.wait(2.0)
+                continue
+            analyzer = getattr(self.runtime, "scan_instrument_dict", None)
+            if not callable(analyzer):
+                with self._lock:
+                    self._deep_scan_last_error = "單幣分析器尚未啟用"
+                self._stop.wait(self.config.candidate_scan_interval_seconds)
+                continue
+            if bool(getattr(self.runtime, "_running", False)):
+                with self._lock:
+                    if symbol not in self._candidate_queued and len(self._candidate_queue) < self._candidate_queue.maxlen:
+                        self._candidate_queue.append(symbol)
+                        self._candidate_queued.add(symbol)
+                self._stop.wait(5.0)
+                continue
+            try:
+                result = analyzer(symbol, "BOTH")
+                with self._lock:
+                    self._deep_scans_done += 1
+                    self._deep_scan_last_at = self._clock()
+                    self._deep_scan_last_error = None
+                # A single-symbol confirmation can promote an Episode into
+                # the saved report. Route it through the same deduplicated notifier.
+                if result and getattr(self.runtime, "_latest", None) is not None:
+                    with self.runtime._state_lock:
+                        latest = self.runtime._latest
+                    if latest is not None:
+                        self._formal_alerts.process(latest)
+            except Exception as exc:
+                LOG.info("Candidate analysis skipped: %s", type(exc).__name__)
+                with self._lock:
+                    self._deep_scan_last_error = "候選幣分析暫時失敗或掃描佔用"
+            self._stop.wait(self.config.candidate_scan_interval_seconds)
 
     def _scan_loop(self) -> None:
         while not self._stop.is_set():
