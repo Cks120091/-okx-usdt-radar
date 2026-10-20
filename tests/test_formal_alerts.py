@@ -37,7 +37,9 @@ class FormalAlertsTests(unittest.TestCase):
     def signal(self, **changes):
         payload = dict(
             inst_id="BTC-USDT-SWAP", direction="LONG", actionable=True,
-            signal_stage="CONFIRMED", closed_candle_ts=int((self.now-900) * 1000),
+            signal_stage="CONFIRMED", trigger_type="CONTINUATION",
+            market_story={"trigger": {"type": "CONTINUATION", "triggered": True, "confirmation_ts": int((self.now-900)*1000)}},
+            closed_candle_ts=int((self.now-900) * 1000),
             trigger_id="btc-short-001", entry_low="100", entry_high="101",
             stop_loss="98", lifecycle={"terminal": False, "status": "ACTIVE"},
         )
@@ -100,6 +102,55 @@ class FormalAlertsTests(unittest.TestCase):
         self.assertFalse(self.tracker.process(self.report(signals=[], long_signals=[old_long])))
         self.assertEqual(len(self.sender.events), 1)
 
+    def test_breakout_and_reversal_are_reserve_only_no_notifications(self):
+        for kind in ("BREAKOUT", "BREAKOUT_RETEST", "REVERSAL"):
+            backup = self.signal(
+                trigger_type=kind, trigger_id=f"backup-{kind}",
+                market_story={"trigger": {"type": kind, "triggered": True}},
+            )
+            self.assertFalse(self.tracker.process(self.report(signals=[backup])))
+        self.assertFalse(self.sender.events)
+
+    def test_original_breakout_promoted_on_real_new_continuation_reentry(self):
+        previous = self.signal(
+            trigger_type="BREAKOUT", trigger_id="original-breakout",
+            market_story={"trigger": {"type": "BREAKOUT", "triggered": True}},
+        )
+        self.assertFalse(self.tracker.process(self.report(signals=[previous])))
+        continuation = self.signal(
+            trigger_type="BREAKOUT", trigger_id="original-breakout",
+            signal_stage="REENTRY",
+            market_story={"trigger": {
+                "type": "CONTINUATION", "triggered": True,
+                "confirmation_ts": int((self.now - 300) * 1000),
+            }},
+        )
+        events = self.tracker.process(self.report(signals=[continuation]))
+        self.assertEqual(len(events), 1)
+        self.assertTrue(events[0]["promoted_from_backup"])
+        self.assertTrue(events[0]["original_plan_retained"])
+        self.assertFalse(self.tracker.process(self.report(signals=[continuation])))
+        later = self.signal(
+            trigger_type="BREAKOUT", trigger_id="original-breakout",
+            signal_stage="REENTRY",
+            market_story={"trigger": {
+                "type": "CONTINUATION", "triggered": True,
+                "confirmation_ts": int((self.now - 180) * 1000),
+            }},
+        )
+        self.assertEqual(len(self.tracker.process(self.report(signals=[later]))), 1)
+
+    def test_mere_continuation_story_without_confirmed_reentry_stays_backup(self):
+        invalid = self.signal(
+            trigger_type="BREAKOUT", trigger_id="unconfirmed-change",
+            signal_stage="CONFIRMED",
+            market_story={"trigger": {"type": "CONTINUATION", "triggered": True}},
+        )
+        self.assertFalse(self.tracker.process(self.report(signals=[invalid])))
+        invalid.signal_stage = "REENTRY"
+        invalid.market_story = {"trigger": {"type": "CONTINUATION", "triggered": False}}
+        self.assertFalse(self.tracker.process(self.report(signals=[invalid])))
+
     def test_delivery_failure_retries_without_marking_seen(self):
         self.sender.fail = True
         self.assertFalse(self.tracker.process(self.report()))
@@ -137,7 +188,7 @@ class FormalAlertsTests(unittest.TestCase):
         sender.send(self.tracker.process(self.report())[0])
         self.assertEqual(len(requests), 1)
         payload = json.loads(requests[0].data)
-        self.assertIn("正式訊號", payload["text"])
+        self.assertIn("趨勢延續", payload["text"])
         self.assertNotIn("自動下單：已啟動", payload["text"])
 
 
