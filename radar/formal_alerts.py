@@ -167,11 +167,21 @@ class FormalSignalTracker:
                     confirmation_ms = int(trigger.get("confirmation_ts") or 0) if isinstance(trigger, dict) else 0
                 except (TypeError, ValueError, OverflowError):
                     confirmation_ms = 0
-                # Multiple independent continuation reentries in one old
-                # episode have distinct confirmation timestamps, not fake plans.
+                # A reserve Episode is promoted ONLY by the independently
+                # confirmed, durable core reentry event marker.
+                lifecycle_promotion = 0
+                if is_continuation_promotion(signal):
+                    try:
+                        lifecycle_promotion = int(
+                            lifecycle.get("continuation_promotion_confirmation_ms") or 0
+                        )
+                    except (ValueError, TypeError, OverflowError):
+                        continue
                 confirmed_reentry = str(getattr(signal, "signal_stage", "")).upper() == "REENTRY"
                 event_marker = (
-                    f"{trigger_id or candle_ms}:REENTRY:{confirmation_ms}"
+                    f"{trigger_id or candle_ms}:PROMOTION:{lifecycle_promotion}"
+                    if lifecycle_promotion > 0
+                    else f"{trigger_id or candle_ms}:REENTRY:{confirmation_ms}"
                     if confirmed_reentry and confirmation_ms > 0
                     else (trigger_id or candle_ms)
                 )
