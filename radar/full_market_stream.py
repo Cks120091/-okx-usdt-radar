@@ -216,14 +216,16 @@ class FullMarketStream:
 
                 def on_close(_sock: Any, _status: Any, _reason: Any) -> None:
                     with self._lock:
-                        self._connected.discard(index)
-                        self._acknowledged.pop(index, None)
+                        if generation == self._generation:
+                            self._connected.discard(index)
+                            self._acknowledged.pop(index, None)
 
                 def on_error(_sock: Any, err: Any) -> None:
                     with self._lock:
-                        self._last_error = "OKX 行情連線異常"
-                        self._connected.discard(index)
-                        self._acknowledged.pop(index, None)
+                        if generation == self._generation:
+                            self._last_error = "OKX 行情連線異常"
+                            self._connected.discard(index)
+                            self._acknowledged.pop(index, None)
                     LOG.warning("OKX shard %d disconnected: %s", index, type(err).__name__)
 
                 sock = factory(self.websocket_url, on_open=on_open,
@@ -242,9 +244,10 @@ class FullMarketStream:
                 delay = min(delay * 2, 60.0)
             finally:
                 with self._lock:
-                    self._connected.discard(index)
-                    self._acknowledged.pop(index, None)
-                    self._sockets.pop(index, None)
+                    if generation == self._generation:
+                        self._connected.discard(index)
+                        self._acknowledged.pop(index, None)
+                        self._sockets.pop(index, None)
             if self._stop.wait(delay):
                 break
 
