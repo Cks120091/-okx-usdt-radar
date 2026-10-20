@@ -1,60 +1,54 @@
-# 第一階段：24 小時行情監控與觀察預警（實驗版）
+# 第一階段：OKX 全市場常駐行情監控（測試分支，未部署）
 
-## 安全範圍
+> 本階段 **沒有** 私人 OKX API、模擬或實盤自動下單功能。保留原本 Entry/SL/TP/R:R，使用者自己在 OKX 決定交易及設定止盈止損。本分支尚未做 OKX 真實 WebSocket 長連線壓力測試。
 
-此版本只讀取 **OKX 公開市場資料**，沿用既有 Price-first / MA / MACD / 多週期掃描器及 Signal Episode 的正式觸發規則。沒有私人 API 金鑰、AI 自主交易、Paper Trading 或 Live Trading 下單程式。
+## 怎麼啟動
 
-**預設不啟動。** 只有設定 `RADAR_ALWAYS_ON=1` 才會在現有 Web 服務程序內啟用。現有頁面和手動掃描仍保留；本功能不修改原本的正式 Trigger 門檻。
+在**獨立測試 VPS** 上設定 `RADAR_ALWAYS_ON=1` 啟動原本的 Web 服務（`python run.py --serve`）。正式 Render 的 `main` 不變；沒有 VPS 時不代表已實際 24 小時監控。
 
-## 基本架構
+| 變數 | 預設 | 用途 |
+| --- | --- | --- |
+| `RADAR_ALWAYS_ON` | `0` | 總開關。預設不啟動 |
+| `RADAR_MONITOR_ALL_SYMBOLS` | `1` | 開啟時訂閱所有 live USDT 永續（關閉則舊版最多 80 檔） |
+| `RADAR_MONITOR_WS_SHARD_SIZE` | `80` | 每個 public WebSocket 訂閱的幣種數量，上限 120 |
+| `RADAR_MONITOR_UNIVERSE_REFRESH_SECONDS` | `300` | 每 5 分鐘透過公開 REST 刷新 live 合約名單和成交額快照 |
+| `RADAR_MONITOR_MOVE_PCT` | `0.5` | 在最多 3 分鐘價格視窗內、至少累積 60 秒行情才判斷價格加速 |
+| `RADAR_MONITOR_CANDIDATE_MIN_VOLUME` | `2000000` | 新候選 24H USDT 成交額門檻；**全市場訂閱不受此門檻限制** |
+| `RADAR_MONITOR_CANDIDATE_DEEP_SCAN` | `1` | 在沒有全市場掃描佔用時，對候選進行原策略的單幣深入分析 |
+| `RADAR_MONITOR_CANDIDATE_SCAN_INTERVAL` | `90` | 深入分析的間隔，最低 30 秒，並有最多 24 檔待分析佇列 |
+| `RADAR_TELEGRAM_BOT_TOKEN` | 未設定 | 正式觸發通知 Bot Token，必須存 VPS 私密環境變數 |
+| `RADAR_TELEGRAM_CHAT_ID` | 未設定 | 接收通知的 Telegram Chat ID |
 
-- WebSocket：`wss://ws.okx.com/ws/v5/public`（443 埠），對每輪掃描合格的標的訂閱 `tickers`。優先觀察清單／正式訊號，再補成交額最高的市場；預設最多 **80 個**，不是整個市場全部逐筆追蹤。
-- 正式掃描：新模組只呼叫同一個 `RadarRuntime.scan_blocking()`，而非複製另一套策略；15m 短線每根收線後重新掃描一次，1H 波段 Trigger 每根 1H 收線後重新掃描一次（4H 仍是方向濾網）。掃描使用既有鎖，遇到人工掃描或進場前更新時不搶占。
-- 即時觀察：對 *上一輪正式掃描列入 watchlist* 的標的，若 3 分鐘窗內至少有 60 秒可用行情且同向變動達預設 0.5%，產生 `WATCHLIST_PRICE_ACCELERATION` 觀察事件。
-- 事件一定是 `advisory_only=true`、`entry_permitted=false`；**不新增正式 Trigger、不改 Entry/SL/TP、不授權交易**。
-- 當前監控狀態與最近觀察事件可由 `GET /api/status` 中的 `always_on_monitor` 取得；原網頁在監控啟用時顯示綠色監控狀態與最後一次觀察提示。事件另寫入 `data/monitor_warnings.jsonl`（依 `RADAR_DATA_DIR`），方便日後統計。
-- WebSocket 斷線會重連；監控 ticker 太舊、格式錯誤、逆向或重複資料時不產生觀察事件。每個候選的同向預警設有 30 分鐘冷卻時間。
+### 資料路徑與安全性
 
-## 設定
+1. **第一層全市場即時行情**：使用現有的 `OKXPublicClient.get_usdt_swap_instruments()` 發現所有可交易 USDT 永續（包含符合標準的 XAU），每條 public WebSocket 最多 80 個合約，單次最多 40 個訂閱參數。合約新增／下架後更新連線。**資料有變化就即時處理；不保證每檔幣每秒都有 tick。**
+2. **第二層價量候選**：對所有訂閱合約保留短時間價格樣本；只有符合成交額、價格加速門檻的候選才產生 `MARKET_PRICE_ACCELERATION_CANDIDATE`。只代表觀察，`entry_permitted=false`，不得當正式交易訊號。舊版觀察清單 `WATCHLIST_PRICE_ACCELERATION` 保留。
+3. **第三層深入分析**：候選佇列有數量限制、分析間隔與既有掃描鎖。使用既有單幣閉合 K 線策略進行分析，不能把 WebSocket 盤中價格當正式 K 線。既有全市場掃描：SHORT 15m 收線、LONG 1H 收線（1D 背景／4H 方向）；兩模式的同一時刻合併 FULL 執行。手動掃描仍保留。
+4. **正式事件與手機通知**：`CONFIRMED` 或 `REENTRY` 且未終止的合理新訊號，依（級別／合約／方向／Episode）去重，選配 Telegram 通知。手機沒有 Bot 設定就不會收到推播。通知後仍需進場前更新與追價檢查。**不自動開單。**
+5. **網頁自動刷新**：頁面原有約 15 秒狀態輪詢保留，顯示確認訂閱數／預期幣數、連線覆蓋率、候選、排隊深度；正式報告更新時會重繪，不必手動按掃描。
 
-| 環境變數 | 預設 | 說明 |
-|---|---|---|
-| `RADAR_ALWAYS_ON` | `0` | `1` 才啟用 |
-| `RADAR_MONITOR_MAX_SYMBOLS` | `80` | 公開 ticker 訂閱數，1～150 |
-| `RADAR_MONITOR_MOVE_PCT` | `0.5` | 觀察清單價格加速門檻（百分比） |
-| `RADAR_PUBLIC_WS_URL` | `wss://ws.okx.com/ws/v5/public` | 僅允許 OKX 官方 public WebSocket 的 443 埠 |
+### 狀態與日誌
 
-既有 `websocket-client` 新增於 `requirements.txt`。若想切換 OKX 區域站，使用已允許的官方 `wseea.okx.com` 或 `wsus.okx.com` 域名，不接受任意網址。
+`GET /api/status` 中的 `always_on_monitor` 包含：
+- `market_stream.listed_symbols` / `acknowledged_symbols` / `subscription_coverage_pct` / `coverage_complete`
+- `recent_candidates` / `candidate_analysis`、每個週期上一次成功掃描時間，以及 `formal_alert_notifications`
+- 無網路時不把部分訂閱誤顯示成全市場成功。報表與 Episode 存既有 `RADAR_DATA_DIR`，價量事件寫在 `monitor_warnings.jsonl`，正式通知紀錄寫在 `formal_alerts.jsonl`。
 
-## 限制、上線前驗收
+## 尚待 VPS 驗證（禁止宣稱已上線）
 
-1. **這是基礎監控測試版，不是完整 WebSocket 全市場深度引擎。** 它只能持續訂閱受限制的候選標的；新候選由下一輪全市場掃描發現。短線 15m、波段 1H 正式觸發週期沿用目前程式設計，沒有改變原有策略。
-2. 目前只在頁面/狀態 API 顯示預警，並儲存 JSONL；**關閉手機後的獨立 Web Push 主動預警尚未提供**。現有 Web Push 仍只負責單次手動掃描完成通知；已提供可選的 Telegram 正式訊號通知（見下節），但需要部署並由使用者自行設定 Bot Token 與 Chat ID。
-3. 本機 JSONL 與原有 SQLite/報告使用相同 `data_dir`；若 Render 使用 Free 的非持久化檔案系統，重啟可能遺失資料。**未升級可靠常駐運算與持久化儲存前，不能宣稱服務能真正 24 小時不間斷。**
-4. WebSocket 只供行情「觀察」，不能用 ticker 內盤中價格代替已收盤 K 線。每輪 15m 掃描還是會呼叫完整既有策略，需測量 CPU、耗時、OKX API 配額與並發；正式 24h 運作前做負載測試。
-5. **未執行實際 OKX 長連線測試。** 已新增偽行情離線測試，但仍需在測試環境驗證官方訂閱回覆、重連、資料新鮮度、間歇性失連、健康狀態及 Render 長時間運作。
-6. 不要在本分支直接設置交易 API 權限或啟用實盤。B（AI 分析）與 C（模擬交易／實盤執行）是後續階段，未在本次實作。
+- OKX 真實合約總數、所有 shard 的訂閱 ACK 覆蓋、連線降速限制、重連與下架、公共 API 配額。
+- 全市場每秒價格吞吐率／CPU／記憶體、REST 競爭、單幣分析佇列飽和、正式訊號與通知的端到端延遲。
+- **連續 72 小時測試**，斷線恢復、手機真正收到 Telegram，以及 VPS 的持久化資料與 systemd 自動重啟。
+- 目前資料保存依賴 `RADAR_DATA_DIR` 的持久化儲存；若部署到非持久化主機，重啟可能丟失 Episode、通知去重和觀察歷史。
+- 不保證每秒正式訊號；它只能依 **15m／1H 已收盤** 觸發。沒有覆蓋率或資料異常時應保持觀察／等待，不宣稱可以進場。
 
-## 測試
+## 離線測試
 
 ```bash
-python -m unittest tests.test_always_on -v
-# 整個專案迴歸測試另以既有測試指令執行
+python -m unittest tests.test_full_market_stream tests.test_always_on tests.test_formal_alerts -v
+python -m unittest discover -s tests -v
 ```
 
-## 回滾
+### 回滾
 
-取消 `RADAR_ALWAYS_ON`（或設為 `0`）即可停用新監控；原本的 `run.py` Web 介面與手動掃描維持不變。這次所有變更只在 `feature/always-on-market-monitor` 分支，沒有修改 `main` 或 Render 部署設定。
-
-## 已增補：正式訊號通知（獨立於價格加速觀察）
-
-- 目前版本只對既有掃描器的 `signals`（SHORT）及 `long_signals`（LONG）中 `signal_stage=CONFIRMED/REENTRY`、未終止且在合理收線時間窗內的新 Signal Episode 建立 `FORMAL_TRIGGER_CONFIRMED` 事件。
-- 正式掃描完成才會評估通知；**不是每筆 WebSocket tick 重新判定正式訊號**。早期預警不能升格為正式訊號，不改動價格結構或現有策略。通知仍需檢查最新價與追價條件才能考慮人工下單。
-- 去重依（時間級別、標的、多空、Trigger ID／收線時間）；最近已通知身份保存至 `formal_alert_seen.json`，正式事件追加到 `formal_alerts.jsonl`。目錄要持久化，否則重啟可能再次通知。
-- 如要在手機關閉網頁時收正式通知，可**自行選擇性**設定 `RADAR_TELEGRAM_BOT_TOKEN` 和 `RADAR_TELEGRAM_CHAT_ID`；不設定只保留伺服器端事件，**不會有手機推播**。Token 必須放在主機秘密環境變數，不可以提交到 GitHub、截圖或聊天內容。
-- Telegram 僅送出分析通知，不會連接 OKX 私人 API，也沒有下單、修改止損或自動平倉能力。
-- 手機實測、失敗重送、掃描延遲、通知到達時效、意外重啟仍待 VPS 建立後實測，不能視為已交付的 24h 通知 SLA。
-
-## 交易執行界線
-
-雷達保留原始 Entry、SL、TP1/TP2 及 R:R，僅供使用者決策參考。正式觸發事件通知後，使用者自行前往 OKX 手動開單，並在 OKX 自行設定止盈、止損和獲利目標。不替使用者設定百分比 TP、不改寫原有 R:R、不連接私人下單 API、不自動開倉或平倉。
+只要取消 `RADAR_ALWAYS_ON` 即可停用所有常駐掃描，原本手動掃描介面仍可使用。此階段僅 GitHub `feature/always-on-market-monitor` 分支，不自動部署、不改 `main`。
