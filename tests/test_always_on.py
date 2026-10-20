@@ -122,6 +122,39 @@ class AlwaysOnTests(unittest.TestCase):
         self.monitor._scan_loop()
         self.assertEqual(self.runtime.scanned, ["LONG"])
 
+    def test_full_universe_candidate_is_observation_only_and_liquidity_gated(self):
+        from types import SimpleNamespace
+        class PublicClient:
+            def get_usdt_swap_instruments(inner):
+                return [SimpleNamespace(inst_id="LIQUID-USDT-SWAP", state="live"),
+                        SimpleNamespace(inst_id="THIN-USDT-SWAP", state="live")]
+            def get_swap_tickers(inner):
+                return {
+                    "LIQUID-USDT-SWAP": SimpleNamespace(quote_volume_24h=3_000_000),
+                    "THIN-USDT-SWAP": SimpleNamespace(quote_volume_24h=100_000),
+                }
+        self.runtime.scanner = SimpleNamespace(client=PublicClient())
+        monitor = AlwaysOnMonitor(
+            self.runtime, MonitorConfig(full_universe=True),
+            clock=lambda: self.now[0],
+        )
+        # Use isolated sample frames; no websocket socket is opened here.
+        stream = monitor._full_stream
+        stream._symbols = ("LIQUID-USDT-SWAP", "THIN-USDT-SWAP")
+        stream._volumes = {"LIQUID-USDT-SWAP": 3_000_000,
+                           "THIN-USDT-SWAP": 100_000}
+        for symbol in stream.symbols:
+            monitor.handle_frame(ticker(symbol, int(self.now[0] * 1000), 100))
+        self.now[0] += 61
+        monitor.handle_frame(ticker("LIQUID-USDT-SWAP", int(self.now[0] * 1000), 100.8))
+        monitor.handle_frame(ticker("THIN-USDT-SWAP", int(self.now[0] * 1000), 110))
+        candidates = monitor.status()["recent_candidates"]
+        self.assertEqual(len(candidates), 1)
+        self.assertEqual(candidates[0]["symbol"], "LIQUID-USDT-SWAP")
+        self.assertTrue(candidates[0]["advisory_only"])
+        self.assertFalse(candidates[0]["entry_permitted"])
+        self.assertEqual(candidates[0]["type"], "MARKET_PRICE_ACCELERATION_CANDIDATE")
+
     def test_scan_uses_existing_runtime_without_order(self):
         class StopOnScan:
             def is_set(inner): return len(self.runtime.scanned) > 0
