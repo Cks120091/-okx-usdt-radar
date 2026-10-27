@@ -230,6 +230,7 @@ class ShadowJudge:
             try:
                 self.execution.review_positions(quotes, now)
                 events = []
+                staged_buys = []
                 with self._connect() as db:
                     for token in tokens[:30]:
                         original_allowed = token.get("state") == "PAPER_BUY"
@@ -238,11 +239,14 @@ class ShadowJudge:
                             continue
                         token["shadow_judge"] = verdict
                         events.append(verdict)
-                        # This cannot affect A: completely separate paper ledger.
-                        if (verdict["state"] == "BUY" and
-                            original_allowed and
-                            self.execution.approve(token, now)[0]):
-                            self.book.buy(token, now)
+                        if verdict["state"] == "BUY" and original_allowed:
+                            staged_buys.append(token)
+                # Close/COMMIT the verdict transaction before using the B
+                # ledger's separate SQLite connection; otherwise the first
+                # simulated BUY can deadlock on a writer lock.
+                for token in staged_buys:
+                    if self.execution.approve(token, now)[0]:
+                        self.book.buy(token, now)
                 return events
             except Exception:
                 LOG.exception("shadow judge unavailable; baseline trading unaffected")
