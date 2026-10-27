@@ -205,9 +205,6 @@ class ShadowJudge:
                               min_price_24h=MIN(min_price_24h, ?),
                               max_price_24h=MAX(max_price_24h, ?)
                           WHERE id=?""", (now,price,price,price,row["id"]))
-        if row["outcome_24h"] == "PENDING" and
-            False:
-            pass
         if row["outcome_24h"] == "PENDING" and HORIZON <= now - row["observed_at"] <= HORIZON + FIRST_HOUR:
             # A quote *near* the 24h boundary is required for comparison.
             db.execute("UPDATE judge_leads SET outcome_24h=?,price_at_24h=?,last_seen_at=?,last_price=? WHERE id=?",
