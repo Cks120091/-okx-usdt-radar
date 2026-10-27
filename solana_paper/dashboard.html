@@ -78,7 +78,7 @@ a{color:#9ebcff;text-decoration:none}a:hover{text-decoration:underline}
 </section>
 <section class="panel" style="margin-bottom:14px">
 <div class="sectionhead"><h2>🎯 Solana 候選幣掃描</h2><span class="small" id="candidatecount">—</span></div>
-<div class="warning">搜尋來源為 DEX Screener 最新 Profile / 付費 Boost，並非全部新幣；未驗證合約權限、持幣集中度或真正社群口碑。下列評分不是勝率，也不是實盤買入建議。</div>
+<div class="warning">搜尋來源為 DEX Screener Profile／付費 Boost 或 GeckoTerminal 新池／熱門池，並非全部新幣；未驗證合約權限、持幣集中度或真正社群口碑。下列評分不是勝率，也不是實盤買入建議。</div>
 <div class="candidates" id="candidates"></div>
 </section>
 <section class="panel">
@@ -86,7 +86,7 @@ a{color:#9ebcff;text-decoration:none}a:hover{text-decoration:underline}
 <div class="tablewrap" id="trades"></div>
 </section>
 <div class="foot">
-<strong>資料來源與限制：</strong>DEX Screener 公開 API，模擬市場價 + 固定滑價與交易費率。報價可能延遲、流動性可能虛假、價格可能瞬間跳空，實際出售也可能失敗。<br>
+<strong>資料來源與限制：</strong>DEX Screener／GeckoTerminal 公開 API，模擬市場價 + 固定滑價與交易費率。報價可能延遲、流動性可能虛假、價格可能瞬間跳空，實際出售也可能失敗。<br>
 <strong>儲存：</strong>第一階段使用伺服器本機 SQLite；Render 免費／暫存檔案系統重新部署或休眠後資料可能消失，績效不能視為永久保存。此頁面為公開可讀的模擬數據。<br>
 <strong>操作模式：</strong>後端定期自動掃描、選幣與模擬買賣；前端每 15 秒只讀取狀態。沒有真實下單程式、私鑰、鏈上簽名或自動實盤開關。
 </div></main>
@@ -120,7 +120,7 @@ fetch("/api/status",{cache:"no-store"}).then(function(response){if(!response.ok)
  "止損："+money(d.config.stop_loss_pct)+"% · 止盈："+money(d.config.take_profit_pct)+"% · 最長持有："+money(d.config.max_hold_minutes)+" 分鐘<br>"+
  "單邊費率："+money(d.config.fee_pct_per_side)+"% · 單邊估算滑價："+money(d.config.slippage_pct_per_side)+"%<br>"+
  "最低池流動性：$"+money(d.config.min_liquidity_usd)+" · 掃描間隔："+d.config.scan_seconds+" 秒";
- $("scanstatus").innerHTML="最近嘗試："+safe(time(d.last_attempt))+"<br>最近成功："+safe(time(d.last_scan))+"<br>數據源狀態："+(d.last_error?tag("bad",d.last_error):tag("good","已連接或待首次掃描"));
+ $("scanstatus").innerHTML="行情來源："+safe(d.market_feed||"尚未取得")+"<br>最近嘗試："+safe(time(d.last_attempt))+"<br>最近成功："+safe(time(d.last_scan))+"<br>數據源狀態："+(d.last_error?tag("bad",d.last_error):tag("good","已連接或待首次掃描"));
  var poses=d.positions.map(function(p){var diff=p.unrealized_pct;return '<tr><td><strong>'+safe(p.symbol)+'</strong><div class="small">'+safe(short(p.mint))+'</div></td><td>$'+money(p.entry)+'</td><td>$'+money(p.mark)+'</td><td class="'+cls(diff)+'">'+money(diff)+'%</td><td>$'+money(p.cost)+'</td><td>'+safe(time(p.mark_at))+'</td></tr>'});
  $("positions").innerHTML=htmlTable(["幣種","模擬入場均價","最後報價","價格變化（未扣費）","成本 USD","最後更新"],poses);
  $("candidatecount").textContent=d.candidates.length+" 個候選";
