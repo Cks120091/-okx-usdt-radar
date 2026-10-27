@@ -8,6 +8,7 @@ Launchs are unverified leads only; a websocket event is never a price quote.
 from __future__ import annotations
 
 from collections import deque
+from datetime import datetime, timezone
 import json
 import logging
 import os
@@ -145,11 +146,14 @@ class LiveChainObserver:
         return changed
 
     def scoped_mints(self, limit=20):
-        """Trusted launchpad attribution, *not* permission to trade."""
+        """Only recently observed named-launchpad mints, never market-wide."""
+        now = self.clock()
         with self.lock:
-            return [mint for mint, meta in sorted(
-                self.provenance.items(), key=lambda entry: entry[1][1], reverse=True
-            )[:max(0, min(25, int(limit)))] if meta[0] in ALLOWED_LAUNCHPADS]
+            fresh = [(mint, meta) for mint, meta in self.provenance.items()
+                     if meta[0] in ALLOWED_LAUNCHPADS and 0 <= now - meta[1] < 14400]
+            return [mint for mint, _ in sorted(
+                fresh, key=lambda entry: entry[1][1], reverse=True
+            )[:max(0, min(25, int(limit)))]]
 
     def launchpad_for(self, mint):
         with self.lock:
@@ -267,6 +271,18 @@ class LiveChainObserver:
                         continue
                     mint = row.get("mint") or row.get("tokenMint")
                     if not valid_address(mint):
+                        continue
+                    # Historical launches from a re-polled indexer must never
+                    # masquerade as fresh new-token notifications.
+                    launched = row.get("launchedAt") or row.get("createdAt")
+                    if not isinstance(launched, str):
+                        continue
+                    try:
+                        launched_at = datetime.fromisoformat(
+                            launched.replace("Z", "+00:00")).timestamp()
+                    except (ValueError, OverflowError):
+                        continue
+                    if not 0 <= self.clock() - launched_at <= 3600:
                         continue
                     event = {
                         "action": "create", "mint": mint, "symbol": row.get("symbol"),
