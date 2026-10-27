@@ -22,6 +22,7 @@ from urllib.request import Request, urlopen
 
 from .intelligence import WalletObserver, MintRiskObserver
 from .council import PaperCouncil
+from .feed_control import SHARED_GATE, MarketTemporarilyUnavailable
 
 LOG = logging.getLogger("solana_paper")
 SOLANA_MINT = re.compile(r"^[1-9A-HJ-NP-Za-km-z]{32,44}$")
@@ -99,18 +100,16 @@ class DexFeed:
     """DEX Screener official public REST. Discovery is NOT exhaustive."""
     BASE = "https://api.dexscreener.com"
 
+    def __init__(self, gate=None):
+        self.gate = gate if gate is not None else SHARED_GATE
+
     def _get(self, path: str) -> Any:
-        request = Request(self.BASE + path, headers={
+        # Profile/boost lists change slowly; prices have a shorter fresh TTL.
+        ttl = 90 if path.startswith(("/token-profiles/", "/token-boosts/")) else 25
+        return self.gate.get("DEX_SCREENER", path, {
             "Accept": "application/json",
-            "User-Agent": "Solana-Paper-Research/1.0",
-        })
-        with urlopen(request, timeout=12) as response:
-            if int(response.status) != 200:
-                raise RuntimeError("DEX HTTP status not 200")
-            raw = response.read(2000000)
-            if len(raw) >= 2000000:
-                raise ValueError("API payload too large")
-            return json.loads(raw)
+            "User-Agent": "Solana-Paper-Research/1.1",
+        }, ttl=ttl)
 
     @staticmethod
     def valid(mint: Any) -> bool:
@@ -170,16 +169,16 @@ class GeckoFeed:
     """Secondary public price/pool feed. GeckoTerminal API v2 (beta)."""
     BASE = "https://api.geckoterminal.com/api/v2"
 
+    def __init__(self, gate=None):
+        self.gate = gate if gate is not None else SHARED_GATE
+        self.known_pool: dict[str, str] = {}
+
     def _get(self, path: str) -> dict:
-        req = Request(self.BASE + path, headers={
+        ttl = 180 if "/new_pools" in path or "/trending_pools" in path else 30
+        data = self.gate.get("GECKOTERMINAL", path, {
             "Accept": "application/json;version=20230203",
-            "User-Agent": "Solana-Paper-Research/1.0",
-        })
-        with urlopen(req, timeout=12) as response:
-            raw = response.read(2_000_000)
-            if len(raw) >= 2_000_000:
-                raise ValueError("Gecko payload too large")
-            data = json.loads(raw)
+            "User-Agent": "Solana-Paper-Research/1.1",
+        }, ttl=ttl)
         if not isinstance(data, dict) or not isinstance(data.get("data"), list):
             raise ValueError("Gecko response missing pools")
         return data
@@ -261,53 +260,73 @@ class GeckoFeed:
                     mints.append(mint)
                 sources.setdefault(mint, set()).add(label)
                 raw.append(item)
+        # Track the known pool addresses to batch refresh held positions with
+        # /pools/multi rather than N token/pools calls (N can be 20).
+        best = normalize_pairs(raw, mints, now)
+        for mint, entry in best.items():
+            if DexFeed.valid(entry["pair"]):
+                self.known_pool[mint] = entry["pair"]
+        if len(self.known_pool) > 200:
+            self.known_pool = {k: v for k, v in self.known_pool.items() if k in set(mints)}
         return {"mints": mints, "pairs": raw, "sources": {
             key: sorted(value) for key, value in sources.items()}, "paid": {}, "source": "GECKOTERMINAL"}
 
     def quotes(self, mints: list[str]) -> list[dict]:
-        output = []
-        now = time.time()
-        # Refresh all open positions (up to 20), so none is ignored merely due to count.
-        # Network errors must leave the unquoted positions untouched, not fabricate an exit.
-        for mint in mints[:20]:
-            if DexFeed.valid(mint):
-                payload = self._get("/networks/solana/tokens/" + quote(mint, safe="") + "/pools?include=base_token")
-                output.extend(self.translate(payload, now))
-        return output
+        # A *single* batch for up to 20 known pools, not 20 individual API hits.
+        # Unknown pairs remain stale/UNKNOWN: never fabricate an indicative quote.
+        addresses = list(dict.fromkeys(self.known_pool[mint] for mint in mints[:20]
+                                       if mint in self.known_pool))
+        if not addresses:
+            return []
+        raw = []
+        for start in range(0, len(addresses), 20):
+            path = "/networks/solana/pools/multi/" + ",".join(
+                quote(x, safe="") for x in addresses[start:start+20]) + "?include=base_token"
+            raw.extend(self.translate(self._get(path), time.time()))
+        return [p for p in raw if p["baseToken"]["address"] in set(mints)]
 
 
 class ResilientFeed:
-    """Prefer DEX Screener; skip it for 30 min on 429, use GeckoTerminal fallback."""
-    def __init__(self):
-        self.dex = DexFeed()
-        self.gecko = GeckoFeed()
-        self.dex_retry_after = 0.0
+    """Use fresh DEX or Gecko snapshots with a shared provider circuit breaker."""
+
+    def __init__(self, gate=None):
+        self.gate = gate if gate is not None else SHARED_GATE
+        self.dex = DexFeed(self.gate)
+        self.gecko = GeckoFeed(self.gate)
         self.source = "NOT_FETCHED"
 
     def discover(self) -> dict:
-        if time.time() >= self.dex_retry_after:
+        try:
+            result = self.dex.discover()
+            self.source = "DEX_SCREENER"
+            result["source"] = self.source
+            return result
+        except Exception as dex_exc:
             try:
-                result = self.dex.discover()
-                self.source = "DEX_SCREENER"
-                result["source"] = self.source
+                result = self.gecko.discover()
+                self.source = "GECKOTERMINAL"
                 return result
-            except Exception as exc:
-                LOG.warning("DEX discovery failed; trying GeckoTerminal: %s", exc)
-                # Shared Render egress IPs may be rate limited. Back off to avoid hammering.
-                self.dex_retry_after = time.time() + 1800
-        result = self.gecko.discover()
-        self.source = "GECKOTERMINAL"
-        return result
+            except Exception as gecko_exc:
+                self.source = "ALL_FEEDS_UNAVAILABLE"
+                # Do not invent prices or use an expired cached snapshot.
+                raise MarketTemporarilyUnavailable(
+                    "ALL_MARKET_FEEDS",
+                    "DEX %s; Gecko %s" % (str(dex_exc)[:95], str(gecko_exc)[:95]),
+                    max(getattr(dex_exc, "retry_at", 0),
+                        getattr(gecko_exc, "retry_at", 0),
+                        time.time() + 30)
+                ) from gecko_exc
 
     def quotes(self, mints: list[str]) -> list[dict]:
-        if self.source == "DEX_SCREENER":
-            try:
-                return self.dex.quotes(mints)
-            except Exception as exc:
-                LOG.warning("DEX quote failed; using GeckoTerminal: %s", exc)
-                self.dex_retry_after = time.time() + 1800
-                self.source = "GECKOTERMINAL"
-        return self.gecko.quotes(mints)
+        if not mints:
+            return []
+        try:
+            return self.dex.quotes(mints)
+        except Exception:
+            return self.gecko.quotes(mints)
+
+    def health(self) -> dict:
+        return self.gate.snapshot()
 
 
 def normalize_pairs(raw: list[dict], allowed: list[str], now: float) -> dict[str, dict]:
@@ -711,6 +730,12 @@ class PaperRuntime:
                 self.events = (buys + exits + self.events)[:20]
                 self.last_scan, self.last_error = now, ""
             return {"buys": buys, "exits": exits, "candidates": len(ranked)}
+        except MarketTemporarilyUnavailable as exc:
+            # Display the last good candidates *as stale* for observation only.
+            # No new paper orders, no fake PnL, no repeated stacktrace storm.
+            with self.lock:
+                self.last_error = "行情來源限流／退避中：%s" % str(exc)[:220]
+            return {"error": str(exc), "status": "UPSTREAM_BACKOFF", "buys": [], "exits": []}
         except Exception as exc:
             LOG.exception("paper scan failed")
             with self.lock:
@@ -764,7 +789,9 @@ class PaperRuntime:
                 }
             except Exception as exc:
                 from urllib.error import HTTPError
-                backoff = 300 if isinstance(exc, HTTPError) and exc.code == 429 else 60
+                backoff = (max(30, int(exc.retry_at - now))
+                           if isinstance(exc, MarketTemporarilyUnavailable)
+                           else 300 if isinstance(exc, HTTPError) and exc.code == 429 else 60)
                 message = f"{type(exc).__name__}: {str(exc)[:160]}"
                 LOG.warning("held-position quote monitor unavailable: %s", message)
                 with self.lock:
@@ -810,6 +837,9 @@ class PaperRuntime:
                 "last_attempt": self.last_attempt,
                 "last_error": self.last_error,
                 "market_feed": str(getattr(self.feed, "source", "TEST_FEED")),
+                "market_feed_health": self.feed.health() if hasattr(self.feed, "health") else {},
+                "market_snapshot_stale": not self.last_scan or
+                    (time.time() - self.last_scan > self.s.scan_seconds * 2),
                 "scanning": self.scanning,
                 "candidates": self.candidates,
                 "events": self.events,
