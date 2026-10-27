@@ -4,3 +4,4 @@ __pycache__/
 data/
 tests/*
 !tests/test_solana_paper.py
+!tests/test_intelligence.py
