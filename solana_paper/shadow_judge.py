@@ -26,7 +26,8 @@ FIELDS = (
     "holders_now", "holders_1h_ago", "price_change_1h_pct",
     "buys_last_5m", "sells_last_5m", "buys_prev_5m", "sells_prev_5m",
     "top10_share_pct", "dev_share_pct", "risk_result",
-    "risk_checks", "whale_buy_wallets", "whale_buy_timestamps",
+    "risk_checks", "market_activity_state", "market_buys_h1",
+    "market_sells_h1", "market_volume_h1_usd",
     "social_mentions_now", "social_mentions_1h_ago",
     "insider_net_sell_pct",
 )
@@ -43,7 +44,7 @@ def fact(value):
 def dossier(token, now):
     agents = token.get("agents") or {}
     safety = agents.get("safety") or {}
-    smart = agents.get("smart_money") or {}
+    activity = agents.get("market_activity") or {}
     chain = safety.get("onchain") or {"state": "UNKNOWN"}
     report = {
         "chain": "solana",
@@ -67,13 +68,14 @@ def dossier(token, now):
             "mint_freeze": chain.get("state", "UNKNOWN"),
             "lp_rug": "missing", "holders": "missing", "dev_associates": "missing",
         },
-        # Holding is NOT evidence of a recent buy or winning trader.
-        "whale_buy_wallets": "missing",
-        "whale_buy_timestamps": "missing",
+        # These are hourly pool statistics, not wallet identity or verified inflow.
+        "market_activity_state": fact(activity.get("state")),
+        "market_buys_h1": fact(activity.get("h1_buys")),
+        "market_sells_h1": fact(activity.get("h1_sells")),
+        "market_volume_h1_usd": fact(activity.get("h1_volume_usd")),
         "social_mentions_now": "missing",
         "social_mentions_1h_ago": "missing",
         "insider_net_sell_pct": "missing",
-        "watchlist_holding_count": int(smart.get("matched_wallets", 0)),
         "price_usd": fact(token.get("price")),
         "observed_at": now,
     }
@@ -131,8 +133,6 @@ def gate(answers, dossier_data, original_allowed):
         and exit_risk["score"] <= 3
         and insider["answer"] == "NO"
         and dossier_data["risk_result"] == "PARTIALLY_SCREENED"
-        and dossier_data["whale_buy_wallets"] != "missing"
-        and dossier_data["whale_buy_timestamps"] != "missing"
         and dossier_data["holders_now"] != "missing"
         and dossier_data["top10_share_pct"] != "missing"
     ):
