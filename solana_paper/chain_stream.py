@@ -1,4 +1,4 @@
-"""Read-only free launch websocket and independent Solana public-RPC wallet activity.
+"""Read-only free launch websocket, without wallet or trader tracking.
 
 Strict provider allowlists. Never subscribes to metered PumpPortal trade
 feeds or constructs any trade/signature/private-key transaction.
@@ -18,8 +18,6 @@ import time
 from urllib.request import Request, urlopen
 from urllib.error import HTTPError, URLError
 from .intelligence import valid_address
-from .wallet_roster import roster, selected
-from .public_wallet_rpc import PublicWalletRpcMonitor
 from .launchpad_scope import ALLOWED_LAUNCHPADS, identify_stream_launchpad, identify_bags_indexer_launchpad
 
 LOG = logging.getLogger("solana_paper.stream")
@@ -63,18 +61,6 @@ class LiveChainObserver:
         self.clock = clock or time.time
         self.enabled = env.get("PAPER_PUMP_FREE_EVENTS", "1") == "1"
         self.bags_indexer_enabled = env.get("PAPER_BAGS_INDEXER_ENABLED", "1") == "1"
-        # Helius is not used. Solana Labs PUBLIC RPC is the sole wallet
-        # activity source; opt-out and caps control its shared-IP footprint.
-        self.wallet_roster = roster()
-        self.rpc_wallet_enabled = env.get("PAPER_RPC_WALLET_EVENTS", "1") == "1"
-        try:
-            maximum = int(env.get("PAPER_RPC_MAX_WALLETS", "10"))
-        except (TypeError, ValueError):
-            maximum = 10
-        self.active_wallets = selected(max(1, min(13, maximum)))
-        self.wallet_monitor = PublicWalletRpcMonitor(
-            wallets=self.active_wallets, env=env,
-            connection_factory=connection_factory, clock=self.clock)
         self.connection_factory = connection_factory
         self.pending = queue.Queue(maxsize=1200)
         self.lock = threading.RLock()
@@ -313,7 +299,6 @@ class LiveChainObserver:
         self.started = True
         if self.enabled:
             threading.Thread(target=self._pump_loop, name="solana-free-new-token-ws", daemon=True).start()
-        self.wallet_monitor.start(on_update)
         if self.bags_indexer_enabled:
             threading.Thread(target=self._bags_indexer_loop, name="solana-bags-provenance", daemon=True).start()
 
@@ -325,7 +310,6 @@ class LiveChainObserver:
         threading.Thread(target=one_second, name="solana-one-second-event-screen", daemon=True).start()
 
     def snapshot(self):
-        wallet = self.wallet_monitor.snapshot()
         with self.lock:
             return {
                 "mode": "THREE_LAUNCHPAD_ONLY",
@@ -337,27 +321,13 @@ class LiveChainObserver:
                 "metered_streams_enabled": False,
                 "pump": dict(self.state["pump"]),
                 "bags_indexer": dict(self.state["bags"]),
-                "wallet_rpc": wallet["status"],
                 "pending_count": self.pending.qsize(),
                 "screened_total": self.screened,
                 "created_total": self.created_count,
                 "migrated_total": self.migrated_count,
                 "dropped_total": self.dropped,
-                "wallet_activity_total": wallet["wallet_activity_total"],
-                "wallet_roster_total": len(self.wallet_roster),
-                "wallet_roster_research_candidates": sum(
-                    w["category"] == "ACTIVE_RESEARCH_CANDIDATE" for w in self.wallet_roster),
-                "wallet_subscriptions_selected": len(self.active_wallets) if self.rpc_wallet_enabled else 0,
-                "wallet_roster": [{
-                    "address": w["address"], "label": w["label"],
-                    "category": w["category"], "source": w["source"],
-                    "observed_at": w["observed_at"],
-                    "pnl_verified": w["pnl_verified"],
-                    "currently_selected": self.rpc_wallet_enabled and w in self.active_wallets,
-                } for w in self.wallet_roster],
                 "last_event_at": self.last_seen_at,
                 "last_screen_at": self.last_screen_at,
                 "leads": list(self.leads)[:25],
-                "recent_wallet_events": wallet["recent_wallet_events"],
                 "limitations": "只收有可信來源標記的Pump/BONK/Bags發射事件；其他Raydium/Meteora及不明來源直接丟棄。新幣並非可成交報價；Bags公用索引可能延遲或限流。",
             }
