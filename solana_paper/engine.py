@@ -26,6 +26,7 @@ from .feed_control import SHARED_GATE, MarketTemporarilyUnavailable
 from .openai_agent import OpenAICouncil
 from .shadow_judge import ShadowJudge
 from .realtime import StateSignal
+from .chain_stream import LiveChainObserver
 
 LOG = logging.getLogger("solana_paper")
 SOLANA_MINT = re.compile(r"^[1-9A-HJ-NP-Za-km-z]{32,44}$")
@@ -658,6 +659,7 @@ class PaperRuntime:
         self.openai = OpenAICouncil(self.s.db_path)
         self.shadow_judge = ShadowJudge(self.s)
         self.live_signal = StateSignal()
+        self.chain_stream = LiveChainObserver()
         self.council_reviews = 0
         self.council_approved = 0
         self.council_recent: list[dict] = []
@@ -832,6 +834,7 @@ class PaperRuntime:
             return
         self._started = True
         self.openai.start()
+        self.chain_stream.start(on_update=self.live_signal.notify)
 
         def loop():
             while True:
@@ -908,6 +911,7 @@ class PaperRuntime:
 
                 "持倉監控獨立於全市場掃描：每30秒左右批次檢查報價；這是HTTP輪詢而非WebSocket串流",
                 "若報價來源限流或斷線，不會假裝出場；該持倉會顯示報價過期警告",
+                "免費WebSocket新幣與遷移僅作早期情報，後台每秒整理；無可信行情、聰明錢交易證據不模擬買入",
 
             ],
             "agents": [
@@ -923,6 +927,7 @@ class PaperRuntime:
             "mint_risk_observer": self.mint_observer.summary(),
             "openai_council": self.openai.status(),
             "shadow_judge": self.shadow_judge.summary(),
+            "chain_stream": self.chain_stream.snapshot(),
             "realtime": {
                 "transport": "SSE",
                 "monitoring": "SERVER_HTTP_POLLING",
