@@ -168,8 +168,12 @@ class LiveStreamsTest(unittest.TestCase):
         self.assertFalse(absent.helius_enabled)
         self.assertEqual("NOT_CONFIGURED", absent.snapshot()["helius"]["state"])
         key="testSecret111"
-        fake=FakeSocket([json.dumps({"method":"logsNotification", "params":{
-            "result":{"value":{"signature":"a"*88,"logs":["swap"]}}}})])
+        fake=FakeSocket([
+            json.dumps({"jsonrpc":"2.0","id":1,"result":100}),
+            json.dumps({"method":"logsNotification","params":{
+                "subscription":100,"result":{"value":{
+                    "signature":"a"*88,"err":None,"logs":["swap"]}}}})
+        ])
         urls=[]
         enabled=LiveChainObserver(env={"PAPER_HELIUS_WALLET_EVENTS":"1",
                                         "HELIUS_API_KEY":key,
@@ -179,11 +183,52 @@ class LiveStreamsTest(unittest.TestCase):
         with patch("solana_paper.chain_stream.time.sleep", side_effect=StopThread()):
             with self.assertRaises(StopThread):
                 enabled._helius_loop()
-        self.assertEqual(3,len(fake.sent))
-        self.assertTrue(all(s["method"]=="logsSubscribe" for s in fake.sent))
+        self.assertEqual(10,len(fake.sent))
+        self.assertEqual(13,enabled.snapshot()["wallet_roster_total"])
+        self.assertEqual(10,enabled.snapshot()["wallet_subscriptions_selected"])
+        self.assertEqual(1,enabled.snapshot()["helius"]["subscriptions_confirmed"])
+        self.assertTrue(all(x["method"]=="logsSubscribe" for x in fake.sent))
+        self.assertTrue(all(len(x["params"][0]["mentions"])==1 for x in fake.sent))
         self.assertEqual(1,enabled.snapshot()["wallet_activity_total"])
         self.assertIn("NOT_PROVEN_BUY",enabled.snapshot()["recent_wallet_events"][0]["kind"])
+        self.assertEqual(enabled.active_wallets[0]["address"],
+                         enabled.snapshot()["recent_wallet_events"][0]["address"])
         self.assertNotIn(key,str(enabled.snapshot()))
+
+
+    def test_sourced_wallet_roster_not_fake_profit_ranking(self):
+        from solana_paper.wallet_roster import roster,selected,ACTIVITY_LEADERBOARD
+        from solana_paper.intelligence import valid_address
+        wallets=roster()
+        self.assertEqual(13,len(wallets))
+        self.assertEqual(13,len({w["address"] for w in wallets}))
+        self.assertTrue(all(valid_address(w["address"]) for w in wallets))
+        self.assertTrue(all(not w["pnl_verified"] and not w["win_rate_verified"] for w in wallets))
+        self.assertTrue(all(w["source"]==ACTIVITY_LEADERBOARD
+            for w in wallets if w["category"]=="ACTIVE_RESEARCH_CANDIDATE"))
+        self.assertEqual(10,len(selected()))
+        self.assertEqual(13,len(selected(100)))
+        self.assertEqual(0,len(selected(0)))
+
+    def test_helius_only_accepts_confirmed_successful_wallet_events(self):
+        c=LiveChainObserver(env={"PAPER_HELIUS_WALLET_EVENTS":"1",
+                                  "HELIUS_API_KEY":"unit-only","PAPER_PUMP_FREE_EVENTS":"0"})
+        sig="b"*88
+        event=lambda sub,err=None: {"method":"logsNotification","params":{
+            "subscription":sub,"result":{"value":{"signature":sig,"err":err}}}}
+        c._handle_helius(event(7))
+        self.assertEqual(0,c.snapshot()["wallet_activity_total"])
+        c._handle_helius({"id":1,"result":7})
+        self.assertEqual(1,c.snapshot()["helius"]["subscriptions_confirmed"])
+        c._handle_helius(event(7,{"InstructionError":[0,"Custom"]}))
+        self.assertEqual(0,c.snapshot()["wallet_activity_total"])
+        c._handle_helius(event(7))
+        self.assertEqual(1,c.snapshot()["wallet_activity_total"])
+        self.assertEqual("ADDRESS_ACTIVITY_NOT_PROVEN_BUY",
+                         c.snapshot()["recent_wallet_events"][0]["kind"])
+        with self.assertRaises(RuntimeError):
+            c._handle_helius({"id":2,"error":{"message":"subscription rejected"}})
+        self.assertNotIn("unit-only",str(c.snapshot()))
 
     def test_no_event_can_place_paper_order(self):
         with tempfile.TemporaryDirectory() as tmp:
