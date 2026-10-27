@@ -675,6 +675,7 @@ class PaperRuntime:
         self.live_signal = StateSignal()
         self.chain_stream = LiveChainObserver()
         self.early_watch = EarlyStrengthWatch()
+        self.early_watch_enabled = os.getenv("PAPER_EARLY_WATCH_ENABLED", "1") == "1"
         # Default production scanner ONLY considers attested launches of the
         # three named launchpads. Injected fake feeds opt out only for legacy
         # deterministic tests; Render sets PAPER_LAUNCHPAD_ONLY=1 explicitly.
@@ -713,9 +714,10 @@ class PaperRuntime:
                 # Shadow-only observation of older named-launchpad events.
                 # This does not expand mints processed by six agents/JUDGE.
                 try:
-                    verified = self.chain_stream.research_candidates(now=now)
-                    self.early_watch.register(verified, now)
-                    shadow_mints = self.early_watch.choose_shadow(mints, now=now)
+                    if self.early_watch_enabled:
+                        verified = self.chain_stream.research_candidates(now=now)
+                        self.early_watch.register(verified, now)
+                        shadow_mints = self.early_watch.choose_shadow(mints, now=now)
                 except Exception as exc:
                     shadow_mints = []
                     LOG.warning("research pool unavailable; keep core paper scan: %s",
@@ -739,7 +741,7 @@ class PaperRuntime:
                 discovery = self.feed.discover()
             mints = discovery["mints"]
             candidate_quotes = normalize_pairs(discovery["pairs"], mints, now)
-            if self.launchpad_only:
+            if self.launchpad_only and self.early_watch_enabled:
                 try:
                     extra_quotes = normalize_pairs(discovery["pairs"], shadow_mints, now)
                     self.early_watch.observe({**candidate_quotes, **extra_quotes}, mints, now)
@@ -984,7 +986,7 @@ class PaperRuntime:
             "openai_council": self.openai.status(),
             "shadow_judge": self.shadow_judge.summary(),
             "chain_stream": self.chain_stream.snapshot(),
-            "early_strength_watch": self.early_watch.snapshot(),
+            "early_strength_watch": self.early_watch.snapshot() | {"enabled": self.early_watch_enabled},
             "launchpad_only": self.launchpad_only,
             "realtime": {
                 "transport": "SSE",
