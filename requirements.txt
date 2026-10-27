@@ -1,1 +1,1 @@
-# Solana six-agent paper project uses Python 3.12 standard library only.
+# Solana paper-only V1 uses the Python standard library; no runtime PyPI dependencies.
