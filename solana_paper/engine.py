@@ -233,7 +233,11 @@ class GeckoFeed:
         now = time.time()
         # Two discovery baskets; both constrained and not a census of all Solana launches.
         data_new = self._get("/networks/solana/new_pools?include=base_token")
-        data_trending = self._get("/networks/solana/trending_pools?include=base_token")
+        try:
+            data_trending = self._get("/networks/solana/trending_pools?include=base_token")
+        except Exception as exc:
+            LOG.warning("Gecko trending discovery unavailable, use new pools: %s", exc)
+            data_trending = {"data": []}
         raw = []
         sources = {}
         mints = []
