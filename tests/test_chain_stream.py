@@ -290,6 +290,30 @@ class LiveStreamsTest(unittest.TestCase):
             self.assertEqual("STRONG_PREP",next(t for t in rt.status()[
                 "early_strength_watch"]["items"] if t["mint"]==oldest)["state"])
 
+    def test_shadow_observation_can_be_disabled_without_changing_core_quotes(self):
+        import os
+        class Feed:
+            def __init__(self): self.queries=[]
+            def discover(self): raise AssertionError("No market-wide feed")
+            def quotes(self,mints):
+                self.queries.append(list(mints))
+                return []
+        with tempfile.TemporaryDirectory() as tmp, patch.dict(os.environ,{
+            "PAPER_LAUNCHPAD_ONLY":"1","PAPER_EARLY_WATCH_ENABLED":"0"}):
+            feed=Feed()
+            rt=PaperRuntime(replace(Settings(),db_path=str(Path(tmp)/"flag.db")),feed)
+            rt.chain_stream.clock=lambda:1000
+            for i in range(2):
+                rt.chain_stream.ingest_pump({
+                    "mint":str(i+1)*44,"action":"create","pool":"pump"},950+i)
+            rt.chain_stream.tick(1000)
+            core=rt.chain_stream.scoped_mints(limit=20)
+            rt.run_once(1000)
+            self.assertEqual([core],feed.queries)
+            self.assertEqual(False,rt.status()["early_strength_watch"]["enabled"])
+            self.assertEqual(0,rt.status()["early_strength_watch"]["registered"])
+            self.assertEqual([],rt.book.trades())
+
     def test_shadow_pool_caps_records_and_does_not_use_unknown_launchpads(self):
         from solana_paper.strong_watch import EarlyStrengthWatch
         abc="123456789ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnopqrstuvwxyz"
