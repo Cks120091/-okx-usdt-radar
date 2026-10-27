@@ -24,13 +24,16 @@
 網站是公開唯讀頁面，不提供未驗證身分的操作開關；持倉上限透過 Render 環境變數或本機環境調整，修改後重啟生效。
 
 
-## 公開錢包候選名單（2026-10-27）
+## 公開錢包觀察名單｜Solana 原生公共 RPC（2026-10-28）
 
-原本只有 `PUBLIC_WATCHLIST` 的三個公開歸屬地址，只用於每 10 分鐘的低頻持倉觀察，不是有經驗證的獲利錢包。本次另外從 SolRadar 活躍交易排行榜加入 10 個具公開來源的 Solana 錢包至 **只讀研究候選名單**：合計 13 個，原本三個仍留在 `WalletObserver` 中，不修改任何 A 組與 JUDGE B 組的成交、風控或評分門檻。活躍度排行≠已實現獲利、勝率或可靠 KOL 身分。不得把這些地址稱為已驗證聰明錢。
+**不依賴 Helius 或任何付費 RPC Key。** 根據使用者 B 方案移除原有供應商 WebSocket 與啟用條件；錢包事件現在**直接向 Solana Labs 公共主網 RPC** 請求：
 
-`PAPER_HELIUS_WALLET_EVENTS=1` 且安全配置 `HELIUS_API_KEY` 時，標準 Solana WebSocket 在**單條**連線上對最多 10 個（`PAPER_HELIUS_MAX_WALLETS` 預設 10，可設 3～13）公開地址分別傳送 `logsSubscribe`。Solana 每一個 mentions 訂閱僅允許一個地址。網站明確顯示總名單、發起訂閱、真正收到 RPC 確認的數量與交易活動。訂閱成功≠有活動，收到鏈上活動≠已買幣，失敗交易不算。沒有可靠的 PnL／完整 Swap 解析之前，這些數據不能被用作模擬買單依據。新加的 10 個活動候選是固定快照，**不會自動每天重新排名**；後續若需要動態歷史損益篩選，必須另接有權限的官方排行榜 API，使用額度前先檢查費用。
-
-可看來源：https://sol-radar.com/top-solana-traders 、https://www.solanatracker.io/leaderboard 、https://provadata.com/ 。Helius 免費標準 WebSocket 是按流量消耗 credits，提升地址數可能增加配額使用，若觀察到限額應降低 `PAPER_HELIUS_MAX_WALLETS`；使用者不必提供私鑰與任何錢包交易授權。
+- 公共 WebSocket：`wss://api.mainnet.solana.com/`，單一 WS，逐地址 `logsSubscribe`（mentions 必須一個錢包一個訂閱），只讀 `confirmed` 日誌通知；程式必須收到 RPC 訂閱回覆，才算有確認。
+- 輕量備援 HTTPS：`https://api.mainnet.solana.com`，僅 WebSocket 未完全確認時才對最多 **3** 個地址調用 `getSignaturesForAddress`，預設每 **180 秒** 一輪、單次每錢包最多 3 筆；第一次回傳作基準，不把舊鏈上歷史當成新訊號。
+- 403/429 至少等 600 秒或依 Retry-After 退避，不試圖繞過公共端點限流；網路錯誤 180 秒退避，WebSocket 斷線逐步延遲重連。多個獨立 RPC 使用者共用 IP，仍可能在很低流量下 429。**不保證連續性、遺漏補齊或 24/7 運行。**
+- 13 個具公開來源的觀察地址：原有 3 個公開歸屬地址、SolRadar 活躍排行榜 10 個候選；WebSocket 預設取前 10 個，另外 3 個暫時只列名單。**活躍度與獲利無關**，沒有驗證勝率、已實現 PnL、錢包身分或真實 Swap 方向；收到鏈上活動不得視為已證實買入，不影響任何六代理與 JUDGE A/B 模擬買賣規則。
+- 配置：`PAPER_RPC_WALLET_EVENTS=1` 啟用、`PAPER_RPC_MAX_WALLETS=10` 限制 WS 地址（1～13）、`PAPER_RPC_FALLBACK_WALLETS=3` 限制 HTTP 備援（1～3）、`PAPER_RPC_POLL_SECONDS=180`（120～600 秒）。所有配置不需 API Key。舊 Helius 環境變數若留存不會被讀取，應在 Render Environment 清除。
+- 注意免費 Render 閒置休眠、重啟會中斷訂閱且遺失本機 SQLite。先停留在 **PAPER-only 免費研究**，不可冒充全天候高頻監控。來源規格：https://solana.com/docs/references/clusters 、https://solana.com/docs/rpc/websocket/logssubscribe
 
 ## 三個指定發射台掃描（2026-10 更新）
 
@@ -49,21 +52,11 @@ Bags.fm 公開索引 `https://data-api.bags.fm/v2/launches?launchpads=Bags%2CBag
 
 來源文件：https://pumpapi.io/stream 、https://pumpapi.io/fees 、https://data-api.bags.fm/docs/guide 。
 
-## Solana 免費 WebSocket 新幣事件與每秒初篩（實驗版）
+## 免費 WebSocket 新幣事件與每秒初篩
 
-後端新增 solana_paper/chain_stream.py，預設僅建立一條 PumpPortal WebSocket 連線，且只訂閱官方標示免費的 subscribeNewToken 和 subscribeMigration。嚴禁發出 subscribeTokenTrade 或 subscribeAccountTrade：兩種交易串流會計量收費。所有串流只讀，不能觸發實盤交易。
+新幣發現仍由 PumpApi 免費串流和 Bags.fm 公開索引處理，只從 Pump.fun、BONK.fun、Bags.fm 接受有平台歸屬證據的建立／遷移事件；事件本身不會導致任何交易。收到候選後，每秒僅在本機處理佇列；**並非每秒向市場 API 查價**。超量或斷線須退避。
 
-環境變數：
-- PAPER_PUMP_FREE_EVENTS=1：預設啟用免費新幣／遷移事件。連線網址為 wss://pumpportal.fun/api/data。若供應商拒絕匿名連線，網頁必須顯示 BACKOFF，不能假造新幣通知或暗中啟用計費訂閱。
-- PAPER_PUMP_FREE_EVENTS=0：停用 PumpPortal。
-- PAPER_HELIUS_WALLET_EVENTS=0：預設停用 Helius。
-- PAPER_HELIUS_WALLET_EVENTS=1 + 私密 HELIUS_API_KEY：啟用 Helius 免費標準 logsSubscribe，單 WebSocket 訂閱三個公開錢包地址。這只表示錢包相關鏈上活動，不能當成已確認買入或已實現獲利。API Key 必須由 Render 的私密環境變數保存，不能貼到公開程式或聊天室。
-
-後端每秒批次解析和去重收到的事件，每輪處理不超過 200 筆；佇列最大 1200 筆，溢出會丟棄並記錄；斷線指數退避，不會重新以每秒 HTTP 查詢行情。網頁透過 SSE 顯示最近新幣／遷移事件，包含真正連線狀態、累計事件數和最後收到資料時間。
-
-每個免費新幣事件強制標為 AWAITING_MARKET_VERIFICATION、trade_eligible=false、risk=UNKNOWN，不進入原有模擬買單／JUDGE 下單程序。仍需要可信的流動性、可成交價格、持有人及合約安全證據。原本 150 秒行情掃描、30 秒持倉價格輪詢與七代理 A/B 模擬完全不變。每秒初篩不是每秒有可成交報價，也不能解除 DEX/Gecko 的 429。
-
-官方文件：https://pumpportal.fun/data-api/real-time/ 、https://pumpportal.fun/fees/ 、https://www.helius.dev/pricing
+錢包活動來源已改為**Solana 公共主網 RPC**，與發射台串流彼此獨立：不需要金鑰、不含真實交易授權、不會將歷史持倉假裝成即時買進。SSE 狀態更新、150 秒候選行情掃描、30 秒 PAPER 持倉監控及七代理 A/B 原有門檻均保持不變。
 
 ## 即時網頁推送（Server-Sent Events，免費）
 
