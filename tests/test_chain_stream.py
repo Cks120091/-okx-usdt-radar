@@ -163,38 +163,44 @@ class LiveStreamsTest(unittest.TestCase):
             self.assertEqual(0,feed.discovers)
             self.assertEqual([],rt.book.trades())
 
-    def test_helius_requires_optin_key_and_only_observes_activity(self):
-        absent=LiveChainObserver(env={"PAPER_HELIUS_WALLET_EVENTS":"1"})
-        self.assertFalse(absent.helius_enabled)
-        self.assertEqual("NOT_CONFIGURED", absent.snapshot()["helius"]["state"])
-        key="testSecret111"
+    def test_public_rpc_requires_no_key_and_has_bounded_ws_subscriptions(self):
+        from solana_paper.public_wallet_rpc import (
+            PublicWalletRpcMonitor, PUBLIC_WS_URL)
         fake=FakeSocket([
-            json.dumps({"jsonrpc":"2.0","id":1,"result":100}),
+            *(json.dumps({"id":i,"result":100+i}) for i in range(1,11)),
             json.dumps({"method":"logsNotification","params":{
-                "subscription":100,"result":{"value":{
-                    "signature":"a"*88,"err":None,"logs":["swap"]}}}})
+                "subscription":101,"result":{"value":{
+                    "signature":"a"*88,"err":None}}}})
         ])
-        urls=[]
-        enabled=LiveChainObserver(env={"PAPER_HELIUS_WALLET_EVENTS":"1",
-                                        "HELIUS_API_KEY":key,
-                                        "PAPER_PUMP_FREE_EVENTS":"0"},
-                                  connection_factory=lambda url:(urls.append(url) or fake))
-        self.assertTrue(enabled.helius_enabled)
-        with patch("solana_paper.chain_stream.time.sleep", side_effect=StopThread()):
-            with self.assertRaises(StopThread):
-                enabled._helius_loop()
+        observer=LiveChainObserver(env={
+            "PAPER_RPC_WALLET_EVENTS":"1",
+            "PAPER_RPC_MAX_WALLETS":"10",
+            "HELIUS_API_KEY":"unused-old-key",
+            "PAPER_HELIUS_WALLET_EVENTS":"1",
+            "PAPER_PUMP_FREE_EVENTS":"0",
+        },connection_factory=lambda url:fake)
+        self.assertTrue(observer.rpc_wallet_enabled)
+        self.assertEqual(13,observer.snapshot()["wallet_roster_total"])
+        self.assertEqual(10,observer.snapshot()["wallet_subscriptions_selected"])
+        self.assertEqual("SOLANA_PUBLIC_RPC",observer.snapshot()["wallet_rpc"]["provider"])
+        with self.assertRaises(OSError):
+            observer.wallet_monitor._ws_once()
         self.assertEqual(10,len(fake.sent))
-        self.assertEqual(13,enabled.snapshot()["wallet_roster_total"])
-        self.assertEqual(10,enabled.snapshot()["wallet_subscriptions_selected"])
-        self.assertEqual(1,enabled.snapshot()["helius"]["subscriptions_confirmed"])
+        self.assertEqual(10,observer.snapshot()["wallet_rpc"]["subscriptions_confirmed"])
         self.assertTrue(all(x["method"]=="logsSubscribe" for x in fake.sent))
         self.assertTrue(all(len(x["params"][0]["mentions"])==1 for x in fake.sent))
-        self.assertEqual(1,enabled.snapshot()["wallet_activity_total"])
-        self.assertIn("NOT_PROVEN_BUY",enabled.snapshot()["recent_wallet_events"][0]["kind"])
-        self.assertEqual(enabled.active_wallets[0]["address"],
-                         enabled.snapshot()["recent_wallet_events"][0]["address"])
-        self.assertNotIn(key,str(enabled.snapshot()))
+        self.assertEqual(1,observer.snapshot()["wallet_activity_total"])
+        self.assertEqual("ADDRESS_ACTIVITY_NOT_PROVEN_BUY",
+                         observer.snapshot()["recent_wallet_events"][0]["kind"])
+        self.assertEqual(PUBLIC_WS_URL,"wss://api.mainnet.solana.com/")
+        self.assertNotIn("unused-old-key",str(observer.snapshot()))
 
+    def test_public_rpc_disabled_without_touching_old_helius_settings(self):
+        observer=LiveChainObserver(env={
+            "PAPER_RPC_WALLET_EVENTS":"0", "PAPER_HELIUS_WALLET_EVENTS":"1",
+            "HELIUS_API_KEY":"unused"})
+        self.assertEqual("DISABLED", observer.snapshot()["wallet_rpc"]["state"])
+        self.assertEqual(0,observer.snapshot()["wallet_subscriptions_selected"])
 
     def test_sourced_wallet_roster_not_fake_profit_ranking(self):
         from solana_paper.wallet_roster import roster,selected,ACTIVITY_LEADERBOARD
@@ -210,25 +216,60 @@ class LiveStreamsTest(unittest.TestCase):
         self.assertEqual(13,len(selected(100)))
         self.assertEqual(0,len(selected(0)))
 
-    def test_helius_only_accepts_confirmed_successful_wallet_events(self):
-        c=LiveChainObserver(env={"PAPER_HELIUS_WALLET_EVENTS":"1",
-                                  "HELIUS_API_KEY":"unit-only","PAPER_PUMP_FREE_EVENTS":"0"})
+    def test_public_rpc_confirmed_activity_only_not_copytrading(self):
+        from solana_paper.public_wallet_rpc import PublicWalletRpcMonitor
+        from solana_paper.wallet_roster import selected
+        monitor=PublicWalletRpcMonitor(wallets=selected(3),env={
+            "PAPER_RPC_WALLET_EVENTS":"1"},clock=lambda:1000)
         sig="b"*88
-        event=lambda sub,err=None: {"method":"logsNotification","params":{
-            "subscription":sub,"result":{"value":{"signature":sig,"err":err}}}}
-        c._handle_helius(event(7))
-        self.assertEqual(0,c.snapshot()["wallet_activity_total"])
-        c._handle_helius({"id":1,"result":7})
-        self.assertEqual(1,c.snapshot()["helius"]["subscriptions_confirmed"])
-        c._handle_helius(event(7,{"InstructionError":[0,"Custom"]}))
-        self.assertEqual(0,c.snapshot()["wallet_activity_total"])
-        c._handle_helius(event(7))
-        self.assertEqual(1,c.snapshot()["wallet_activity_total"])
-        self.assertEqual("ADDRESS_ACTIVITY_NOT_PROVEN_BUY",
-                         c.snapshot()["recent_wallet_events"][0]["kind"])
+        def event(sub,error=None):
+            return {"method":"logsNotification","params":{
+                "subscription":sub,"result":{"value":{"signature":sig,"err":error}}}}
+        monitor.handle_ws_message(event(7))
+        self.assertEqual(0,monitor.snapshot()["wallet_activity_total"])
+        monitor.handle_ws_message({"id":1,"result":7})
+        monitor.handle_ws_message(event(7,{"InstructionError":[0,"Custom"]}))
+        self.assertEqual(0,monitor.snapshot()["wallet_activity_total"])
+        monitor.handle_ws_message(event(7))
+        monitor.handle_ws_message(event(7))
+        self.assertEqual(1,monitor.snapshot()["wallet_activity_total"])
+        self.assertEqual("SOLANA_PUBLIC_WS",
+                         monitor.snapshot()["recent_wallet_events"][0]["source"])
         with self.assertRaises(RuntimeError):
-            c._handle_helius({"id":2,"error":{"message":"subscription rejected"}})
-        self.assertNotIn("unit-only",str(c.snapshot()))
+            monitor.handle_ws_message({"id":2,"error":{"message":"rejected"}})
+
+    def test_public_rpc_http_fallback_baseline_and_429_backoff(self):
+        from solana_paper.public_wallet_rpc import (
+            PublicWalletRpcMonitor, PUBLIC_HTTP_URL)
+        from solana_paper.wallet_roster import selected
+        from urllib.error import HTTPError
+        from unittest.mock import Mock
+        clock=[1000.]
+        monitor=PublicWalletRpcMonitor(wallets=selected(3),clock=lambda:clock[0],
+                env={"PAPER_RPC_FALLBACK_WALLETS":"1","PAPER_RPC_POLL_SECONDS":"10"})
+        self.assertEqual(120,monitor.poll_seconds)
+        self.assertEqual(1,monitor.poll_limit)
+        initial="a"*88
+        new="b"*88
+        results=[[{"signature":initial,"err":None}],
+                 [{"signature":new,"err":None},{"signature":initial,"err":None}]]
+        monitor._signatures=lambda addr: results.pop(0)
+        self.assertTrue(monitor.poll_once())
+        self.assertEqual(0,monitor.snapshot()["wallet_activity_total"])
+        clock[0]=1180
+        self.assertTrue(monitor.poll_once())
+        self.assertEqual(1,monitor.snapshot()["wallet_activity_total"])
+        self.assertEqual("SOLANA_PUBLIC_HTTP_FALLBACK",
+                         monitor.snapshot()["recent_wallet_events"][0]["source"])
+        def rate_limit(addr):
+            raise HTTPError(PUBLIC_HTTP_URL,429,"Rate limited",{"Retry-After":"900"},None)
+        monitor._signatures=rate_limit
+        clock[0]=1350
+        self.assertFalse(monitor.poll_once())
+        self.assertEqual("BACKOFF",monitor.snapshot()["status"]["state"])
+        self.assertGreaterEqual(monitor.snapshot()["status"]["http_backoff_until"],2250)
+        self.assertFalse(monitor.poll_once())
+        self.assertEqual(1,monitor.snapshot()["wallet_activity_total"])
 
     def test_no_event_can_place_paper_order(self):
         with tempfile.TemporaryDirectory() as tmp:
