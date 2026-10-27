@@ -132,7 +132,12 @@ class MarketHttpGate:
             return decoded
 
     def snapshot(self):
-        with self.lock:
+        # Health/dashboard requests must not wait behind a slow upstream HTTP
+        # request while the scan/monitor worker holds the gateway mutex.
+        if not self.lock.acquire(blocking=False):
+            return {"gateway": {"state": "FETCH_IN_PROGRESS", "last_error": "",
+                                "http_calls": 0, "cache_hits": 0}}
+        try:
             now = self.clock()
             return {
                 source: {
@@ -144,6 +149,8 @@ class MarketHttpGate:
                               else ("OK" if st["last_success"] else "NOT_FETCHED"),
                 } for source, st in self.state.items()
             }
+        finally:
+            self.lock.release()
 
 
 SHARED_GATE = MarketHttpGate()
