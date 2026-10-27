@@ -7,3 +7,4 @@ tests/*
 !tests/test_intelligence.py
 !tests/test_openai_agent.py
 !tests/test_shadow_judge.py
+!tests/test_chain_stream.py
