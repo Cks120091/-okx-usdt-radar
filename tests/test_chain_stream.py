@@ -180,6 +180,79 @@ class LiveStreamsTest(unittest.TestCase):
         self.assertEqual(0, len([x for x in snap if "wallet" in x.lower()]))
         self.assertNotIn("old-key-not-used", str(snap))
 
+    def test_shadow_early_strength_requires_two_real_quote_snapshots(self):
+        from solana_paper.strong_watch import EarlyStrengthWatch
+        mint="7"*44
+        p=EarlyStrengthWatch(clock=lambda:1000)
+        p.register([(mint,"PUMP",1000)],1000)
+        self.assertEqual("AWAITING_QUOTE",p.snapshot(1000)["items"][0]["state"])
+        row={"mint":mint,"symbol":"EARLY","price":.0002,
+             "liquidity_usd":35000,"volume_h1":10000,
+             "h1_buys":31,"h1_sells":20,
+             "m5_change":3,"h1_change":12}
+        p.observe({mint:row},[mint],1050)
+        self.assertEqual("BUILDING",p.snapshot(1050)["items"][0]["state"])
+        p.observe({mint:row},[mint],1100)  # ignore repeat within 90s
+        self.assertEqual(1,p.snapshot(1100)["items"][0]["quote_samples"])
+        p.observe({mint:row},[mint],1200)
+        snap=p.snapshot(1200)
+        self.assertEqual("STRONG_PREP",snap["items"][0]["state"])
+        self.assertEqual(2,snap["items"][0]["quote_samples"])
+        self.assertFalse(snap["trade_decisions_affected"])
+        self.assertEqual(0,snap["extra_market_requests"])
+        self.assertEqual("STALE_DATA",p.snapshot(1800)["items"][0]["state"])
+        # no hidden trading even with strong snapshot; class only observes.
+        self.assertFalse(hasattr(p,"buy"))
+
+    def test_shadow_pool_retains_older_leads_without_trading_them(self):
+        from solana_paper.strong_watch import EarlyStrengthWatch
+        import os
+        abc="123456789ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnopqrstuvwxyz"
+        class Feed:
+            def __init__(self):
+                self.queries=[]
+            def quotes(self,mints):
+                self.queries.append(list(mints))
+                return []
+            def discover(self):
+                raise AssertionError("Never run full-market discovery")
+        with tempfile.TemporaryDirectory() as tmp, patch.dict(
+                os.environ,{"PAPER_LAUNCHPAD_ONLY":"1"}):
+            settings=replace(Settings(),db_path=str(Path(tmp)/"watch.db"))
+            feed=Feed()
+            rt=PaperRuntime(settings,feed)
+            rt.chain_stream.clock=lambda:1100
+            for i in range(35):
+                rt.chain_stream.ingest_pump({
+                    "mint":abc[i]*44, "action":"create","pool":"pump",
+                    "symbol":"RESEARCH"},1000+i)
+            self.assertTrue(rt.chain_stream.tick(1100))
+            core=rt.chain_stream.scoped_mints(limit=20)
+            self.assertEqual(20,len(core))
+            before_trades=rt.book.trades()
+            rt.run_once(1100)
+            self.assertEqual(1,len(feed.queries))
+            self.assertEqual(30,len(feed.queries[0]))
+            self.assertEqual(core,feed.queries[0][:20])
+            self.assertTrue(set(feed.queries[0][20:]).isdisjoint(core))
+            self.assertEqual(before_trades,rt.book.trades())
+            obs=rt.status()["early_strength_watch"]
+            self.assertEqual(35,obs["registered"])
+            self.assertEqual(15,obs["outside_latest_20"])
+            self.assertEqual(0,obs["valid_quote_samples"])
+            self.assertEqual("OBSERVE_ONLY",obs["mode"])
+            self.assertEqual(0,obs["extra_market_requests"])
+
+    def test_shadow_pool_caps_records_and_does_not_use_unknown_launchpads(self):
+        from solana_paper.strong_watch import EarlyStrengthWatch
+        abc="123456789ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnopqrstuvwxyz"
+        p=EarlyStrengthWatch(clock=lambda:1000)
+        p.register([(abc[i%len(abc)]*43+abc[i//len(abc)],"PUMP",1000)
+                    for i in range(135)],1000)
+        self.assertEqual(120,p.snapshot(1000)["registered"])
+        self.assertEqual(10,len(p.choose_shadow([],100,1000)))
+        self.assertEqual(0,p.snapshot(20000)["registered"])
+
     def test_no_event_can_place_paper_order(self):
         with tempfile.TemporaryDirectory() as tmp:
             s=replace(Settings(),db_path=str(Path(tmp)/"paper.db"))
