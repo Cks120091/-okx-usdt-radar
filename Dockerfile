@@ -15,6 +15,7 @@ RUN python -m compileall -q solana_paper run.py && \
     python -m unittest discover -s tests -p 'test_solana_paper.py' -v && \
     python -m unittest discover -s tests -p 'test_intelligence.py' -v && \
     python -m unittest discover -s tests -p 'test_openai_agent.py' -v && \
+    python -m unittest discover -s tests -p 'test_shadow_judge.py' -v && \
     mkdir -p /app/data
 ENV PYTHONUNBUFFERED=1
 ENV PORT=8000
