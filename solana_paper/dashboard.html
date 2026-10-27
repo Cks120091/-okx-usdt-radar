@@ -93,6 +93,13 @@ a{color:#9ebcff;text-decoration:none}a:hover{text-decoration:underline}
 <div class="tablewrap" id="chainEvents"></div>
 </section>
 <section class="panel" style="margin-bottom:14px">
+<div class="sectionhead"><h2>🌱 強勢預備追蹤池｜觀察實驗</h2><span class="badge warn">不影響模擬買賣</span></div>
+<div class="warning">先追蹤三平台最多 120 個已辨識新幣。正式六代理仍只審查最新 20 個；觀察池在同一批次行情查詢內，額外查看最多 10 個較早候選。不額外輪詢／不修改原進場門檻。強勢預備需兩次間隔至少 90 秒的有效市場快照，沒有報價絕不表示安全或強勢。</div>
+<div class="small" id="earlyStatus" style="line-height:1.9">等待發射台事件與行情觀察…</div>
+<div class="sep"></div>
+<div class="tablewrap" id="earlyTable"></div>
+</section>
+<section class="panel" style="margin-bottom:14px">
 <div class="sectionhead"><h2>🎯 三大發射台候選幣掃描</h2><span class="small" id="candidatecount">—</span></div>
 <div class="warning">現在只查來自 Pump.fun、BONK.fun、Bags.fm 的已辨識代幣；DEX／Gecko 僅負責取得這些代幣的市場報價，不再從全市場任意挖候選。供應商限流、平台標記不完整時可能漏掃。評分不是勝率。</div>
 <div class="candidates" id="candidates"></div>
@@ -209,6 +216,31 @@ fetch("/api/status",{cache:"no-store"}).then(function(response){if(!response.ok)
    encodeURIComponent(e.mint)+"'>DEX 查看</a></td></tr>";
  });
  $("chainEvents").innerHTML=htmlTable(["接收時間","發射台","幣種","事件","風控狀態","查閱"],streamRows);
+ var early=d.early_strength_watch||{}, stages=early.states||{};
+ $("earlyStatus").innerHTML="本機觀察："+safe(early.registered||0)+" 顆 · 最新 20 顆之外："+
+   safe(early.outside_latest_20||0)+" 顆 · 強勢預備："+tag("good",stages.STRONG_PREP||0)+
+   " · 轉強觀察："+tag("warn",stages.BUILDING||0)+
+   " · 等待報價："+safe(stages.AWAITING_QUOTE||0)+
+   " · 過期資料："+safe(stages.STALE_DATA||0)+
+   "<br>最後有效行情觀測："+safe(time(early.last_observed_at))+
+   " · 網路額外請求：0（仍有原行情 API 429／限流風險）"+
+   "<br>所有結果僅供研究，不代表漲幅預測、真實成交或模擬買入許可。Render 重新部署或休眠可能遺失觀察記錄。";
+ var earlyRows=(early.items||[]).map(function(t){
+   var n=t.state==="STRONG_PREP"?"強勢預備":t.state==="BUILDING"?"轉強觀察":
+     t.state==="STALE_DATA"?"資料過期":t.state==="AWAITING_QUOTE"?"等待報價":"早期觀察";
+   var stateTag=t.state==="STRONG_PREP"?"good":t.state==="STALE_DATA"?"bad":"warn";
+   return "<tr><td><strong>"+safe(t.symbol||"未報價")+
+     "</strong><div class='small'><a target='_blank' rel='noopener noreferrer' href='https://dexscreener.com/solana/"+
+     encodeURIComponent(t.mint)+"'>"+safe(short(t.mint))+"</a></div></td><td>"+safe(t.launchpad)+
+     "</td><td>"+tag(stateTag,n)+
+     "<div class='small'>"+safe(t.reason)+"</div></td><td>"+
+     (t.volume_h1==null?"—":"$"+money(t.volume_h1))+
+     "</td><td>"+(t.liquidity_usd==null?"—":"$"+money(t.liquidity_usd))+
+     "</td><td>"+safe(t.quote_samples||0)+" 次<br>"+safe(time(t.last_quote_at))+
+     "</td><td>"+(t.recent_core?"最新 20":"持續觀察")+"</td></tr>";
+ });
+ $("earlyTable").innerHTML=htmlTable(
+   ["候選幣","來源","觀察階段","1H成交額","流動性","有效快照","分組"],earlyRows);
  $("candidatecount").textContent=d.candidates.length+" 個候選"+(d.market_snapshot_stale?" · ⚠ 快照過期":"");
  $("candidates").innerHTML=d.candidates.length?d.candidates.map(function(t){
  var label=t.state==="PAPER_BUY"?"符合模擬條件":t.state==="REJECT"?"市場風險淘汰":"觀察中";
