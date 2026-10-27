@@ -73,7 +73,7 @@ class PaperSystemTests(unittest.TestCase):
         self.rt.run_once(NOW)
         pos = self.rt.book.positions()[0]
         self.assertGreater(pos["entry"], 1)
-        self.assertLess(self.rt.book.cash(), 950)
+        self.assertLess(self.rt.book.cash(), self.s.initial_cash - self.s.trade_usd)
         self.assertLess(self.rt.book.equity(), 1000)
 
     def test_error_never_fabricates_quotes_or_orders(self):
