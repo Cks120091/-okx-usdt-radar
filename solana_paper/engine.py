@@ -44,9 +44,9 @@ def fmt(value: float) -> float:
 @dataclass(frozen=True)
 class Settings:
     initial_cash: float = 1000.0
-    trade_usd: float = 50.0
-    max_positions: int = 3
-    max_allocated_pct: float = 0.20
+    trade_usd: float = 40.0
+    max_positions: int = 20  # simultaneous open positions, not trades per day
+    max_allocated_pct: float = 0.90
     daily_loss_limit_usd: float = 50.0
     min_liquidity_usd: float = 25000.0
     min_volume_h1_usd: float = 5000.0
@@ -68,9 +68,9 @@ class Settings:
                 return kind(default)
         return cls(
             initial_cash=get("PAPER_INITIAL_CASH", 1000, 100, 100000),
-            trade_usd=get("PAPER_TRADE_USD", 50, 1, 1000),
-            max_positions=get("PAPER_MAX_POSITIONS", 3, 1, 10, int),
-            max_allocated_pct=get("PAPER_MAX_ALLOCATION_PCT", 20, 1, 100) / 100,
+            trade_usd=get("PAPER_TRADE_USD", 40, 1, 1000),
+            max_positions=get("PAPER_MAX_POSITIONS", 20, 3, 20, int),
+            max_allocated_pct=get("PAPER_MAX_ALLOCATION_PCT", 90, 1, 100) / 100,
             daily_loss_limit_usd=get("PAPER_DAILY_LOSS_USD", 50, 1, 10000),
             min_liquidity_usd=get("PAPER_MIN_LIQUIDITY_USD", 25000, 1000, 10000000),
             min_volume_h1_usd=get("PAPER_MIN_VOLUME_H1_USD", 5000, 100, 10000000),
@@ -256,8 +256,9 @@ class GeckoFeed:
     def quotes(self, mints: list[str]) -> list[dict]:
         output = []
         now = time.time()
-        # Usually at most three positions: 3 calls per 150 s, under conservative free budgets.
-        for mint in mints[:10]:
+        # Refresh all open positions (up to 20), so none is ignored merely due to count.
+        # Network errors must leave the unquoted positions untouched, not fabricate an exit.
+        for mint in mints[:20]:
             if DexFeed.valid(mint):
                 payload = self._get("/networks/solana/tokens/" + quote(mint, safe="") + "/pools?include=base_token")
                 output.extend(self.translate(payload, now))
@@ -560,7 +561,7 @@ class ExecutionAgent:
     def approve(self, token: dict, now: float) -> tuple[bool, str]:
         positions = self.book.positions()
         if len(positions) >= self.s.max_positions:
-            return False, "持倉數上限"
+            return False, "同時持倉數已達上限（非每日交易次數）"
         if self.book.bought_recently(token["mint"], now):
             return False, "同幣1小時冷卻"
         if self.book.realized_today(now) <= -self.s.daily_loss_limit_usd:
@@ -708,6 +709,7 @@ class PaperRuntime:
                 "成交為延遲行情估算，含固定滑價／費率，不等於真實可成交價",
                 "Render 免費服務檔案系統可能重置；當前 SQLite 僅供第一階段測試",
                 "本模擬網站為公開可讀狀態；未配置私人存取限制",
+                "持倉數是同時持有的開倉數（可設定 3～20），平倉即釋放名額，沒有每日筆數上限",
             ],
             "agents": [
                 {"id": "01", "name": self.hunters.name, "status": "ACTIVE", "detail": "DEX 最新 Profile + 付費 Boost"},
