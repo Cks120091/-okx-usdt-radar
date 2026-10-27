@@ -73,6 +73,13 @@ a{color:#9ebcff;text-decoration:none}a:hover{text-decoration:underline}
 </section>
 </div>
 <section class="panel" style="margin-bottom:14px">
+<div class="sectionhead"><h2>⚖️ 第七位 JUDGE｜影子實驗 B</h2><span class="badge warn">不影響 A 組買賣</span></div>
+<div class="warning">目前是免費規則型裁判，不是 Jev 或 GPT。五個問題缺資料會答 UNKNOWN，不會編造信心機率；WATCH 30 分鐘後最多複審一次。B 組有獨立模擬資金、持倉、手續費；A 組原本策略完全照常執行。</div>
+<div id="judgeStatus" class="small" style="line-height:1.9">裁判實驗統計載入中…</div>
+<div class="sep"></div>
+<div class="tablewrap" id="judgeRecent"></div>
+</section>
+<section class="panel" style="margin-bottom:14px">
 <div class="sectionhead"><h2>💼 目前模擬持倉</h2><span class="small">持倉獨立報價檢查 · 過期會警示</span></div>
 <div class="tablewrap" id="positions"></div>
 </section>
@@ -148,16 +155,34 @@ fetch("/api/status",{cache:"no-store"}).then(function(response){if(!response.ok)
  }
  var poses=d.positions.map(function(p){var diff=p.unrealized_pct;return '<tr><td><strong>'+safe(p.symbol)+'</strong><div class="small">'+safe(short(p.mint))+'</div></td><td>$'+money(p.entry)+'</td><td>$'+money(p.mark)+'</td><td class="'+cls(diff)+'">'+money(diff)+'%</td><td>$'+money(p.cost)+'</td><td>'+safe(time(p.mark_at))+' · '+(p.quote_stale?'⚠ 報價過期':'報價有效')+'</td></tr>'});
  $("positions").innerHTML=htmlTable(["幣種","模擬入場均價","最後報價","價格變化（未扣費）","成本 USD","最後更新"],poses);
+ var j=d.shadow_judge||{}, totals=j.totals||{}, jr=j.recent||[];
+ $("judgeStatus").innerHTML="<strong>A 組原策略：</strong>模擬淨值 $"+money(d.account.equity)+
+  "（A 組不受裁判控制）<br><strong>B 組有裁判：</strong>獨立模擬淨值 $"+money(j.bank_b_usd)+
+  " · 現金 $"+money(j.bank_b_cash_usd)+" · 持倉 "+safe(j.open_positions_b||0)+
+  "<br>裁判 BUY / WATCH / PASS："+safe(totals.BUY||0)+" / "+safe(totals.WATCH||0)+" / "+safe(totals.PASS||0)+
+  "<br>已滿 24 小時候選："+safe(j["24h_matured_leads"]||0)+
+  " · 有約 24 小時報價："+safe(j["24h_verified_quotes"]||0)+
+  " · 缺報價："+safe(j["24h_missing_quotes"]||0)+
+  "<br>⚠ 無行情時不能完成研究。觀察價漲跌不是已實現盈虧，也不能單憑跌幅定義 RUG；目前不可比較勝率。";
+ var jrows=jr.map(function(q){
+  return "<tr><td>#"+safe(q.lead_id)+" · "+safe(q.symbol)+"</td><td>"+safe(time(q.at))+
+  "</td><td>"+tag(q.action==="BUY"?"good":q.action==="PASS"?"bad":"warn",q.action)+
+  "（"+safe(q.reviews)+" 次）</td><td>"+safe(q.reason)+
+  "</td><td>"+(q.change_24h_pct==null?"未有可用 24h 報價":
+  '<span class="'+cls(q.change_24h_pct)+'">'+money(q.change_24h_pct)+"%</span>")+"</td></tr>";
+ });
+ $("judgeRecent").innerHTML=htmlTable(["Lead","首次觀察","裁判","原因","約24h變化"],jrows);
  $("candidatecount").textContent=d.candidates.length+" 個候選"+(d.market_snapshot_stale?" · ⚠ 快照過期":"");
  $("candidates").innerHTML=d.candidates.length?d.candidates.map(function(t){
  var label=t.state==="PAPER_BUY"?"符合模擬條件":t.state==="REJECT"?"市場風險淘汰":"觀察中";
  var kind=t.state==="PAPER_BUY"?"good":t.state==="REJECT"?"bad":"warn";
  var note=t.agents.safety;
+ var shadow=t.shadow_judge||{};
  return '<article class="coin"><div class="coin-head"><div><div class="coin-name">'+safe(t.symbol)+'</div><div class="coin-mint">'+safe(short(t.mint))+' · '+safe(t.dex)+'</div></div><div style="text-align:right"><div class="coin-score">'+money(t.score)+'</div>'+tag(kind,label)+'</div></div>'+
  '<div class="coin-stats"><div><span>價格 USD</span><b>$'+safe(t.price)+'</b></div><div><span>池流動性</span><b>$'+money(t.liquidity_usd)+'</b></div>'+
  '<div><span>1H 成交額</span><b>$'+money(t.volume_h1)+'</b></div><div><span>5m / 1H 漲幅</span><b class="'+cls(t.m5_change)+'">'+money(t.m5_change)+'% / '+money(t.h1_change)+'%</b></div></div>'+
  '<div class="notice"><strong>'+safe(note.contract_security==="RISK"?"已發現部分鏈上權限風險":"合約安全未完整驗證")+'</strong> · '+safe(note.reasons.length?note.reasons.join("、"):"通過初步市場條件")+'<br>公開觀察錢包持有：'+safe(t.agents.smart_money.matched_wallets||0)+' 個（不等於新買入）<br>來源：'+safe(t.agents.discovery.sources.join(" / ")||"未知")+
- '<br>'+safe(t.paper_order||t.agents.decision.reasons.join("、")||"無完整條件")+' · <a target="_blank" rel="noopener noreferrer" href="https://dexscreener.com/solana/'+encodeURIComponent(t.mint)+'">DEX 查看</a></div></article>'
+ '<br>JUDGE B 組：'+safe(shadow.state||"尚未評估")+'（'+safe(shadow.reason||"等待資料")+'）<br>'+safe(t.paper_order||t.agents.decision.reasons.join("、")||"無完整條件")+' · <a target="_blank" rel="noopener noreferrer" href="https://dexscreener.com/solana/'+encodeURIComponent(t.mint)+'">DEX 查看</a></div></article>'
  }).join(''):'<div class="empty">尚無可顯示的 Solana 候選幣。可能尚未掃描成功，或當前最新清單沒有符合條件的交易池。</div>';
  var trades=d.trades.map(function(t){return '<tr><td>'+safe(time(t.ts))+'</td><td>'+safe(t.symbol)+'</td><td>'+tag(t.side==="BUY"?"good":"warn",t.side)+'</td><td>'+safe(t.price)+'</td><td>$'+money(t.gross)+'</td><td>$'+money(t.fee)+'</td><td class="'+cls(t.pnl)+'">'+(t.pnl==null?"—":"$"+money(t.pnl))+'</td><td>'+safe(t.reason)+'</td></tr>'});
  $("trades").innerHTML=htmlTable(["時間","幣種","方向","模擬成交價","名目金額","費用","已實現損益","原因"],trades);
