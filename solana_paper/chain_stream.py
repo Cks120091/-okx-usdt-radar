@@ -18,7 +18,8 @@ import time
 from urllib.parse import quote
 from urllib.request import Request, urlopen
 from urllib.error import HTTPError, URLError
-from .intelligence import PUBLIC_WATCHLIST, valid_address
+from .intelligence import valid_address
+from .wallet_roster import roster, selected
 from .launchpad_scope import ALLOWED_LAUNCHPADS, identify_stream_launchpad, identify_bags_indexer_launchpad
 
 LOG = logging.getLogger("solana_paper.stream")
@@ -67,6 +68,15 @@ class LiveChainObserver:
         self.helius_enabled = (env.get("PAPER_HELIUS_WALLET_EVENTS", "0") == "1"
                                and bool(key))
         self.helius_key = key  # private only, never in public status/logs
+        try:
+            requested_max = int(env.get("PAPER_HELIUS_MAX_WALLETS", "10"))
+        except (TypeError, ValueError):
+            requested_max = 10
+        self.helius_max_wallets = max(3, min(13, requested_max))
+        self.wallet_roster = roster()
+        self.active_wallets = selected(self.helius_max_wallets)
+        self.helius_acknowledged = {}
+        self.helius_on_update = None
         self.connection_factory = connection_factory
         self.pending = queue.Queue(maxsize=1200)
         self.lock = threading.RLock()
@@ -92,7 +102,8 @@ class LiveChainObserver:
                      "last_message": 0.0, "reconnects": 0},
             "helius": {"state": "CONNECTING" if self.helius_enabled else "NOT_CONFIGURED",
                        "last_error": "", "last_connected": 0.0,
-                       "last_message": 0.0, "reconnects": 0},
+                       "last_message": 0.0, "reconnects": 0,
+                       "subscriptions_requested": 0, "subscriptions_confirmed": 0},
         }
 
     def ingest_pump(self, packet, timestamp=None):
@@ -305,20 +316,39 @@ class LiveChainObserver:
             time.sleep(pause)
 
     def _handle_helius(self, packet):
-        if not isinstance(packet, dict) or packet.get("method") != "logsNotification":
+        if not isinstance(packet, dict):
             return
-        value = (packet.get("params") or {}).get("result") or {}
-        details = value.get("value") or {}
+        if "error" in packet:
+            # Provider may reject free-tier limit / invalid auth. Never expose
+            # raw provider response: it could contain private API key.
+            raise RuntimeError("Helius rejected subscription request")
+        if packet.get("method") != "logsNotification":
+            request_id, subscription_id = packet.get("id"), packet.get("result")
+            if (isinstance(request_id, int) and 1 <= request_id <= len(self.active_wallets)
+                    and isinstance(subscription_id, int)):
+                with self.lock:
+                    self.helius_acknowledged[subscription_id] = self.active_wallets[request_id - 1]["address"]
+                    self.state["helius"]["subscriptions_confirmed"] = len(self.helius_acknowledged)
+            return
+        params = packet.get("params") or {}
+        details = ((params.get("result") or {}).get("value") or {})
         signature = details.get("signature")
-        if not isinstance(signature, str) or len(signature) < 60:
+        if (details.get("err") is not None or not isinstance(signature, str)
+                or len(signature) < 60):
             return
-        # logsSubscribe mentions show address activity only, NOT wallet buys.
+        sub_id = params.get("subscription")
         with self.lock:
+            watched = self.helius_acknowledged.get(sub_id, None)
+            if watched is None:
+                return  # Only accept activity for confirmed tracked wallets.
+            # logsSubscribe mentions show address activity only, NOT buys.
             self.wallet_count += 1
             self.wallet_activities.appendleft({
-                "signature": signature[:100], "at": self.clock(),
-                "kind": "ADDRESS_ACTIVITY_NOT_PROVEN_BUY"
+                "signature": signature[:100], "address": watched,
+                "at": self.clock(), "kind": "ADDRESS_ACTIVITY_NOT_PROVEN_BUY"
             })
+        if self.helius_on_update:
+            self.helius_on_update()
 
     def _helius_loop(self):
         pause = 5
@@ -326,14 +356,20 @@ class LiveChainObserver:
             ws = None
             try:
                 ws = self._connect(HELIUS_URL + quote(self.helius_key, safe=""))
-                # Standard logsSubscribe, one address per subscription; single
-                # WS. "mentions" is not equivalent to a verified smart-money buy.
-                for n, wallet in enumerate(PUBLIC_WATCHLIST[:3], 1):
+                # Native logsSubscribe accepts only one address per request.
+                # One WS for up to 13 individually identified public wallets.
+                with self.lock:
+                    self.helius_acknowledged.clear()
+                    self.state["helius"]["subscriptions_confirmed"] = 0
+                    self.state["helius"]["subscriptions_requested"] = len(self.active_wallets)
+                for n, wallet in enumerate(self.active_wallets, 1):
                     ws.send(json.dumps({"jsonrpc": "2.0", "id": n,
                         "method": "logsSubscribe",
                         "params": [{"mentions": [wallet["address"]]},
                                    {"commitment": "confirmed"}]}))
                 self._set_state("helius", "CONNECTED")
+                LOG.info("Helius read-only WS opened; requested %d source-labelled wallet subscriptions",
+                         len(self.active_wallets))
                 pause = 5
                 self._receive(ws, "helius", self._handle_helius)
             except Exception as exc:
@@ -356,6 +392,7 @@ class LiveChainObserver:
         if self.started:
             return
         self.started = True
+        self.helius_on_update = on_update
         if self.enabled:
             threading.Thread(target=self._pump_loop, name="solana-free-new-token-ws", daemon=True).start()
         if self.helius_enabled:
@@ -389,6 +426,17 @@ class LiveChainObserver:
                 "migrated_total": self.migrated_count,
                 "dropped_total": self.dropped,
                 "wallet_activity_total": self.wallet_count,
+                "wallet_roster_total": len(self.wallet_roster),
+                "wallet_roster_research_candidates": sum(
+                    w["category"] == "ACTIVE_RESEARCH_CANDIDATE" for w in self.wallet_roster),
+                "wallet_subscriptions_selected": len(self.active_wallets) if self.helius_enabled else 0,
+                "wallet_roster": [{
+                    "address": w["address"], "label": w["label"],
+                    "category": w["category"], "source": w["source"],
+                    "observed_at": w["observed_at"],
+                    "pnl_verified": w["pnl_verified"],
+                    "currently_selected": self.helius_enabled and w in self.active_wallets,
+                } for w in self.wallet_roster],
                 "last_event_at": self.last_seen_at,
                 "last_screen_at": self.last_screen_at,
                 "leads": list(self.leads)[:25],
