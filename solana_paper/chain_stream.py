@@ -107,7 +107,7 @@ class LiveChainObserver:
             for lead in batch:
                 mint = lead["mint"]
                 dedup = (mint, lead["kind"])
-                if self.unique.get(dedup, 0) > at - 3600:
+                if dedup in self.unique and self.unique[dedup] > at - 3600:
                     continue
                 self.unique[dedup] = at
                 self.leads.appendleft(lead)
