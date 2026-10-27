@@ -154,6 +154,146 @@ class DexFeed:
         return output
 
 
+
+class GeckoFeed:
+    """Secondary public price/pool feed. GeckoTerminal API v2 (beta)."""
+    BASE = "https://api.geckoterminal.com/api/v2"
+
+    def _get(self, path: str) -> dict:
+        req = Request(self.BASE + path, headers={
+            "Accept": "application/json;version=20230203",
+            "User-Agent": "Solana-Paper-Research/1.0",
+        })
+        with urlopen(req, timeout=12) as response:
+            raw = response.read(2_000_000)
+            if len(raw) >= 2_000_000:
+                raise ValueError("Gecko payload too large")
+            data = json.loads(raw)
+        if not isinstance(data, dict) or not isinstance(data.get("data"), list):
+            raise ValueError("Gecko response missing pools")
+        return data
+
+    @staticmethod
+    def translate(payload: dict, now: float) -> list[dict]:
+        """Map Gecko JSONAPI pool shape to the shared DEX pair contract."""
+        included = {}
+        for entry in payload.get("included") or []:
+            if isinstance(entry, dict):
+                included[entry.get("id")] = entry.get("attributes") or {}
+        result = []
+        for pool in payload.get("data") or []:
+            if not isinstance(pool, dict):
+                continue
+            attrs, relationships = pool.get("attributes") or {}, pool.get("relationships") or {}
+            base_ref = ((relationships.get("base_token") or {}).get("data") or {})
+            base_id = str(base_ref.get("id") or "")
+            if not base_id.startswith("solana_"):
+                continue
+            mint = base_id[len("solana_"):]
+            if not DexFeed.valid(mint):
+                continue
+            base_attrs = included.get(base_id, {})
+            created = attrs.get("pool_created_at")
+            try:
+                created_ms = int(dt.datetime.fromisoformat(str(created).replace("Z", "+00:00")).timestamp() * 1000)
+            except (ValueError, TypeError, OverflowError):
+                continue
+            if created_ms <= 0 or created_ms > (now + 300) * 1000:
+                continue
+            price = num(attrs.get("base_token_price_usd"))
+            liq = num(attrs.get("reserve_in_usd"))
+            if price <= 0 or liq <= 0:
+                continue
+            txns = attrs.get("transactions") or {}
+            volume = attrs.get("volume_usd") or {}
+            change = attrs.get("price_change_percentage") or {}
+            pool_name = str(attrs.get("name") or "")
+            symbol = str(base_attrs.get("symbol") or pool_name.split("/")[0].strip() or "?")[:22]
+            result.append({
+                "chainId": "solana",
+                "baseToken": {"address": mint, "symbol": symbol,
+                              "name": str(base_attrs.get("name") or pool_name)[:50]},
+                "pairAddress": str(attrs.get("address") or "")[:80],
+                "dexId": str(((relationships.get("dex") or {}).get("data") or {}).get("id") or "gecko")[:35],
+                "priceUsd": str(price),
+                "liquidity": {"usd": liq},
+                "fdv": num(attrs.get("fdv_usd")),
+                "marketCap": num(attrs.get("market_cap_usd")),
+                "pairCreatedAt": created_ms,
+                "volume": {"h1": num(volume.get("h1")), "h24": num(volume.get("h24"))},
+                "priceChange": {"m5": num(change.get("m5")), "h1": num(change.get("h1"))},
+                "txns": {"h1": {
+                    "buys": max(0, int(num((txns.get("h1") or {}).get("buys")))),
+                    "sells": max(0, int(num((txns.get("h1") or {}).get("sells")))),
+                }},
+            })
+        return result
+
+    def discover(self) -> dict:
+        now = time.time()
+        # Two discovery baskets; both constrained and not a census of all Solana launches.
+        data_new = self._get("/networks/solana/new_pools?include=base_token")
+        data_trending = self._get("/networks/solana/trending_pools?include=base_token")
+        raw = []
+        sources = {}
+        mints = []
+        for label, payload in (("gecko_new_pool", data_new), ("gecko_trending", data_trending)):
+            for item in self.translate(payload, now):
+                mint = item["baseToken"]["address"]
+                if mint not in mints and len(mints) >= 30:
+                    continue
+                if mint not in mints:
+                    mints.append(mint)
+                sources.setdefault(mint, set()).add(label)
+                raw.append(item)
+        return {"mints": mints, "pairs": raw, "sources": {
+            key: sorted(value) for key, value in sources.items()}, "paid": {}, "source": "GECKOTERMINAL"}
+
+    def quotes(self, mints: list[str]) -> list[dict]:
+        output = []
+        now = time.time()
+        # Usually at most three positions: 3 calls per 150 s, under conservative free budgets.
+        for mint in mints[:10]:
+            if DexFeed.valid(mint):
+                payload = self._get("/networks/solana/tokens/" + quote(mint, safe="") + "/pools?include=base_token")
+                output.extend(self.translate(payload, now))
+        return output
+
+
+class ResilientFeed:
+    """Prefer DEX Screener; skip it for 30 min on 429, use GeckoTerminal fallback."""
+    def __init__(self):
+        self.dex = DexFeed()
+        self.gecko = GeckoFeed()
+        self.dex_retry_after = 0.0
+        self.source = "NOT_FETCHED"
+
+    def discover(self) -> dict:
+        if time.time() >= self.dex_retry_after:
+            try:
+                result = self.dex.discover()
+                self.source = "DEX_SCREENER"
+                result["source"] = self.source
+                return result
+            except Exception as exc:
+                LOG.warning("DEX discovery failed; trying GeckoTerminal: %s", exc)
+                # Shared Render egress IPs may be rate limited. Back off to avoid hammering.
+                self.dex_retry_after = time.time() + 1800
+        result = self.gecko.discover()
+        self.source = "GECKOTERMINAL"
+        return result
+
+    def quotes(self, mints: list[str]) -> list[dict]:
+        if self.source == "DEX_SCREENER":
+            try:
+                return self.dex.quotes(mints)
+            except Exception as exc:
+                LOG.warning("DEX quote failed; using GeckoTerminal: %s", exc)
+                self.dex_retry_after = time.time() + 1800
+                self.source = "GECKOTERMINAL"
+        return self.gecko.quotes(mints)
+
+
 def normalize_pairs(raw: list[dict], allowed: list[str], now: float) -> dict[str, dict]:
     """Choose highest-liquidity BASE pool per mint (avoid quote-token misidentification)."""
     allowed_mints = set(allowed)
@@ -454,7 +594,7 @@ class ExecutionAgent:
 class PaperRuntime:
     def __init__(self, settings: Settings | None = None, feed: Any | None = None):
         self.s = settings or Settings.load()
-        self.feed = feed or DexFeed()
+        self.feed = feed or ResilientFeed()
         self.book = PaperBook(self.s)
         self.hunters = DiscoveryAgent()
         self.safety = SafetyAgent(self.s)
@@ -541,6 +681,7 @@ class PaperRuntime:
                 "last_scan": self.last_scan,
                 "last_attempt": self.last_attempt,
                 "last_error": self.last_error,
+                "market_feed": str(getattr(self.feed, "source", "TEST_FEED")),
                 "scanning": self.scanning,
                 "candidates": self.candidates,
                 "events": self.events,
