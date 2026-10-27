@@ -84,14 +84,16 @@ class MarketHttpGate:
         key = (source, path)
         with self.lock:
             now = self.clock()
-            cached = self.cache.get(key)
-            if cached and now < cached[0]:
-                self.state[source]["cache_hits"] += 1
-                return cached[1]
             st = self.state[source]
+            # Once the provider is rate-limited, never treat even a short
+            # cached snapshot as confirmation for a NEW simulated entry.
             if now < st["cooldown_until"]:
                 st["blocked_calls"] += 1
                 raise MarketTemporarilyUnavailable(source, st["last_error"] or "cooldown", st["cooldown_until"])
+            cached = self.cache.get(key)
+            if cached and now < cached[0]:
+                st["cache_hits"] += 1
+                return cached[1]
             gap = self.SOURCES[source]["gap"]
             if st["last_request"] and now < st["last_request"] + gap:
                 self.sleeper(st["last_request"] + gap - now)
