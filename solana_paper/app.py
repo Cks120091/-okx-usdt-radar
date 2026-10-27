@@ -4,6 +4,8 @@ from __future__ import annotations
 import json
 import logging
 import os
+import threading
+import time
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from urllib.parse import urlsplit
@@ -14,9 +16,12 @@ from .engine import PaperRuntime, Settings
 def make_handler(runtime: PaperRuntime):
     dashboard = Path(__file__).with_name("dashboard.html").read_bytes()
     retired_sw = Path(__file__).with_name("retire_service_worker.js").read_bytes()
+    # Guard free-instance resources against unlimited public SSE connections.
+    event_slots = threading.BoundedSemaphore(8)
 
     class Handler(BaseHTTPRequestHandler):
-        server_version = "SolanaPaper/1.0"
+        server_version = "SolanaPaper/1.1"
+        protocol_version = "HTTP/1.1"
 
         def send_bytes(self, status: int, data: bytes, kind: str) -> None:
             self.send_response(status)
@@ -35,8 +40,56 @@ def make_handler(runtime: PaperRuntime):
             if self.command != "HEAD":
                 self.wfile.write(data)
 
+        def _write_chunk(self, payload: bytes) -> None:
+            self.wfile.write(("%x\r\n" % len(payload)).encode("ascii") + payload + b"\r\n")
+            self.wfile.flush()
+
+        def stream_events(self) -> None:
+            """Push backend state revisions; never pretend these are market ticks.
+
+            The 30s-held quote checks and 150s market scans remain unchanged.
+            """
+            if not event_slots.acquire(blocking=False):
+                self.send_bytes(503, b'{"error":"Too many live dashboard connections"}',
+                                "application/json")
+                return
+            self.send_response(200)
+            self.send_header("Content-Type", "text/event-stream; charset=utf-8")
+            self.send_header("Cache-Control", "no-cache, no-transform")
+            self.send_header("X-Accel-Buffering", "no")
+            self.send_header("Transfer-Encoding", "chunked")
+            self.send_header("X-Content-Type-Options", "nosniff")
+            self.end_headers()
+            self.close_connection = True
+            last = -1
+            deadline = time.monotonic() + 95
+            try:
+                self._write_chunk(b"retry: 3000\n\n")
+                while time.monotonic() < deadline:
+                    revision, changed = runtime.live_signal.wait(last, timeout=12)
+                    if changed:
+                        message = json.dumps(
+                            {"revision": revision, "time": time.time()},
+                            separators=(",", ":"), allow_nan=False
+                        ).encode("utf-8")
+                        self._write_chunk(b"event: change\ndata: " + message + b"\n\n")
+                        last = revision
+                    else:
+                        self._write_chunk(b": heartbeat\n\n")
+                self.wfile.write(b"0\r\n\r\n")
+                self.wfile.flush()
+            except (BrokenPipeError, ConnectionResetError, TimeoutError, OSError):
+                # Browser switched tabs or mobile network changed; EventSource
+                # automatically reconnects without changing trading behavior.
+                pass
+            finally:
+                event_slots.release()
+
         def do_HEAD(self) -> None:
-            self.do_GET()
+            if urlsplit(self.path).path == "/api/events":
+                self.send_bytes(405, b'{"error":"Use GET for live event stream"}', "application/json")
+            else:
+                self.do_GET()
 
         def do_GET(self) -> None:
             path = urlsplit(self.path).path
@@ -47,6 +100,8 @@ def make_handler(runtime: PaperRuntime):
                 # terminating worker instead of 404 so browsers can update it,
                 # clear stale app-shell caches and unregister permanently.
                 self.send_bytes(200, retired_sw, "text/javascript; charset=utf-8")
+            elif path == "/api/events":
+                self.stream_events()
             elif path == "/api/status":
                 body = json.dumps(runtime.status(), ensure_ascii=False, allow_nan=False).encode("utf-8")
                 self.send_bytes(200, body, "application/json; charset=utf-8")
