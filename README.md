@@ -22,7 +22,7 @@
 - `Dockerfile`：只啟動新的 Solana 系統。
 - `GET /`、`GET /api/status`、`GET /health`；全部 POST 禁用。
 
-DEX Screener 來源：`/token-profiles/latest/v1`、`/token-boosts/latest/v1`、`/tokens/v1/solana/{tokenAddresses}`。Profile 和 paid boost 存在抽樣偏差，不能假裝全網覆蓋。
+DEX Screener 來源（HTTP 429 等錯誤後退避 30 分鐘，改用 GeckoTerminal Solana 新池＋熱門池作備援）：`/token-profiles/latest/v1`、`/token-boosts/latest/v1`、`/tokens/v1/solana/{tokenAddresses}`。Profile 和 paid boost 存在抽樣偏差，不能假裝全網覆蓋。
 
 ## 第一階段預設模擬設定
 
