@@ -25,6 +25,7 @@ from .council import PaperCouncil
 from .feed_control import SHARED_GATE, MarketTemporarilyUnavailable
 from .openai_agent import OpenAICouncil
 from .shadow_judge import ShadowJudge
+from .realtime import StateSignal
 
 LOG = logging.getLogger("solana_paper")
 SOLANA_MINT = re.compile(r"^[1-9A-HJ-NP-Za-km-z]{32,44}$")
@@ -656,6 +657,7 @@ class PaperRuntime:
         # Explicit opt-in only. OPENAI_API_KEY is never returned to the browser.
         self.openai = OpenAICouncil(self.s.db_path)
         self.shadow_judge = ShadowJudge(self.s)
+        self.live_signal = StateSignal()
         self.council_reviews = 0
         self.council_approved = 0
         self.council_recent: list[dict] = []
@@ -763,7 +765,7 @@ class PaperRuntime:
         finally:
             with self.lock:
                 self.scanning = False
-
+            self.live_signal.notify()
 
     def monitor_once(self, now: float | None = None) -> dict:
         """Refresh open positions and apply simulated TP/SL without a universe scan.
@@ -823,6 +825,7 @@ class PaperRuntime:
                 return {"status": "ERROR", "error": message, "retry_after_seconds": backoff}
         finally:
             self.monitor_lock.release()
+            self.live_signal.notify()
 
     def start(self) -> None:
         if self._started:
@@ -850,6 +853,7 @@ class PaperRuntime:
                 with self.lock:
                     mints = [t["mint"] for t in self.candidates[:5]]
                 self.mint_observer.refresh(mints)
+                self.live_signal.notify()
                 time.sleep(600)
         threading.Thread(target=intelligence_loop, name="solana-paper-intelligence", daemon=True).start()
 
@@ -919,6 +923,14 @@ class PaperRuntime:
             "mint_risk_observer": self.mint_observer.summary(),
             "openai_council": self.openai.status(),
             "shadow_judge": self.shadow_judge.summary(),
+            "realtime": {
+                "transport": "SSE",
+                "monitoring": "SERVER_HTTP_POLLING",
+                "live_market_tick": False,
+                "last_scan_success_at": self.last_scan,
+                "last_monitor_quote_success_at": self.monitor_last_success,
+                **self.live_signal.snapshot(),
+            },
             "coordination": {"model": "SIX_RULE_AGENT_COUNCIL", "requires": "discovery + non-veto safety + decision + execution",
                              "smart_money": "observational; not automatically trusted",
                              "social": "abstains until independently verified",
