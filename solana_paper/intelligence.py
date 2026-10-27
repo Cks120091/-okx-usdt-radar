@@ -1,7 +1,6 @@
-"""Read-only Solana wallet and mint intelligence for paper-only research.
+"""Read-only Solana Mint/Freeze risk intelligence for paper-only research.
 
-A public address list is not proof of trader identity, profitability or future
-signal quality. Data outages explicitly return UNKNOWN, never safe/zero risk.
+Data outages explicitly return UNKNOWN, never safe/zero risk.
 No private keys, signatures, orders or on-chain transactions are constructed.
 """
 from __future__ import annotations
@@ -17,14 +16,6 @@ from urllib.request import Request, urlopen
 LOG = logging.getLogger("solana_paper.intelligence")
 TOKEN_PROGRAM = "TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA"
 TOKEN_2022 = "TokenzQdBNbLqP5VEhdkAS6EPF7CWaHr9gqPNbP93"
-SOURCE_URL = "https://blog.bananagun.io/blog/fomo-copy-trading-top-wallets"
-SOURCE_CHECKED = "2026-09-30"
-PUBLIC_WATCHLIST = (
-    {"label": "Unipcs (public attribution)", "address": "2heJbC32Tpfcb3nbUb5ER61K11FGZVfVGtVnDm6LDogF"},
-    {"label": "frankdegods (public attribution)", "address": "498g1rVnFcnjBjpfw1xyqA1WvgQXUU8RWuELjxkjAayQ"},
-    {"label": "pointfarmcap (public attribution)", "address": "Beqv6dzTcjV2eodo8RRXCiCcnSYrS1vkQKhfqwHXqeit"},
-)
-
 def valid_address(value):
     import re
     return isinstance(value, str) and re.fullmatch(r"[1-9A-HJ-NP-Za-km-z]{32,44}", value) is not None
@@ -41,7 +32,7 @@ class PublicRpc:
             raise ValueError("Only HTTPS RPC endpoints are supported")
 
     def call(self, method: str, params: list):
-        if method not in {"getTokenAccountsByOwner", "getAccountInfo"}:
+        if method != "getAccountInfo":
             raise ValueError("Unsupported read-only RPC method")
         payload = json.dumps({"jsonrpc": "2.0", "id": 1, "method": method, "params": params}).encode()
         request = Request(self.url, data=payload, headers={
@@ -56,21 +47,6 @@ class PublicRpc:
         if not isinstance(data, dict) or "error" in data or "result" not in data:
             raise RuntimeError("RPC returned an error or missing result")
         return data["result"]
-
-
-def extract_wallet_mints(response):
-    values = response.get("value") if isinstance(response, dict) else None
-    if not isinstance(values, list):
-        raise ValueError("Missing token accounts")
-    result = set()
-    for row in values[:1500]:
-        try:
-            info = row["account"]["data"]["parsed"]["info"]
-            if int(info["tokenAmount"]["amount"]) > 0 and valid_address(info["mint"]):
-                result.add(info["mint"])
-        except (KeyError, ValueError, TypeError, AttributeError):
-            continue
-    return result
 
 
 def mint_risk_from_rpc(result):
@@ -105,71 +81,6 @@ def mint_risk_from_rpc(result):
                 "flags": risks, "program": owner_program}
     except (KeyError, TypeError, AttributeError, ValueError):
         return {"state": "UNKNOWN", "flags": ["mint_parse_incomplete"]}
-
-
-class WalletObserver:
-    """Low-frequency, non-copy-trading holding observer for public addresses."""
-    def __init__(self, rpc=None, wallets=None):
-        self.rpc = rpc or PublicRpc()
-        self.wallets = tuple(wallets) if wallets is not None else PUBLIC_WATCHLIST
-        self.lock = threading.Lock()
-        self.data = {}
-        self.updated_at = 0.0
-        self.last_error = ""
-        self.backoff_until = 0.0
-
-    def refresh(self, now=None):
-        now = now if now is not None else time.time()
-        with self.lock:
-            if now < self.backoff_until:
-                return False
-            if self.updated_at and now - self.updated_at < 600:
-                return True
-        observed = {}
-        try:
-            for wallet in self.wallets[:5]:
-                if not valid_address(wallet.get("address")):
-                    continue
-                accounts = self.rpc.call("getTokenAccountsByOwner", [
-                    wallet["address"], {"programId": TOKEN_PROGRAM},
-                    {"encoding": "jsonParsed", "commitment": "confirmed"}])
-                observed[wallet["address"]] = extract_wallet_mints(accounts)
-            if not observed:
-                raise RuntimeError("No public wallet records obtained")
-            with self.lock:
-                self.data, self.updated_at, self.last_error = observed, now, ""
-                self.backoff_until = 0.0
-            return True
-        except Exception as exc:
-            error = "%s: %s" % (type(exc).__name__, str(exc)[:100])
-            delay = 1800 if isinstance(exc, HTTPError) and exc.code in (403, 429) else 600
-            LOG.warning("public watchlist unavailable; cached data is not a live trade: %s", error)
-            with self.lock:
-                self.last_error = error
-                self.backoff_until = now + delay
-            return False
-
-    def status(self, mint: str, now=None):
-        now = now if now is not None else time.time()
-        with self.lock:
-            age = now - self.updated_at if self.updated_at else None
-            # Cached observation is stale rather than a fresh confirmation.
-            valid = age is not None and 0 <= age <= 1200
-            matches = [a for a, mints in self.data.items() if mint in mints] if valid else []
-            return {
-                "state": "OBSERVED_HOLDING" if matches else ("NOT_HELD_IN_WATCHLIST" if valid else "NO_DATA"),
-                "matched_wallets": len(matches), "observed_addresses": matches[:5],
-                "wallets_sampled": len(self.data) if valid else 0,
-                "source": SOURCE_URL, "checked_at_source": SOURCE_CHECKED,
-                "snapshot_age_seconds": round(age) if age is not None else None,
-                "score_used": False, "note": "公開歸屬未獨立驗證；持倉快照不是新買入，也不是獲利證明",
-            }
-
-    def summary(self):
-        with self.lock:
-            return {"tracked": len(self.wallets), "updated_at": self.updated_at,
-                    "last_error": self.last_error, "backoff_until": self.backoff_until,
-                    "source": SOURCE_URL}
 
 
 class MintRiskObserver:
