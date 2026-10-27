@@ -160,6 +160,30 @@ class MarketFeedGateTests(unittest.TestCase):
         self.assertEqual(stat["blocked_calls"], 1)
         self.assertEqual(stat["state"], "BACKOFF")
 
+    def test_rate_limited_source_does_not_return_otherwise_fresh_cache(self):
+        from urllib.error import HTTPError
+        from solana_paper.feed_control import MarketHttpGate, MarketTemporarilyUnavailable
+        class Response:
+            def __enter__(self): return self
+            def __exit__(self, *args): return False
+            def read(self, size): return b'{"data":[]}'
+        now = [2000.0]
+        calls = []
+        def fetch(req, timeout):
+            calls.append(req.full_url)
+            if req.full_url.endswith("/blocked"):
+                raise HTTPError(req.full_url, 429, "Too Many Requests", {}, None)
+            return Response()
+        gate = MarketHttpGate(clock=lambda: now[0], fetcher=fetch,
+                             sleeper=lambda d: now.__setitem__(0, now[0] + d))
+        self.assertEqual(gate.get("GECKOTERMINAL", "/fresh", {}, ttl=300), {"data": []})
+        with self.assertRaises(MarketTemporarilyUnavailable):
+            gate.get("GECKOTERMINAL", "/blocked", {}, ttl=30)
+        with self.assertRaises(MarketTemporarilyUnavailable):
+            gate.get("GECKOTERMINAL", "/fresh", {}, ttl=300)
+        self.assertEqual(len(calls), 2)
+        self.assertEqual(gate.snapshot()["GECKOTERMINAL"]["state"], "BACKOFF")
+
     def test_gecko_quote_refreshes_known_pools_in_one_request(self):
         from solana_paper.engine import GeckoFeed
         class FakeGate:
