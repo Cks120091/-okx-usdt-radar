@@ -276,7 +276,7 @@ class LiveStreamsTest(unittest.TestCase):
                 rt.chain_stream.ingest_pump({
                     "mint":alphabet[i]*44,"action":"create",
                     "pool":"pump","symbol":"TEST"},1000+i)
-            rt.chain_stream.tick(1100)
+                rt.chain_stream.tick(1000+i)  # distinct actual dispatch times
             self.assertNotIn(oldest,rt.chain_stream.scoped_mints(limit=20))
             rt.run_once(1100)
             self.assertEqual([],rt.book.trades())
