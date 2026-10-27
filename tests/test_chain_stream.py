@@ -149,6 +149,7 @@ class LiveStreamsTest(unittest.TestCase):
             settings=replace(Settings(),db_path=str(Path(tmp)/"paper.db"))
             feed=ScopedFeed()
             rt=PaperRuntime(settings,feed)
+            rt.chain_stream.clock=lambda:1001
             no_leads=rt.run_once(1000)
             self.assertEqual("WAITING_LAUNCHPAD_EVENTS",no_leads["status"])
             self.assertEqual([],feed.queries)
