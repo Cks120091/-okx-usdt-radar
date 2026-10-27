@@ -88,7 +88,7 @@ a{color:#9ebcff;text-decoration:none}a:hover{text-decoration:underline}
 <div class="foot">
 <strong>資料來源與限制：</strong>DEX Screener／GeckoTerminal 公開 API，模擬市場價 + 固定滑價與交易費率。報價可能延遲、流動性可能虛假、價格可能瞬間跳空，實際出售也可能失敗。<br>
 <strong>儲存：</strong>第一階段使用伺服器本機 SQLite；Render 免費／暫存檔案系統重新部署或休眠後資料可能消失，績效不能視為永久保存。此頁面為公開可讀的模擬數據。<br>
-<strong>操作模式：</strong>後端定期自動掃描、選幣與模擬買賣；前端每 15 秒只讀取狀態。沒有真實下單程式、私鑰、鏈上簽名或自動實盤開關。
+<strong>操作模式：</strong>後端定期自動掃描、選幣與模擬買賣；前端每 15 秒只讀取狀態。沒有真實下單程式、私鑰、鏈上簽名或自動實盤開關。<br><strong>ChatGPT 串接：</strong>後端可選 OpenAI API，預設關閉、不會用你的 ChatGPT Plus 額度；沒有 API Key 不會呼叫付費模型，API Key 不會顯示於公開頁面。
 </div></main>
 <script>
 (function(){
@@ -124,6 +124,16 @@ fetch("/api/status",{cache:"no-store"}).then(function(response){if(!response.ok)
  "最低池流動性：$"+money(d.config.min_liquidity_usd)+" · 全市場掃描："+d.config.scan_seconds+" 秒 · 持倉查價："+d.config.monitor_seconds+" 秒";
  $("scanstatus").innerHTML="行情來源："+safe(d.market_feed||"尚未取得")+"<br>最近嘗試："+safe(time(d.last_attempt))+"<br>最近成功："+safe(time(d.last_scan))+"<br>數據源狀態："+(d.last_error?tag("bad",d.last_error):tag("good","已連接或待首次掃描"));
  $("scanstatus").innerHTML+="<br>持倉報價最近成功："+safe(time(d.monitor_last_success))+"<br>持倉報價狀態："+(d.monitor_last_error?tag("bad",d.monitor_last_error):tag("good","正常／等待持倉"))+"<br>六代理後台審議："+safe(d.council_reviewed_total||0)+" 次 · 成功建立模擬持倉 "+safe(d.council_paper_fills_total||0)+" 次<br>公開錢包觀察："+safe((d.smart_money_watchlist||{}).tracked||0)+" 個地址（非買賣訊號）<br>唯讀鏈上查核："+safe((d.mint_risk_observer||{}).checked||0)+" 個 Mint";
+ var llm=d.openai_council||{};
+ $("scanstatus").innerHTML+="<br><strong>ChatGPT AI 協作：</strong>"+
+   (llm.state==="ACTIVE"?tag("good","六角色 AI 已啟用"):
+   llm.state==="WAITING_API_KEY"?tag("warn","等待 API Key"):
+   tag("warn","尚未啟用（無 API 費用）"))+
+   " · 模型："+safe(llm.model||"未配置")+
+   " · 每日 API 請求："+safe(llm.calls_today||0)+"/"+safe(llm.calls_day_limit||12)+
+   " · 本機估計用量 $"+money(llm.estimate_month_usd||0)+
+   (llm.last_error?" · "+tag("bad",llm.last_error):"");
+
  var feeds=d.market_feed_health||{};
  Object.keys(feeds).forEach(function(name){
    var f=feeds[name]||{};
