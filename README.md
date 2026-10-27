@@ -24,6 +24,14 @@
 網站是公開唯讀頁面，不提供未驗證身分的操作開關；持倉上限透過 Render 環境變數或本機環境調整，修改後重啟生效。
 
 
+## 公開錢包候選名單（2026-10-27）
+
+原本只有 `PUBLIC_WATCHLIST` 的三個公開歸屬地址，只用於每 10 分鐘的低頻持倉觀察，不是有經驗證的獲利錢包。本次另外從 SolRadar 活躍交易排行榜加入 10 個具公開來源的 Solana 錢包至 **只讀研究候選名單**：合計 13 個，原本三個仍留在 `WalletObserver` 中，不修改任何 A 組與 JUDGE B 組的成交、風控或評分門檻。活躍度排行≠已實現獲利、勝率或可靠 KOL 身分。不得把這些地址稱為已驗證聰明錢。
+
+`PAPER_HELIUS_WALLET_EVENTS=1` 且安全配置 `HELIUS_API_KEY` 時，標準 Solana WebSocket 在**單條**連線上對最多 10 個（`PAPER_HELIUS_MAX_WALLETS` 預設 10，可設 3～13）公開地址分別傳送 `logsSubscribe`。Solana 每一個 mentions 訂閱僅允許一個地址。網站明確顯示總名單、發起訂閱、真正收到 RPC 確認的數量與交易活動。訂閱成功≠有活動，收到鏈上活動≠已買幣，失敗交易不算。沒有可靠的 PnL／完整 Swap 解析之前，這些數據不能被用作模擬買單依據。新加的 10 個活動候選是固定快照，**不會自動每天重新排名**；後續若需要動態歷史損益篩選，必須另接有權限的官方排行榜 API，使用額度前先檢查費用。
+
+可看來源：https://sol-radar.com/top-solana-traders 、https://www.solanatracker.io/leaderboard 、https://provadata.com/ 。Helius 免費標準 WebSocket 是按流量消耗 credits，提升地址數可能增加配額使用，若觀察到限額應降低 `PAPER_HELIUS_MAX_WALLETS`；使用者不必提供私鑰與任何錢包交易授權。
+
 ## 三個指定發射台掃描（2026-10 更新）
 
 後端預設 **PAPER_LAUNCHPAD_ONLY=1**，只允許 PUMP（Pump.fun）、BONK（BONK.fun／LetsBONK）、BAGS（Bags.fm／Bags Protocol）。對候選使用嚴格來源證據，**幣名叫 BONK、mint 結尾 bonk、Raydium 池，均不足以宣稱來自 BONK；普通 Meteora 池也不是 Bags**。
