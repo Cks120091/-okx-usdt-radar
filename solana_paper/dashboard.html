@@ -1,0 +1,144 @@
+<!DOCTYPE html>
+<html lang="zh-Hant">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
+<meta name="theme-color" content="#080d18">
+<title>Solana 六代理 · AI 土狗模擬交易</title>
+<style>
+:root{color-scheme:dark;--bg:#080d18;--surface:#121b2d;--surface2:#18243a;--border:#293850;--txt:#ecf4ff;--muted:#a0b0c8;--green:#64e8a3;--red:#ff8d9a;--yellow:#ffdb83;--blue:#93b7ff}
+*{box-sizing:border-box}html,body{margin:0;min-height:100%;font-family:-apple-system,BlinkMacSystemFont,"Noto Sans TC","Segoe UI",sans-serif;background:var(--bg);color:var(--txt)}
+body{background-image:radial-gradient(ellipse at top right,#173358 0,transparent 46%);background-attachment:fixed}
+main{width:min(1320px,100%);margin:auto;padding:22px 18px 80px}
+header{display:flex;align-items:center;justify-content:space-between;gap:12px;flex-wrap:wrap;padding-bottom:20px}
+.brand{display:flex;gap:13px;align-items:center}.logo{display:grid;place-items:center;width:46px;height:46px;border-radius:13px;background:linear-gradient(135deg,#a38bff,#60e5ad);color:#101322;font-size:26px;font-weight:900}
+h1{font-size:clamp(19px,3vw,29px);letter-spacing:.2px;margin:0}h2{font-size:17px;margin:0}p{margin:0}.sub,.muted{color:var(--muted)}.sub{font-size:12px;margin-top:4px}
+.pill{border:1px solid var(--border);padding:8px 11px;border-radius:999px;font-size:12px;background:#101e31;white-space:nowrap}
+.badge{display:inline-block;border-radius:6px;padding:4px 7px;font-size:11px;font-weight:800;letter-spacing:.3px}
+.badge.good{color:var(--green);background:#0e3c31}.badge.warn{color:var(--yellow);background:#453a24}.badge.bad{color:var(--red);background:#47252c}
+.intro{border:1px solid #42606a;padding:16px 17px;border-radius:14px;background:linear-gradient(110deg,#133236,#111d35);margin-bottom:16px;line-height:1.7}
+.intro strong{color:var(--green)}.intro .muted{font-size:12px}
+.metrics{display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:10px;margin-bottom:16px}
+.panel{background:var(--surface);border:1px solid var(--border);border-radius:14px;padding:16px;min-width:0}
+.stat-label{font-size:12px;color:var(--muted)}.stat-val{font-size:clamp(21px,3vw,30px);font-weight:750;font-variant-numeric:tabular-nums;margin-top:7px;overflow-wrap:anywhere}
+.positive{color:var(--green)}.negative{color:var(--red)}
+.twocol{display:grid;grid-template-columns:minmax(0,1.65fr) minmax(300px,1fr);gap:14px;margin-bottom:14px}
+.sectionhead{display:flex;align-items:center;justify-content:space-between;gap:10px;margin:0 0 15px}
+.small{font-size:12px;color:var(--muted)}.agentgrid{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:9px}
+.agent{background:var(--surface2);border:1px solid var(--border);border-radius:12px;padding:12px;min-height:124px}
+.agenttitle{font-size:14px;font-weight:750;display:flex;align-items:center;gap:7px;justify-content:space-between}
+.agent .desc{font-size:12px;line-height:1.6;color:var(--muted);margin-top:9px}
+.empty{padding:22px 10px;text-align:center;color:var(--muted);font-size:13px;line-height:1.8}
+.tablewrap{overflow-x:auto}.table{width:100%;border-collapse:collapse;font-size:13px;min-width:600px}
+.table th{text-align:left;color:var(--muted);font-size:11px;font-weight:650;padding:11px 8px;border-bottom:1px solid var(--border)}
+.table td{padding:13px 8px;border-bottom:1px solid #253146;vertical-align:middle;font-variant-numeric:tabular-nums}
+a{color:#9ebcff;text-decoration:none}a:hover{text-decoration:underline}
+.candidates{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:10px}
+.coin{padding:14px;background:var(--surface2);border:1px solid var(--border);border-radius:12px;min-width:0}
+.coin-head{display:flex;justify-content:space-between;gap:10px;align-items:flex-start}
+.coin-name{font-size:17px;font-weight:800;overflow-wrap:anywhere}.coin-mint{color:var(--muted);font-size:11px;margin-top:2px}
+.coin-score{font-size:23px;font-weight:800;color:var(--blue)}.coin-stats{display:grid;grid-template-columns:1fr 1fr;gap:9px;margin-top:13px}
+.coin-stats span{display:block;color:var(--muted);font-size:11px}.coin-stats b{display:block;margin-top:3px;font-size:13px}
+.notice{font-size:11px;color:var(--muted);line-height:1.6;margin-top:11px}.notice strong{color:var(--yellow)}
+.foot{margin-top:20px;border-top:1px solid var(--border);padding-top:16px;color:var(--muted);font-size:12px;line-height:1.8}
+.warning{border-left:3px solid var(--yellow);background:#2b291d;padding:10px 12px;margin-bottom:14px;border-radius:7px;line-height:1.7;font-size:12px}
+.sep{height:1px;background:var(--border);margin:14px 0}
+@media(max-width:930px){.twocol{grid-template-columns:1fr}.metrics{grid-template-columns:repeat(2,minmax(0,1fr))}}
+@media(max-width:560px){main{padding:14px 11px 65px}header{padding-bottom:14px}.agentgrid{grid-template-columns:repeat(2,minmax(0,1fr))}.candidates{grid-template-columns:1fr}.panel{padding:12px}.stat-val{font-size:23px}.brand{gap:9px}.logo{width:42px;height:42px}}
+</style>
+</head>
+<body><main>
+<header>
+<div class="brand"><div class="logo">◎</div><div><h1>Solana 六代理交易中心</h1><div class="sub">六代理協作 · 全自動模擬策略 · 第一階段 v1.0</div></div></div>
+<div id="health" class="pill">● 正在讀取系統狀態…</div>
+</header>
+<div class="intro"><strong>🧪 模式 B｜100% 模擬交易</strong>　不連接錢包、不持有私鑰、不會發出任何鏈上買賣。<div class="muted">六個分工代理目前是自動化規則引擎，並非六個獨立大模型；第三、四代理的鏈上／社群資料未完整接入，會明確標示資料不足。公開市場資料不保證安全，模擬績效也不等於可實現獲利。</div></div>
+<div id="error" class="warning" hidden></div>
+<div class="metrics">
+<section class="panel"><div class="stat-label">模擬淨值 USD</div><div class="stat-val" id="equity">—</div><div class="sub">包含估值，不是鏈上資產</div></section>
+<section class="panel"><div class="stat-label">可用模擬現金 USD</div><div class="stat-val" id="cash">—</div><div class="sub">起始資金 <span id="initial">—</span></div></section>
+<section class="panel"><div class="stat-label">模擬總報酬</div><div class="stat-val" id="pnl">—</div><div class="sub">已扣固定估算滑價／手續費</div></section>
+<section class="panel"><div class="stat-label">持倉數 / 上限</div><div class="stat-val" id="positionsCount">—</div><div class="sub">每日已實現 PnL（UTC）<span id="today">—</span></div></section>
+</div>
+<div class="twocol">
+<section class="panel">
+<div class="sectionhead"><h2>🤖 六個代理運作狀態</h2><span class="small" id="agentsStamp">規則引擎 v1</span></div>
+<div id="agents" class="agentgrid"></div>
+</section>
+<section class="panel">
+<div class="sectionhead"><h2>⚙️ 模擬風控</h2><span class="badge good">僅模擬</span></div>
+<div id="rules" class="small" style="line-height:2">正在讀取…</div>
+<div class="sep"></div>
+<div class="small" id="scanstatus" style="line-height:1.8">掃描狀態載入中…</div>
+</section>
+</div>
+<section class="panel" style="margin-bottom:14px">
+<div class="sectionhead"><h2>💼 目前模擬持倉</h2><span class="small">價格採最近掃描的參考價</span></div>
+<div class="tablewrap" id="positions"></div>
+</section>
+<section class="panel" style="margin-bottom:14px">
+<div class="sectionhead"><h2>🎯 Solana 候選幣掃描</h2><span class="small" id="candidatecount">—</span></div>
+<div class="warning">搜尋來源為 DEX Screener 最新 Profile / 付費 Boost，並非全部新幣；未驗證合約權限、持幣集中度或真正社群口碑。下列評分不是勝率，也不是實盤買入建議。</div>
+<div class="candidates" id="candidates"></div>
+</section>
+<section class="panel">
+<div class="sectionhead"><h2>📓 模擬交易流水</h2><span class="small">BUY / SELL 紙上紀錄</span></div>
+<div class="tablewrap" id="trades"></div>
+</section>
+<div class="foot">
+<strong>資料來源與限制：</strong>DEX Screener 公開 API，模擬市場價 + 固定滑價與交易費率。報價可能延遲、流動性可能虛假、價格可能瞬間跳空，實際出售也可能失敗。<br>
+<strong>儲存：</strong>第一階段使用伺服器本機 SQLite；Render 免費／暫存檔案系統重新部署或休眠後資料可能消失，績效不能視為永久保存。此頁面為公開可讀的模擬數據。<br>
+<strong>操作模式：</strong>後端定期自動掃描、選幣與模擬買賣；前端每 15 秒只讀取狀態。沒有真實下單程式、私鑰、鏈上簽名或自動實盤開關。
+</div></main>
+<script>
+(function(){
+"use strict";
+function $(id){return document.getElementById(id)}
+function safe(v){return String(v==null?"":v).replace(/[&<>"']/g,function(ch){return {"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;"}[ch]})}
+function money(v){var n=Number(v);return Number.isFinite(n)?n.toLocaleString("en-US",{minimumFractionDigits:2,maximumFractionDigits:2}):"—"}
+function short(v){return v?String(v).slice(0,5)+"…"+String(v).slice(-5):"—"}
+function time(v){return v?new Date(Number(v)*1000).toLocaleString("zh-TW",{hour12:false}):"尚未完成"}
+function cls(v){return Number(v)>0?"positive":Number(v)<0?"negative":""}
+function tag(kind,label){return '<span class="badge '+kind+'">'+safe(label)+'</span>'}
+function htmlTable(headers, rows){if(!rows.length)return '<div class="empty">尚無紀錄。系統會在符合條件後，自動建立模擬交易。</div>';
+ return '<table class="table"><thead><tr>'+headers.map(function(h){return '<th>'+safe(h)+'</th>'}).join('')+'</tr></thead><tbody>'+rows.join('')+'</tbody></table>'}
+function agentState(s){return s==="ACTIVE"||s==="PAPER_ONLY"?"good":s==="PARTIAL"?"warn":"bad"}
+function refresh(){
+fetch("/api/status",{cache:"no-store"}).then(function(response){if(!response.ok)throw Error("狀態 API："+response.status);return response.json()}).then(function(d){
+ $("error").hidden=true;
+ $("health").textContent=(d.scanning?"● 掃描中":d.last_error?"● 資料來源異常":"● 模擬系統運行中")+" · "+(d.last_scan?"最近完成 "+time(d.last_scan):"等待首次掃描");
+ $("equity").textContent="$"+money(d.account.equity);
+ $("cash").textContent="$"+money(d.account.cash);
+ $("initial").textContent="$"+money(d.config.initial_cash);
+ $("pnl").textContent=(d.account.pnl_since_start>=0?"+":"")+"$"+money(d.account.pnl_since_start);
+ $("pnl").className="stat-val "+cls(d.account.pnl_since_start);
+ $("positionsCount").textContent=d.account.open_positions+" / "+d.config.max_positions;
+ $("today").textContent="$"+money(d.account.realized_today_utc);
+ $("agents").innerHTML=d.agents.map(function(a){return '<article class="agent"><div class="agenttitle"><span>'+safe(a.name)+'</span>'+tag(agentState(a.status),a.status)+'</div><div class="desc">'+safe(a.detail)+'</div></article>'}).join('');
+ $("rules").innerHTML="模擬每筆：<strong>$"+money(d.config.trade_usd)+"</strong> · 最多 "+d.config.max_positions+" 筆<br>"+
+ "最高總配置："+money(d.config.max_allocated_pct*100)+"% · 每日已實現虧損熔斷：$"+money(d.config.daily_loss_limit_usd)+"<br>"+
+ "止損："+money(d.config.stop_loss_pct)+"% · 止盈："+money(d.config.take_profit_pct)+"% · 最長持有："+money(d.config.max_hold_minutes)+" 分鐘<br>"+
+ "單邊費率："+money(d.config.fee_pct_per_side)+"% · 單邊估算滑價："+money(d.config.slippage_pct_per_side)+"%<br>"+
+ "最低池流動性：$"+money(d.config.min_liquidity_usd)+" · 掃描間隔："+d.config.scan_seconds+" 秒";
+ $("scanstatus").innerHTML="最近嘗試："+safe(time(d.last_attempt))+"<br>最近成功："+safe(time(d.last_scan))+"<br>數據源狀態："+(d.last_error?tag("bad",d.last_error):tag("good","已連接或待首次掃描"));
+ var poses=d.positions.map(function(p){var diff=p.unrealized_pct;return '<tr><td><strong>'+safe(p.symbol)+'</strong><div class="small">'+safe(short(p.mint))+'</div></td><td>$'+money(p.entry)+'</td><td>$'+money(p.mark)+'</td><td class="'+cls(diff)+'">'+money(diff)+'%</td><td>$'+money(p.cost)+'</td><td>'+safe(time(p.mark_at))+'</td></tr>'});
+ $("positions").innerHTML=htmlTable(["幣種","模擬入場均價","最後報價","價格變化（未扣費）","成本 USD","最後更新"],poses);
+ $("candidatecount").textContent=d.candidates.length+" 個候選";
+ $("candidates").innerHTML=d.candidates.length?d.candidates.map(function(t){
+ var label=t.state==="PAPER_BUY"?"符合模擬條件":t.state==="REJECT"?"市場風險淘汰":"觀察中";
+ var kind=t.state==="PAPER_BUY"?"good":t.state==="REJECT"?"bad":"warn";
+ var note=t.agents.safety;
+ return '<article class="coin"><div class="coin-head"><div><div class="coin-name">'+safe(t.symbol)+'</div><div class="coin-mint">'+safe(short(t.mint))+' · '+safe(t.dex)+'</div></div><div style="text-align:right"><div class="coin-score">'+money(t.score)+'</div>'+tag(kind,label)+'</div></div>'+
+ '<div class="coin-stats"><div><span>價格 USD</span><b>$'+safe(t.price)+'</b></div><div><span>池流動性</span><b>$'+money(t.liquidity_usd)+'</b></div>'+
+ '<div><span>1H 成交額</span><b>$'+money(t.volume_h1)+'</b></div><div><span>5m / 1H 漲幅</span><b class="'+cls(t.m5_change)+'">'+money(t.m5_change)+'% / '+money(t.h1_change)+'%</b></div></div>'+
+ '<div class="notice"><strong>合約安全未驗證</strong> · '+safe(note.reasons.length?note.reasons.join("、"):"通過初步市場條件")+'<br>來源：'+safe(t.agents.discovery.sources.join(" / ")||"未知")+
+ '<br>'+safe(t.paper_order||t.agents.decision.reasons.join("、")||"無完整條件")+' · <a target="_blank" rel="noopener noreferrer" href="https://dexscreener.com/solana/'+encodeURIComponent(t.mint)+'">DEX 查看</a></div></article>'
+ }).join(''):'<div class="empty">尚無可顯示的 Solana 候選幣。可能尚未掃描成功，或當前最新清單沒有符合條件的交易池。</div>';
+ var trades=d.trades.map(function(t){return '<tr><td>'+safe(time(t.ts))+'</td><td>'+safe(t.symbol)+'</td><td>'+tag(t.side==="BUY"?"good":"warn",t.side)+'</td><td>'+safe(t.price)+'</td><td>$'+money(t.gross)+'</td><td>$'+money(t.fee)+'</td><td class="'+cls(t.pnl)+'">'+(t.pnl==null?"—":"$"+money(t.pnl))+'</td><td>'+safe(t.reason)+'</td></tr>'});
+ $("trades").innerHTML=htmlTable(["時間","幣種","方向","模擬成交價","名目金額","費用","已實現損益","原因"],trades);
+ }).catch(function(e){$("error").hidden=false;$("error").textContent="無法取得模擬系統狀態："+String(e.message||e);$("health").textContent="● 服務未連接"});
+}
+refresh();setInterval(refresh,15000);
+})();
+</script>
+</body></html>
