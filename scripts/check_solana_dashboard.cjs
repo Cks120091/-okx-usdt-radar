@@ -23,4 +23,11 @@ if (!snippets[0][1].includes('fetch("/api/status"')) {
 if (count("var poses=d.positions.map") !== 1) {
   throw new Error("Duplicate or absent positions renderer");
 }
-console.log("Solana dashboard validated: HTML structure, JS syntax and state polling");
+const retiredFile = "solana_paper/retire_service_worker.js";
+const sw = fs.readFileSync(retiredFile, "utf8");
+new vm.Script(sw, { filename: retiredFile });
+if (!sw.includes("self.registration.unregister()") || !sw.includes("okx-radar-")) {
+  throw new Error("Legacy OKX offline shell retirement logic absent");
+}
+console.log("Solana dashboard & PWA retirement validated: HTML and JavaScript");
+
