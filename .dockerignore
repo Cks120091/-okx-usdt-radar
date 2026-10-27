@@ -3,4 +3,4 @@ __pycache__/
 .git/
 data/
 tests/*
-!tests/test_preflight_detail.cjs
+!tests/test_solana_paper.py
