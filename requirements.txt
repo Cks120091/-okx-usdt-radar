@@ -1,1 +1,2 @@
-# Solana paper-only V1 uses the Python standard library; no runtime PyPI dependencies.
+# WebSocket client is only used for read-only, fee-free live token events.
+websocket-client==1.8.0
