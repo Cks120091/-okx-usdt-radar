@@ -23,6 +23,23 @@
 
 網站是公開唯讀頁面，不提供未驗證身分的操作開關；持倉上限透過 Render 環境變數或本機環境調整，修改後重啟生效。
 
+
+## Solana 免費 WebSocket 新幣事件與每秒初篩（實驗版）
+
+後端新增 solana_paper/chain_stream.py，預設僅建立一條 PumpPortal WebSocket 連線，且只訂閱官方標示免費的 subscribeNewToken 和 subscribeMigration。嚴禁發出 subscribeTokenTrade 或 subscribeAccountTrade：兩種交易串流會計量收費。所有串流只讀，不能觸發實盤交易。
+
+環境變數：
+- PAPER_PUMP_FREE_EVENTS=1：預設啟用免費新幣／遷移事件。連線網址為 wss://pumpportal.fun/api/data。若供應商拒絕匿名連線，網頁必須顯示 BACKOFF，不能假造新幣通知或暗中啟用計費訂閱。
+- PAPER_PUMP_FREE_EVENTS=0：停用 PumpPortal。
+- PAPER_HELIUS_WALLET_EVENTS=0：預設停用 Helius。
+- PAPER_HELIUS_WALLET_EVENTS=1 + 私密 HELIUS_API_KEY：啟用 Helius 免費標準 logsSubscribe，單 WebSocket 訂閱三個公開錢包地址。這只表示錢包相關鏈上活動，不能當成已確認買入或已實現獲利。API Key 必須由 Render 的私密環境變數保存，不能貼到公開程式或聊天室。
+
+後端每秒批次解析和去重收到的事件，每輪處理不超過 200 筆；佇列最大 1200 筆，溢出會丟棄並記錄；斷線指數退避，不會重新以每秒 HTTP 查詢行情。網頁透過 SSE 顯示最近新幣／遷移事件，包含真正連線狀態、累計事件數和最後收到資料時間。
+
+每個免費新幣事件強制標為 AWAITING_MARKET_VERIFICATION、trade_eligible=false、risk=UNKNOWN，不進入原有模擬買單／JUDGE 下單程序。仍需要可信的流動性、可成交價格、持有人及合約安全證據。原本 150 秒行情掃描、30 秒持倉價格輪詢與七代理 A/B 模擬完全不變。每秒初篩不是每秒有可成交報價，也不能解除 DEX/Gecko 的 429。
+
+官方文件：https://pumpportal.fun/data-api/real-time/ 、https://pumpportal.fun/fees/ 、https://www.helius.dev/pricing
+
 ## 即時網頁推送（Server-Sent Events，免費）
 
 網站 `/api/events` 新增只讀 SSE HTTP 事件流：後端每次完成 150 秒全市場掃描、30 秒持倉監控、錢包背景更新，會發出**狀態版本通知**，前端立刻重新讀取 `/api/status`。頁面另外每 30 秒備援同步，斷線時自動重連；不支援 SSE 的瀏覽器退回每 15 秒輪詢。這不是交易所 WebSocket、不是每秒更新的幣價，也不會讓報價快於原本的來源更新速度。事件連線有並發上限，避免免費主機被大量使用者拖垮。
