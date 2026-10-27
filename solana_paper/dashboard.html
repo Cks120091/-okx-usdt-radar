@@ -163,6 +163,15 @@ fetch("/api/status",{cache:"no-store"}).then(function(response){if(!response.ok)
  $("trades").innerHTML=htmlTable(["時間","幣種","方向","模擬成交價","名目金額","費用","已實現損益","原因"],trades);
  }).catch(function(e){$("error").hidden=false;$("error").textContent="無法取得模擬系統狀態："+String(e.message||e);$("health").textContent="● 服務未連接"});
 }
+// Old OKX radar PWA registrations can still intercept this page. Ask the
+// browser to fetch the one-time retirement worker served at the same URL.
+if ("serviceWorker" in navigator) {
+  navigator.serviceWorker.getRegistrations().then(function(registrations) {
+    return Promise.all(registrations.map(function(reg) {
+      return reg.update().catch(function(){});
+    }));
+  }).catch(function(){});
+}
 refresh();setInterval(refresh,15000);
 })();
 </script>
