@@ -222,6 +222,7 @@ class LiveStreamsTest(unittest.TestCase):
             feed=Feed()
             rt=PaperRuntime(settings,feed)
             rt.chain_stream.clock=lambda:1100
+            rt.early_watch.clock=lambda:1100
             for i in range(35):
                 rt.chain_stream.ingest_pump({
                     "mint":abc[i]*44, "action":"create","pool":"pump",
