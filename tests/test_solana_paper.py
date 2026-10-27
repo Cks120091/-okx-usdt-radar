@@ -124,6 +124,52 @@ class PaperTests(unittest.TestCase):
         self.assertEqual(1, len(self.runtime.book.trades()))
         self.assertEqual("RATE_LIMIT_BACKOFF", self.runtime.monitor_once(NOW + 40)["status"])
 
+    def test_sse_pushes_backend_revisions_without_market_requests(self):
+        server = ThreadingHTTPServer(("127.0.0.1", 0), make_handler(self.runtime))
+        server.daemon_threads = True
+        thread = threading.Thread(target=server.serve_forever, daemon=True)
+        thread.start()
+        conn = http.client.HTTPConnection("127.0.0.1", server.server_address[1], timeout=4)
+        try:
+            conn.request("GET", "/api/events")
+            res = conn.getresponse()
+            self.assertEqual(res.status, 200)
+            self.assertIn("text/event-stream", res.getheader("Content-Type"))
+            self.assertEqual(res.getheader("Transfer-Encoding"), "chunked")
+            self.assertEqual(res.readline(), b"retry: 3000\\n".replace(b"\\n",b"\n"))
+            self.assertEqual(res.readline(), b"\n")
+            self.assertEqual(res.readline(), b"event: change\n")
+            payload = res.readline()
+            self.assertTrue(payload.startswith(b"data: "))
+            self.assertIn(b'"revision":0', payload)
+            self.assertEqual(res.readline(), b"\n")
+            self.runtime.live_signal.notify()
+            self.assertEqual(res.readline(), b"event: change\n")
+            self.assertIn(b'"revision":1', res.readline())
+            self.assertEqual(res.readline(), b"\n")
+        finally:
+            conn.close()
+            server.shutdown()
+            server.server_close()
+            thread.join(timeout=3)
+
+    def test_head_sse_rejected_without_starting_stream(self):
+        server = ThreadingHTTPServer(("127.0.0.1", 0), make_handler(self.runtime))
+        server.daemon_threads = True
+        thread = threading.Thread(target=server.serve_forever, daemon=True)
+        thread.start()
+        conn = http.client.HTTPConnection("127.0.0.1", server.server_address[1], timeout=3)
+        try:
+            conn.request("HEAD", "/api/events")
+            res = conn.getresponse()
+            self.assertEqual(405, res.status)
+            self.assertEqual(b"", res.read())
+        finally:
+            conn.close()
+            server.shutdown()
+            server.server_close()
+            thread.join(timeout=3)
+
     def test_head_homepage_returns_headers_without_body(self):
         server = ThreadingHTTPServer(("127.0.0.1", 0), make_handler(self.runtime))
         thread = threading.Thread(target=server.serve_forever, daemon=True)
