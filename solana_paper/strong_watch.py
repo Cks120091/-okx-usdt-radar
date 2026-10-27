@@ -74,8 +74,8 @@ class EarlyStrengthWatch:
     def observe(self, quotes, core_mints, now=None):
         """Use only validated normalized snapshots; at most one per scan interval."""
         now = self.clock() if now is None else now
-        self.last_core = tuple(core_mints)
         with self.lock:
+            self.last_core = tuple(core_mints)
             for row in quotes.values():
                 rec = self.records.get(row.get("mint"))
                 if rec is None:
