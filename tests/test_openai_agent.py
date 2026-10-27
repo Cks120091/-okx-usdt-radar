@@ -46,7 +46,7 @@ class FakeTransport:
     def ask(self, role, token, prior):
         self.calls.append((role, dict(prior)))
         choice = ("VETO" if role == self.veto else
-                  "ABSTAIN" if role in ("smart_money", "social") else "APPROVE")
+                  "ABSTAIN" if role in ("market_activity", "social") else "APPROVE")
         return {"vote": choice, "reason": "僅供模擬研究，無已驗證獲利資料"}, {
             "input_tokens": 200, "output_tokens": 100,
         }
