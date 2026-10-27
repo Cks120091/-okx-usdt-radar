@@ -10,6 +10,7 @@ WORKDIR /app
 COPY . /app
 # Build must depend on the JS verifier, or Render could publish a broken page.
 COPY --from=verified_ui /ui-check-ok /ui-check-ok
+RUN python -m pip install --no-cache-dir -r requirements.txt
 RUN python -m compileall -q solana_paper run.py && \
     python -m unittest discover -s solana_paper/tests -p 'test_*.py' -v && \
     python -m unittest discover -s tests -p 'test_solana_paper.py' -v && \
