@@ -86,6 +86,13 @@ a{color:#9ebcff;text-decoration:none}a:hover{text-decoration:underline}
 <div class="tablewrap" id="positions"></div>
 </section>
 <section class="panel" style="margin-bottom:14px">
+<div class="sectionhead"><h2>🔍 公開錢包研究名單｜Helius 觀察</h2><span class="badge warn">未驗證獲利</span></div>
+<div class="warning">名單包含原先 3 個公開歸屬地址，以及 SolRadar 活躍交易榜 10 個候選地址。活躍度≠獲利；目前沒有計算勝率、已實現損益或確認是「聰明錢」。只讀 Helius WebSocket 訂閱有限數量，不自動跟單，也不影響 A／B 組原本買賣規則。</div>
+<div id="walletStatus" class="small" style="line-height:1.9">載入錢包觀察名單…</div>
+<div class="sep"></div>
+<div class="tablewrap" id="walletTable"></div>
+</section>
+<section class="panel" style="margin-bottom:14px">
 <div class="sectionhead"><h2>⚡ Pump / BONK / BAGS｜每秒新幣初篩</h2><span class="badge warn">事件≠成交訊號</span></div>
 <div class="warning">僅篩選 Pump.fun、BONK.fun、Bags.fm 的新幣／遷移。免費 PumpApi WebSocket 按發射台來源標記過濾；Bags 公開索引作低頻補充。其他 Raydium／Meteora 或不明平台直接排除。事件尚未驗證安全／可成交價，不能直接模擬買入。</div>
 <div class="small" id="chainStatus" style="line-height:1.9">等待免費串流資料…</div>
@@ -187,6 +194,24 @@ fetch("/api/status",{cache:"no-store"}).then(function(response){if(!response.ok)
  });
  $("judgeRecent").innerHTML=htmlTable(["Lead","首次觀察","裁判","原因","約24h變化"],jrows);
  var stream=d.chain_stream||{}, pump=stream.pump||{}, helius=stream.helius||{}, streamEvents=stream.leads||[];
+ var roster=stream.wallet_roster||[];
+ $("walletStatus").innerHTML="<strong>已登錄：</strong>"+safe(stream.wallet_roster_total||0)+
+   " 個（公開歸屬 3 ＋ 活躍候選 "+safe(stream.wallet_roster_research_candidates||0)+"）"+
+   " · <strong>請求訂閱：</strong>"+safe(helius.subscriptions_requested||0)+
+   " · <strong>已確認訂閱：</strong>"+safe(helius.subscriptions_confirmed||0)+
+   " · <strong>錢包活動：</strong>"+safe(stream.wallet_activity_total||0)+
+   " · "+(helius.state==="CONNECTED"?tag("good","WS 已連線"):tag("warn",helius.state||"未連線"))+
+   (helius.last_error?" · "+tag("bad",helius.last_error):"")+
+   "<br>名單來源：公開歸屬與 SolRadar 活躍榜快照；任何地址的勝率及損益均未驗證。";
+ var walletRows=roster.map(function(w){
+   var category=w.category==="ACTIVE_RESEARCH_CANDIDATE"?"活躍候選":"公開歸屬（未驗證）";
+   return "<tr><td>"+safe(w.label)+"</td><td><a href='https://solscan.io/account/"+
+     encodeURIComponent(w.address)+"' target='_blank' rel='noopener noreferrer'>"+
+     safe(short(w.address))+"</a></td><td>"+tag("warn",category)+
+     "</td><td>"+(w.currently_selected?tag("good","要求訂閱"):tag("warn","暫未訂閱"))+
+     "</td><td>未知／未驗證</td></tr>";
+ });
+ $("walletTable").innerHTML=htmlTable(["錢包","Solscan","證據級別","監控狀態","真實損益／勝率"],walletRows);
  var stName=function(v){return v==="CONNECTED"?tag("good","已連線"):v==="BACKOFF"?tag("bad","重連等待"):tag("warn",v||"尚未連線")};
  var bags=stream.bags_indexer||{}, platformCount=stream.platform_counts||{};
  $("chainStatus").innerHTML="<strong>限制掃描：</strong>Pump.fun / BONK.fun / Bags.fm"+
