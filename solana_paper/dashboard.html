@@ -49,7 +49,7 @@ a{color:#9ebcff;text-decoration:none}a:hover{text-decoration:underline}
 </head>
 <body><main>
 <header>
-<div class="brand"><div class="logo">◎</div><div><h1>Solana 六代理交易中心</h1><div class="sub">六代理協作 · 全自動模擬策略 · 第一階段 v1.0</div></div></div>
+<div class="brand"><div class="logo">◎</div><div><h1>Solana 七代理監控中心</h1><div class="sub">六代理規則引擎＋JUDGE 影子裁判 · 免費事件串流測試</div></div></div>
 <div style="display:flex;gap:8px;align-items:center;flex-wrap:wrap">
 <div id="streamState" class="pill" aria-live="polite">◌ 正在連接即時事件…</div>
 <div id="health" class="pill">● 正在讀取系統狀態…</div></div>
@@ -86,6 +86,13 @@ a{color:#9ebcff;text-decoration:none}a:hover{text-decoration:underline}
 <div class="tablewrap" id="positions"></div>
 </section>
 <section class="panel" style="margin-bottom:14px">
+<div class="sectionhead"><h2>⚡ Solana 新幣事件｜每秒本地篩查</h2><span class="badge warn">事件≠成交訊號</span></div>
+<div class="warning">PumpPortal 免費 WebSocket 僅接收新幣建立／遷移消息；不使用會計費的錢包或代幣交易串流。新幣尚未通過流動性、合約、持有人及可成交價格驗證，不能因出現在這裡就模擬買入。Helius 地址活動監控需另行設定自己的免費 API Key。</div>
+<div class="small" id="chainStatus" style="line-height:1.9">等待免費串流資料…</div>
+<div class="sep"></div>
+<div class="tablewrap" id="chainEvents"></div>
+</section>
+<section class="panel" style="margin-bottom:14px">
 <div class="sectionhead"><h2>🎯 Solana 候選幣掃描</h2><span class="small" id="candidatecount">—</span></div>
 <div class="warning">搜尋來源為 DEX Screener Profile／付費 Boost 或 GeckoTerminal 新池／熱門池，並非全部新幣；未驗證合約權限、持幣集中度或真正社群口碑。下列評分不是勝率，也不是實盤買入建議。</div>
 <div class="candidates" id="candidates"></div>
@@ -95,7 +102,7 @@ a{color:#9ebcff;text-decoration:none}a:hover{text-decoration:underline}
 <div class="tablewrap" id="trades"></div>
 </section>
 <div class="foot">
-<strong>資料來源與限制：</strong>DEX Screener／GeckoTerminal 公開 API，模擬市場價 + 固定滑價與交易費率。報價可能延遲、流動性可能虛假、價格可能瞬間跳空，實際出售也可能失敗。<br>
+<strong>資料來源與限制：</strong>PumpPortal 免費新幣事件、可選 Helius 位址通知，加上 DEX Screener／GeckoTerminal 公開 API，模擬市場價 + 固定滑價與交易費率。報價可能延遲、流動性可能虛假、價格可能瞬間跳空，實際出售也可能失敗。<br>
 <strong>儲存：</strong>第一階段使用伺服器本機 SQLite；Render 免費／暫存檔案系統重新部署或休眠後資料可能消失，績效不能視為永久保存。此頁面為公開可讀的模擬數據。<br>
 <strong>操作模式：</strong>後端定期自動掃描、選幣與模擬買賣；前端接收後端 SSE 狀態事件，另有 30 秒備援輪詢；行情掃描與持倉查價仍按各自週期執行，這不是即時逐筆成交 WebSocket。沒有真實下單程式、私鑰、鏈上簽名或自動實盤開關。<br><strong>ChatGPT 串接：</strong>後端可選 OpenAI API，預設關閉、不會用你的 ChatGPT Plus 額度；沒有 API Key 不會呼叫付費模型，API Key 不會顯示於公開頁面。
 </div></main>
@@ -179,6 +186,24 @@ fetch("/api/status",{cache:"no-store"}).then(function(response){if(!response.ok)
   '<span class="'+cls(q.change_24h_pct)+'">'+money(q.change_24h_pct)+"%</span>")+"</td></tr>";
  });
  $("judgeRecent").innerHTML=htmlTable(["Lead","首次觀察","裁判","原因","約24h變化"],jrows);
+ var stream=d.chain_stream||{}, pump=stream.pump||{}, helius=stream.helius||{}, streamEvents=stream.leads||[];
+ var stName=function(v){return v==="CONNECTED"?tag("good","已連線"):v==="BACKOFF"?tag("bad","重連等待"):tag("warn",v||"尚未連線")};
+ $("chainStatus").innerHTML="免費新幣 WebSocket："+stName(pump.state)+
+   " · 已接收建立："+safe(stream.created_total||0)+" · 已接收遷移："+safe(stream.migrated_total||0)+
+   " · 已篩查："+safe(stream.screened_total||0)+" · 排隊："+safe(stream.pending_count||0)+
+   "<br>最後有效事件："+safe(time(stream.last_event_at))+" · 最後每秒篩查："+safe(time(stream.last_screen_at))+
+   "<br>Helius 錢包活動："+stName(helius.state)+" · 活動通知："+safe(stream.wallet_activity_total||0)+
+   "（僅鏈上活動，無法證明買入）"+
+   (pump.last_error?"<br>"+tag("bad","免費串流連線問題："+pump.last_error):"")+
+   "<br>"+tag("warn","行情仍由獨立資料來源取得；WebSocket 建幣事件並非可成交價格");
+ var streamRows=streamEvents.slice(0,20).map(function(e){
+   return "<tr><td>"+safe(time(e.received_at))+"</td><td><strong>"+safe(e.symbol)+"</strong><div class='small'>"+
+   safe(short(e.mint))+"</div></td><td>"+tag("warn",e.kind==="MIGRATED"?"流動性遷移":"新幣建立")+
+   "</td><td>"+tag("warn","待行情、安全驗證")+
+   "</td><td><a target='_blank' rel='noopener noreferrer' href='https://dexscreener.com/solana/"+
+   encodeURIComponent(e.mint)+"'>DEX 查看</a></td></tr>";
+ });
+ $("chainEvents").innerHTML=htmlTable(["接收時間","幣種","事件","風控狀態","查閱"],streamRows);
  $("candidatecount").textContent=d.candidates.length+" 個候選"+(d.market_snapshot_stale?" · ⚠ 快照過期":"");
  $("candidates").innerHTML=d.candidates.length?d.candidates.map(function(t){
  var label=t.state==="PAPER_BUY"?"符合模擬條件":t.state==="REJECT"?"市場風險淘汰":"觀察中";
