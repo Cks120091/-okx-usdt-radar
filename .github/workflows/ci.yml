@@ -22,6 +22,6 @@ jobs:
       - name: Offline paper engine tests
         run: python -m unittest discover -s solana_paper/tests -p 'test_*.py' -v
       - name: Offline paper accounting tests
-        run: python -m unittest discover -s tests -p 'test_solana_paper.py' -v
+        run: python -m unittest discover -s tests -p 'test_*.py' -v
       - name: Verify formatting
         run: git diff --check
