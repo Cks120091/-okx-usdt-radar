@@ -1,8 +1,10 @@
+import os
 import tempfile
+from unittest.mock import patch
 import unittest
 from dataclasses import replace
 from pathlib import Path
-from solana_paper.engine import DecisionAgent, DexFeed, PaperBook, PaperRuntime, SafetyAgent, Settings, normalize_pairs
+from solana_paper.engine import DecisionAgent, DexFeed, ExecutionAgent, PaperBook, PaperRuntime, SafetyAgent, Settings, normalize_pairs
 
 MINT = "A" * 44
 NOW = 1793100000.0
@@ -101,6 +103,35 @@ class PaperSystemTests(unittest.TestCase):
         self.assertEqual("UNVERIFIED", safety["contract_security"])
         self.assertEqual("PAPER_BUY", decision["state"])
         self.assertEqual(100, decision["score"])
+
+    def test_max_positions_config_is_3_to_20(self):
+        with patch.dict(os.environ, {"PAPER_MAX_POSITIONS": "99"}):
+            self.assertEqual(20, Settings.load().max_positions)
+        with patch.dict(os.environ, {"PAPER_MAX_POSITIONS": "1"}):
+            self.assertEqual(3, Settings.load().max_positions)
+        with patch.dict(os.environ, {"PAPER_MAX_POSITIONS": "12"}):
+            self.assertEqual(12, Settings.load().max_positions)
+
+    def test_20_simultaneous_positions_and_slot_released_same_day(self):
+        settings = replace(self.s, trade_usd=40, max_positions=20, max_allocated_pct=.90)
+        book = PaperBook(settings)
+        execution = ExecutionAgent(book, settings)
+        for i in range(20):
+            token = {"mint": "test_sol_mint_%02d" % i, "symbol": "TEST%02d" % i, "price": 1.0}
+            approved, reason = execution.approve(token, NOW)
+            self.assertTrue(approved, reason)
+            self.assertTrue(book.buy(token, NOW))
+        self.assertEqual(20, len(book.positions()))
+        extra = {"mint": "extra_mint", "symbol": "EXTRA", "price": 1.0}
+        self.assertEqual("同時持倉數已達上限（非每日交易次數）", execution.approve(extra, NOW)[1])
+        first_position = book.positions()[0]
+        self.assertIsNotNone(book.sell(first_position, 1.03, "TEST_CLOSE", NOW + 60))
+        self.assertEqual(19, len(book.positions()))
+        approved, reason = execution.approve(extra, NOW + 60)
+        self.assertTrue(approved, reason)
+        self.assertTrue(book.buy(extra, NOW + 60))
+        self.assertEqual(20, len(book.positions()))
+        self.assertGreaterEqual(len(book.trades()), 22)
 
     def test_mint_validation(self):
         self.assertTrue(DexFeed.valid(MINT))
