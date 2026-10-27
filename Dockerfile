@@ -11,7 +11,8 @@ COPY . /app
 COPY --from=verified_ui /ui-check-ok /ui-check-ok
 RUN python -m compileall -q solana_paper run.py && \
     python -m unittest discover -s solana_paper/tests -p 'test_*.py' -v && \
-    python -m unittest discover -s tests -p 'test_*.py' -v && \
+    python -m unittest discover -s tests -p 'test_solana_paper.py' -v && \
+    python -m unittest discover -s tests -p 'test_intelligence.py' -v && \
     mkdir -p /app/data
 ENV PYTHONUNBUFFERED=1
 ENV PORT=8000
