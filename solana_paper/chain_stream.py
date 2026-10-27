@@ -144,6 +144,16 @@ class LiveChainObserver:
                 fresh, key=lambda entry: entry[1][1], reverse=True
             )[:max(0, min(25, int(limit)))]]
 
+    def research_candidates(self, limit=350, now=None):
+        """Research-only verified mint metadata, no provider requests."""
+        at = self.clock() if now is None else now
+        with self.lock:
+            found = [(mint, platform, observed)
+                     for mint, (platform, observed) in self.provenance.items()
+                     if platform in ALLOWED_LAUNCHPADS and 0 <= at-observed < 14400]
+            found.sort(key=lambda x: x[2], reverse=True)
+            return found[:max(0, min(350, int(limit)))]
+
     def launchpad_for(self, mint):
         with self.lock:
             return self.provenance.get(mint, ("UNKNOWN", 0))[0]
