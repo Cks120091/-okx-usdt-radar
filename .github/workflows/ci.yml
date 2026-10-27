@@ -25,5 +25,7 @@ jobs:
         run: python -m unittest discover -s tests -p 'test_solana_paper.py' -v
       - name: Offline wallet, safety and reserve tests
         run: python -m unittest discover -s tests -p 'test_intelligence.py' -v
+      - name: Offline OpenAI integration and cost-cap tests
+        run: python -m unittest discover -s tests -p 'test_openai_agent.py' -v
       - name: Verify formatting
         run: git diff --check
