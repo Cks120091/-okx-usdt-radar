@@ -48,7 +48,8 @@ def dossier(token, now):
     report = {
         "chain": "solana",
         "age_minutes": fact(token.get("age_minutes")),
-        "market_cap_usd": fact(token.get("market_cap") or token.get("fdv")),
+        "market_cap_usd": fact(token.get("market_cap")),
+        "fdv_usd": fact(token.get("fdv")),
         "liquidity_usd": fact(token.get("liquidity_usd")),
         "holders_now": "missing",
         "holders_1h_ago": "missing",
