@@ -39,6 +39,26 @@
 
 **這不是 WebSocket／逐筆即時價格串流。** HTTP 資料源被 429 限流時，持倉監控至少退避 300 秒；其他錯誤退避 60 秒。缺失的持倉報價不會虛構平倉，`PAPER_MONITOR_STALE_SECONDS` 預設 120 秒以上未更新就於介面顯示報價過期。若需要秒級、更可靠的完整池報價以及 24 小時不中斷，需評估行情供應商的 WebSocket 與一台持續運行、能保存資料的伺服器；此階段**不會自行啟用付費方案**。
 
+## ChatGPT 六角色 AI 協作（預設完全停用、無 API 費用）
+
+本專案已預先整合官方 **OpenAI Responses API**；這不是直接連到你的 ChatGPT App 聊天記錄，也不能把 ChatGPT Plus 當作免費 API 額度。正式啟用需要專用 OpenAI API Key 及其獨立的 API 計費。
+
+目前預設**關閉**，故部署完成也**不會產生任何 OpenAI API 呼叫或費用**。設定在 Render 的**私密環境變數**（絕不可貼進公開網頁／GitHub／聊天室）：
+
+- \`PAPER_OPENAI_ENABLED=1\`：**使用者明確批准產生費用後才開啟**；單有 API Key 不會啟用。
+- \`OPENAI_API_KEY\`：從 OpenAI API Platform 建立的專用專案金鑰，僅存於 Render secret environment。
+- \`PAPER_OPENAI_MODEL=gpt-6-luna\`：2026 年公開低成本模型。僅允許 \`gpt-6-luna\` 或 \`gpt-5.6-luna\`，避免誤選昂貴模型。
+- \`PAPER_OPENAI_MAX_DAILY_CALLS=12\`：預設每天最多 12 次模型呼叫，相當於約 **2 顆候選幣 × 6 位 AI 審查員**。可設定 1～60；若設定不足六次無法完成一顆幣的完整會議。
+- \`PAPER_OPENAI_MONTHLY_BUDGET_USD=1\`：內部估算計費額度，預設每月 1 USD、最大 10 USD。
+
+每個被原始規則評為可進場的候選幣，才排入**獨立後台佇列**；六位 AI 依序審核，後一位看到前一位的結構化投票，不必讓所有幣每 30 秒重複討論。模型提供 **APPROVE / CAUTION / WAIT / VETO / ABSTAIN** 與繁體中文理由。若 AI 資料不完整、遭到拒絕、超過本機額度或有 VETO / WAIT，都**不會新開模擬倉**；原有流動性、合約風險、持倉上限、手續費、滑價和停損邏輯仍然優先，AI 無權突破。若串接處於關閉狀態，維持既有規則型六代理與模擬策略。
+
+安全限制：這是六個*模型呼叫的角色*，並非六個不同廠商或六個獨立模型。所有輸入只含候選幣公開指標，沒有私鑰、API Key、用戶對話內容。回覆採 JSON Schema 驗證，API 錯誤不產生虛構分析，網頁僅顯示模型狀態與本機用量，不回傳金鑰。
+
+**費用安全提醒**：本機 SQLite 用量表只能限制**同一儲存實例**，Render Free 重新部署或休眠可能遺失，因此**不是 OpenAI 平台的硬帳單上限**。啟用前請在 OpenAI API 專案設定額外的消費控制／預付額度；未經你同意，本專案不會自行開啟付費功能。
+
+官方文件：https://developers.openai.com/api/docs/guides/text 與 https://developers.openai.com/api/docs/pricing
+
 ## 公開聰明錢研究與後台協商
 
 使用 Banana Gun 於 2026-10-27 前公開、聲稱在 2026-09-30 核對的 Fomo 交易者地址作為研究起點：
