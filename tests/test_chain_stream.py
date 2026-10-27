@@ -100,7 +100,7 @@ class LiveStreamsTest(unittest.TestCase):
 
     def test_strict_platform_filter_excludes_generic_raydium_meteora_unknown(self):
         c=LiveChainObserver(env={"PAPER_PUMP_FREE_EVENTS":"1",
-            "PAPER_BAGS_INDEXER_ENABLED":"0"},clock=lambda:1000)
+            "PAPER_BAGS_INDEXER_ENABLED":"0"},clock=lambda:1021)
         for i,(pool,platform,label) in enumerate([
             ("pump",None,"PUMP"),
             ("raydium-launchpad","bonk","BONK"),
