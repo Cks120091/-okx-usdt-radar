@@ -163,113 +163,22 @@ class LiveStreamsTest(unittest.TestCase):
             self.assertEqual(0,feed.discovers)
             self.assertEqual([],rt.book.trades())
 
-    def test_public_rpc_requires_no_key_and_has_bounded_ws_subscriptions(self):
-        from solana_paper.public_wallet_rpc import (
-            PublicWalletRpcMonitor, PUBLIC_WS_URL)
-        fake=FakeSocket([
-            *(json.dumps({"id":i,"result":100+i}) for i in range(1,11)),
-            json.dumps({"method":"logsNotification","params":{
-                "subscription":101,"result":{"value":{
-                    "signature":"a"*88,"err":None}}}})
-        ])
-        observer=LiveChainObserver(env={
+    def test_stream_does_not_start_wallet_monitor_even_with_old_settings(self):
+        observer = LiveChainObserver(env={
             "PAPER_RPC_WALLET_EVENTS":"1",
-            "PAPER_RPC_MAX_WALLETS":"10",
-            "HELIUS_API_KEY":"unused-old-key",
+            "PAPER_RPC_MAX_WALLETS":"13",
             "PAPER_HELIUS_WALLET_EVENTS":"1",
+            "HELIUS_API_KEY":"old-key-not-used",
             "PAPER_PUMP_FREE_EVENTS":"0",
-        },connection_factory=lambda url:fake)
-        self.assertTrue(observer.rpc_wallet_enabled)
-        self.assertEqual(13,observer.snapshot()["wallet_roster_total"])
-        self.assertEqual(10,observer.snapshot()["wallet_subscriptions_selected"])
-        self.assertEqual("SOLANA_PUBLIC_RPC",observer.snapshot()["wallet_rpc"]["provider"])
-        with self.assertRaises(OSError):
-            observer.wallet_monitor._ws_once()
-        self.assertEqual(10,len(fake.sent))
-        self.assertEqual(10,observer.snapshot()["wallet_rpc"]["subscriptions_confirmed"])
-        self.assertTrue(all(x["method"]=="logsSubscribe" for x in fake.sent))
-        self.assertTrue(all(len(x["params"][0]["mentions"])==1 for x in fake.sent))
-        self.assertEqual(1,observer.snapshot()["wallet_activity_total"])
-        self.assertEqual("ADDRESS_ACTIVITY_NOT_PROVEN_BUY",
-                         observer.snapshot()["recent_wallet_events"][0]["kind"])
-        self.assertEqual(PUBLIC_WS_URL,"wss://api.mainnet.solana.com/")
-        self.assertNotIn("unused-old-key",str(observer.snapshot()))
-
-    def test_public_rpc_disabled_without_touching_old_helius_settings(self):
-        observer=LiveChainObserver(env={
-            "PAPER_RPC_WALLET_EVENTS":"0", "PAPER_HELIUS_WALLET_EVENTS":"1",
-            "HELIUS_API_KEY":"unused"})
-        self.assertEqual("DISABLED", observer.snapshot()["wallet_rpc"]["state"])
-        self.assertEqual(0,observer.snapshot()["wallet_subscriptions_selected"])
-
-    def test_sourced_wallet_roster_not_fake_profit_ranking(self):
-        from solana_paper.wallet_roster import roster,selected,ACTIVITY_LEADERBOARD
-        from solana_paper.intelligence import valid_address
-        wallets=roster()
-        self.assertEqual(13,len(wallets))
-        self.assertEqual(13,len({w["address"] for w in wallets}))
-        self.assertTrue(all(valid_address(w["address"]) for w in wallets))
-        self.assertTrue(all(not w["pnl_verified"] and not w["win_rate_verified"] for w in wallets))
-        self.assertTrue(all(w["source"]==ACTIVITY_LEADERBOARD
-            for w in wallets if w["category"]=="ACTIVE_RESEARCH_CANDIDATE"))
-        self.assertEqual(10,len(selected()))
-        self.assertEqual(13,len(selected(100)))
-        self.assertEqual(0,len(selected(0)))
-
-    def test_public_rpc_confirmed_activity_only_not_copytrading(self):
-        from solana_paper.public_wallet_rpc import PublicWalletRpcMonitor
-        from solana_paper.wallet_roster import selected
-        monitor=PublicWalletRpcMonitor(wallets=selected(3),env={
-            "PAPER_RPC_WALLET_EVENTS":"1"},clock=lambda:1000)
-        sig="b"*88
-        def event(sub,error=None):
-            return {"method":"logsNotification","params":{
-                "subscription":sub,"result":{"value":{"signature":sig,"err":error}}}}
-        monitor.handle_ws_message(event(7))
-        self.assertEqual(0,monitor.snapshot()["wallet_activity_total"])
-        monitor.handle_ws_message({"id":1,"result":7})
-        monitor.handle_ws_message(event(7,{"InstructionError":[0,"Custom"]}))
-        self.assertEqual(0,monitor.snapshot()["wallet_activity_total"])
-        monitor.handle_ws_message(event(7))
-        monitor.handle_ws_message(event(7))
-        self.assertEqual(1,monitor.snapshot()["wallet_activity_total"])
-        self.assertEqual("SOLANA_PUBLIC_WS",
-                         monitor.snapshot()["recent_wallet_events"][0]["source"])
-        with self.assertRaises(RuntimeError):
-            monitor.handle_ws_message({"id":2,"error":{"message":"rejected"}})
-
-    def test_public_rpc_http_fallback_baseline_and_429_backoff(self):
-        from solana_paper.public_wallet_rpc import (
-            PublicWalletRpcMonitor, PUBLIC_HTTP_URL)
-        from solana_paper.wallet_roster import selected
-        from urllib.error import HTTPError
-        from unittest.mock import Mock
-        clock=[1000.]
-        monitor=PublicWalletRpcMonitor(wallets=selected(3),clock=lambda:clock[0],
-                env={"PAPER_RPC_FALLBACK_WALLETS":"1","PAPER_RPC_POLL_SECONDS":"10"})
-        self.assertEqual(120,monitor.poll_seconds)
-        self.assertEqual(1,monitor.poll_limit)
-        initial="a"*88
-        new="b"*88
-        results=[[{"signature":initial,"err":None}],
-                 [{"signature":new,"err":None},{"signature":initial,"err":None}]]
-        monitor._signatures=lambda addr: results.pop(0)
-        self.assertTrue(monitor.poll_once())
-        self.assertEqual(0,monitor.snapshot()["wallet_activity_total"])
-        clock[0]=1180
-        self.assertTrue(monitor.poll_once())
-        self.assertEqual(1,monitor.snapshot()["wallet_activity_total"])
-        self.assertEqual("SOLANA_PUBLIC_HTTP_FALLBACK",
-                         monitor.snapshot()["recent_wallet_events"][0]["source"])
-        def rate_limit(addr):
-            raise HTTPError(PUBLIC_HTTP_URL,429,"Rate limited",{"Retry-After":"900"},None)
-        monitor._signatures=rate_limit
-        clock[0]=1350
-        self.assertFalse(monitor.poll_once())
-        self.assertEqual("BACKOFF",monitor.snapshot()["status"]["state"])
-        self.assertGreaterEqual(monitor.snapshot()["status"]["http_backoff_until"],2250)
-        self.assertFalse(monitor.poll_once())
-        self.assertEqual(1,monitor.snapshot()["wallet_activity_total"])
+            "PAPER_BAGS_INDEXER_ENABLED":"0",
+        })
+        snap = observer.snapshot()
+        self.assertNotIn("wallet_rpc", snap)
+        self.assertNotIn("wallet_roster", snap)
+        self.assertNotIn("recent_wallet_events", snap)
+        self.assertFalse(hasattr(observer, "wallet_monitor"))
+        self.assertEqual(0, len([x for x in snap if "wallet" in x.lower()]))
+        self.assertNotIn("old-key-not-used", str(snap))
 
     def test_no_event_can_place_paper_order(self):
         with tempfile.TemporaryDirectory() as tmp:
