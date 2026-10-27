@@ -145,6 +145,34 @@ class PaperTests(unittest.TestCase):
             server.server_close()
             thread.join(timeout=3)
 
+    def test_legacy_service_worker_is_retired_not_returned_404(self):
+        # Previously installed OKX PWA worker caches '/' and can outlive
+        # releases; the old origin worker URL must serve an update script.
+        server = ThreadingHTTPServer(("127.0.0.1", 0), make_handler(self.runtime))
+        thread = threading.Thread(target=server.serve_forever, daemon=True)
+        thread.start()
+        conn = http.client.HTTPConnection("127.0.0.1", server.server_address[1], timeout=3)
+        try:
+            conn.request("GET", "/service-worker.js")
+            response = conn.getresponse()
+            code, content_type = response.status, response.getheader("Content-Type")
+            code_body = response.read().decode("utf-8")
+            self.assertEqual(code, 200)
+            self.assertIn("javascript", content_type)
+            self.assertIn("self.registration.unregister()", code_body)
+            self.assertIn("okx-radar-", code_body)
+            self.assertNotIn("cache.addAll", code_body)
+            conn.request("GET", "/")
+            main_page = conn.getresponse()
+            html = main_page.read().decode("utf-8")
+            self.assertEqual(main_page.status, 200)
+            self.assertIn("serviceWorker.getRegistrations()", html)
+        finally:
+            conn.close()
+            server.shutdown()
+            server.server_close()
+            thread.join(timeout=3)
+
     def test_reports_read_only_paper_mode(self):
         s = self.runtime.status()
         self.assertEqual(s["mode"], "PAPER_ONLY")
