@@ -6,3 +6,4 @@ tests/*
 !tests/test_solana_paper.py
 !tests/test_intelligence.py
 !tests/test_openai_agent.py
+!tests/test_shadow_judge.py
