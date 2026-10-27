@@ -15,12 +15,18 @@ import queue
 import threading
 import time
 from urllib.parse import quote
+from urllib.request import Request, urlopen
+from urllib.error import HTTPError, URLError
 from .intelligence import PUBLIC_WATCHLIST, valid_address
+from .launchpad_scope import ALLOWED_LAUNCHPADS, identify_stream_launchpad, identify_bags_indexer_launchpad
 
 LOG = logging.getLogger("solana_paper.stream")
-PUMP_URL = "wss://pumpportal.fun/api/data"
+# Provider explicitly marks launch pool/platform; stream includes other events
+# which are dropped BEFORE entering the queue. One socket, no subscriptions.
+PUMP_URL = "wss://stream.pumpapi.io/"
+BAGS_LAUNCHES_URL = "https://data-api.bags.fm/v2/launches?launchpads=Bags%2CBagsProtocol&limit=30"
 HELIUS_URL = "wss://mainnet.helius-rpc.com/?api-key="
-FREE_PUMP_METHODS = ("subscribeNewToken", "subscribeMigration")
+FREE_PUMP_METHODS = ()
 
 
 def interpret_pump_event(packet, received_at):
@@ -29,22 +35,24 @@ def interpret_pump_event(packet, received_at):
     mint = packet.get("mint")
     if not valid_address(mint):
         return None
-    kind = str(packet.get("txType") or packet.get("type") or "").lower()
+    kind = str(packet.get("action") or packet.get("txType") or packet.get("type") or "").lower()
     if kind in ("create", "newtoken", "new_token", "new_token_creation"):
         kind = "CREATED"
     elif kind in ("migration", "migrate", "migrated"):
         kind = "MIGRATED"
     else:
-        # Avoid treating paid trade messages or arbitrary packets as launches.
         return None
+    launchpad = identify_stream_launchpad(packet)
+    if launchpad not in ALLOWED_LAUNCHPADS:
+        return None  # Generic Raydium/Meteora is not a BONK/BAGS launch.
     return {
         "mint": mint, "symbol": str(packet.get("symbol") or "未知")[:24],
         "name": str(packet.get("name") or "")[:52],
         "kind": kind, "received_at": received_at,
+        "launchpad": launchpad,
         "state": "AWAITING_MARKET_VERIFICATION",
-        "risk": "UNKNOWN",
-        "trade_eligible": False,
-        "source": "PUMPPORTAL_FREE_EVENTS",
+        "risk": "UNKNOWN", "trade_eligible": False,
+        "source": str(packet.get("_verified_source") or "PUMPAPI_FREE_STREAM")[:48],
     }
 
 
@@ -53,6 +61,7 @@ class LiveChainObserver:
         env = env if env is not None else os.environ
         self.clock = clock or time.time
         self.enabled = env.get("PAPER_PUMP_FREE_EVENTS", "1") == "1"
+        self.bags_indexer_enabled = env.get("PAPER_BAGS_INDEXER_ENABLED", "1") == "1"
         key = env.get("HELIUS_API_KEY", "").strip()
         self.helius_enabled = (env.get("PAPER_HELIUS_WALLET_EVENTS", "0") == "1"
                                and bool(key))
@@ -63,6 +72,8 @@ class LiveChainObserver:
         self.started = False
         self.unique = {}
         self.leads = deque(maxlen=50)
+        self.provenance = {}
+        self.launchpad_counts = {k: 0 for k in ALLOWED_LAUNCHPADS}
         self.created_count = 0
         self.migrated_count = 0
         self.dropped = 0
@@ -73,6 +84,9 @@ class LiveChainObserver:
         self.wallet_count = 0
         self.state = {
             "pump": {"state": "DISABLED" if not self.enabled else "CONNECTING",
+                     "last_error": "", "last_connected": 0.0,
+                     "last_message": 0.0, "reconnects": 0},
+            "bags": {"state": "CONNECTING" if self.bags_indexer_enabled else "DISABLED",
                      "last_error": "", "last_connected": 0.0,
                      "last_message": 0.0, "reconnects": 0},
             "helius": {"state": "CONNECTING" if self.helius_enabled else "NOT_CONFIGURED",
@@ -111,6 +125,8 @@ class LiveChainObserver:
                     continue
                 self.unique[dedup] = at
                 self.leads.appendleft(lead)
+                self.provenance[mint] = (lead["launchpad"], at)
+                self.launchpad_counts[lead["launchpad"]] += 1
                 self.screened += 1
                 if self.screened == 1:
                     LOG.info("first free WebSocket Solana launch event accepted for local screening")
@@ -123,7 +139,21 @@ class LiveChainObserver:
             self.last_screen_at = at
             if len(self.unique) > 3000:
                 self.unique = {k:v for k,v in self.unique.items() if v > at - 3600}
+            if len(self.provenance) > 600:
+                newest = sorted(self.provenance.items(), key=lambda x: x[1][1], reverse=True)[:350]
+                self.provenance = dict(newest)
         return changed
+
+    def scoped_mints(self, limit=20):
+        """Trusted launchpad attribution, *not* permission to trade."""
+        with self.lock:
+            return [mint for mint, meta in sorted(
+                self.provenance.items(), key=lambda entry: entry[1][1], reverse=True
+            )[:max(0, min(25, int(limit)))] if meta[0] in ALLOWED_LAUNCHPADS]
+
+    def launchpad_for(self, mint):
+        with self.lock:
+            return self.provenance.get(mint, ("UNKNOWN", 0))[0]
 
     def _connect(self, url):
         if self.connection_factory is not None:
@@ -186,10 +216,10 @@ class LiveChainObserver:
             try:
                 # No API key and no metered account/token trade subscriptions.
                 ws = self._connect(PUMP_URL)
-                for method in FREE_PUMP_METHODS:
-                    ws.send(json.dumps({"method": method}))
+                # PumpApi publishes without a subscribe command or API key.
+                # Never call fee-bearing trade endpoints or send private keys.
                 self._set_state("pump", "CONNECTED")
-                LOG.info("PumpPortal free WebSocket connected; ONLY new-token and migration subscriptions active")
+                LOG.info("Multi-launchpad free stream connected; strict Pump/BONK/Bags launch-only filter active")
                 pause = 5
                 self._receive(ws, "pump", self._handle_pump_packet)
             except Exception as exc:
@@ -197,7 +227,7 @@ class LiveChainObserver:
                 self._set_state("pump", "BACKOFF", type(exc).__name__)
                 with self.lock:
                     self.state["pump"]["reconnects"] += 1
-                LOG.warning("free PumpPortal stream disconnected: %s; retry in %ds",
+                LOG.warning("free launchpad stream disconnected: %s; retry in %ds",
                             type(exc).__name__, pause)
                 time.sleep(pause)
                 pause = min(pause * 2, 300)
@@ -207,6 +237,56 @@ class LiveChainObserver:
                         ws.close()
                     except Exception:
                         pass
+
+    def _bags_indexer_loop(self):
+        """Slow public, launchpad-filtered provenance backup; never price/trade."""
+        pause = 120
+        while True:
+            try:
+                req = Request(BAGS_LAUNCHES_URL, headers={
+                    "Accept": "application/json",
+                    "User-Agent": "Solana-Paper-Launchpad-Observer/1.0"})
+                with urlopen(req, timeout=8) as response:
+                    if response.status != 200:
+                        raise OSError("Indexer HTTP status not OK")
+                    raw = response.read(800001)
+                if len(raw) > 800000:
+                    raise ValueError("Indexer response oversized")
+                payload = json.loads(raw)
+                if isinstance(payload, dict):
+                    rows = payload.get("launches", payload.get("data", payload.get("items", [])))
+                    if isinstance(rows, dict):
+                        rows = rows.get("launches", rows.get("items", []))
+                else:
+                    rows = payload
+                if not isinstance(rows, list):
+                    raise ValueError("Indexer payload has no launch list")
+                accepted = 0
+                for row in rows[:50]:
+                    if identify_bags_indexer_launchpad(row) != "BAGS":
+                        continue
+                    mint = row.get("mint") or row.get("tokenMint")
+                    if not valid_address(mint):
+                        continue
+                    event = {
+                        "action": "create", "mint": mint, "symbol": row.get("symbol"),
+                        "name": row.get("name"), "pool": "meteora-launchpad",
+                        "platform": "bags", "_verified_source": "BAGS_INDEXER_LAUNCHES"}
+                    accepted += int(self.ingest_pump(event))
+                self._set_state("bags", "CONNECTED")
+                with self.lock:
+                    self.state["bags"]["last_message"] = self.clock()
+                pause = 120
+                if accepted and self.screened == 0:
+                    LOG.info("public Bags-only indexer returned launchpad-attributed candidates")
+            except Exception as exc:
+                self._set_state("bags", "BACKOFF", type(exc).__name__)
+                with self.lock:
+                    self.state["bags"]["reconnects"] += 1
+                pause = max(600 if isinstance(exc, HTTPError) and exc.code == 429 else 120, pause)
+                LOG.warning("Bags public launch indexer unavailable: %s; retry in %ds",
+                            type(exc).__name__, pause)
+            time.sleep(pause)
 
     def _handle_helius(self, packet):
         if not isinstance(packet, dict) or packet.get("method") != "logsNotification":
@@ -264,6 +344,8 @@ class LiveChainObserver:
             threading.Thread(target=self._pump_loop, name="solana-free-new-token-ws", daemon=True).start()
         if self.helius_enabled:
             threading.Thread(target=self._helius_loop, name="solana-helius-wallet-ws", daemon=True).start()
+        if self.bags_indexer_enabled:
+            threading.Thread(target=self._bags_indexer_loop, name="solana-bags-provenance", daemon=True).start()
 
         def one_second():
             while True:
@@ -275,12 +357,15 @@ class LiveChainObserver:
     def snapshot(self):
         with self.lock:
             return {
-                "mode": "FREE_READ_ONLY_EVENT_SCREEN",
+                "mode": "THREE_LAUNCHPAD_ONLY",
+                "allowed_launchpads": list(ALLOWED_LAUNCHPADS),
+                "platform_counts": dict(self.launchpad_counts),
                 "every_second_local_screen": True,
                 "price_websocket": False,
                 "fills_from_stream": False,
                 "metered_streams_enabled": False,
                 "pump": dict(self.state["pump"]),
+                "bags_indexer": dict(self.state["bags"]),
                 "helius": dict(self.state["helius"]),
                 "pending_count": self.pending.qsize(),
                 "screened_total": self.screened,
@@ -292,5 +377,5 @@ class LiveChainObserver:
                 "last_screen_at": self.last_screen_at,
                 "leads": list(self.leads)[:25],
                 "recent_wallet_events": list(self.wallet_activities)[:6],
-                "limitations": "新幣事件不是安全證據或可成交價格；缺市場報價時不交易。Helius logs 不是錢包買賣分類。",
+                "limitations": "只收有可信來源標記的Pump/BONK/Bags發射事件；其他Raydium/Meteora及不明來源直接丟棄。新幣並非可成交報價；Bags公用索引可能延遲或限流。",
             }
