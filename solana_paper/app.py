@@ -13,6 +13,7 @@ from .engine import PaperRuntime, Settings
 
 def make_handler(runtime: PaperRuntime):
     dashboard = Path(__file__).with_name("dashboard.html").read_bytes()
+    retired_sw = Path(__file__).with_name("retire_service_worker.js").read_bytes()
 
     class Handler(BaseHTTPRequestHandler):
         server_version = "SolanaPaper/1.0"
@@ -41,6 +42,11 @@ def make_handler(runtime: PaperRuntime):
             path = urlsplit(self.path).path
             if path in ("/", "/index.html"):
                 self.send_bytes(200, dashboard, "text/html; charset=utf-8")
+            elif path == "/service-worker.js":
+                # An old OKX PWA may still control the origin. Return a valid
+                # terminating worker instead of 404 so browsers can update it,
+                # clear stale app-shell caches and unregister permanently.
+                self.send_bytes(200, retired_sw, "text/javascript; charset=utf-8")
             elif path == "/api/status":
                 body = json.dumps(runtime.status(), ensure_ascii=False, allow_nan=False).encode("utf-8")
                 self.send_bytes(200, body, "application/json; charset=utf-8")
