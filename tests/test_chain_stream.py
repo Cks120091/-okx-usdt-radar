@@ -71,6 +71,15 @@ class LiveStreamsTest(unittest.TestCase):
         self.assertTrue(c.tick(1002))
         self.assertEqual(1,c.snapshot()["migrated_total"])
 
+    def test_free_stream_api_rejection_is_not_treated_as_new_token(self):
+        c=LiveChainObserver(env={"PAPER_PUMP_FREE_EVENTS":"1"})
+        with self.assertRaises(RuntimeError):
+            c._handle_pump_packet({"status":"error","message":"Invalid API key"})
+        self.assertEqual(0,c.snapshot()["screened_total"])
+        self.assertEqual(0,c.snapshot()["pending_count"])
+        c._handle_pump_packet({"message":"Successfully subscribed"})
+        self.assertEqual(0,c.snapshot()["pending_count"])
+
     def test_free_pump_subscription_only_one_ws_and_no_metered_methods(self):
         socket=FakeSocket([json.dumps({"txType": "create","mint":MINT, "symbol":"ABC"})])
         created=[]
