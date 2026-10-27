@@ -112,5 +112,87 @@ class IntelligenceTests(unittest.TestCase):
             self.assertIsNotNone(book2.sell(pos, 1.2, "TEST_EXIT", 1001))
             self.assertGreater(book2.trades()[0]["fee"], .02)
 
+
+class MarketFeedGateTests(unittest.TestCase):
+    def test_rate_limit_retry_after_and_no_expired_price_reuse(self):
+        import io
+        from solana_paper.feed_control import MarketHttpGate, MarketTemporarilyUnavailable
+        class Clock:
+            t = 1000.0
+            def now(self):
+                return self.t
+            def sleep(self, seconds):
+                self.t += seconds
+        class Response:
+            def __init__(self, blob):
+                self.blob = blob
+            def __enter__(self):
+                return self
+            def __exit__(self, *args):
+                return False
+            def read(self, count):
+                return self.blob[:count]
+        clock = Clock()
+        requests = []
+        def fetch(request, timeout):
+            from urllib.error import HTTPError
+            requests.append(request.full_url)
+            if len(requests) > 1:
+                raise HTTPError(request.full_url, 429, "Too Many Requests",
+                                {"Retry-After": "1200"}, None)
+            return Response(b'{"data":[1]}')
+        gate = MarketHttpGate(clock=clock.now, fetcher=fetch, sleeper=clock.sleep)
+        path = "/networks/solana/new_pools"
+        self.assertEqual(gate.get("GECKOTERMINAL", path, {}, ttl=30), {"data": [1]})
+        clock.t += 10
+        self.assertEqual(gate.get("GECKOTERMINAL", path, {}, ttl=30), {"data": [1]})
+        self.assertEqual(len(requests), 1)
+        clock.t += 40
+        with self.assertRaises(MarketTemporarilyUnavailable) as blocked:
+            gate.get("GECKOTERMINAL", path, {}, ttl=30)
+        self.assertGreaterEqual(blocked.exception.retry_at - clock.t, 1200)
+        with self.assertRaises(MarketTemporarilyUnavailable):
+            gate.get("GECKOTERMINAL", path, {}, ttl=30)
+        self.assertEqual(len(requests), 2)
+        stat = gate.snapshot()["GECKOTERMINAL"]
+        self.assertEqual(stat["http_calls"], 2)
+        self.assertEqual(stat["cache_hits"], 1)
+        self.assertEqual(stat["blocked_calls"], 1)
+        self.assertEqual(stat["state"], "BACKOFF")
+
+    def test_gecko_quote_refreshes_known_pools_in_one_request(self):
+        from solana_paper.engine import GeckoFeed
+        class FakeGate:
+            calls = []
+            def get(self, source, path, headers, ttl):
+                self.calls.append((source, path))
+                return {"data": [], "included": []}
+        gateway = FakeGate()
+        gecko = GeckoFeed(gateway)
+        gecko.known_pool = {("A" * 43) + str(i): ("B" * 43) + str(i)
+                            for i in range(10)}
+        results = gecko.quotes(list(gecko.known_pool))
+        self.assertEqual(results, [])
+        self.assertEqual(len(gateway.calls), 1)
+        self.assertTrue(gateway.calls[0][1].startswith("/networks/solana/pools/multi/"))
+
+    def test_both_blocked_sources_dont_fake_paper_fill(self):
+        from solana_paper.engine import ResilientFeed, PaperRuntime
+        from solana_paper.feed_control import MarketTemporarilyUnavailable
+        class FailedProvider:
+            def discover(self):
+                raise MarketTemporarilyUnavailable("UPSTREAM", "HTTP 429", 9999999999)
+        with tempfile.TemporaryDirectory() as tmp:
+            settings = replace(Settings(), db_path=str(Path(tmp) / "paper.db"))
+            feed = ResilientFeed()
+            feed.dex, feed.gecko = FailedProvider(), FailedProvider()
+            runtime = PaperRuntime(settings, feed)
+            result = runtime.run_once(1000)
+            self.assertEqual(result["buys"], [])
+            self.assertEqual(result["status"], "UPSTREAM_BACKOFF")
+            self.assertEqual(runtime.book.trades(), [])
+            self.assertTrue(runtime.status()["market_snapshot_stale"])
+
+
 if __name__ == "__main__":
     unittest.main()
