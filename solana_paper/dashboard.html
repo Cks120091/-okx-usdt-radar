@@ -124,9 +124,21 @@ fetch("/api/status",{cache:"no-store"}).then(function(response){if(!response.ok)
  "最低池流動性：$"+money(d.config.min_liquidity_usd)+" · 全市場掃描："+d.config.scan_seconds+" 秒 · 持倉查價："+d.config.monitor_seconds+" 秒";
  $("scanstatus").innerHTML="行情來源："+safe(d.market_feed||"尚未取得")+"<br>最近嘗試："+safe(time(d.last_attempt))+"<br>最近成功："+safe(time(d.last_scan))+"<br>數據源狀態："+(d.last_error?tag("bad",d.last_error):tag("good","已連接或待首次掃描"));
  $("scanstatus").innerHTML+="<br>持倉報價最近成功："+safe(time(d.monitor_last_success))+"<br>持倉報價狀態："+(d.monitor_last_error?tag("bad",d.monitor_last_error):tag("good","正常／等待持倉"))+"<br>六代理後台審議："+safe(d.council_reviewed_total||0)+" 次 · 成功建立模擬持倉 "+safe(d.council_paper_fills_total||0)+" 次<br>公開錢包觀察："+safe((d.smart_money_watchlist||{}).tracked||0)+" 個地址（非買賣訊號）<br>唯讀鏈上查核："+safe((d.mint_risk_observer||{}).checked||0)+" 個 Mint";
+ var feeds=d.market_feed_health||{};
+ Object.keys(feeds).forEach(function(name){
+   var f=feeds[name]||{};
+   $("scanstatus").innerHTML+="<br>"+safe(name)+"："+
+    (f.state==="BACKOFF"?tag("bad","限流退避 "+safe(f.retry_in_seconds)+" 秒"):
+     f.state==="OK"?tag("good","可連線"):tag("warn","尚未成功"))+
+    " · HTTP："+safe(f.http_calls||0)+" · 快取："+safe(f.cache_hits||0)+
+    (f.last_error?" · "+safe(f.last_error):"");
+ });
+ if(d.market_snapshot_stale){
+   $("scanstatus").innerHTML+="<br>"+tag("bad","全市場行情快照已過期；不會使用舊資料新開倉");
+ }
  var poses=d.positions.map(function(p){var diff=p.unrealized_pct;return '<tr><td><strong>'+safe(p.symbol)+'</strong><div class="small">'+safe(short(p.mint))+'</div></td><td>$'+money(p.entry)+'</td><td>$'+money(p.mark)+'</td><td class="'+cls(diff)+'">'+money(diff)+'%</td><td>$'+money(p.cost)+'</td><td>'+safe(time(p.mark_at))+' · '+(p.quote_stale?'⚠ 報價過期':'報價有效')+'</td></tr>'});
  $("positions").innerHTML=htmlTable(["幣種","模擬入場均價","最後報價","價格變化（未扣費）","成本 USD","最後更新"],poses);
- $("candidatecount").textContent=d.candidates.length+" 個候選";
+ $("candidatecount").textContent=d.candidates.length+" 個候選"+(d.market_snapshot_stale?" · ⚠ 快照過期":"");
  $("candidates").innerHTML=d.candidates.length?d.candidates.map(function(t){
  var label=t.state==="PAPER_BUY"?"符合模擬條件":t.state==="REJECT"?"市場風險淘汰":"觀察中";
  var kind=t.state==="PAPER_BUY"?"good":t.state==="REJECT"?"bad":"warn";
