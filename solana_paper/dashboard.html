@@ -217,7 +217,8 @@ fetch("/api/status",{cache:"no-store"}).then(function(response){if(!response.ok)
  });
  $("chainEvents").innerHTML=htmlTable(["接收時間","發射台","幣種","事件","風控狀態","查閱"],streamRows);
  var early=d.early_strength_watch||{}, stages=early.states||{};
- $("earlyStatus").innerHTML="本機觀察："+safe(early.registered||0)+" 顆 · 最新 20 顆之外："+
+ $("earlyStatus").innerHTML=(early.enabled===false?tag("warn","觀察實驗已關閉")+" · ":"")+
+   "本機觀察："+safe(early.registered||0)+" 顆 · 最新 20 顆之外："+
    safe(early.outside_latest_20||0)+" 顆 · 強勢預備："+tag("good",stages.STRONG_PREP||0)+
    " · 轉強觀察："+tag("warn",stages.BUILDING||0)+
    " · 等待報價："+safe(stages.AWAITING_QUOTE||0)+
