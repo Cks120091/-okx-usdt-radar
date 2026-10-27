@@ -20,6 +20,9 @@ from typing import Any
 from urllib.parse import quote
 from urllib.request import Request, urlopen
 
+from .intelligence import WalletObserver, MintRiskObserver
+from .council import PaperCouncil
+
 LOG = logging.getLogger("solana_paper")
 SOLANA_MINT = re.compile(r"^[1-9A-HJ-NP-Za-km-z]{32,44}$")
 KNOWN_QUOTES = {
@@ -47,6 +50,8 @@ class Settings:
     trade_usd: float = 40.0
     max_positions: int = 20  # simultaneous open positions, not trades per day
     max_allocated_pct: float = 0.90
+    cash_reserve_usd: float = 50.0
+    simulated_network_fee_usd: float = 0.02
     daily_loss_limit_usd: float = 50.0
     min_liquidity_usd: float = 25000.0
     min_volume_h1_usd: float = 5000.0
@@ -73,6 +78,8 @@ class Settings:
             trade_usd=get("PAPER_TRADE_USD", 40, 1, 1000),
             max_positions=get("PAPER_MAX_POSITIONS", 20, 3, 20, int),
             max_allocated_pct=get("PAPER_MAX_ALLOCATION_PCT", 90, 1, 100) / 100,
+            cash_reserve_usd=get("PAPER_CASH_RESERVE_USD", 50, 0, 10000),
+            simulated_network_fee_usd=get("PAPER_NETWORK_FEE_USD", .02, 0, 2),
             daily_loss_limit_usd=get("PAPER_DAILY_LOSS_USD", 50, 1, 10000),
             min_liquidity_usd=get("PAPER_MIN_LIQUIDITY_USD", 25000, 1000, 10000000),
             min_volume_h1_usd=get("PAPER_MIN_VOLUME_H1_USD", 5000, 100, 10000000),
@@ -367,19 +374,28 @@ class SafetyAgent:
             failures.append("池齡資料異常")
         if t["fdv"] > 0 and t["fdv"] / max(t["liquidity_usd"], 1) > 100:
             failures.append("FDV／流動性比過高")
+        chain = t.get("onchain_risk") or {"state": "UNKNOWN", "flags": ["not_checked"]}
+        if chain.get("state") == "RISK":
+            failures.append("已偵測 Mint／Freeze 或其他鏈上重大權限風險")
         return {
             "state": "REJECT" if failures else "MARKET_SCREENED",
             "passed": not failures,
             "reasons": failures,
-            "contract_security": "UNVERIFIED",
-            "message": "只檢查市場可見風險；合約權限、持幣集中度與 Rug 風險尚未經鏈上驗證",
+            "contract_security": "RISK" if chain.get("state") == "RISK" else "UNVERIFIED",
+            "onchain": chain,
+            "message": "僅局部檢查 Mint／Freeze；持幣集中度、DEV 關聯、夾擊、交易稅與 Rug 無法完整驗證",
         }
 
 
 class SmartMoneyAgent:
     name = "03｜聰明錢"
-    def evaluate(self, t: dict) -> dict:
-        return {"state": "NO_DATA", "score_used": False, "message": "尚未串接錢包獲利與地址關聯資料，不推測巨鯨動向"}
+    def __init__(self, observer: WalletObserver | None = None):
+        self.observer = observer or WalletObserver()
+
+    def evaluate(self, t: dict, now: float | None = None) -> dict:
+        report = self.observer.status(t["mint"], now)
+        return {**report, "message": "只觀察公開錢包持倉；沒有交易方向與已實現獲利證據，不作為追單訊號"}
+
 
 
 class SocialAgent:
@@ -512,11 +528,11 @@ class PaperBook:
         """Accounting uses gross quote notional plus fee. All USD is simulated."""
         size = self.s.trade_usd
         fill = t["price"] * (1 + self.s.slippage_pct_per_side / 100)
-        fee = size * self.s.fee_pct_per_side / 100
+        fee = size * self.s.fee_pct_per_side / 100 + self.s.simulated_network_fee_usd
         with self.connect() as db:
             db.execute("BEGIN IMMEDIATE")
             cash = float(db.execute("SELECT value FROM meta WHERE key='cash'").fetchone()[0])
-            if cash < size + fee or db.execute("SELECT 1 FROM positions WHERE mint=?", (t["mint"],)).fetchone():
+            if cash < size + fee + self.s.cash_reserve_usd or db.execute("SELECT 1 FROM positions WHERE mint=?", (t["mint"],)).fetchone():
                 db.rollback()
                 return False
             qty = size / fill
@@ -534,7 +550,7 @@ class PaperBook:
             return None
         fill = quote_price * (1 - self.s.slippage_pct_per_side / 100)
         gross = pos["qty"] * fill
-        fee = gross * self.s.fee_pct_per_side / 100
+        fee = gross * self.s.fee_pct_per_side / 100 + self.s.simulated_network_fee_usd
         pnl = gross - fee - pos["cost"]
         with self.connect() as db:
             db.execute("BEGIN IMMEDIATE")
@@ -575,8 +591,10 @@ class ExecutionAgent:
         invested = sum(p["cost"] for p in positions)
         if invested + self.s.trade_usd > self.book.equity() * self.s.max_allocated_pct:
             return False, "總模擬倉位上限"
-        if self.book.cash() < self.s.trade_usd * (1 + self.s.fee_pct_per_side / 100):
-            return False, "模擬餘額不足"
+        required = (self.s.trade_usd * (1 + self.s.fee_pct_per_side / 100)
+                    + self.s.simulated_network_fee_usd + self.s.cash_reserve_usd)
+        if self.book.cash() < required:
+            return False, "扣除手續費／網路費與預留緩衝後，模擬餘額不足"
         return True, "可模擬買入"
 
     def review_positions(self, quotes: dict[str, dict], now: float) -> list[dict]:
@@ -610,7 +628,13 @@ class PaperRuntime:
         self.book = PaperBook(self.s)
         self.hunters = DiscoveryAgent()
         self.safety = SafetyAgent(self.s)
-        self.wallet = SmartMoneyAgent()
+        self.wallet_observer = WalletObserver()
+        self.mint_observer = MintRiskObserver()
+        self.wallet = SmartMoneyAgent(self.wallet_observer)
+        self.council = PaperCouncil()
+        self.council_reviews = 0
+        self.council_approved = 0
+        self.council_recent: list[dict] = []
         self.social = SocialAgent()
         self.decision = DecisionAgent(self.s)
         self.execution = ExecutionAgent(self.book, self.s)
@@ -649,9 +673,10 @@ class PaperRuntime:
                 t = candidate_quotes.get(mint)
                 if not t:
                     continue
+                t["onchain_risk"] = self.mint_observer.status(mint, now)
                 discovery_report = self.hunters.evaluate(t, discovery["sources"].get(mint, []))
                 safety = self.safety.evaluate(t)
-                money = self.wallet.evaluate(t)
+                money = self.wallet.evaluate(t, now)
                 social = self.social.evaluate(t, discovery["paid"].get(mint, 0))
                 decision = self.decision.evaluate(t, safety)
                 ranked.append({**t, "score": decision["score"], "state": decision["state"],
@@ -659,17 +684,29 @@ class PaperRuntime:
                                "smart_money": money, "social": social, "decision": decision}})
             ranked.sort(key=lambda x: (x["score"], x["liquidity_usd"]), reverse=True)
             buys = []
+            council_records = []
             for t in ranked:
-                if t["state"] != "PAPER_BUY":
-                    continue
+                # Private background council asks all six roles for an explicit
+                # vote before any simulated order. Unknown is never 'safe'.
                 allowed, why = self.execution.approve(t, now)
-                if not allowed:
-                    t["paper_order"] = why
+                council = self.council.consider(
+                    t["agents"]["discovery"], t["agents"]["safety"],
+                    t["agents"]["smart_money"], t["agents"]["social"],
+                    t["agents"]["decision"], allowed, why)
+                council_records.append({"symbol": t["symbol"], "mint": t["mint"],
+                                        "outcome": council["outcome"],
+                                        "votes": council["votes"], "at": now})
+                if not council["paper_allowed"]:
+                    t["paper_order"] = "六代理未通過模擬： " + (
+                        why if not allowed else council["outcome"])
                     continue
                 if self.book.buy(t, now):
                     buys.append({"symbol": t["symbol"], "price": fmt(t["price"]), "usd": self.s.trade_usd})
-                    t["paper_order"] = "已模擬買入"
+                    t["paper_order"] = "六代理協商通過；鏈上風險未完整驗證；已模擬買入"
             with self.lock:
+                self.council_reviews += len(council_records)
+                self.council_approved += len(buys)
+                self.council_recent = (council_records + self.council_recent)[:20]
                 self.candidates = ranked[:30]
                 self.events = (buys + exits + self.events)[:20]
                 self.last_scan, self.last_error = now, ""
@@ -755,6 +792,17 @@ class PaperRuntime:
                 time.sleep(self.s.monitor_seconds)
         threading.Thread(target=monitor_loop, name="solana-paper-position-monitor", daemon=True).start()
 
+        def intelligence_loop():
+            # Off hot scan path; failures never become fictitious wallet buys.
+            time.sleep(5)
+            while True:
+                self.wallet_observer.refresh()
+                with self.lock:
+                    mints = [t["mint"] for t in self.candidates[:5]]
+                self.mint_observer.refresh(mints)
+                time.sleep(600)
+        threading.Thread(target=intelligence_loop, name="solana-paper-intelligence", daemon=True).start()
+
     def status(self) -> dict:
         with self.lock:
             snapshot = {
@@ -772,6 +820,9 @@ class PaperRuntime:
                 "monitor_backoff_until": self.monitor_next_allowed,
                 "monitor_type": "BATCHED_HTTP_POLLING_NOT_WEBSOCKET",
                 "monitor_seconds": self.s.monitor_seconds,
+                "council_reviewed_total": self.council_reviews,
+                "council_paper_fills_total": self.council_approved,
+                "council_recent": self.council_recent[:10],
             }
         positions = self.book.positions()
         cash = self.book.cash()
@@ -792,6 +843,10 @@ class PaperRuntime:
                 "Render 免費服務檔案系統可能重置；當前 SQLite 僅供第一階段測試",
                 "本模擬網站為公開可讀狀態；未配置私人存取限制",
                 "持倉數是同時持有的開倉數（可設定 3～20），平倉即釋放名額，沒有每日筆數上限",
+                "預留 USD 模擬現金給手續費與退出緩衝，計入每次模擬進出費用",
+                "公開錢包榜只用於觀察持倉，不是驗證實際獲利或自動跟單",
+                "六代理在後台交換規則投票；不是六個會互相對話的獨立 LLM",
+
                 "持倉監控獨立於全市場掃描：每30秒左右批次檢查報價；這是HTTP輪詢而非WebSocket串流",
                 "若報價來源限流或斷線，不會假裝出場；該持倉會顯示報價過期警告",
 
@@ -799,12 +854,18 @@ class PaperRuntime:
             "agents": [
                 {"id": "01", "name": self.hunters.name, "status": "ACTIVE", "detail": "DEX 最新 Profile + 付費 Boost"},
                 {"id": "02", "name": self.safety.name, "status": "PARTIAL", "detail": "流動性／池齡／FDV，合約安全未知"},
-                {"id": "03", "name": self.wallet.name, "status": "NO_DATA", "detail": "未接錢包地址與鏈上獲利"},
+                {"id": "03", "name": self.wallet.name, "status": "PARTIAL", "detail": "公開地址唯讀 RPC 觀察；獲利／交易方向未驗證"},
                 {"id": "04", "name": self.social.name, "status": "PARTIAL", "detail": "付費曝光指示，未接 X 語意分析"},
                 {"id": "05", "name": self.decision.name, "status": "ACTIVE", "detail": "多因子條件與防追價"},
                 {"id": "06", "name": self.execution.name, "status": "PAPER_ONLY", "detail": "只寫 SQLite，絕不送單"},
             ],
             "config": asdict(self.s) | {"db_path": "(server local sqlite)"},
+            "smart_money_watchlist": self.wallet_observer.summary(),
+            "mint_risk_observer": self.mint_observer.summary(),
+            "coordination": {"model": "SIX_RULE_AGENT_COUNCIL", "requires": "discovery + non-veto safety + decision + execution",
+                             "smart_money": "observational; not automatically trusted",
+                             "social": "abstains until independently verified",
+                             "llm_enabled": False, "paper_only": True},
             "account": {
                 "cash": fmt(cash), "equity": fmt(equity),
                 "open_positions": len(positions),
