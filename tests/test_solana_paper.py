@@ -136,7 +136,7 @@ class PaperTests(unittest.TestCase):
             self.assertEqual(res.status, 200)
             self.assertIn("text/event-stream", res.getheader("Content-Type"))
             self.assertEqual(res.getheader("Transfer-Encoding"), "chunked")
-            self.assertEqual(res.readline(), b"retry: 3000\\n".replace(b"\\n",b"\n"))
+            self.assertEqual(res.readline(), b"retry: 3000\n")
             self.assertEqual(res.readline(), b"\n")
             self.assertEqual(res.readline(), b"event: change\n")
             payload = res.readline()
