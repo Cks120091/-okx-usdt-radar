@@ -660,6 +660,11 @@ class PaperRuntime:
         self.shadow_judge = ShadowJudge(self.s)
         self.live_signal = StateSignal()
         self.chain_stream = LiveChainObserver()
+        # Default production scanner ONLY considers attested launches of the
+        # three named launchpads. Injected fake feeds opt out only for legacy
+        # deterministic tests; Render sets PAPER_LAUNCHPAD_ONLY=1 explicitly.
+        self.launchpad_only = os.getenv("PAPER_LAUNCHPAD_ONLY",
+                                       "1" if feed is None else "0") == "1"
         self.council_reviews = 0
         self.council_approved = 0
         self.council_recent: list[dict] = []
@@ -687,7 +692,22 @@ class PaperRuntime:
         with self.lock:
             self.scanning, self.last_attempt = True, now
         try:
-            discovery = self.feed.discover()
+            if self.launchpad_only:
+                mints = self.chain_stream.scoped_mints(limit=20)
+                if not mints:
+                    with self.lock:
+                        self.candidates = []
+                        self.last_error = "等待 Pump.fun／BONK.fun／Bags.fm 的已識別新幣；不抓全市場候選"
+                    return {"buys": [], "exits": [], "candidates": 0, "status": "WAITING_LAUNCHPAD_EVENTS"}
+                # No DEX/Gecko all-market discovery calls. Only batch quotes
+                # for launchpad-attested mints; all risk, council and original
+                # paper-account checks below remain in force.
+                discovery = {"mints": mints, "pairs": self.feed.quotes(mints),
+                             "paid": {}, "sources": {
+                                 mint: ["launchpad:" + self.chain_stream.launchpad_for(mint)]
+                                 for mint in mints}}
+            else:
+                discovery = self.feed.discover()
             mints = discovery["mints"]
             candidate_quotes = normalize_pairs(discovery["pairs"], mints, now)
             held_mints = [p["mint"] for p in self.book.positions()]
@@ -707,7 +727,8 @@ class PaperRuntime:
                 money = self.wallet.evaluate(t, now)
                 social = self.social.evaluate(t, discovery["paid"].get(mint, 0))
                 decision = self.decision.evaluate(t, safety)
-                ranked.append({**t, "score": decision["score"], "state": decision["state"],
+                ranked.append({**t, "launchpad": self.chain_stream.launchpad_for(mint) if self.launchpad_only else "LEGACY_TEST",
+                    "score": decision["score"], "state": decision["state"],
                     "agents": {"discovery": discovery_report, "safety": safety,
                                "smart_money": money, "social": social, "decision": decision}})
             ranked.sort(key=lambda x: (x["score"], x["liquidity_usd"]), reverse=True)
@@ -908,6 +929,7 @@ class PaperRuntime:
                 "六代理在後台交換規則投票；不是六個會互相對話的獨立 LLM",
                 "ChatGPT 六角色分析是 API 選用功能；停用時完全不呼叫付費 API，啟用後仍受原風控否決",
                 "第七位JUDGE目前僅規則型影子測試：五題閉合答案與缺失資料、30分鐘最多再問一次、獨立B帳本，不影響A原策略",
+                "新幣掃描僅 Pump.fun／BONK.fun／Bags.fm：需來源辨識才加入，DEX與Gecko僅對三平台清單查報價，歷史持倉續受監控",
 
                 "持倉監控獨立於全市場掃描：每30秒左右批次檢查報價；這是HTTP輪詢而非WebSocket串流",
                 "若報價來源限流或斷線，不會假裝出場；該持倉會顯示報價過期警告",
@@ -928,6 +950,7 @@ class PaperRuntime:
             "openai_council": self.openai.status(),
             "shadow_judge": self.shadow_judge.summary(),
             "chain_stream": self.chain_stream.snapshot(),
+            "launchpad_only": self.launchpad_only,
             "realtime": {
                 "transport": "SSE",
                 "monitoring": "SERVER_HTTP_POLLING",
