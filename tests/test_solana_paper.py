@@ -2,10 +2,14 @@
 from __future__ import annotations
 
 import os
+import http.client
+import threading
+from http.server import ThreadingHTTPServer
 import tempfile
 import unittest
 from dataclasses import replace
 
+from solana_paper.app import make_handler
 from solana_paper.engine import (
     DecisionAgent,
     DexFeed,
@@ -119,6 +123,27 @@ class PaperTests(unittest.TestCase):
         self.assertEqual(1, len(self.runtime.book.positions()))
         self.assertEqual(1, len(self.runtime.book.trades()))
         self.assertEqual("RATE_LIMIT_BACKOFF", self.runtime.monitor_once(NOW + 40)["status"])
+
+    def test_head_homepage_returns_headers_without_body(self):
+        server = ThreadingHTTPServer(("127.0.0.1", 0), make_handler(self.runtime))
+        thread = threading.Thread(target=server.serve_forever, daemon=True)
+        thread.start()
+        conn = http.client.HTTPConnection("127.0.0.1", server.server_address[1], timeout=3)
+        try:
+            conn.request("HEAD", "/")
+            res = conn.getresponse()
+            self.assertEqual(res.status, 200)
+            self.assertGreater(int(res.getheader("Content-Length", "0")), 1000)
+            self.assertEqual(res.read(), b"")
+            conn.request("GET", "/health")
+            health = conn.getresponse()
+            self.assertEqual(health.status, 200)
+            self.assertIn(b"PAPER_ONLY", health.read())
+        finally:
+            conn.close()
+            server.shutdown()
+            server.server_close()
+            thread.join(timeout=3)
 
     def test_reports_read_only_paper_mode(self):
         s = self.runtime.status()
