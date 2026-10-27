@@ -26,6 +26,7 @@ from .feed_control import SHARED_GATE, MarketTemporarilyUnavailable
 from .openai_agent import OpenAICouncil
 from .shadow_judge import ShadowJudge
 from .realtime import StateSignal
+from .strong_watch import EarlyStrengthWatch
 from .chain_stream import LiveChainObserver
 
 LOG = logging.getLogger("solana_paper")
@@ -673,6 +674,7 @@ class PaperRuntime:
         self.shadow_judge = ShadowJudge(self.s)
         self.live_signal = StateSignal()
         self.chain_stream = LiveChainObserver()
+        self.early_watch = EarlyStrengthWatch()
         # Default production scanner ONLY considers attested launches of the
         # three named launchpads. Injected fake feeds opt out only for legacy
         # deterministic tests; Render sets PAPER_LAUNCHPAD_ONLY=1 explicitly.
@@ -705,8 +707,19 @@ class PaperRuntime:
         with self.lock:
             self.scanning, self.last_attempt = True, now
         try:
+            shadow_mints = []
             if self.launchpad_only:
                 mints = self.chain_stream.scoped_mints(limit=20)
+                # Shadow-only observation of older named-launchpad events.
+                # This does not expand mints processed by six agents/JUDGE.
+                try:
+                    verified = self.chain_stream.research_candidates(now=now)
+                    self.early_watch.register(verified, now)
+                    shadow_mints = self.early_watch.choose_shadow(mints, now=now)
+                except Exception as exc:
+                    shadow_mints = []
+                    LOG.warning("research pool unavailable; keep core paper scan: %s",
+                                type(exc).__name__)
                 if not mints:
                     with self.lock:
                         self.candidates = []
@@ -715,7 +728,10 @@ class PaperRuntime:
                 # No DEX/Gecko all-market discovery calls. Only batch quotes
                 # for launchpad-attested mints; all risk, council and original
                 # paper-account checks below remain in force.
-                discovery = {"mints": mints, "pairs": self.feed.quotes(mints),
+                # DEX token batch supports 30: 20 original + up to 10 shadow.
+                # One normal market quote call, not a second polling loop.
+                discovery = {"mints": mints,
+                             "pairs": self.feed.quotes(mints + shadow_mints),
                              "paid": {}, "sources": {
                                  mint: ["launchpad:" + self.chain_stream.launchpad_for(mint)]
                                  for mint in mints}}
@@ -723,6 +739,13 @@ class PaperRuntime:
                 discovery = self.feed.discover()
             mints = discovery["mints"]
             candidate_quotes = normalize_pairs(discovery["pairs"], mints, now)
+            if self.launchpad_only:
+                try:
+                    extra_quotes = normalize_pairs(discovery["pairs"], shadow_mints, now)
+                    self.early_watch.observe({**candidate_quotes, **extra_quotes}, mints, now)
+                except Exception as exc:
+                    LOG.warning("research quote observation unavailable, paper unchanged: %s",
+                                type(exc).__name__)
             held_mints = [p["mint"] for p in self.book.positions()]
             missing = [mint for mint in held_mints if mint not in candidate_quotes]
             if missing:
@@ -961,6 +984,7 @@ class PaperRuntime:
             "openai_council": self.openai.status(),
             "shadow_judge": self.shadow_judge.summary(),
             "chain_stream": self.chain_stream.snapshot(),
+            "early_strength_watch": self.early_watch.snapshot(),
             "launchpad_only": self.launchpad_only,
             "realtime": {
                 "transport": "SSE",
