@@ -120,9 +120,10 @@ fetch("/api/status",{cache:"no-store"}).then(function(response){if(!response.ok)
  "最高總配置："+money(d.config.max_allocated_pct*100)+"% · 每日已實現虧損熔斷：$"+money(d.config.daily_loss_limit_usd)+"<br>"+
  "止損："+money(d.config.stop_loss_pct)+"% · 止盈："+money(d.config.take_profit_pct)+"% · 最長持有："+money(d.config.max_hold_minutes)+" 分鐘<br>"+
  "單邊費率："+money(d.config.fee_pct_per_side)+"% · 單邊估算滑價："+money(d.config.slippage_pct_per_side)+"%<br>"+
+ "模擬現金預留：$"+money(d.config.cash_reserve_usd)+" · 每次成交另估網路費：$"+money(d.config.simulated_network_fee_usd)+"（僅紙上）<br>"+
  "最低池流動性：$"+money(d.config.min_liquidity_usd)+" · 全市場掃描："+d.config.scan_seconds+" 秒 · 持倉查價："+d.config.monitor_seconds+" 秒";
  $("scanstatus").innerHTML="行情來源："+safe(d.market_feed||"尚未取得")+"<br>最近嘗試："+safe(time(d.last_attempt))+"<br>最近成功："+safe(time(d.last_scan))+"<br>數據源狀態："+(d.last_error?tag("bad",d.last_error):tag("good","已連接或待首次掃描"));
- $("scanstatus").innerHTML+="<br>持倉報價最近成功："+safe(time(d.monitor_last_success))+"<br>持倉報價狀態："+(d.monitor_last_error?tag("bad",d.monitor_last_error):tag("good","正常／等待持倉"));
+ $("scanstatus").innerHTML+="<br>持倉報價最近成功："+safe(time(d.monitor_last_success))+"<br>持倉報價狀態："+(d.monitor_last_error?tag("bad",d.monitor_last_error):tag("good","正常／等待持倉"))+"<br>六代理後台審議："+safe(d.council_reviewed_total||0)+" 次 · 成功建立模擬持倉 "+safe(d.council_paper_fills_total||0)+" 次<br>公開錢包觀察："+safe((d.smart_money_watchlist||{}).tracked||0)+" 個地址（非買賣訊號）<br>唯讀鏈上查核："+safe((d.mint_risk_observer||{}).checked||0)+" 個 Mint";
  var poses=d.positions.map(function(p){var diff=p.unrealized_pct;return '<tr><td><strong>'+safe(p.symbol)+'</strong><div class="small">'+safe(short(p.mint))+'</div></td><td>$'+money(p.entry)+'</td><td>$'+money(p.mark)+'</td><td class="'+cls(diff)+'">'+money(diff)+'%</td><td>$'+money(p.cost)+'</td><td>'+safe(time(p.mark_at))+' · '+(p.quote_stale?'⚠ 報價過期':'報價有效')+'</td></tr>'});
  $("positions").innerHTML=htmlTable(["幣種","模擬入場均價","最後報價","價格變化（未扣費）","成本 USD","最後更新"],poses);
  $("candidatecount").textContent=d.candidates.length+" 個候選";
@@ -133,7 +134,7 @@ fetch("/api/status",{cache:"no-store"}).then(function(response){if(!response.ok)
  return '<article class="coin"><div class="coin-head"><div><div class="coin-name">'+safe(t.symbol)+'</div><div class="coin-mint">'+safe(short(t.mint))+' · '+safe(t.dex)+'</div></div><div style="text-align:right"><div class="coin-score">'+money(t.score)+'</div>'+tag(kind,label)+'</div></div>'+
  '<div class="coin-stats"><div><span>價格 USD</span><b>$'+safe(t.price)+'</b></div><div><span>池流動性</span><b>$'+money(t.liquidity_usd)+'</b></div>'+
  '<div><span>1H 成交額</span><b>$'+money(t.volume_h1)+'</b></div><div><span>5m / 1H 漲幅</span><b class="'+cls(t.m5_change)+'">'+money(t.m5_change)+'% / '+money(t.h1_change)+'%</b></div></div>'+
- '<div class="notice"><strong>合約安全未驗證</strong> · '+safe(note.reasons.length?note.reasons.join("、"):"通過初步市場條件")+'<br>來源：'+safe(t.agents.discovery.sources.join(" / ")||"未知")+
+ '<div class="notice"><strong>'+safe(note.contract_security==="RISK"?"已發現部分鏈上權限風險":"合約安全未完整驗證")+'</strong> · '+safe(note.reasons.length?note.reasons.join("、"):"通過初步市場條件")+'<br>公開觀察錢包持有：'+safe(t.agents.smart_money.matched_wallets||0)+' 個（不等於新買入）<br>來源：'+safe(t.agents.discovery.sources.join(" / ")||"未知")+
  '<br>'+safe(t.paper_order||t.agents.decision.reasons.join("、")||"無完整條件")+' · <a target="_blank" rel="noopener noreferrer" href="https://dexscreener.com/solana/'+encodeURIComponent(t.mint)+'">DEX 查看</a></div></article>'
  }).join(''):'<div class="empty">尚無可顯示的 Solana 候選幣。可能尚未掃描成功，或當前最新清單沒有符合條件的交易池。</div>';
  var trades=d.trades.map(function(t){return '<tr><td>'+safe(time(t.ts))+'</td><td>'+safe(t.symbol)+'</td><td>'+tag(t.side==="BUY"?"good":"warn",t.side)+'</td><td>'+safe(t.price)+'</td><td>$'+money(t.gross)+'</td><td>$'+money(t.fee)+'</td><td class="'+cls(t.pnl)+'">'+(t.pnl==null?"—":"$"+money(t.pnl))+'</td><td>'+safe(t.reason)+'</td></tr>'});
