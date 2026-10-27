@@ -58,7 +58,7 @@ a{color:#9ebcff;text-decoration:none}a:hover{text-decoration:underline}
 <section class="panel"><div class="stat-label">模擬淨值 USD</div><div class="stat-val" id="equity">—</div><div class="sub">包含估值，不是鏈上資產</div></section>
 <section class="panel"><div class="stat-label">可用模擬現金 USD</div><div class="stat-val" id="cash">—</div><div class="sub">起始資金 <span id="initial">—</span></div></section>
 <section class="panel"><div class="stat-label">模擬總報酬</div><div class="stat-val" id="pnl">—</div><div class="sub">已扣固定估算滑價／手續費</div></section>
-<section class="panel"><div class="stat-label">持倉數 / 上限</div><div class="stat-val" id="positionsCount">—</div><div class="sub">每日已實現 PnL（UTC）<span id="today">—</span></div></section>
+<section class="panel"><div class="stat-label">同時持倉數 / 上限（非每日次數）</div><div class="stat-val" id="positionsCount">—</div><div class="sub">平倉即釋放名額，可再建立新倉</div><div class="sub">每日已實現 PnL（UTC）<span id="today">—</span></div></section>
 </div>
 <div class="twocol">
 <section class="panel">
@@ -115,7 +115,8 @@ fetch("/api/status",{cache:"no-store"}).then(function(response){if(!response.ok)
  $("positionsCount").textContent=d.account.open_positions+" / "+d.config.max_positions;
  $("today").textContent="$"+money(d.account.realized_today_utc);
  $("agents").innerHTML=d.agents.map(function(a){return '<article class="agent"><div class="agenttitle"><span>'+safe(a.name)+'</span>'+tag(agentState(a.status),a.status)+'</div><div class="desc">'+safe(a.detail)+'</div></article>'}).join('');
- $("rules").innerHTML="模擬每筆：<strong>$"+money(d.config.trade_usd)+"</strong> · 最多 "+d.config.max_positions+" 筆<br>"+
+ $("rules").innerHTML="模擬每筆：<strong>$"+money(d.config.trade_usd)+"</strong> · 同時最多 "+d.config.max_positions+" 筆（可設定 3～20）<br>"+
+ "同時持倉範圍：3～20 筆；平倉後可再買入，不限制每日交易筆數<br>"+
  "最高總配置："+money(d.config.max_allocated_pct*100)+"% · 每日已實現虧損熔斷：$"+money(d.config.daily_loss_limit_usd)+"<br>"+
  "止損："+money(d.config.stop_loss_pct)+"% · 止盈："+money(d.config.take_profit_pct)+"% · 最長持有："+money(d.config.max_hold_minutes)+" 分鐘<br>"+
  "單邊費率："+money(d.config.fee_pct_per_side)+"% · 單邊估算滑價："+money(d.config.slippage_pct_per_side)+"%<br>"+
