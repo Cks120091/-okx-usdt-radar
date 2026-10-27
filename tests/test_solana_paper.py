@@ -95,6 +95,31 @@ class PaperTests(unittest.TestCase):
         token = normalize_pairs([pool(liquidity=2500)], [MINT], NOW)[MINT]
         self.assertEqual(SafetyAgent(self.settings).evaluate(token)["state"], "REJECT")
 
+    def test_independent_monitor_closes_without_discovery_scan(self):
+        first = self.runtime.run_once(NOW)
+        self.assertEqual(len(first["buys"]), 1)
+        self.assertEqual(len(self.runtime.book.positions()), 1)
+        self.runtime.monitor_feed = self.feed
+        self.feed.price = 0.015
+        outcome = self.runtime.monitor_once(NOW + 30)
+        self.assertEqual("OK", outcome["status"])
+        self.assertEqual(len(outcome["exits"]), 1)
+        self.assertEqual(self.runtime.book.positions(), [])
+        self.assertEqual(self.runtime.monitor_last_success, NOW + 30)
+        self.assertEqual([t["side"] for t in self.runtime.book.trades()], ["SELL", "BUY"])
+
+    def test_monitor_failure_never_creates_fake_exit(self):
+        self.runtime.run_once(NOW)
+        class EmptyQuotes:
+            def quotes(self, mints):
+                return []
+        self.runtime.monitor_feed = EmptyQuotes()
+        failed = self.runtime.monitor_once(NOW + 30)
+        self.assertEqual("ERROR", failed["status"])
+        self.assertEqual(1, len(self.runtime.book.positions()))
+        self.assertEqual(1, len(self.runtime.book.trades()))
+        self.assertEqual("RATE_LIMIT_BACKOFF", self.runtime.monitor_once(NOW + 40)["status"])
+
     def test_reports_read_only_paper_mode(self):
         s = self.runtime.status()
         self.assertEqual(s["mode"], "PAPER_ONLY")
