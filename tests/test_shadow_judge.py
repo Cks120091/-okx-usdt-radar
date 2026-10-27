@@ -27,7 +27,8 @@ def token(price=1.0, mint=MINT):
     t["agents"] = {
         "safety": {"state": "MARKET_SCREENED", "passed": True,
                    "onchain": {"state": "UNKNOWN"}},
-        "smart_money": {"state": "OBSERVED_HOLDING", "matched_wallets": 1},
+        "market_activity": {"state": "OBSERVED", "h1_buys": 70,
+                            "h1_sells": 30, "h1_volume_usd": 30000},
         "social": {"state": "PAID_MARKETING_ONLY"},
     }
     return t
@@ -64,9 +65,10 @@ class JudgeTests(unittest.TestCase):
         self.assertEqual("missing", d["holders_now"])
         self.assertEqual("missing", d["top10_share_pct"])
         self.assertEqual("missing", d["dev_share_pct"])
-        self.assertEqual("missing", d["whale_buy_wallets"])
-        self.assertEqual("missing", d["whale_buy_timestamps"])
-        self.assertEqual(1, d["watchlist_holding_count"])
+        self.assertEqual("OBSERVED", d["market_activity_state"])
+        self.assertEqual(70, d["market_buys_h1"])
+        self.assertEqual(30, d["market_sells_h1"])
+        self.assertEqual(30000, d["market_volume_h1_usd"])
         self.assertEqual("missing", d["insider_net_sell_pct"])
         a = judge_four_plus_one(d,token())
         self.assertEqual("UNKNOWN", a["organic"]["answer"])
@@ -128,8 +130,6 @@ class JudgeTests(unittest.TestCase):
         d=dossier(t,NOW)
         d.update({
             "risk_result":"PARTIALLY_SCREENED",
-            "whale_buy_wallets":["example"],
-            "whale_buy_timestamps":[NOW-30],
             "holders_now":450,
             "top10_share_pct":13,
         })
