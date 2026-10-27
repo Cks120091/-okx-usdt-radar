@@ -200,7 +200,7 @@ fetch("/api/status",{cache:"no-store"}).then(function(response){if(!response.ok)
    " · <strong>請求訂閱：</strong>"+safe(helius.subscriptions_requested||0)+
    " · <strong>已確認訂閱：</strong>"+safe(helius.subscriptions_confirmed||0)+
    " · <strong>錢包活動：</strong>"+safe(stream.wallet_activity_total||0)+
-   " · "+(helius.state==="CONNECTED"?tag("good","WS 已連線"):tag("warn",helius.state||"未連線"))+
+   " · "+(Number(helius.subscriptions_confirmed||0)>0?tag("good","已收到訂閱確認"):tag("warn",helius.state==="CONNECTED"?"WS 已開啟，等待訂閱確認":helius.state||"未連線"))+
    (helius.last_error?" · "+tag("bad",helius.last_error):"")+
    "<br>名單來源：公開歸屬與 SolRadar 活躍榜快照；任何地址的勝率及損益均未驗證。";
  var walletRows=roster.map(function(w){
