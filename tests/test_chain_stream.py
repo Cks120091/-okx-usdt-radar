@@ -41,21 +41,21 @@ class FakeSocket:
 class LiveStreamsTest(unittest.TestCase):
     def test_creation_migration_parsing_and_unpriced_fail_closed(self):
         now = 2000.0
-        created = interpret_pump_event({"mint": MINT, "txType": "create",
+        created = interpret_pump_event({"mint": MINT, "action": "create", "pool": "pump",
                                         "symbol": "NEW"}, now)
         self.assertEqual(created["state"], "AWAITING_MARKET_VERIFICATION")
         self.assertFalse(created["trade_eligible"])
         self.assertEqual(created["risk"], "UNKNOWN")
         self.assertEqual("MIGRATED", interpret_pump_event(
-            {"mint": MINT, "txType": "migration"}, now)["kind"])
-        self.assertIsNone(interpret_pump_event({"mint": MINT, "txType": "buy"}, now))
+            {"mint": MINT, "action": "migrate", "pool": "pump"}, now)["kind"])
+        self.assertIsNone(interpret_pump_event({"mint": MINT, "action": "buy", "pool": "pump"}, now))
         self.assertIsNone(interpret_pump_event({"mint": MINT, "price": 1}, now))
-        self.assertIsNone(interpret_pump_event({"mint": "bad", "txType": "create"}, now))
+        self.assertIsNone(interpret_pump_event({"mint": "bad", "action": "create", "pool": "pump"}, now))
 
     def test_one_second_screen_dedup_status_and_no_prices(self):
         c = LiveChainObserver(env={"PAPER_PUMP_FREE_EVENTS": "1"}, clock=lambda: 1000)
-        self.assertTrue(c.ingest_pump({"mint": MINT, "txType": "create"}, 1000))
-        self.assertTrue(c.ingest_pump({"mint": MINT, "txType": "create"}, 1000))
+        self.assertTrue(c.ingest_pump({"mint": MINT, "action": "create", "pool": "pump"}, 1000))
+        self.assertTrue(c.ingest_pump({"mint": MINT, "action": "create", "pool": "pump"}, 1000))
         self.assertTrue(c.tick(1000))
         data=c.snapshot()
         self.assertEqual(1, data["created_total"])
@@ -67,7 +67,7 @@ class LiveStreamsTest(unittest.TestCase):
         self.assertFalse(data["metered_streams_enabled"])
         self.assertFalse(data["leads"][0]["trade_eligible"])
         self.assertFalse(c.tick(1001))
-        self.assertTrue(c.ingest_pump({"mint": MINT, "txType": "migrate"},1002))
+        self.assertTrue(c.ingest_pump({"mint": MINT, "action": "migrate", "pool": "pump"},1002))
         self.assertTrue(c.tick(1002))
         self.assertEqual(1,c.snapshot()["migrated_total"])
 
@@ -81,7 +81,7 @@ class LiveStreamsTest(unittest.TestCase):
         self.assertEqual(0,c.snapshot()["pending_count"])
 
     def test_free_pump_subscription_only_one_ws_and_no_metered_methods(self):
-        socket=FakeSocket([json.dumps({"txType": "create","mint":MINT, "symbol":"ABC"})])
+        socket=FakeSocket([json.dumps({"action": "create", "pool": "pump","mint":MINT, "symbol":"ABC"})])
         created=[]
         c=LiveChainObserver(env={"PAPER_PUMP_FREE_EVENTS":"1"},
                             clock=lambda:1000,connection_factory=lambda url:(created.append(url) or socket))
@@ -89,12 +89,78 @@ class LiveStreamsTest(unittest.TestCase):
             with self.assertRaises(StopThread):
                 c._pump_loop()
         self.assertEqual([PUMP_URL],created)
-        self.assertEqual([x["method"] for x in socket.sent],list(FREE_PUMP_METHODS))
+        self.assertEqual([], socket.sent)  # Public source streams without commands
+        self.assertEqual((), FREE_PUMP_METHODS)
         self.assertNotIn("subscribeAccountTrade",repr(socket.sent))
         self.assertNotIn("subscribeTokenTrade",repr(socket.sent))
         self.assertTrue(socket.closed)
         self.assertTrue(c.tick(1000))
         self.assertEqual(c.snapshot()["created_total"],1)
+
+
+    def test_strict_platform_filter_excludes_generic_raydium_meteora_unknown(self):
+        c=LiveChainObserver(env={"PAPER_PUMP_FREE_EVENTS":"1",
+            "PAPER_BAGS_INDEXER_ENABLED":"0"},clock=lambda:1000)
+        for i,(pool,platform,label) in enumerate([
+            ("pump",None,"PUMP"),
+            ("raydium-launchpad","bonk","BONK"),
+            ("meteora-launchpad","bags","BAGS")]):
+            self.assertTrue(c.ingest_pump({"action":"create","pool":pool,
+                "platform":platform,"mint":str(i+1)*44,"symbol":label},1000+i))
+        for event in [
+            {"action":"create","pool":"raydium-launchpad","platform":"custom"},
+            {"action":"create","pool":"meteora-launchpad"},
+            {"action":"create","pool":"meteora-launchpad","platform":"moonshot"},
+            {"action":"create","pool":"raydium-cpmm","platform":"bonk"},
+            {"action":"create","pool":"pump","platform":"custom"},
+            {"action":"create","symbol":"BONK"},
+            {"action":"buy","pool":"pump"},
+        ]:
+            self.assertFalse(c.ingest_pump({"mint":"8"*44,**event},1010))
+        self.assertTrue(c.tick(1020))
+        v=c.snapshot()
+        self.assertEqual({"PUMP":1,"BONK":1,"BAGS":1},v["platform_counts"])
+        self.assertEqual({"PUMP","BONK","BAGS"},set(x["launchpad"] for x in v["leads"]))
+        self.assertEqual(3,len(c.scoped_mints()))
+        self.assertFalse(v["metered_streams_enabled"])
+
+    def test_bags_indexer_requires_exact_launchpad_identity(self):
+        from solana_paper.launchpad_scope import identify_bags_indexer_launchpad as cls
+        self.assertEqual("BAGS",cls({"launchpad":"Bags"}))
+        self.assertEqual("BAGS",cls({"launchpad":"BagsProtocol"}))
+        self.assertEqual("BAGS",cls({"launch":{"launchpad":"Bags"}}))
+        self.assertIsNone(cls({"launchpad":"Moonshot","symbol":"BAGS"}))
+        self.assertIsNone(cls({"protocol":"meteora_dbc"}))
+
+    def test_production_scan_queries_only_attested_launchpad_mints(self):
+        import os
+        class ScopedFeed:
+            def __init__(self):
+                self.discovers=0
+                self.queries=[]
+            def discover(self):
+                self.discovers+=1
+                raise AssertionError("Must NOT scan whole market")
+            def quotes(self,mints):
+                self.queries.append(list(mints))
+                return []
+        with tempfile.TemporaryDirectory() as tmp, patch.dict(
+            os.environ, {"PAPER_LAUNCHPAD_ONLY":"1"}):
+            settings=replace(Settings(),db_path=str(Path(tmp)/"paper.db"))
+            feed=ScopedFeed()
+            rt=PaperRuntime(settings,feed)
+            no_leads=rt.run_once(1000)
+            self.assertEqual("WAITING_LAUNCHPAD_EVENTS",no_leads["status"])
+            self.assertEqual([],feed.queries)
+            self.assertEqual(0,feed.discovers)
+            self.assertTrue(rt.chain_stream.ingest_pump(
+                {"action":"create","pool":"raydium-launchpad",
+                 "platform":"bonk","mint":MINT},1000))
+            rt.chain_stream.tick(1000)
+            rt.run_once(1001)
+            self.assertEqual([[MINT]],feed.queries)
+            self.assertEqual(0,feed.discovers)
+            self.assertEqual([],rt.book.trades())
 
     def test_helius_requires_optin_key_and_only_observes_activity(self):
         absent=LiveChainObserver(env={"PAPER_HELIUS_WALLET_EVENTS":"1"})
@@ -128,7 +194,7 @@ class LiveStreamsTest(unittest.TestCase):
                     return []
             rt=PaperRuntime(s,EmptyFeed())
             stream=rt.chain_stream
-            self.assertTrue(stream.ingest_pump({"mint":MINT,"txType":"create"},1000))
+            self.assertTrue(stream.ingest_pump({"mint":MINT,"action":"create","pool":"pump"},1000))
             stream.tick(1000)
             self.assertEqual([],rt.book.trades())
             self.assertEqual([],rt.run_once(1000)["buys"])
