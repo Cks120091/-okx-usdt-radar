@@ -24,6 +24,7 @@ from .intelligence import WalletObserver, MintRiskObserver
 from .council import PaperCouncil
 from .feed_control import SHARED_GATE, MarketTemporarilyUnavailable
 from .openai_agent import OpenAICouncil
+from .shadow_judge import ShadowJudge
 
 LOG = logging.getLogger("solana_paper")
 SOLANA_MINT = re.compile(r"^[1-9A-HJ-NP-Za-km-z]{32,44}$")
@@ -654,6 +655,7 @@ class PaperRuntime:
         self.council = PaperCouncil()
         # Explicit opt-in only. OPENAI_API_KEY is never returned to the browser.
         self.openai = OpenAICouncil(self.s.db_path)
+        self.shadow_judge = ShadowJudge(self.s)
         self.council_reviews = 0
         self.council_approved = 0
         self.council_recent: list[dict] = []
@@ -735,6 +737,10 @@ class PaperRuntime:
                 if self.book.buy(t, now):
                     buys.append({"symbol": t["symbol"], "price": fmt(t["price"]), "usd": self.s.trade_usd})
                     t["paper_order"] = "六代理協商通過；鏈上風險未完整驗證；已模擬買入"
+            # The seventh JUDGE is observational: a separate B ledger, no API
+            # spend and no veto/hold applied to baseline A.
+            # Errors in the lab never stop or modify original paper fills.
+            self.shadow_judge.process(ranked, candidate_quotes, now)
             with self.lock:
                 self.council_reviews += len(council_records)
                 self.council_approved += len(buys)
@@ -788,6 +794,9 @@ class PaperRuntime:
                 if not quotes:
                     raise RuntimeError("沒有取得任何可驗證的持倉交易池報價")
                 exits = self.execution.review_positions(quotes, now)
+                # Update B exits only when the baseline batch already contains
+                # their quote; never make A depend on extra shadow HTTP calls.
+                self.shadow_judge.monitor(quotes, now)
                 with self.lock:
                     self.monitor_last_success = now
                     self.monitor_last_error = ""
@@ -891,6 +900,7 @@ class PaperRuntime:
                 "公開錢包榜只用於觀察持倉，不是驗證實際獲利或自動跟單",
                 "六代理在後台交換規則投票；不是六個會互相對話的獨立 LLM",
                 "ChatGPT 六角色分析是 API 選用功能；停用時完全不呼叫付費 API，啟用後仍受原風控否決",
+                "第七位JUDGE目前僅規則型影子測試：五題閉合答案與缺失資料、30分鐘最多再問一次、獨立B帳本，不影響A原策略",
 
                 "持倉監控獨立於全市場掃描：每30秒左右批次檢查報價；這是HTTP輪詢而非WebSocket串流",
                 "若報價來源限流或斷線，不會假裝出場；該持倉會顯示報價過期警告",
@@ -908,6 +918,7 @@ class PaperRuntime:
             "smart_money_watchlist": self.wallet_observer.summary(),
             "mint_risk_observer": self.mint_observer.summary(),
             "openai_council": self.openai.status(),
+            "shadow_judge": self.shadow_judge.summary(),
             "coordination": {"model": "SIX_RULE_AGENT_COUNCIL", "requires": "discovery + non-veto safety + decision + execution",
                              "smart_money": "observational; not automatically trusted",
                              "social": "abstains until independently verified",
