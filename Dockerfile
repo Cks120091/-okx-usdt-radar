@@ -1,6 +1,7 @@
 FROM node:22-bookworm-slim AS verified_ui
 WORKDIR /app
 COPY solana_paper/dashboard.html /app/solana_paper/dashboard.html
+COPY solana_paper/retire_service_worker.js /app/solana_paper/retire_service_worker.js
 COPY scripts/check_solana_dashboard.cjs /app/scripts/check_solana_dashboard.cjs
 RUN node scripts/check_solana_dashboard.cjs && printf ok > /ui-check-ok
 
