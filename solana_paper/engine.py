@@ -56,6 +56,8 @@ class Settings:
     fee_pct_per_side: float = 0.30
     slippage_pct_per_side: float = 0.80
     scan_seconds: int = 150
+    monitor_seconds: int = 30  # held-position quote checks, separate from universe scans
+    monitor_stale_seconds: int = 120
     db_path: str = "data/solana_paper.sqlite3"
 
     @classmethod
@@ -80,6 +82,8 @@ class Settings:
             fee_pct_per_side=get("PAPER_FEE_PCT", .30, 0, 5),
             slippage_pct_per_side=get("PAPER_SLIPPAGE_PCT", .80, 0, 10),
             scan_seconds=get("PAPER_SCAN_SECONDS", 150, 60, 3600, int),
+            monitor_seconds=get("PAPER_MONITOR_SECONDS", 30, 15, 300, int),
+            monitor_stale_seconds=get("PAPER_MONITOR_STALE_SECONDS", 120, 60, 900, int),
             db_path=os.getenv("PAPER_DB_PATH", "data/solana_paper.sqlite3"),
         )
 
@@ -600,6 +604,9 @@ class PaperRuntime:
     def __init__(self, settings: Settings | None = None, feed: Any | None = None):
         self.s = settings or Settings.load()
         self.feed = feed or ResilientFeed()
+        # Keep a separate price path: one batched request for <= 20 held mints.
+        # The discoverer can fail independently.  This is polling, NOT WebSocket.
+        self.monitor_feed = DexFeed()
         self.book = PaperBook(self.s)
         self.hunters = DiscoveryAgent()
         self.safety = SafetyAgent(self.s)
@@ -608,6 +615,13 @@ class PaperRuntime:
         self.decision = DecisionAgent(self.s)
         self.execution = ExecutionAgent(self.book, self.s)
         self.lock = threading.Lock()
+        self.monitor_lock = threading.Lock()
+        self.monitor_last_attempt = 0.0
+        self.monitor_last_success = 0.0
+        self.monitor_last_error = ""
+        self.monitor_quotes_seen = 0
+        self.monitor_next_allowed = 0.0
+        self.monitor_events: list[dict] = []
         self.last_scan = 0.0
         self.last_attempt = 0.0
         self.last_error = ""
@@ -669,6 +683,61 @@ class PaperRuntime:
             with self.lock:
                 self.scanning = False
 
+
+    def monitor_once(self, now: float | None = None) -> dict:
+        """Refresh open positions and apply simulated TP/SL without a universe scan.
+
+        No orders and no fabricated fills. A failed batch does not re-use a stale
+        mark for an exit. Quote fetching is bulked via DEX Screener (max 30 mints).
+        This method is synchronous so it can be tested with a fake market feed.
+        """
+        now = now if now is not None else time.time()
+        if not self.monitor_lock.acquire(blocking=False):
+            return {"status": "BUSY"}
+        try:
+            with self.lock:
+                self.monitor_last_attempt = now
+                next_allowed = self.monitor_next_allowed
+            held = self.book.positions()
+            if not held:
+                with self.lock:
+                    self.monitor_last_error = ""
+                    self.monitor_quotes_seen = 0
+                return {"status": "NO_POSITIONS", "monitored": 0, "exits": []}
+            if now < next_allowed:
+                return {"status": "RATE_LIMIT_BACKOFF", "next_allowed": next_allowed}
+            mints = [pos["mint"] for pos in held]
+            try:
+                raw_quotes = self.monitor_feed.quotes(mints)
+                quotes = normalize_pairs(raw_quotes, mints, now)
+                if not quotes:
+                    raise RuntimeError("沒有取得任何可驗證的持倉交易池報價")
+                exits = self.execution.review_positions(quotes, now)
+                with self.lock:
+                    self.monitor_last_success = now
+                    self.monitor_last_error = ""
+                    self.monitor_quotes_seen = len(quotes)
+                    self.monitor_next_allowed = 0.0
+                    self.monitor_events = (exits + self.monitor_events)[:20]
+                return {
+                    "status": "OK" if len(quotes) == len(mints) else "PARTIAL",
+                    "monitored": len(quotes),
+                    "missing": len(mints) - len(quotes),
+                    "exits": exits,
+                }
+            except Exception as exc:
+                from urllib.error import HTTPError
+                backoff = 300 if isinstance(exc, HTTPError) and exc.code == 429 else 60
+                message = f"{type(exc).__name__}: {str(exc)[:160]}"
+                LOG.warning("held-position quote monitor unavailable: %s", message)
+                with self.lock:
+                    self.monitor_last_error = message
+                    self.monitor_quotes_seen = 0
+                    self.monitor_next_allowed = now + backoff
+                return {"status": "ERROR", "error": message, "retry_after_seconds": backoff}
+        finally:
+            self.monitor_lock.release()
+
     def start(self) -> None:
         if self._started:
             return
@@ -680,6 +749,12 @@ class PaperRuntime:
                 time.sleep(self.s.scan_seconds)
         threading.Thread(target=loop, name="solana-paper-scanner", daemon=True).start()
 
+        def monitor_loop():
+            while True:
+                self.monitor_once()
+                time.sleep(self.s.monitor_seconds)
+        threading.Thread(target=monitor_loop, name="solana-paper-position-monitor", daemon=True).start()
+
     def status(self) -> dict:
         with self.lock:
             snapshot = {
@@ -690,6 +765,13 @@ class PaperRuntime:
                 "scanning": self.scanning,
                 "candidates": self.candidates,
                 "events": self.events,
+                "monitor_last_attempt": self.monitor_last_attempt,
+                "monitor_last_success": self.monitor_last_success,
+                "monitor_last_error": self.monitor_last_error,
+                "monitor_quotes_seen": self.monitor_quotes_seen,
+                "monitor_backoff_until": self.monitor_next_allowed,
+                "monitor_type": "BATCHED_HTTP_POLLING_NOT_WEBSOCKET",
+                "monitor_seconds": self.s.monitor_seconds,
             }
         positions = self.book.positions()
         cash = self.book.cash()
@@ -710,6 +792,9 @@ class PaperRuntime:
                 "Render 免費服務檔案系統可能重置；當前 SQLite 僅供第一階段測試",
                 "本模擬網站為公開可讀狀態；未配置私人存取限制",
                 "持倉數是同時持有的開倉數（可設定 3～20），平倉即釋放名額，沒有每日筆數上限",
+                "持倉監控獨立於全市場掃描：每30秒左右批次檢查報價；這是HTTP輪詢而非WebSocket串流",
+                "若報價來源限流或斷線，不會假裝出場；該持倉會顯示報價過期警告",
+
             ],
             "agents": [
                 {"id": "01", "name": self.hunters.name, "status": "ACTIVE", "detail": "DEX 最新 Profile + 付費 Boost"},
@@ -728,7 +813,10 @@ class PaperRuntime:
                 "pnl_since_start": fmt(equity - self.s.initial_cash),
             },
             "positions": [
-                {**p, "unrealized_pct": round((p["mark"] / p["entry"] - 1) * 100, 2)}
+                {**p,
+                 "unrealized_pct": round((p["mark"] / p["entry"] - 1) * 100, 2),
+                 "quote_age_seconds": max(0, int(time.time() - p["mark_at"])),
+                 "quote_stale": time.time() - p["mark_at"] > self.s.monitor_stale_seconds}
                 for p in positions
             ],
             "trades": self.book.trades(40),
