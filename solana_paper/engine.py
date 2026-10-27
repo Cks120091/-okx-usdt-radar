@@ -20,7 +20,7 @@ from typing import Any
 from urllib.parse import quote
 from urllib.request import Request, urlopen
 
-from .intelligence import WalletObserver, MintRiskObserver
+from .intelligence import MintRiskObserver
 from .council import PaperCouncil
 from .feed_control import SHARED_GATE, MarketTemporarilyUnavailable
 from .openai_agent import OpenAICouncil
@@ -410,15 +410,29 @@ class SafetyAgent:
         }
 
 
-class SmartMoneyAgent:
-    name = "03｜聰明錢"
-    def __init__(self, observer: WalletObserver | None = None):
-        self.observer = observer or WalletObserver()
+class MarketActivityAgent:
+    """03: market participation evidence, distinct from entry/exit strategy.
+
+    Records only observed hourly transaction counts and volume; these counts
+    do not prove buyer notional, genuine wallets, or future price direction.
+    Does not place orders, score entries, or bypass safety.
+    """
+    name = "03｜交易活躍度"
 
     def evaluate(self, t: dict, now: float | None = None) -> dict:
-        report = self.observer.status(t["mint"], now)
-        return {**report, "message": "只觀察公開錢包持倉；沒有交易方向與已實現獲利證據，不作為追單訊號"}
-
+        buys = max(0, int(t.get("h1_buys") or 0))
+        sells = max(0, int(t.get("h1_sells") or 0))
+        volume = max(0.0, float(t.get("volume_h1") or 0))
+        total = buys + sells
+        observed = total >= 20 and volume > 0
+        return {
+            "state": "OBSERVED" if observed else "INSUFFICIENT_DATA",
+            "h1_buys": buys, "h1_sells": sells,
+            "h1_transactions": total, "h1_volume_usd": volume,
+            "buy_sell_count_ratio": round(buys / max(sells, 1), 3) if total else None,
+            "score_used": False,
+            "message": "獨立回報1H交易筆數與成交量；買賣筆數不是資金淨流入，也不代表可實盤",
+        }
 
 
 class SocialAgent:
@@ -651,9 +665,8 @@ class PaperRuntime:
         self.book = PaperBook(self.s)
         self.hunters = DiscoveryAgent()
         self.safety = SafetyAgent(self.s)
-        self.wallet_observer = WalletObserver()
         self.mint_observer = MintRiskObserver()
-        self.wallet = SmartMoneyAgent(self.wallet_observer)
+        self.activity = MarketActivityAgent()
         self.council = PaperCouncil()
         # Explicit opt-in only. OPENAI_API_KEY is never returned to the browser.
         self.openai = OpenAICouncil(self.s.db_path)
@@ -724,13 +737,13 @@ class PaperRuntime:
                 t["onchain_risk"] = self.mint_observer.status(mint, now)
                 discovery_report = self.hunters.evaluate(t, discovery["sources"].get(mint, []))
                 safety = self.safety.evaluate(t)
-                money = self.wallet.evaluate(t, now)
+                activity = self.activity.evaluate(t, now)
                 social = self.social.evaluate(t, discovery["paid"].get(mint, 0))
                 decision = self.decision.evaluate(t, safety)
                 ranked.append({**t, "launchpad": self.chain_stream.launchpad_for(mint) if self.launchpad_only else "LEGACY_TEST",
                     "score": decision["score"], "state": decision["state"],
                     "agents": {"discovery": discovery_report, "safety": safety,
-                               "smart_money": money, "social": social, "decision": decision}})
+                               "market_activity": activity, "social": social, "decision": decision}})
             ranked.sort(key=lambda x: (x["score"], x["liquidity_usd"]), reverse=True)
             buys = []
             council_records = []
@@ -740,7 +753,7 @@ class PaperRuntime:
                 allowed, why = self.execution.approve(t, now)
                 council = self.council.consider(
                     t["agents"]["discovery"], t["agents"]["safety"],
-                    t["agents"]["smart_money"], t["agents"]["social"],
+                    t["agents"]["market_activity"], t["agents"]["social"],
                     t["agents"]["decision"], allowed, why)
                 council_records.append({"symbol": t["symbol"], "mint": t["mint"],
                                         "outcome": council["outcome"],
@@ -870,10 +883,9 @@ class PaperRuntime:
         threading.Thread(target=monitor_loop, name="solana-paper-position-monitor", daemon=True).start()
 
         def intelligence_loop():
-            # Off hot scan path; failures never become fictitious wallet buys.
+            # Refresh mint permissions off the hot scan path; no wallet tracking.
             time.sleep(5)
             while True:
-                self.wallet_observer.refresh()
                 with self.lock:
                     mints = [t["mint"] for t in self.candidates[:5]]
                 self.mint_observer.refresh(mints)
@@ -917,7 +929,7 @@ class PaperRuntime:
             "public_dashboard": True,
             "persistent_storage_guaranteed": False,
             "notes": [
-                "六代理第一版是規則代理，尚未串接 LLM 或鏈上聰明錢；不是 AI 預測勝率",
+                "六代理分工是規則引擎，非六個獨立 LLM；不追蹤聰明錢錢包，也不是預測勝率",
                 "DexScreener 最新 Profile／Boost 不是全鏈新幣清單，Boost 是付費曝光",
                 "合約權限與 Rug 風險未完成鏈上驗證，僅可模擬，不可實盤",
                 "成交為延遲行情估算，含固定滑價／費率，不等於真實可成交價",
@@ -925,7 +937,7 @@ class PaperRuntime:
                 "本模擬網站為公開可讀狀態；未配置私人存取限制",
                 "持倉數是同時持有的開倉數（可設定 3～20），平倉即釋放名額，沒有每日筆數上限",
                 "預留 USD 模擬現金給手續費與退出緩衝，計入每次模擬進出費用",
-                "公開錢包榜只用於觀察持倉，不是驗證實際獲利或自動跟單",
+                "第三代理僅觀察市場交易活躍度，未驗證真實買方資金或投資者身分",
                 "六代理在後台交換規則投票；不是六個會互相對話的獨立 LLM",
                 "ChatGPT 六角色分析是 API 選用功能；停用時完全不呼叫付費 API，啟用後仍受原風控否決",
                 "第七位JUDGE目前僅規則型影子測試：五題閉合答案與缺失資料、30分鐘最多再問一次、獨立B帳本，不影響A原策略",
@@ -933,19 +945,18 @@ class PaperRuntime:
 
                 "持倉監控獨立於全市場掃描：每30秒左右批次檢查報價；這是HTTP輪詢而非WebSocket串流",
                 "若報價來源限流或斷線，不會假裝出場；該持倉會顯示報價過期警告",
-                "免費WebSocket新幣與遷移僅作早期情報，後台每秒整理；無可信行情、聰明錢交易證據不模擬買入",
+                "免費WebSocket新幣與遷移僅作早期情報，後台每秒整理；無可信行情與必要風控證據不模擬買入",
 
             ],
             "agents": [
                 {"id": "01", "name": self.hunters.name, "status": "ACTIVE", "detail": "DEX 最新 Profile + 付費 Boost"},
                 {"id": "02", "name": self.safety.name, "status": "PARTIAL", "detail": "流動性／池齡／FDV，合約安全未知"},
-                {"id": "03", "name": self.wallet.name, "status": "PARTIAL", "detail": "公開地址唯讀 RPC 觀察；獲利／交易方向未驗證"},
+                {"id": "03", "name": self.activity.name, "status": "ACTIVE", "detail": "獨立核對每小時買賣筆數與成交量，不推測資金方向"},
                 {"id": "04", "name": self.social.name, "status": "PARTIAL", "detail": "付費曝光指示，未接 X 語意分析"},
                 {"id": "05", "name": self.decision.name, "status": "ACTIVE", "detail": "多因子條件與防追價"},
                 {"id": "06", "name": self.execution.name, "status": "PAPER_ONLY", "detail": "只寫 SQLite，絕不送單"},
             ],
             "config": asdict(self.s) | {"db_path": "(server local sqlite)"},
-            "smart_money_watchlist": self.wallet_observer.summary(),
             "mint_risk_observer": self.mint_observer.summary(),
             "openai_council": self.openai.status(),
             "shadow_judge": self.shadow_judge.summary(),
@@ -960,7 +971,7 @@ class PaperRuntime:
                 **self.live_signal.snapshot(),
             },
             "coordination": {"model": "SIX_RULE_AGENT_COUNCIL", "requires": "discovery + non-veto safety + decision + execution",
-                             "smart_money": "observational; not automatically trusted",
+                             "market_activity": "independent observations only; decision and execution remain separate",
                              "social": "abstains until independently verified",
                              "llm_enabled": self.openai.enabled, "paper_only": True},
             "account": {
