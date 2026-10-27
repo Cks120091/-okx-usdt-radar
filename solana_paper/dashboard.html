@@ -86,15 +86,15 @@ a{color:#9ebcff;text-decoration:none}a:hover{text-decoration:underline}
 <div class="tablewrap" id="positions"></div>
 </section>
 <section class="panel" style="margin-bottom:14px">
-<div class="sectionhead"><h2>⚡ Solana 新幣事件｜每秒本地篩查</h2><span class="badge warn">事件≠成交訊號</span></div>
-<div class="warning">PumpPortal 免費 WebSocket 僅接收新幣建立／遷移消息；不使用會計費的錢包或代幣交易串流。新幣尚未通過流動性、合約、持有人及可成交價格驗證，不能因出現在這裡就模擬買入。Helius 地址活動監控需另行設定自己的免費 API Key。</div>
+<div class="sectionhead"><h2>⚡ Pump / BONK / BAGS｜每秒新幣初篩</h2><span class="badge warn">事件≠成交訊號</span></div>
+<div class="warning">僅篩選 Pump.fun、BONK.fun、Bags.fm 的新幣／遷移。免費 PumpApi WebSocket 按發射台來源標記過濾；Bags 公開索引作低頻補充。其他 Raydium／Meteora 或不明平台直接排除。事件尚未驗證安全／可成交價，不能直接模擬買入。</div>
 <div class="small" id="chainStatus" style="line-height:1.9">等待免費串流資料…</div>
 <div class="sep"></div>
 <div class="tablewrap" id="chainEvents"></div>
 </section>
 <section class="panel" style="margin-bottom:14px">
-<div class="sectionhead"><h2>🎯 Solana 候選幣掃描</h2><span class="small" id="candidatecount">—</span></div>
-<div class="warning">搜尋來源為 DEX Screener Profile／付費 Boost 或 GeckoTerminal 新池／熱門池，並非全部新幣；未驗證合約權限、持幣集中度或真正社群口碑。下列評分不是勝率，也不是實盤買入建議。</div>
+<div class="sectionhead"><h2>🎯 三大發射台候選幣掃描</h2><span class="small" id="candidatecount">—</span></div>
+<div class="warning">現在只查來自 Pump.fun、BONK.fun、Bags.fm 的已辨識代幣；DEX／Gecko 僅負責取得這些代幣的市場報價，不再從全市場任意挖候選。供應商限流、平台標記不完整時可能漏掃。評分不是勝率。</div>
 <div class="candidates" id="candidates"></div>
 </section>
 <section class="panel">
@@ -102,7 +102,7 @@ a{color:#9ebcff;text-decoration:none}a:hover{text-decoration:underline}
 <div class="tablewrap" id="trades"></div>
 </section>
 <div class="foot">
-<strong>資料來源與限制：</strong>PumpPortal 免費新幣事件、可選 Helius 位址通知，加上 DEX Screener／GeckoTerminal 公開 API，模擬市場價 + 固定滑價與交易費率。報價可能延遲、流動性可能虛假、價格可能瞬間跳空，實際出售也可能失敗。<br>
+<strong>資料來源與限制：</strong>PumpApi 免費新幣事件（只選 Pump/BONK/Bags）、Bags 公開索引、可選 Helius 位址通知，以及針對候選幣的 DEX Screener／GeckoTerminal 報價，模擬市場價 + 固定滑價與交易費率。報價可能延遲、流動性可能虛假、價格可能瞬間跳空，實際出售也可能失敗。<br>
 <strong>儲存：</strong>第一階段使用伺服器本機 SQLite；Render 免費／暫存檔案系統重新部署或休眠後資料可能消失，績效不能視為永久保存。此頁面為公開可讀的模擬數據。<br>
 <strong>操作模式：</strong>後端定期自動掃描、選幣與模擬買賣；前端接收後端 SSE 狀態事件，另有 30 秒備援輪詢；行情掃描與持倉查價仍按各自週期執行，這不是即時逐筆成交 WebSocket。沒有真實下單程式、私鑰、鏈上簽名或自動實盤開關。<br><strong>ChatGPT 串接：</strong>後端可選 OpenAI API，預設關閉、不會用你的 ChatGPT Plus 額度；沒有 API Key 不會呼叫付費模型，API Key 不會顯示於公開頁面。
 </div></main>
@@ -188,7 +188,13 @@ fetch("/api/status",{cache:"no-store"}).then(function(response){if(!response.ok)
  $("judgeRecent").innerHTML=htmlTable(["Lead","首次觀察","裁判","原因","約24h變化"],jrows);
  var stream=d.chain_stream||{}, pump=stream.pump||{}, helius=stream.helius||{}, streamEvents=stream.leads||[];
  var stName=function(v){return v==="CONNECTED"?tag("good","已連線"):v==="BACKOFF"?tag("bad","重連等待"):tag("warn",v||"尚未連線")};
- $("chainStatus").innerHTML="免費新幣 WebSocket："+stName(pump.state)+
+ var bags=stream.bags_indexer||{}, platformCount=stream.platform_counts||{};
+ $("chainStatus").innerHTML="<strong>限制掃描：</strong>Pump.fun / BONK.fun / Bags.fm"+
+   " · 僅三平台："+(d.launchpad_only?tag("good","已啟用"):tag("bad","未啟用"))+
+   "<br><strong>即時新幣來源：</strong>PumpApi："+stName(pump.state)+
+   " · Bags 索引："+stName(bags.state)+
+   "<br>PUMP："+safe(platformCount.PUMP||0)+" · BONK："+safe(platformCount.BONK||0)+
+   " · BAGS："+safe(platformCount.BAGS||0)+
    " · 已接收建立："+safe(stream.created_total||0)+" · 已接收遷移："+safe(stream.migrated_total||0)+
    " · 已篩查："+safe(stream.screened_total||0)+" · 排隊："+safe(stream.pending_count||0)+
    "<br>最後有效事件："+safe(time(stream.last_event_at))+" · 最後每秒篩查："+safe(time(stream.last_screen_at))+
@@ -197,20 +203,21 @@ fetch("/api/status",{cache:"no-store"}).then(function(response){if(!response.ok)
    (pump.last_error?"<br>"+tag("bad","免費串流連線問題："+pump.last_error):"")+
    "<br>"+tag("warn","行情仍由獨立資料來源取得；WebSocket 建幣事件並非可成交價格");
  var streamRows=streamEvents.slice(0,20).map(function(e){
-   return "<tr><td>"+safe(time(e.received_at))+"</td><td><strong>"+safe(e.symbol)+"</strong><div class='small'>"+
+   return "<tr><td>"+safe(time(e.received_at))+"</td><td>"+tag("good",e.launchpad||"UNKNOWN")+
+   "</td><td><strong>"+safe(e.symbol)+"</strong><div class='small'>"+
    safe(short(e.mint))+"</div></td><td>"+tag("warn",e.kind==="MIGRATED"?"流動性遷移":"新幣建立")+
    "</td><td>"+tag("warn","待行情、安全驗證")+
    "</td><td><a target='_blank' rel='noopener noreferrer' href='https://dexscreener.com/solana/"+
    encodeURIComponent(e.mint)+"'>DEX 查看</a></td></tr>";
  });
- $("chainEvents").innerHTML=htmlTable(["接收時間","幣種","事件","風控狀態","查閱"],streamRows);
+ $("chainEvents").innerHTML=htmlTable(["接收時間","發射台","幣種","事件","風控狀態","查閱"],streamRows);
  $("candidatecount").textContent=d.candidates.length+" 個候選"+(d.market_snapshot_stale?" · ⚠ 快照過期":"");
  $("candidates").innerHTML=d.candidates.length?d.candidates.map(function(t){
  var label=t.state==="PAPER_BUY"?"符合模擬條件":t.state==="REJECT"?"市場風險淘汰":"觀察中";
  var kind=t.state==="PAPER_BUY"?"good":t.state==="REJECT"?"bad":"warn";
  var note=t.agents.safety;
  var shadow=t.shadow_judge||{};
- return '<article class="coin"><div class="coin-head"><div><div class="coin-name">'+safe(t.symbol)+'</div><div class="coin-mint">'+safe(short(t.mint))+' · '+safe(t.dex)+'</div></div><div style="text-align:right"><div class="coin-score">'+money(t.score)+'</div>'+tag(kind,label)+'</div></div>'+
+ return '<article class="coin"><div class="coin-head"><div><div class="coin-name">'+safe(t.symbol)+'</div><div class="coin-mint">'+safe(short(t.mint))+' · '+safe(t.launchpad||"未知發射台")+' · '+safe(t.dex)+'</div></div><div style="text-align:right"><div class="coin-score">'+money(t.score)+'</div>'+tag(kind,label)+'</div></div>'+
  '<div class="coin-stats"><div><span>價格 USD</span><b>$'+safe(t.price)+'</b></div><div><span>池流動性</span><b>$'+money(t.liquidity_usd)+'</b></div>'+
  '<div><span>1H 成交額</span><b>$'+money(t.volume_h1)+'</b></div><div><span>5m / 1H 漲幅</span><b class="'+cls(t.m5_change)+'">'+money(t.m5_change)+'% / '+money(t.h1_change)+'%</b></div></div>'+
  '<div class="notice"><strong>'+safe(note.contract_security==="RISK"?"已發現部分鏈上權限風險":"合約安全未完整驗證")+'</strong> · '+safe(note.reasons.length?note.reasons.join("、"):"通過初步市場條件")+'<br>公開觀察錢包持有：'+safe(t.agents.smart_money.matched_wallets||0)+' 個（不等於新買入）<br>來源：'+safe(t.agents.discovery.sources.join(" / ")||"未知")+
