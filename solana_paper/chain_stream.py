@@ -328,7 +328,11 @@ class LiveChainObserver:
                     and isinstance(subscription_id, int)):
                 with self.lock:
                     self.helius_acknowledged[subscription_id] = self.active_wallets[request_id - 1]["address"]
-                    self.state["helius"]["subscriptions_confirmed"] = len(self.helius_acknowledged)
+                    confirmed = len(self.helius_acknowledged)
+                    self.state["helius"]["subscriptions_confirmed"] = confirmed
+                if confirmed in (1, len(self.active_wallets)):
+                    LOG.info("Helius wallet logsSubscribe confirmed %d/%d on the current connection",
+                             confirmed, len(self.active_wallets))
             return
         params = packet.get("params") or {}
         details = ((params.get("result") or {}).get("value") or {})
