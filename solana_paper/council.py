@@ -1,17 +1,17 @@
 """Six rule agents' private, auditable decision council for paper-only orders.
 
 No LLM inference is implied; votes are deterministic.  Unknown chain-risk,
-wallet performance, social authenticity and order execution are not 'safe'.
+trade-activity counts, social authenticity and order execution are not 'safe'.
 Only simulated orders may be considered if unresolved evidence remains.
 """
 from __future__ import annotations
 
 
 class PaperCouncil:
-    names = ("discovery", "safety", "smart_money", "social", "decision", "execution")
+    names = ("discovery", "safety", "market_activity", "social", "decision", "execution")
 
     @staticmethod
-    def consider(discovery: dict, safety: dict, smart_money: dict,
+    def consider(discovery: dict, safety: dict, market_activity: dict,
                  social: dict, decision: dict, execution_ok: bool, execution_reason: str) -> dict:
         votes = {}
         votes["discovery"] = {"vote": "APPROVE" if discovery.get("sources") else "WAIT",
@@ -26,11 +26,12 @@ class PaperCouncil:
         else:
             svote, sreason = "CAUTION", "鏈上安全證據不完整，不代表安全"
         votes["safety"] = {"vote": svote, "reason": sreason}
-        state = smart_money.get("state")
-        votes["smart_money"] = {
-            "vote": "OBSERVE" if state == "OBSERVED_HOLDING" else "ABSTAIN",
-            "reason": "公開觀察錢包持有此幣；未驗證其獲利及買入時間" if state == "OBSERVED_HOLDING"
-                      else "無可用聰明錢買入證據；不假設聰明錢同意"}
+        observed = market_activity.get("state") == "OBSERVED"
+        votes["market_activity"] = {
+            "vote": "OBSERVE" if observed else "ABSTAIN",
+            "reason": "1H交易筆數與成交量有觀測資料；不推論淨買額或未來漲幅"
+                      if observed else "交易活躍度資料不足；不虛構市場參與",
+        }
         votes["social"] = {"vote": "ABSTAIN",
                            "reason": "付費曝光或缺乏社群資料，不足以認定真實熱度"}
         votes["decision"] = {"vote": "APPROVE" if decision.get("state") == "PAPER_BUY" else "WAIT",
@@ -49,7 +50,7 @@ class PaperCouncil:
             "votes": votes,
             "warnings": [
                 "六代理是規則角色協商，不是六個獨立 LLM",
-                "聰明錢及社群投票不能替代鏈上安全驗證",
+                "交易活躍度及社群投票不能替代鏈上安全驗證",
                 "未驗證風險僅允許有限額紙上模擬，絕不能推論可實盤",
             ],
         }
