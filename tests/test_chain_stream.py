@@ -244,6 +244,52 @@ class LiveStreamsTest(unittest.TestCase):
             self.assertEqual("OBSERVE_ONLY",obs["mode"])
             self.assertEqual(0,obs["extra_market_requests"])
 
+    def test_older_shadow_strong_candidate_cannot_create_paper_buy(self):
+        import os
+        alphabet="123456789ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnopqrstuvwxyz"
+        oldest=alphabet[0]*44
+        now=[1100.]
+        class Feed:
+            def __init__(self): self.calls=0
+            def discover(self): raise AssertionError("No whole-market discovery")
+            def quotes(self,mints):
+                self.calls+=1
+                if oldest not in mints:
+                    return []
+                return [{
+                    "chainId":"solana",
+                    "baseToken":{"address":oldest,"symbol":"OLD"},
+                    "pairAddress":"B"*44,"dexId":"raydium",
+                    "priceUsd":"0.0002","pairCreatedAt":900000,
+                    "liquidity":{"usd":100000},
+                    "volume":{"h1":32000,"h24":100000},
+                    "txns":{"h1":{"buys":60,"sells":30}},
+                    "priceChange":{"m5":4.0,"h1":12.0},
+                    "fdv":600000,"marketCap":500000,
+                }]
+        with tempfile.TemporaryDirectory() as tmp, patch.dict(
+            os.environ,{"PAPER_LAUNCHPAD_ONLY":"1"}):
+            rt=PaperRuntime(replace(Settings(),db_path=str(Path(tmp)/"shadow.db")),Feed())
+            rt.chain_stream.clock=lambda:now[0]
+            rt.early_watch.clock=lambda:now[0]
+            for i in range(21):
+                rt.chain_stream.ingest_pump({
+                    "mint":alphabet[i]*44,"action":"create",
+                    "pool":"pump","symbol":"TEST"},1000+i)
+            rt.chain_stream.tick(1100)
+            self.assertNotIn(oldest,rt.chain_stream.scoped_mints(limit=20))
+            rt.run_once(1100)
+            self.assertEqual([],rt.book.trades())
+            self.assertEqual([],rt.status()["candidates"])
+            self.assertEqual("BUILDING",next(t for t in rt.status()[
+                "early_strength_watch"]["items"] if t["mint"]==oldest)["state"])
+            now[0]=1250
+            rt.run_once(1250)
+            self.assertEqual([],rt.book.trades())
+            self.assertEqual([],rt.shadow_judge.book.trades())
+            self.assertEqual("STRONG_PREP",next(t for t in rt.status()[
+                "early_strength_watch"]["items"] if t["mint"]==oldest)["state"])
+
     def test_shadow_pool_caps_records_and_does_not_use_unknown_launchpads(self):
         from solana_paper.strong_watch import EarlyStrengthWatch
         abc="123456789ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnopqrstuvwxyz"
