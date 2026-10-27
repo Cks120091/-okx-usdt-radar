@@ -86,16 +86,6 @@ a{color:#9ebcff;text-decoration:none}a:hover{text-decoration:underline}
 <div class="tablewrap" id="positions"></div>
 </section>
 <section class="panel" style="margin-bottom:14px">
-<div class="sectionhead"><h2>🔍 公開錢包研究名單｜Solana 公共 RPC</h2><span class="badge warn">未驗證獲利</span></div>
-<div class="warning">13 個公開候選地址（原先 3 個＋活躍交易榜 10 個），不是已驗證的獲利錢包。直接使用免費 Solana 主網公共 RPC，優先用 WebSocket；連線不完整時僅對最多 3 個地址低頻 HTTP 補查。公共 RPC 可能 429／403 或中斷，後端休眠也不會持續監控。活動≠買入，不會自動跟單、不影響 A／B 模擬交易。</div>
-<div id="walletStatus" class="small" style="line-height:1.9">載入錢包觀察名單…</div>
-<div class="sep"></div>
-<div class="tablewrap" id="walletTable"></div>
-<div class="sep"></div>
-<div class="sectionhead"><h3>最近鏈上活動（未驗證買賣方向）</h3></div>
-<div class="tablewrap" id="walletRecent"></div>
-</section>
-<section class="panel" style="margin-bottom:14px">
 <div class="sectionhead"><h2>⚡ Pump / BONK / BAGS｜每秒新幣初篩</h2><span class="badge warn">事件≠成交訊號</span></div>
 <div class="warning">僅篩選 Pump.fun、BONK.fun、Bags.fm 的新幣／遷移。免費 PumpApi WebSocket 按發射台來源標記過濾；Bags 公開索引作低頻補充。其他 Raydium／Meteora 或不明平台直接排除。事件尚未驗證安全／可成交價，不能直接模擬買入。</div>
 <div class="small" id="chainStatus" style="line-height:1.9">等待免費串流資料…</div>
@@ -112,7 +102,7 @@ a{color:#9ebcff;text-decoration:none}a:hover{text-decoration:underline}
 <div class="tablewrap" id="trades"></div>
 </section>
 <div class="foot">
-<strong>資料來源與限制：</strong>PumpApi 免費新幣事件（只選 Pump/BONK/Bags）、Bags 公開索引、Solana 公共 RPC 唯讀錢包活動，以及針對候選幣的 DEX Screener／GeckoTerminal 報價，模擬市場價 + 固定滑價與交易費率。報價可能延遲、流動性可能虛假、價格可能瞬間跳空，實際出售也可能失敗。<br>
+<strong>資料來源與限制：</strong>PumpApi 免費新幣事件（只選 Pump/BONK/Bags）、Bags 公開索引、Solana 公共 RPC 唯讀 Mint 權限局部檢查，以及針對候選幣的 DEX Screener／GeckoTerminal 報價，模擬市場價 + 固定滑價與交易費率。報價可能延遲、流動性可能虛假、價格可能瞬間跳空，實際出售也可能失敗。<br>
 <strong>儲存：</strong>第一階段使用伺服器本機 SQLite；Render 免費／暫存檔案系統重新部署或休眠後資料可能消失，績效不能視為永久保存。此頁面為公開可讀的模擬數據。<br>
 <strong>操作模式：</strong>後端定期自動掃描、選幣與模擬買賣；前端接收後端 SSE 狀態事件，另有 30 秒備援輪詢；行情掃描與持倉查價仍按各自週期執行，這不是即時逐筆成交 WebSocket。沒有真實下單程式、私鑰、鏈上簽名或自動實盤開關。<br><strong>ChatGPT 串接：</strong>後端可選 OpenAI API，預設關閉、不會用你的 ChatGPT Plus 額度；沒有 API Key 不會呼叫付費模型，API Key 不會顯示於公開頁面。
 </div></main>
@@ -149,7 +139,7 @@ fetch("/api/status",{cache:"no-store"}).then(function(response){if(!response.ok)
  "模擬現金預留：$"+money(d.config.cash_reserve_usd)+" · 每次成交另估網路費：$"+money(d.config.simulated_network_fee_usd)+"（僅紙上）<br>"+
  "最低池流動性：$"+money(d.config.min_liquidity_usd)+" · 全市場掃描："+d.config.scan_seconds+" 秒 · 持倉查價："+d.config.monitor_seconds+" 秒";
  $("scanstatus").innerHTML="行情來源："+safe(d.market_feed||"尚未取得")+"<br>最近嘗試："+safe(time(d.last_attempt))+"<br>最近成功："+safe(time(d.last_scan))+"<br>數據源狀態："+(d.last_error?tag("bad",d.last_error):tag("good","已連接或待首次掃描"));
- $("scanstatus").innerHTML+="<br>持倉報價最近成功："+safe(time(d.monitor_last_success))+"<br>持倉報價狀態："+(d.monitor_last_error?tag("bad",d.monitor_last_error):tag("good","正常／等待持倉"))+"<br>六代理後台審議："+safe(d.council_reviewed_total||0)+" 次 · 成功建立模擬持倉 "+safe(d.council_paper_fills_total||0)+" 次<br>公開錢包觀察："+safe((d.smart_money_watchlist||{}).tracked||0)+" 個地址（非買賣訊號）<br>唯讀鏈上查核："+safe((d.mint_risk_observer||{}).checked||0)+" 個 Mint";
+ $("scanstatus").innerHTML+="<br>持倉報價最近成功："+safe(time(d.monitor_last_success))+"<br>持倉報價狀態："+(d.monitor_last_error?tag("bad",d.monitor_last_error):tag("good","正常／等待持倉"))+"<br>六代理後台審議："+safe(d.council_reviewed_total||0)+" 次 · 成功建立模擬持倉 "+safe(d.council_paper_fills_total||0)+" 次<br>六個獨立職責：獵幣／風險／交易活躍度／社群／決策／紙上執行<br>唯讀鏈上查核："+safe((d.mint_risk_observer||{}).checked||0)+" 個 Mint";
  var llm=d.openai_council||{};
  $("scanstatus").innerHTML+="<br><strong>ChatGPT AI 協作：</strong>"+
    (llm.state==="ACTIVE"?tag("good","六角色 AI 已啟用"):
@@ -196,37 +186,7 @@ fetch("/api/status",{cache:"no-store"}).then(function(response){if(!response.ok)
   '<span class="'+cls(q.change_24h_pct)+'">'+money(q.change_24h_pct)+"%</span>")+"</td></tr>";
  });
  $("judgeRecent").innerHTML=htmlTable(["Lead","首次觀察","裁判","原因","約24h變化"],jrows);
- var stream=d.chain_stream||{}, pump=stream.pump||{}, rpcWallet=stream.wallet_rpc||{}, streamEvents=stream.leads||[];
- var roster=stream.wallet_roster||[];
- $("walletStatus").innerHTML="<strong>已登錄：</strong>"+safe(stream.wallet_roster_total||0)+
-   " 個（公開歸屬 3 ＋ 活躍候選 "+safe(stream.wallet_roster_research_candidates||0)+"）"+
-   " · <strong>WS 要求：</strong>"+safe(rpcWallet.subscriptions_requested||0)+
-   " · <strong>WS 確認：</strong>"+safe(rpcWallet.subscriptions_confirmed||0)+
-   " · <strong>鏈上活動：</strong>"+safe(stream.wallet_activity_total||0)+
-   " · "+(rpcWallet.subscriptions_confirmed>0?tag("good","公共 RPC WebSocket 已收到訂閱確認"):
-     rpcWallet.state==="POLLING"?tag("warn","HTTP 低頻補查（最多 "+safe(rpcWallet.fallback_wallets||0)+" 地址）"):
-     tag("warn",rpcWallet.state||"尚未連線"))+
-   "<br><strong>HTTP 補查：</strong>每 "+safe(rpcWallet.poll_interval_seconds||180)+" 秒、最多 "+
-   safe(rpcWallet.fallback_wallets||0)+" 個地址 · 最後完成："+safe(time(rpcWallet.last_poll))+
-   (rpcWallet.last_error?" · "+tag("bad","RPC 狀態："+rpcWallet.last_error):"")+
-   "<br>免費公共 RPC 非 24/7 保證，資料可能遺漏、429 限流或 403 拒絕；任何地址的勝率及損益均未驗證。";
- var walletRows=roster.map(function(w){
-   var category=w.category==="ACTIVE_RESEARCH_CANDIDATE"?"活躍候選":"公開歸屬（未驗證）";
-   return "<tr><td>"+safe(w.label)+"</td><td><a href='https://solscan.io/account/"+
-     encodeURIComponent(w.address)+"' target='_blank' rel='noopener noreferrer'>"+
-     safe(short(w.address))+"</a></td><td>"+tag("warn",category)+
-     "</td><td>"+(w.currently_selected?tag("good","WS 訂閱候選"):tag("warn","名單保留"))+
-     "</td><td>未知／未驗證</td></tr>";
- });
- $("walletTable").innerHTML=htmlTable(["錢包","Solscan","證據級別","監控名單","真實損益／勝率"],walletRows);
- var walletEvents=(stream.recent_wallet_events||[]).map(function(ev){
-   return "<tr><td>"+safe(time(ev.at))+"</td><td>"+safe(short(ev.address))+"</td><td>"+
-     '<a target="_blank" rel="noopener noreferrer" href="https://solscan.io/tx/'+
-     encodeURIComponent(ev.signature)+'">'+safe(short(ev.signature))+"</a></td><td>"+
-     safe(ev.source==="SOLANA_PUBLIC_WS"?"公共 RPC 即時活動":"公共 RPC 低頻補查")+
-     "</td><td>"+tag("warn","不是確認買入")+"</td></tr>";
- });
- $("walletRecent").innerHTML=htmlTable(["接收時間","錢包","交易簽章","來源","解讀"],walletEvents);
+ var stream=d.chain_stream||{}, pump=stream.pump||{}, streamEvents=stream.leads||[];
  var stName=function(v){return v==="CONNECTED"?tag("good","已連線"):v==="BACKOFF"?tag("bad","重連等待"):tag("warn",v||"尚未連線")};
  var bags=stream.bags_indexer||{}, platformCount=stream.platform_counts||{};
  $("chainStatus").innerHTML="<strong>限制掃描：</strong>Pump.fun / BONK.fun / Bags.fm"+
@@ -238,8 +198,6 @@ fetch("/api/status",{cache:"no-store"}).then(function(response){if(!response.ok)
    " · 已接收建立："+safe(stream.created_total||0)+" · 已接收遷移："+safe(stream.migrated_total||0)+
    " · 已篩查："+safe(stream.screened_total||0)+" · 排隊："+safe(stream.pending_count||0)+
    "<br>最後有效事件："+safe(time(stream.last_event_at))+" · 最後每秒篩查："+safe(time(stream.last_screen_at))+
-   "<br>Solana 公共 RPC 錢包："+stName(rpcWallet.state)+" · 活動通知："+safe(stream.wallet_activity_total||0)+
-   "（僅鏈上活動，無法證明買入）"+
    (pump.last_error?"<br>"+tag("bad","免費串流連線問題："+pump.last_error):"")+
    "<br>"+tag("warn","行情仍由獨立資料來源取得；WebSocket 建幣事件並非可成交價格");
  var streamRows=streamEvents.slice(0,20).map(function(e){
@@ -260,7 +218,7 @@ fetch("/api/status",{cache:"no-store"}).then(function(response){if(!response.ok)
  return '<article class="coin"><div class="coin-head"><div><div class="coin-name">'+safe(t.symbol)+'</div><div class="coin-mint">'+safe(short(t.mint))+' · '+safe(t.launchpad||"未知發射台")+' · '+safe(t.dex)+'</div></div><div style="text-align:right"><div class="coin-score">'+money(t.score)+'</div>'+tag(kind,label)+'</div></div>'+
  '<div class="coin-stats"><div><span>價格 USD</span><b>$'+safe(t.price)+'</b></div><div><span>池流動性</span><b>$'+money(t.liquidity_usd)+'</b></div>'+
  '<div><span>1H 成交額</span><b>$'+money(t.volume_h1)+'</b></div><div><span>5m / 1H 漲幅</span><b class="'+cls(t.m5_change)+'">'+money(t.m5_change)+'% / '+money(t.h1_change)+'%</b></div></div>'+
- '<div class="notice"><strong>'+safe(note.contract_security==="RISK"?"已發現部分鏈上權限風險":"合約安全未完整驗證")+'</strong> · '+safe(note.reasons.length?note.reasons.join("、"):"通過初步市場條件")+'<br>公開觀察錢包持有：'+safe(t.agents.smart_money.matched_wallets||0)+' 個（不等於新買入）<br>來源：'+safe(t.agents.discovery.sources.join(" / ")||"未知")+
+ '<div class="notice"><strong>'+safe(note.contract_security==="RISK"?"已發現部分鏈上權限風險":"合約安全未完整驗證")+'</strong> · '+safe(note.reasons.length?note.reasons.join("、"):"通過初步市場條件")+'<br>交易活躍度：'+safe((t.agents.market_activity||{}).state||"INSUFFICIENT_DATA")+'，1H 買／賣筆數 '+safe((t.agents.market_activity||{}).h1_buys||0)+'／'+safe((t.agents.market_activity||{}).h1_sells||0)+'（非真實資金淨流入）<br>來源：'+safe(t.agents.discovery.sources.join(" / ")||"未知")+
  '<br>JUDGE B 組：'+safe(shadow.state||"尚未評估")+'（'+safe(shadow.reason||"等待資料")+'）<br>'+safe(t.paper_order||t.agents.decision.reasons.join("、")||"無完整條件")+' · <a target="_blank" rel="noopener noreferrer" href="https://dexscreener.com/solana/'+encodeURIComponent(t.mint)+'">DEX 查看</a></div></article>'
  }).join(''):'<div class="empty">尚無可顯示的 Solana 候選幣。可能尚未掃描成功，或當前最新清單沒有符合條件的交易池。</div>';
  var trades=d.trades.map(function(t){return '<tr><td>'+safe(time(t.ts))+'</td><td>'+safe(t.symbol)+'</td><td>'+tag(t.side==="BUY"?"good":"warn",t.side)+'</td><td>'+safe(t.price)+'</td><td>$'+money(t.gross)+'</td><td>$'+money(t.fee)+'</td><td class="'+cls(t.pnl)+'">'+(t.pnl==null?"—":"$"+money(t.pnl))+'</td><td>'+safe(t.reason)+'</td></tr>'});
