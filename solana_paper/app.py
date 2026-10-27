@@ -30,7 +30,12 @@ def make_handler(runtime: PaperRuntime):
                              "script-src 'self' 'unsafe-inline'; connect-src 'self'; "
                              "img-src 'self' data:; frame-ancestors 'none'")
             self.end_headers()
-            self.wfile.write(data)
+            # HEAD advertises the same headers/length as GET, with no body.
+            if self.command != "HEAD":
+                self.wfile.write(data)
+
+        def do_HEAD(self) -> None:
+            self.do_GET()
 
         def do_GET(self) -> None:
             path = urlsplit(self.path).path
