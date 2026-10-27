@@ -112,6 +112,8 @@ class LiveChainObserver:
                 self.unique[dedup] = at
                 self.leads.appendleft(lead)
                 self.screened += 1
+                if self.screened == 1:
+                    LOG.info("first free WebSocket Solana launch event accepted for local screening")
                 self.last_seen_at = at
                 if lead["kind"] == "CREATED":
                     self.created_count += 1
@@ -168,6 +170,15 @@ class LiveChainObserver:
                 else:
                     raise
 
+    def _handle_pump_packet(self, packet):
+        if isinstance(packet, dict):
+            message = str(packet.get("message") or packet.get("error") or "")[:120].lower()
+            if packet.get("status") == "error" or packet.get("error") or any(
+                phrase in message for phrase in ("unauthorized", "invalid api key", "not authorized", "api key required")
+            ):
+                raise RuntimeError("free launch event subscription rejected")
+        self.ingest_pump(packet)
+
     def _pump_loop(self):
         pause = 5
         while True:
@@ -178,8 +189,9 @@ class LiveChainObserver:
                 for method in FREE_PUMP_METHODS:
                     ws.send(json.dumps({"method": method}))
                 self._set_state("pump", "CONNECTED")
+                LOG.info("PumpPortal free WebSocket connected; ONLY new-token and migration subscriptions active")
                 pause = 5
-                self._receive(ws, "pump", self.ingest_pump)
+                self._receive(ws, "pump", self._handle_pump_packet)
             except Exception as exc:
                 # Never log endpoint URLs or any response secret.
                 self._set_state("pump", "BACKOFF", type(exc).__name__)
