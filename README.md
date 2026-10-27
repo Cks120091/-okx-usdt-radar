@@ -24,6 +24,23 @@
 網站是公開唯讀頁面，不提供未驗證身分的操作開關；持倉上限透過 Render 環境變數或本機環境調整，修改後重啟生效。
 
 
+## 三個指定發射台掃描（2026-10 更新）
+
+後端預設 **PAPER_LAUNCHPAD_ONLY=1**，只允許 PUMP（Pump.fun）、BONK（BONK.fun／LetsBONK）、BAGS（Bags.fm／Bags Protocol）。對候選使用嚴格來源證據，**幣名叫 BONK、mint 結尾 bonk、Raydium 池，均不足以宣稱來自 BONK；普通 Meteora 池也不是 Bags**。
+
+免費事件通道改為 PumpApi 的單一 WebSocket `wss://stream.pumpapi.io/`。該提供者目前宣稱 Data Stream 免費、無 API Key，傳送原始 Solana 多種事件；接收器只把 `create`／`migrate` 且具有明確平台欄位的事件送進篩選佇列：
+- PUMP：pool=pump 且沒有衝突平台標記。
+- BONK：pool=raydium-launchpad 且 platform=bonk／letsbonk。
+- BAGS：pool=meteora-launchpad／bags-protocol 且 platform=bags／bagsprotocol。
+
+Bags.fm 公開索引 `https://data-api.bags.fm/v2/launches?launchpads=Bags%2CBagsProtocol&limit=30` 每 120 秒少量查詢一次（PAPER_BAGS_INDEXER_ENABLED=1）；只採納回傳 launchpad **明確為 Bags 或 BagsProtocol** 的項目。任何接口受限、結構變更、缺少平台標記會顯示限流／重連並略過，不會臆測來源。Bags 索引非逐秒串流。
+
+六代理正式掃描不再呼叫 DEX/Gecko 全市場發現清單，僅對已核對平台的最多 20 個 Mint 每 150 秒批次取市場報價、經過原有安全風控與 A/B 模擬交易門檻。舊模擬持倉仍由獨立報價監控，不會因篩選條件被強迫平倉。沒有任何來源辨識的新幣時不呼叫 DEX 市場掃描。**保留 WebSocket 新幣每秒初篩，但這不表示有每秒真實報價或能每秒完成七代理買入決策。**
+
+免費 PumpApi 服務會傳送多平台的原始事件，**篩選是在本機進行的**；雖然不使用付費方法，但實際接收頻寬可能不低。若未來發現免費主機流量／資源壓力，應降載或尋找可在供應商端過濾的資料源，不能為了節省成本偷改成實盤交易。
+
+來源文件：https://pumpapi.io/stream 、https://pumpapi.io/fees 、https://data-api.bags.fm/docs/guide 。
+
 ## Solana 免費 WebSocket 新幣事件與每秒初篩（實驗版）
 
 後端新增 solana_paper/chain_stream.py，預設僅建立一條 PumpPortal WebSocket 連線，且只訂閱官方標示免費的 subscribeNewToken 和 subscribeMigration。嚴禁發出 subscribeTokenTrade 或 subscribeAccountTrade：兩種交易串流會計量收費。所有串流只讀，不能觸發實盤交易。
