@@ -29,5 +29,7 @@ jobs:
         run: python -m unittest discover -s tests -p 'test_openai_agent.py' -v
       - name: Offline seventh JUDGE and A/B shadow ledger tests
         run: python -m unittest discover -s tests -p 'test_shadow_judge.py' -v
+      - name: Offline free stream and one-second screen tests
+        run: python -m unittest discover -s tests -p 'test_chain_stream.py' -v
       - name: Verify formatting
         run: git diff --check
