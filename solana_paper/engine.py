@@ -23,6 +23,7 @@ from urllib.request import Request, urlopen
 from .intelligence import WalletObserver, MintRiskObserver
 from .council import PaperCouncil
 from .feed_control import SHARED_GATE, MarketTemporarilyUnavailable
+from .openai_agent import OpenAICouncil
 
 LOG = logging.getLogger("solana_paper")
 SOLANA_MINT = re.compile(r"^[1-9A-HJ-NP-Za-km-z]{32,44}$")
@@ -651,6 +652,8 @@ class PaperRuntime:
         self.mint_observer = MintRiskObserver()
         self.wallet = SmartMoneyAgent(self.wallet_observer)
         self.council = PaperCouncil()
+        # Explicit opt-in only. OPENAI_API_KEY is never returned to the browser.
+        self.openai = OpenAICouncil(self.s.db_path)
         self.council_reviews = 0
         self.council_approved = 0
         self.council_recent: list[dict] = []
@@ -719,6 +722,16 @@ class PaperRuntime:
                     t["paper_order"] = "六代理未通過模擬： " + (
                         why if not allowed else council["outcome"])
                     continue
+                if self.openai.enabled:
+                    # Only rule-eligible + freshly quoted candidates reach paid AI.
+                    # AI is asynchronous, cost-limited and may only deny/delay.
+                    ai_vote = self.openai.review(t["mint"])
+                    if ai_vote["state"] != "APPROVED" or not ai_vote["allowed"]:
+                        state = self.openai.submit(t) if ai_vote["state"] in ("UNREVIEWED", "PENDING") else ai_vote["state"]
+                        t["paper_order"] = "等待 ChatGPT 六角色審查／未批准（" + state + "）"
+                        t["ai_state"] = state
+                        continue
+                    t["ai_state"] = "APPROVED"
                 if self.book.buy(t, now):
                     buys.append({"symbol": t["symbol"], "price": fmt(t["price"]), "usd": self.s.trade_usd})
                     t["paper_order"] = "六代理協商通過；鏈上風險未完整驗證；已模擬買入"
@@ -806,6 +819,7 @@ class PaperRuntime:
         if self._started:
             return
         self._started = True
+        self.openai.start()
 
         def loop():
             while True:
@@ -876,6 +890,7 @@ class PaperRuntime:
                 "預留 USD 模擬現金給手續費與退出緩衝，計入每次模擬進出費用",
                 "公開錢包榜只用於觀察持倉，不是驗證實際獲利或自動跟單",
                 "六代理在後台交換規則投票；不是六個會互相對話的獨立 LLM",
+                "ChatGPT 六角色分析是 API 選用功能；停用時完全不呼叫付費 API，啟用後仍受原風控否決",
 
                 "持倉監控獨立於全市場掃描：每30秒左右批次檢查報價；這是HTTP輪詢而非WebSocket串流",
                 "若報價來源限流或斷線，不會假裝出場；該持倉會顯示報價過期警告",
@@ -892,10 +907,11 @@ class PaperRuntime:
             "config": asdict(self.s) | {"db_path": "(server local sqlite)"},
             "smart_money_watchlist": self.wallet_observer.summary(),
             "mint_risk_observer": self.mint_observer.summary(),
+            "openai_council": self.openai.status(),
             "coordination": {"model": "SIX_RULE_AGENT_COUNCIL", "requires": "discovery + non-veto safety + decision + execution",
                              "smart_money": "observational; not automatically trusted",
                              "social": "abstains until independently verified",
-                             "llm_enabled": False, "paper_only": True},
+                             "llm_enabled": self.openai.enabled, "paper_only": True},
             "account": {
                 "cash": fmt(cash), "equity": fmt(equity),
                 "open_positions": len(positions),
