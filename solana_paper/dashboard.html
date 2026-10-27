@@ -50,7 +50,9 @@ a{color:#9ebcff;text-decoration:none}a:hover{text-decoration:underline}
 <body><main>
 <header>
 <div class="brand"><div class="logo">◎</div><div><h1>Solana 六代理交易中心</h1><div class="sub">六代理協作 · 全自動模擬策略 · 第一階段 v1.0</div></div></div>
-<div id="health" class="pill">● 正在讀取系統狀態…</div>
+<div style="display:flex;gap:8px;align-items:center;flex-wrap:wrap">
+<div id="streamState" class="pill" aria-live="polite">◌ 正在連接即時事件…</div>
+<div id="health" class="pill">● 正在讀取系統狀態…</div></div>
 </header>
 <div class="intro"><strong>🧪 模式 B｜100% 模擬交易</strong>　不連接錢包、不持有私鑰、不會發出任何鏈上買賣。<div class="muted">六個分工代理目前是自動化規則引擎，並非六個獨立大模型；第三、四代理的鏈上／社群資料未完整接入，會明確標示資料不足。公開市場資料不保證安全，模擬績效也不等於可實現獲利。</div></div>
 <div id="error" class="warning" hidden></div>
@@ -95,7 +97,7 @@ a{color:#9ebcff;text-decoration:none}a:hover{text-decoration:underline}
 <div class="foot">
 <strong>資料來源與限制：</strong>DEX Screener／GeckoTerminal 公開 API，模擬市場價 + 固定滑價與交易費率。報價可能延遲、流動性可能虛假、價格可能瞬間跳空，實際出售也可能失敗。<br>
 <strong>儲存：</strong>第一階段使用伺服器本機 SQLite；Render 免費／暫存檔案系統重新部署或休眠後資料可能消失，績效不能視為永久保存。此頁面為公開可讀的模擬數據。<br>
-<strong>操作模式：</strong>後端定期自動掃描、選幣與模擬買賣；前端每 15 秒只讀取狀態。沒有真實下單程式、私鑰、鏈上簽名或自動實盤開關。<br><strong>ChatGPT 串接：</strong>後端可選 OpenAI API，預設關閉、不會用你的 ChatGPT Plus 額度；沒有 API Key 不會呼叫付費模型，API Key 不會顯示於公開頁面。
+<strong>操作模式：</strong>後端定期自動掃描、選幣與模擬買賣；前端接收後端 SSE 狀態事件，另有 30 秒備援輪詢；行情掃描與持倉查價仍按各自週期執行，這不是即時逐筆成交 WebSocket。沒有真實下單程式、私鑰、鏈上簽名或自動實盤開關。<br><strong>ChatGPT 串接：</strong>後端可選 OpenAI API，預設關閉、不會用你的 ChatGPT Plus 額度；沒有 API Key 不會呼叫付費模型，API Key 不會顯示於公開頁面。
 </div></main>
 <script>
 (function(){
@@ -153,6 +155,11 @@ fetch("/api/status",{cache:"no-store"}).then(function(response){if(!response.ok)
  if(d.market_snapshot_stale){
    $("scanstatus").innerHTML+="<br>"+tag("bad","全市場行情快照已過期；不會使用舊資料新開倉");
  }
+ var rt=d.realtime||{};
+ $("scanstatus").innerHTML+="<br><strong>網頁即時事件：</strong>SSE 推送狀態版本 "+safe(rt.revision||0)+
+ " · 行情成功："+safe(time(rt.last_scan_success_at))+
+ " · 持倉成功報價："+safe(time(rt.last_monitor_quote_success_at))+
+ "<br>"+tag("warn","即時推播的是後端狀態，並非交易所逐筆行情；免費主機可能休眠");
  var poses=d.positions.map(function(p){var diff=p.unrealized_pct;return '<tr><td><strong>'+safe(p.symbol)+'</strong><div class="small">'+safe(short(p.mint))+'</div></td><td>$'+money(p.entry)+'</td><td>$'+money(p.mark)+'</td><td class="'+cls(diff)+'">'+money(diff)+'%</td><td>$'+money(p.cost)+'</td><td>'+safe(time(p.mark_at))+' · '+(p.quote_stale?'⚠ 報價過期':'報價有效')+'</td></tr>'});
  $("positions").innerHTML=htmlTable(["幣種","模擬入場均價","最後報價","價格變化（未扣費）","成本 USD","最後更新"],poses);
  var j=d.shadow_judge||{}, totals=j.totals||{}, jr=j.recent||[];
@@ -197,7 +204,32 @@ if ("serviceWorker" in navigator) {
     }));
   }).catch(function(){});
 }
-refresh();setInterval(refresh,15000);
+// Server-Sent Events push changes as soon as the background scan/monitor
+// changes state. This does NOT turn the HTTP market feeds into a price stream.
+refresh();
+if (typeof EventSource !== "undefined") {
+  var live = new EventSource("/api/events");
+  live.addEventListener("open", function(){
+    $("streamState").textContent="● 事件連線已接通（行情非逐筆）";
+    $("streamState").style.color="var(--green)";
+    refresh();
+  });
+  live.addEventListener("change", function(){
+    if (document.visibilityState !== "hidden") refresh();
+  });
+  live.addEventListener("error", function(){
+    $("streamState").textContent="◌ 推送暫時斷線，自動重連";
+    $("streamState").style.color="var(--yellow)";
+  });
+  // Resync if background async AI/snapshot changed without a signal.
+  setInterval(function(){if(document.visibilityState!=="hidden")refresh()},30000);
+} else {
+  $("streamState").textContent="輪詢模式：每 15 秒更新";
+  setInterval(refresh,15000);
+}
+document.addEventListener("visibilitychange",function(){
+  if(document.visibilityState==="visible")refresh();
+});
 })();
 </script>
 </body></html>
