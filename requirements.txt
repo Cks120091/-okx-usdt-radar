@@ -1,1 +1,1 @@
-pywebpush==2.4.0
+# Solana six-agent paper project uses Python 3.12 standard library only.
