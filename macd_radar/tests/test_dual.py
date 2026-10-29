@@ -52,9 +52,44 @@ class TestDualConfirm(unittest.TestCase):
         self.assertFalse(actual["is_new"])
         self.assertEqual(actual["state"], "雙確認做多維持")
 
-    def test_old_ma_confirmation_expires(self):
-        actual = self.run_pattern(ma_turn=112, macd_turn=119)
-        self.assertEqual(actual["trigger"], "無新雙確認")
+    def test_no_arbitrary_five_bar_expiry(self):
+        # MA formed 16 completed bars earlier, stayed valid; MACD
+        # now crosses in the SAME direction => valid formal signal.
+        actual = self.run_pattern(ma_turn=103, macd_turn=119)
+        self.assertEqual(actual["trigger"], "正式雙確認做多")
+        self.assertTrue(actual["confirmed"])
+        self.assertEqual(actual["ma_confirm_bars_ago"], 16)
+        self.assertEqual(actual["event_age_bars"], 16)
+
+    def test_order_independence_when_macd_crossed_long_ago(self):
+        actual = self.run_pattern(ma_turn=119, macd_turn=100)
+        self.assertTrue(actual["is_new"])
+        self.assertEqual(actual["macd_confirm_bars_ago"], 19)
+
+    def test_alignment_without_observed_ma_crosses_is_not_enough(self):
+        n = 120
+        c = [10 + i*.1 for i in range(n)]
+        b = [x+1 for x in c]
+        a = [x+2 for x in c]  # all above MA20 at every observed bar
+        fast, slow = [2.0]*n, [0.0]*n
+        signal = [3.0]*119 + [1.0]
+        with patch("macd_radar.dual.averages", side_effect=[a,b,c]), patch(
+            "macd_radar.dual.ema", side_effect=[fast,slow,signal]
+        ):
+            actual = dual_confirm([100.0]*n)
+        self.assertFalse(actual["confirmed"])
+
+    def test_ma_opposite_cross_invalidates_previous_setup(self):
+        n=120
+        c=[10+i*.1 for i in range(n)]
+        b=[(x-1 if i < 105 or i >= 112 else x+1) for i,x in enumerate(c)]
+        a=[(x-2 if i < 105 or i >= 112 else x+2) for i,x in enumerate(c)]
+        fast,slow=[2.0]*n,[0.0]*n
+        signal=[3.0]*119+[1.0]
+        with patch("macd_radar.dual.averages", side_effect=[a,b,c]), patch(
+            "macd_radar.dual.ema", side_effect=[fast,slow,signal]
+        ):
+            actual=dual_confirm([100.0]*n)
         self.assertFalse(actual["confirmed"])
 
     def test_opposite_macd_cross_cannot_form_bull_signal(self):

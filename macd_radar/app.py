@@ -142,7 +142,7 @@ def do_scan(timeframe, limit):
         "count": len(signals), "items": signals, "errors": errors[:12],
         "scanned_at": datetime.now(timezone.utc).isoformat(),
         "seconds": round(time.monotonic() - start, 2),
-        "note": "僅掃描24h估算成交額>=150萬USDT的OKX USDT永續，先過濾再掃K線；估算基於24h標的幣數量×現價，非精確成交額。MA+MACD最近5根確認；其他僅觀察。4MA暫用SMA。"
+        "note": "僅掃描24h估算成交額>=150萬USDT的OKX USDT永續，先過濾再掃K線；估算基於24h標的幣數量×現價，非精確成交額。MA與MACD實際同向交叉，先後不限且無固定5根截止；兩者仍有效才算確認；其他僅觀察。4MA暫用SMA。"
     }
 
 

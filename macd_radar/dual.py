@@ -1,14 +1,17 @@
-"""Strict MA × MACD confirmation on confirmed candles, no look-ahead.
+"""Strict, order-INDEPENDENT MA crossover + MACD crossover confirmation.
 
-A dual-confirm signal is *new* only when the last completed bar closes the
-second of two same-direction confirmations. The two events may be sequential,
-within the latest five closed bars, and must remain valid on the current bar.
+Formal MA confirmation requires actual historical crosses of MA5/MA10,
+MA5/MA20 AND MA10/MA20, the corresponding price-side ordering and a
+same-direction MA20 slope. Formal MACD confirmation requires a completed
+MACD-vs-Signal crossover. Both can occur in either order.
 
-MA confirmation: MA5/10/20 full ordered alignment + MA20 trending in same
-direction across 3 closed bars, when that alignment first becomes valid.
-MACD confirmation: the MACD(EMA12-EMA26) LINE crossing the EMA9 SIGNAL line.
-EMA12/26 mutual crossing (MACD crossing zero) is separate context, not
-silently substituted for the signal-line crossover.
+No arbitrary five-candle event expiry: the first confirmation stays eligible
+while its directional state remains valid. Opposite crosses invalidate it.
+Emit one NEW signal when both states first become valid for the current
+pair of crossover episodes. Same historical crosses never re-alert merely
+because slope briefly changed or the browser refreshed.
+
+Only closed candles may be supplied by callers. No future look-ahead.
 """
 from __future__ import annotations
 
@@ -17,82 +20,136 @@ from typing import Sequence
 from .core import ema
 from .technical import averages
 
-DUAL_CONFIRM_WINDOW = 5
+MIN_CONFIRM_BARS = 100
 
 
-def dual_confirm(closes: Sequence[float], ma_type: str = "SMA",
-                 window: int = DUAL_CONFIRM_WINDOW) -> dict:
-    if len(closes) < 100:
-        raise ValueError("Need at least 100 closed candles for strict confirmation")
-    if not 2 <= window <= 20:
-        raise ValueError("Window must be 2..20 closed candles")
+def _cross(first_before: float, second_before: float,
+           first_now: float, second_now: float) -> int:
+    if first_before <= second_before and first_now > second_now:
+        return 1
+    if first_before >= second_before and first_now < second_now:
+        return -1
+    return 0
+
+
+def dual_confirm(closes: Sequence[float], ma_type: str = "SMA") -> dict:
+    if len(closes) < MIN_CONFIRM_BARS:
+        raise ValueError("Need at least 100 CLOSED candles for strict confirmation")
+
     n = len(closes)
-    a, b, c = [averages(closes, length, ma_type) for length in (5, 10, 20)]
-    fast = ema(closes, 12)
-    slow = ema(closes, 26)
-    macd = [x-y for x, y in zip(fast, slow)]
+    a, b, c = [averages(closes, p, ma_type) for p in (5, 10, 20)]
+    f, s = ema(closes, 12), ema(closes, 26)
+    macd = [x-y for x, y in zip(f, s)]
     signal = ema(macd, 9)
-    histogram = [x-y for x, y in zip(macd, signal)]
+    hist = [x-y for x, y in zip(macd, signal)]
 
-    def ma_valid(i: int, direction: int) -> bool:
-        if direction > 0:
-            return (a[i] > b[i] > c[i] and c[i] > c[i-1] > c[i-2])
-        return (a[i] < b[i] < c[i] and c[i] < c[i-1] < c[i-2])
+    # Cross records contain only observed bar crossings, never inferred crosses
+    # from current ordering. A record stays effective until the next opposite
+    # or same-direction crossing of that pair.
+    last_ma = {"5_10": (0, None), "5_20": (0, None), "10_20": (0, None)}
+    last_macd = (0, None)
+    first_ma_confirm_at: dict[tuple, int] = {}
+    fired_pair_keys: set[tuple] = set()
+    last_fired_at: dict[tuple, int] = {}
 
-    def macd_event(i: int, direction: int) -> bool:
-        if direction > 0:
-            return histogram[i-1] <= 0 < histogram[i]
-        return histogram[i-1] >= 0 > histogram[i]
-
-    recent_start = n-window
-    for direction, side in ((1, "做多"), (-1, "做空")):
-        if not ma_valid(n-1, direction):
-            continue
-        if not (histogram[-1] > 0 if direction > 0 else histogram[-1] < 0):
-            continue
-        ma_events = [i for i in range(recent_start, n) if ma_valid(i, direction) and not ma_valid(i-1, direction)]
-        macd_events = [i for i in range(recent_start, n) if macd_event(i, direction)]
-        if not ma_events or not macd_events:
-            continue
-        ma_at = ma_events[-1]
-        macd_at = macd_events[-1]
-        # Both events must have happened within the configured window.
-        # Current alignment and histogram side must still be valid.
-        latest = max(ma_at, macd_at)
-        is_new = latest == n-1
-        return {
-            "trigger": f"正式雙確認{side}" if is_new else "無新雙確認",
-            "state": f"正式雙確認{side}" if is_new else f"雙確認{side}維持",
-            "direction": "多" if direction > 0 else "空",
-            "is_new": is_new,
-            "confirmed": True,
-            "ma_confirm_bars_ago": n-1-ma_at,
-            "macd_confirm_bars_ago": n-1-macd_at,
-            "confirmation_bars_ago": n-1-latest,
-            "window_bars": window,
-            "reasons": ["MA5/10/20完整排列且MA20同向", "MACD線與Signal線同向交叉"],
-        }
-
-    # Watchlist is still useful but must never be mislabeled "formal signal".
-    recent_bull = any(histogram[i-1] <= 0 < histogram[i] for i in range(recent_start, n))
-    recent_bear = any(histogram[i-1] >= 0 > histogram[i] for i in range(recent_start, n))
-    if ma_valid(n-1, 1) and histogram[-1] > 0:
-        reason = "多方均線完整、MACD同向，但雙確認時效未同時滿足"
-    elif ma_valid(n-1, -1) and histogram[-1] < 0:
-        reason = "空方均線完整、MACD同向，但雙確認時效未同時滿足"
-    elif recent_bull or recent_bear:
-        reason = "MACD近期交叉，等待同向均線完整結構"
-    else:
-        reason = "MA與MACD尚未形成有效雙確認"
-    return {
-        "trigger": "無新雙確認",
-        "state": "等待雙確認",
-        "direction": "無",
-        "is_new": False,
-        "confirmed": False,
-        "ma_confirm_bars_ago": None,
-        "macd_confirm_bars_ago": None,
-        "confirmation_bars_ago": None,
-        "window_bars": window,
-        "reasons": [reason],
+    latest_state = {
+        "direction": "無", "confirmed": False, "is_new": False,
+        "ma_confirm_bars_ago": None, "macd_confirm_bars_ago": None,
+        "confirmation_bars_ago": None, "event_age_bars": None,
+        "ma_crosses_bars_ago": {}, "window_bars": None,
     }
+
+    for i in range(21, n):
+        updates = {
+            "5_10": _cross(a[i-1], b[i-1], a[i], b[i]),
+            "5_20": _cross(a[i-1], c[i-1], a[i], c[i]),
+            "10_20": _cross(b[i-1], c[i-1], b[i], c[i]),
+        }
+        for name, direction in updates.items():
+            if direction:
+                last_ma[name] = (direction, i)
+
+        # Warm up MACD for 90 confirmed bars before recognizing its crossings.
+        # The signal EMA begins at the first MACD reading, matching the
+        # existing radar's deterministic calculation convention.
+        if i >= 90:
+            crossing = _cross(hist[i-1], 0.0, hist[i], 0.0)
+            if crossing:
+                last_macd = (crossing, i)
+
+        if i < MIN_CONFIRM_BARS - 1:
+            continue
+
+        bar_state = dict(latest_state)
+        bar_state.update({
+            "direction": "無", "confirmed": False, "is_new": False,
+            "ma_confirm_bars_ago": None, "macd_confirm_bars_ago": None,
+            "confirmation_bars_ago": None, "event_age_bars": None,
+            "ma_crosses_bars_ago": {},
+        })
+
+        for direction, label in ((1, "多"), (-1, "空")):
+            if direction > 0:
+                ordered = a[i] > b[i] > c[i]
+                slope = c[i] > c[i-1] > c[i-2]
+                macd_valid = hist[i] > 0
+            else:
+                ordered = a[i] < b[i] < c[i]
+                slope = c[i] < c[i-1] < c[i-2]
+                macd_valid = hist[i] < 0
+
+            # Last observed crossover of *each pair* must match direction.
+            ma_crosses_valid = all(last_ma[k][0] == direction for k in last_ma)
+            if not (ordered and slope and ma_crosses_valid):
+                continue
+            ma_key = (direction, *(last_ma[k][1] for k in ("5_10", "5_20", "10_20")))
+            if ma_key not in first_ma_confirm_at:
+                first_ma_confirm_at[ma_key] = i
+
+            if not (macd_valid and last_macd[0] == direction):
+                continue
+
+            macd_at = last_macd[1]
+            ma_at = first_ma_confirm_at[ma_key]
+            pair_key = (ma_key, macd_at)
+            if pair_key not in fired_pair_keys:
+                fired_pair_keys.add(pair_key)
+                last_fired_at[pair_key] = i
+
+            is_new = last_fired_at[pair_key] == i
+            # The "is_new" of the final result must mean THIS most recent
+            # confirmed bar, not the first evaluation of a previous bar.
+            bar_state = {
+                "direction": label,
+                "confirmed": True,
+                "is_new": is_new,
+                "ma_confirm_bars_ago": n-1-ma_at,
+                "macd_confirm_bars_ago": n-1-macd_at,
+                "confirmation_bars_ago": n-1-last_fired_at[pair_key],
+                "event_age_bars": abs(ma_at-macd_at),
+                "ma_crosses_bars_ago": {
+                    k: n-1-last_ma[k][1] for k in ("5_10", "5_20", "10_20")
+                },
+                "window_bars": None,
+            }
+            break
+
+        latest_state = bar_state
+
+    # A signal is newly emitted only on the most recent completed bar.
+    is_new = latest_state["confirmed"] and latest_state["confirmation_bars_ago"] == 0
+    direction = latest_state["direction"]
+    latest_state["is_new"] = is_new
+    latest_state["trigger"] = f"正式雙確認做{'多' if direction=='多' else '空'}" if is_new else "無新雙確認"
+    latest_state["state"] = (
+        f"正式雙確認做{'多' if direction=='多' else '空'}" if is_new else
+        f"雙確認{'做多' if direction=='多' else '做空'}維持" if latest_state["confirmed"] else
+        "等待雙確認"
+    )
+    latest_state["reasons"] = (
+        ["MA5/10、MA5/20、MA10/20同向交叉且MA20斜率同向",
+         "MACD主線與Signal同向交叉，兩項無先後限制"]
+        if latest_state["confirmed"] else
+        ["尚未完成所有同向交叉、MA20方向或MACD確認"]
+    )
+    return latest_state
