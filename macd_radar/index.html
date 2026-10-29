@@ -20,7 +20,17 @@ select,input{background:#101b2b;border:1px solid var(--edge);border-radius:12px;
 .prices small,.values small{color:var(--muted);display:block;font-size:11px}.prices strong{font-size:17px;font-variant-numeric:tabular-nums}.values{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:8px}.values b{font-size:14px;font-variant-numeric:tabular-nums;overflow-wrap:anywhere}
 .mode-tabs{display:flex;gap:8px;flex-wrap:wrap;margin:0 0 14px}.mode-tabs button{background:#172237;border:1px solid var(--edge);border-radius:12px;padding:9px 14px;color:var(--muted);font-weight:700}.mode-tabs button.active{background:#244536;border-color:#41715c;color:var(--aqua)}
 .signal-line{margin-top:10px;padding:9px 11px;border-radius:10px;background:#202d42;font-size:12px;color:#d9e8fa}.signal-line.positive{border-left:3px solid var(--aqua)}.signal-line.negative{border-left:3px solid var(--rose)}.signal-line.caution{border-left:3px solid var(--gold)}.signal-line b{color:var(--text)}.ma-values{grid-template-columns:repeat(4,minmax(0,1fr));margin-top:12px}
-.foot{color:var(--muted);font-size:11px;margin-top:14px}.info{font-size:12px;color:var(--muted);border-top:1px solid var(--edge);margin-top:22px;padding-top:16px}.error{color:var(--rose);font-size:12px;white-space:pre-wrap}.empty{border:1px dashed var(--edge);border-radius:16px;padding:32px;text-align:center;color:var(--muted)}
+.foot{color:var(--muted);font-size:11px;margin-top:14px}
+.diagnostics{margin-top:20px;border-top:1px solid var(--edge);padding-top:12px}
+.diagnostics summary{cursor:pointer;color:var(--muted);font-size:12px;list-style:none;display:flex;align-items:center;gap:8px;min-height:36px;max-width:max-content}
+.diagnostics summary::-webkit-details-marker{display:none}
+.diagnostics summary::before{content:"▸";font-size:13px;color:var(--muted)}
+.diagnostics[open] summary::before{content:"▾"}
+.diagnostics summary:focus-visible{outline:2px solid var(--aqua);outline-offset:4px;border-radius:4px}
+.diag-count{color:var(--gold);border-radius:6px;background:#332b21;padding:2px 7px}
+.info{font-size:12px;color:var(--muted);line-height:1.7;margin-top:14px}
+.error{color:var(--rose);font-size:12px;white-space:pre-wrap;overflow-wrap:anywhere;margin-top:10px}
+.error:empty{display:none}.empty{border:1px dashed var(--edge);border-radius:16px;padding:32px;text-align:center;color:var(--muted)}
 @media(max-width:720px){.list{grid-template-columns:1fr}.metrics{grid-template-columns:repeat(2,1fr)}.control{align-items:stretch}.tabs{width:100%;justify-content:space-between}.tabs button{flex:1;padding:10px 6px}.top{align-items:center}.readonly{font-size:11px}h1{font-size:30px}}
 </style>
 </head>
@@ -38,8 +48,12 @@ select,input{background:#101b2b;border:1px solid var(--edge);border-radius:12px;
 <button id="watchMode" aria-pressed="false">◉ 觀察池（未雙確認）</button></div>
 <div class="status" id="status">只掃描估算 24h 成交額 ≥ 150 萬 USDT 的永續合約，準備查詢已收盤 K 線…</div>
 <section class="metrics"><div class="metric"><span>最新雙確認</span><b id="dualCount" style="color:var(--aqua)">—</b></div><div class="metric"><span>MACD金叉（僅觀察）</span><b id="gold" style="color:var(--aqua)">—</b></div><div class="metric"><span>MACD死叉（僅觀察）</span><b id="death" style="color:var(--rose)">—</b></div><div class="metric"><span>交叉預備</span><b id="watch" style="color:var(--gold)">—</b></div><div class="metric"><span>均線多方完整</span><b id="maBull" style="color:var(--aqua)">—</b></div><div class="metric"><span>均線空方完整</span><b id="maBear" style="color:var(--rose)">—</b></div><div class="metric"><span>背離候選</span><b id="divCount" style="color:var(--gold)">—</b></div><div class="metric"><span>已分析合約</span><b id="total">—</b></div></section>
-<div id="cards" class="list"></div><div id="errors" class="error"></div>
-<div class="info">只掃描估算 24h 成交額 <strong>≥ 1,500,000 USDT</strong> 的 OKX USDT 永續；成交額由 24h 標的幣成交量 × 最新價估算，與逐筆成交額會有差異。先過濾達標合約，再取前20／40個掃描。正式雙確認規則：MA5/10、MA5/20、MA10/20都完成同向穿越，形成同向完整排列且MA20斜率同向，MACD(12,26,9)主線同向穿越Signal訊號線，兩者<strong>不分先後、不限同一根K線</strong>，都必須實際交叉且目前維持同向；第二個條件剛確認時才算新訊號，不會每分鐘重複宣告。未雙確認的一律是觀察，不是正式訊號。參數：MACD 12／26／9 · Close · EMA／EMA；4MA 5／10／20／90（暫以 SMA 計算，原 TradingView 自訂指標平均線類型尚待核對）。<b>只有交易所確認已收盤的 K 線才觸發正式交叉</b>。金叉預備／死叉預備與背離候選屬觀察，不是下單訊號。均線完整排列要求 MA5／MA10 同處 MA20 一側且 MA20 連續兩根已收盤 K 線朝同方向；EMA12 與 EMA26 的零軸交叉不同於 MACD 與 Signal 的金叉／死叉。背離由已確認的價格轉折點與對應 MACD 值偵測，大小分類為暫定研究標準，無法保證反轉。現價與訊號 K 收盤價分開顯示，避免把歷史觸發價當作現在進場價。本頁開啟時每 60 秒自動重新查詢，尚未部署 24 小時背景監控。交易有風險，MACD 動能與排序並非勝率。</div>
+<div id="cards" class="list"></div>
+<details class="diagnostics" id="infoDetails">
+ <summary>ⓘ 規則說明與掃描診斷 <span class="diag-count" id="diagIndicator" hidden></span></summary>
+ <div id="errors" class="error"></div>
+ <div class="info">只掃描估算 24h 成交額 <strong>≥ 1,500,000 USDT</strong> 的 OKX USDT 永續；成交額由 24h 標的幣成交量 × 最新價估算，與逐筆成交額會有差異。先過濾達標合約，再取前20／40個掃描。正式雙確認規則：MA5/10、MA5/20、MA10/20都完成同向穿越，形成同向完整排列且MA20斜率同向，MACD(12,26,9)主線同向穿越Signal訊號線，兩者<strong>不分先後、不限同一根K線</strong>，都必須實際交叉且目前維持同向；第二個條件剛確認時才算新訊號，不會每分鐘重複宣告。未雙確認的一律是觀察，不是正式訊號。參數：MACD 12／26／9 · Close · EMA／EMA；4MA 5／10／20／90（暫以 SMA 計算，原 TradingView 自訂指標平均線類型尚待核對）。<b>只有交易所確認已收盤的 K 線才觸發正式交叉</b>。金叉預備／死叉預備與背離候選屬觀察，不是下單訊號。均線完整排列要求 MA5／MA10 同處 MA20 一側且 MA20 連續兩根已收盤 K 線朝同方向；EMA12 與 EMA26 的零軸交叉不同於 MACD 與 Signal 的金叉／死叉。背離由已確認的價格轉折點與對應 MACD 值偵測，大小分類為暫定研究標準，無法保證反轉。現價與訊號 K 收盤價分開顯示，避免把歷史觸發價當作現在進場價。本頁開啟時每 60 秒自動重新查詢，尚未部署 24 小時背景監控。交易有風險，MACD 動能與排序並非勝率。</div>
+</details>
 </main>
 <script>
 "use strict";
@@ -91,9 +105,18 @@ async function scan(){
   if(!response.ok)throw Error(data.error||"API 無法取得資料");
   if(data.timeframe!==activeTf)return;
   snapshot=data.items||[];draw();
-  el("status").textContent="已更新 · "+time(Date.parse(data.scanned_at))+"（台灣時間） · "+data.seconds+" 秒 · 24h估算成交額≥150萬USDT · 已收盤K線 · 掃描"+data.requested+"個達標合約";
-  el("errors").textContent=(data.errors||[]).length?"部分合約無法取得資料："+data.errors.join("；"):"";
- }catch(err){el("status").textContent="掃描失敗："+String(err.message||err);el("errors").textContent="請檢查 OKX API 是否可連線；不會使用過期資料假裝最新結果。";}
+  el("status").textContent="更新 "+time(Date.parse(data.scanned_at))+" · 已分析 "+data.count+"/"+data.requested+" 個達標合約";
+  var issues=data.errors||[];
+  el("errors").textContent=issues.length?"以下合約無法完成掃描："+issues.join("；"):"";
+  el("diagIndicator").hidden=!issues.length;
+  el("diagIndicator").textContent=issues.length?"資料異常 "+issues.length:"";
+ }catch(err){
+  snapshot=[];draw();
+  el("status").textContent="掃描失敗 · 可展開診斷資訊";
+  el("errors").textContent="無法取得最新資料："+String(err.message||err)+"。請檢查 OKX API 是否可連線，不使用過期資料替代。";
+  el("diagIndicator").textContent="掃描異常";
+  el("diagIndicator").hidden=false;
+ }
  finally{loading=false;el("refresh").disabled=false}
 }
 document.querySelectorAll("[data-tf]").forEach(b=>b.addEventListener("click",function(){
