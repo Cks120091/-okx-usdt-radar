@@ -5,6 +5,7 @@ The previous OKX strategy and Solana application are never imported or modified.
 """
 from __future__ import annotations
 import json
+import math
 import os
 import threading
 import time
@@ -21,6 +22,11 @@ from .dual import dual_confirm
 
 API_BASE = "https://www.okx.com"
 TIMEFRAMES = {"15m": 900, "1H": 3600, "4H": 14400, "1D": 86400}
+# USDT-denominated, *estimated* trailing 24h traded notional.
+# OKX's derivative SWAP volCcy24h reports base-currency quantity, not
+# actual accumulated USDT trade turnover. Converting at latest trade price
+# is a snapshot estimate; borderline markets may differ from exact turnover.
+MIN_24H_TURNOVER_USDT_EST = 1_500_000.0
 _CACHE = {}
 _LOCK = threading.Lock()
 
@@ -42,14 +48,43 @@ def safe_number(value):
         return 0.0
 
 
+def estimated_24h_turnover_usdt(ticker):
+    """Approximate 24h USDT notional for a linear USDT SWAP.
+
+    SWAP volCcy24h is underlying/base-coin quantity; *not* quote USDT.
+    It cannot be compared directly to the threshold. Convert via last
+    trade price and discard absent, zero, infinite or NaN inputs.
+    """
+    if not ticker.get("instId", "").endswith("-USDT-SWAP"):
+        return 0.0
+    try:
+        base_qty = float(ticker["volCcy24h"])
+        last = float(ticker["last"])
+    except (KeyError, TypeError, ValueError, OverflowError):
+        return 0.0
+    if not (math.isfinite(base_qty) and math.isfinite(last)) or base_qty <= 0 or last <= 0:
+        return 0.0
+    amount = base_qty * last
+    return amount if math.isfinite(amount) else 0.0
+
+
+def eligible_usdt_swaps(tickers, minimum=MIN_24H_TURNOVER_USDT_EST):
+    """Hard gate applied BEFORE market candles, MA/MACD, or signal ranking."""
+    if not math.isfinite(minimum) or minimum < 0:
+        raise ValueError("Invalid 24h turnover minimum")
+    eligible = []
+    for ticker in tickers:
+        notional = estimated_24h_turnover_usdt(ticker)
+        if notional < minimum:
+            continue
+        eligible.append({**ticker, "turnover_24h_usdt_est": notional})
+    eligible.sort(key=lambda row: row["turnover_24h_usdt_est"], reverse=True)
+    return eligible
+
+
 def ranked_usdt_swaps(limit: int):
-    # USD notionals are approximate: the public SWAP ticker exposes 24h base-volume
-    # and a last price, NOT an authoritative USDT turnover or liquidity figure.
     items = okx_get("/api/v5/market/tickers", instType="SWAP")
-    items = [r for r in items if r.get("instId", "").endswith("-USDT-SWAP")
-             and safe_number(r.get("last")) > 0]
-    items.sort(key=lambda r: safe_number(r.get("volCcy24h")) * safe_number(r.get("last")), reverse=True)
-    return items[:limit]
+    return eligible_usdt_swaps(items)[:limit]
 
 
 def scan_one(ticker, timeframe):
@@ -79,6 +114,7 @@ def scan_one(ticker, timeframe):
     )
     return {
         "instId": inst, "last": safe_number(ticker.get("last")),
+        "turnover_24h_usdt_est": ticker["turnover_24h_usdt_est"],
         "confirmed_close": closes[-1],
         "confirmed_bar_start_ms": bar_start, "confirmed_bar_end_ms": bar_end,
         "rank_priority": priority, **metrics, **technical, "dual": dual,
@@ -100,10 +136,13 @@ def do_scan(timeframe, limit):
     signals.sort(key=lambda r: (r["rank_priority"], -r["normalized_histogram"]))
     return {
         "mode": "READ_ONLY", "timeframe": timeframe, "requested": len(rows),
+        "turnover_24h_min_usdt_est": MIN_24H_TURNOVER_USDT_EST,
+        "turnover_basis": "SWAP 24h underlying/base volume × latest price; estimate only",
+        "universe": "OKX USDT-margined perpetuals with estimated 24h turnover >= 1,500,000 USDT",
         "count": len(signals), "items": signals, "errors": errors[:12],
         "scanned_at": datetime.now(timezone.utc).isoformat(),
         "seconds": round(time.monotonic() - start, 2),
-        "note": "嚴格雙確認：MA完整結構新成立與MACD訊號線同向交叉，最近5根已收盤K線內先後確認；其他條件僅觀察。4MA暫用SMA，需核對TradingView腳本。"
+        "note": "僅掃描24h估算成交額>=150萬USDT的OKX USDT永續，先過濾再掃K線；估算基於24h標的幣數量×現價，非精確成交額。MA+MACD最近5根確認；其他僅觀察。4MA暫用SMA。"
     }
 
 
