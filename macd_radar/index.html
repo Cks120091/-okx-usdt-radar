@@ -1,0 +1,102 @@
+<!DOCTYPE html>
+<html lang="zh-Hant">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
+<title>MACD 雷達｜OKX USDT 永續</title>
+<style>
+:root{color-scheme:dark;--bg:#090e19;--panel:#121b2b;--edge:#24344b;--text:#eaf1ff;--muted:#91a1b8;--aqua:#69e5c1;--rose:#ff8498;--gold:#f5c86a}
+*{box-sizing:border-box}body{margin:0;background:radial-gradient(ellipse at 30% 0%,#17273a 0%,var(--bg) 52%);color:var(--text);font:15px/1.5 -apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif}
+main{max-width:1160px;padding:22px 18px 100px;margin:auto}.top{display:flex;justify-content:space-between;align-items:flex-start;gap:12px}.eyebrow{letter-spacing:.22em;color:var(--aqua);font-size:11px;font-weight:800}
+h1{font-size:clamp(27px,6vw,40px);line-height:1.1;margin:8px 0 4px;letter-spacing:-.03em}.sub{color:var(--muted);margin:0}.readonly{white-space:nowrap;border:1px solid #335646;border-radius:999px;color:var(--aqua);padding:6px 10px;font-size:12px}
+.control{display:flex;gap:10px;flex-wrap:wrap;align-items:center;margin:28px 0 20px}.tabs{display:flex;padding:4px;background:#172237;border:1px solid var(--edge);border-radius:14px;flex-wrap:wrap;gap:4px}
+button,select,input{font:inherit;color:var(--text)}button{cursor:pointer}button:disabled{cursor:wait;opacity:.55}.tabs button{border:0;background:transparent;border-radius:10px;padding:10px 15px;font-weight:700;color:var(--muted)}
+.tabs button.active{background:#2a4555;color:var(--aqua)}.btn{background:#1e344c;border:1px solid #3a5c6d;border-radius:12px;padding:11px 17px;font-weight:700}
+select,input{background:#101b2b;border:1px solid var(--edge);border-radius:12px;padding:11px 12px}input{min-width:180px;flex:1}.status{color:var(--muted);font-size:13px;margin-bottom:15px;min-height:20px}
+.metrics{display:grid;grid-template-columns:repeat(4,1fr);gap:10px;margin-bottom:20px}.metric{background:var(--panel);border:1px solid var(--edge);border-radius:15px;padding:15px}.metric b{display:block;font-size:26px;font-variant-numeric:tabular-nums;margin-top:3px}.metric span{color:var(--muted);font-size:12px}
+.list{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:13px}.card{background:linear-gradient(160deg,#182439,#111a2b);border:1px solid var(--edge);border-radius:18px;padding:17px;min-width:0}
+.card-header{display:flex;justify-content:space-between;align-items:center;gap:7px}.coin{font-size:19px;font-weight:800;letter-spacing:-.02em;overflow-wrap:anywhere}.pill{border-radius:999px;background:#26384d;color:#d5e2f4;font-size:12px;padding:5px 9px;white-space:nowrap}.pill.long{color:var(--aqua);background:#153a36}.pill.short{color:var(--rose);background:#412333}.pill.watch{color:var(--gold);background:#443922}
+.phase{margin-top:10px;color:var(--muted);font-size:13px}.prices{display:grid;grid-template-columns:1fr 1fr;margin:14px 0;padding:12px 0;border-top:1px solid var(--edge);border-bottom:1px solid var(--edge);gap:12px}
+.prices small,.values small{color:var(--muted);display:block;font-size:11px}.prices strong{font-size:17px;font-variant-numeric:tabular-nums}.values{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:8px}.values b{font-size:14px;font-variant-numeric:tabular-nums;overflow-wrap:anywhere}
+.signal-line{margin-top:10px;padding:9px 11px;border-radius:10px;background:#202d42;font-size:12px;color:#d9e8fa}.signal-line.positive{border-left:3px solid var(--aqua)}.signal-line.negative{border-left:3px solid var(--rose)}.signal-line.caution{border-left:3px solid var(--gold)}.signal-line b{color:var(--text)}.ma-values{grid-template-columns:repeat(4,minmax(0,1fr));margin-top:12px}
+.foot{color:var(--muted);font-size:11px;margin-top:14px}.info{font-size:12px;color:var(--muted);border-top:1px solid var(--edge);margin-top:22px;padding-top:16px}.error{color:var(--rose);font-size:12px;white-space:pre-wrap}.empty{border:1px dashed var(--edge);border-radius:16px;padding:32px;text-align:center;color:var(--muted)}
+@media(max-width:720px){.list{grid-template-columns:1fr}.metrics{grid-template-columns:repeat(2,1fr)}.control{align-items:stretch}.tabs{width:100%;justify-content:space-between}.tabs button{flex:1;padding:10px 6px}.top{align-items:center}.readonly{font-size:11px}h1{font-size:30px}}
+</style>
+</head>
+<body>
+<main>
+<header class="top"><div><div class="eyebrow">NEW GENERATION / OKX PERPETUAL</div><h1>MA × MACD 雷達 <span style="color:var(--aqua)">·</span></h1><p class="sub">均線結構 · MACD 交叉 · 樞紐背離</p></div><div class="readonly">● 僅分析｜不下單</div></header>
+<div class="control">
+ <div class="tabs" aria-label="時間週期"><button data-tf="15m" class="active">15m</button><button data-tf="1H">1H</button><button data-tf="4H">4H</button><button data-tf="1D">1D</button></div>
+ <select id="limit" aria-label="掃描數量"><option value="20">前 20 個合約</option><option value="40">前 40 個合約</option></select>
+ <button class="btn" id="refresh">↻ 掃描更新</button>
+ <input id="filter" placeholder="搜尋幣種，如 BTC" aria-label="搜尋幣種">
+</div>
+<div class="status" id="status">準備掃描已收盤 K 線…</div>
+<section class="metrics"><div class="metric"><span>最新金叉</span><b id="gold" style="color:var(--aqua)">—</b></div><div class="metric"><span>最新死叉</span><b id="death" style="color:var(--rose)">—</b></div><div class="metric"><span>交叉預備</span><b id="watch" style="color:var(--gold)">—</b></div><div class="metric"><span>均線多方完整</span><b id="maBull" style="color:var(--aqua)">—</b></div><div class="metric"><span>均線空方完整</span><b id="maBear" style="color:var(--rose)">—</b></div><div class="metric"><span>背離候選</span><b id="divCount" style="color:var(--gold)">—</b></div><div class="metric"><span>已分析合約</span><b id="total">—</b></div></section>
+<div id="cards" class="list"></div><div id="errors" class="error"></div>
+<div class="info">參數：MACD 12／26／9 · Close · EMA／EMA；4MA 5／10／20／90（暫以 SMA 計算，原 TradingView 自訂指標平均線類型尚待核對）。<b>只有交易所確認已收盤的 K 線才觸發正式交叉</b>。金叉預備／死叉預備與背離候選屬觀察，不是下單訊號。均線完整排列要求 MA5／MA10 同處 MA20 一側且 MA20 連續兩根已收盤 K 線朝同方向；EMA12 與 EMA26 的零軸交叉不同於 MACD 與 Signal 的金叉／死叉。背離由已確認的價格轉折點與對應 MACD 值偵測，大小分類為暫定研究標準，無法保證反轉。現價與訊號 K 收盤價分開顯示，避免把歷史觸發價當作現在進場價。本頁開啟時每 60 秒自動重新查詢，尚未部署 24 小時背景監控。交易有風險，MACD 動能與排序並非勝率。</div>
+</main>
+<script>
+"use strict";
+var activeTf="15m", snapshot=[], loading=false;
+var el=id=>document.getElementById(id);
+function escapeHtml(x){return String(x).replace(/[&<>"']/g,function(c){return {"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;"}[c]})}
+function fmt(x){x=Number(x);if(!Number.isFinite(x))return "—";if(x===0)return "0";if(Math.abs(x)<0.00001)return x.toExponential(3);if(Math.abs(x)<1)return x.toFixed(6).replace(/0+$/,"").replace(/\.$/,"");return x.toLocaleString("en-US",{maximumFractionDigits:x<100?4:2})}
+function time(ms){return new Date(ms).toLocaleString("zh-TW",{timeZone:"Asia/Taipei",month:"2-digit",day:"2-digit",hour:"2-digit",minute:"2-digit",hour12:false})}
+function state(s){if(s.event==="金叉")return ["最新金叉","long"];if(s.event==="死叉")return ["最新死叉","short"];if(s.phase!=="方向維持")return [s.phase,"watch"];return [s.side+"維持",s.side==="多方"?"long":s.side==="空方"?"short":""]}
+function signalRow(txt,style){return '<div class="signal-line '+style+'">'+escapeHtml(txt)+'</div>'}
+function card(s){
+ var v=state(s),x=document.createElement("article");x.className="card";
+ x.innerHTML='<div class="card-header"><div class="coin">'+escapeHtml(s.instId.replace("-USDT-SWAP",""))+' <span style="color:var(--muted);font-size:12px;font-weight:500">/ USDT 永續</span></div><span class="pill '+v[1]+'">'+escapeHtml(v[0])+'</span></div>'+
+ '<div class="phase">'+escapeHtml(s.momentum)+' · '+escapeHtml(s.side)+' · '+escapeHtml(activeTf)+' 已收盤確認</div>'+
+ '<div class="prices"><div><small>目前成交價</small><strong>'+fmt(s.last)+'</strong></div><div><small>最近已收盤 K 收盤價</small><strong>'+fmt(s.confirmed_close)+'</strong></div></div>'+
+ '<div class="values"><div><small>MACD</small><b>'+fmt(s.macd)+'</b></div><div><small>Signal</small><b>'+fmt(s.signal)+'</b></div><div><small>Histogram</small><b>'+fmt(s.histogram)+'</b></div></div>'+
+ '<div class="values ma-values"><div><small>MA5</small><b>'+fmt(s.ma.ma5)+'</b></div><div><small>MA10</small><b>'+fmt(s.ma.ma10)+'</b></div><div><small>MA20</small><b>'+fmt(s.ma.ma20)+'</b></div><div><small>MA90</small><b>'+fmt(s.ma.ma90)+'</b></div></div>'+
+ signalRow('MA5/20：'+s.ma.ma5_vs20_recent+' · MA10/20：'+s.ma.ma10_vs20_recent,'')+
+ signalRow('均線：'+s.ma.structure+' · '+s.ma.cross_5_10, s.ma.structure.includes('空方')?'negative':s.ma.structure.includes('多方')?'positive':'caution')+
+ signalRow('結構事件：'+s.ma.structure_trigger+' · '+s.ma.ma90_position, s.ma.structure_trigger==='無新結構確認'?'':'caution')+
+ signalRow('MACD：'+s.event+' · '+s.ema12_26_cross,s.event==='死叉'?'negative':s.event==='金叉'?'positive':'')+
+ signalRow('共振：'+s.confluence,s.confluence.includes('空方')?'negative':s.confluence.includes('多方')?'positive':'')+
+ (s.divergences||[]).map(function(d){return signalRow(d.level+' · '+d.pattern+' · 波峰/谷間隔 '+d.pivot_gap_bars+' 根 · 已確認 '+d.confirmed_bars_ago+' 根', 'caution')}).join('')+
+ '<div class="foot">訊號 K 完結時間（台灣）：'+escapeHtml(time(s.confirmed_bar_end_ms))+'</div>';return x
+}
+function draw(){
+ var key=el("filter").value.trim().toUpperCase();
+ var items=snapshot.filter(s=>s.instId.toUpperCase().includes(key));
+ var host=el("cards");host.replaceChildren();
+ if(!items.length){var empty=document.createElement("div");empty.className="empty";empty.textContent=snapshot.length?"找不到符合的幣種":"此時間週期暫無可顯示資料";host.appendChild(empty);}
+ else items.forEach(s=>host.appendChild(card(s)));
+ el("gold").textContent=snapshot.filter(s=>s.event==="金叉").length;
+ el("death").textContent=snapshot.filter(s=>s.event==="死叉").length;
+ el("watch").textContent=snapshot.filter(s=>s.phase==="金叉預備"||s.phase==="死叉預備").length;
+ el("maBull").textContent=snapshot.filter(s=>s.ma&&s.ma.structure==="多方完整排列").length;
+ el("maBear").textContent=snapshot.filter(s=>s.ma&&s.ma.structure==="空方完整排列").length;
+ el("divCount").textContent=snapshot.filter(s=>(s.divergences||[]).length>0).length;
+ el("total").textContent=snapshot.length;
+}
+async function scan(){
+ if(loading)return;loading=true;el("refresh").disabled=true;el("status").textContent="正在向 OKX 查詢已收盤 K 線…";
+ try{
+  var url="/api/scan?tf="+encodeURIComponent(activeTf)+"&limit="+el("limit").value;
+  var response=await fetch(url,{cache:"no-store"});
+  var data=await response.json();
+  if(!response.ok)throw Error(data.error||"API 無法取得資料");
+  if(data.timeframe!==activeTf)return;
+  snapshot=data.items||[];draw();
+  el("status").textContent="已更新 · "+time(Date.parse(data.scanned_at))+"（台灣時間） · "+data.seconds+" 秒 · 已確認 K 線";
+  el("errors").textContent=(data.errors||[]).length?"部分合約無法取得資料："+data.errors.join("；"):"";
+ }catch(err){el("status").textContent="掃描失敗："+String(err.message||err);el("errors").textContent="請檢查 OKX API 是否可連線；不會使用過期資料假裝最新結果。";}
+ finally{loading=false;el("refresh").disabled=false}
+}
+document.querySelectorAll("[data-tf]").forEach(b=>b.addEventListener("click",function(){
+ if(loading)return;activeTf=b.dataset.tf;document.querySelectorAll("[data-tf]").forEach(v=>v.classList.toggle("active",v===b));snapshot=[];scan()
+}));
+el("refresh").addEventListener("click",scan);
+el("limit").addEventListener("change",scan);
+el("filter").addEventListener("input",draw);
+scan();
+setInterval(function(){if(!document.hidden)scan()},60000);
+</script>
+</body>
+</html>

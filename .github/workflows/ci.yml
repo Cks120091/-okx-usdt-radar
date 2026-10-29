@@ -1,4 +1,4 @@
-name: Solana Paper Only CI
+name: OKX MA MACD Radar CI
 on:
   push:
     branches: [main]
@@ -12,24 +12,19 @@ jobs:
     timeout-minutes: 10
     steps:
       - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
       - uses: actions/setup-python@v5
         with:
           python-version: "3.12"
-      - name: Verify Solana dashboard JS
-        run: node scripts/check_solana_dashboard.cjs
-      - name: Compile new runtime
-        run: python -m compileall -q solana_paper run.py
-      - name: Offline paper engine tests
-        run: python -m unittest discover -s solana_paper/tests -p 'test_*.py' -v
-      - name: Offline paper accounting tests
-        run: python -m unittest discover -s tests -p 'test_solana_paper.py' -v
-      - name: Offline wallet, safety and reserve tests
-        run: python -m unittest discover -s tests -p 'test_intelligence.py' -v
-      - name: Offline OpenAI integration and cost-cap tests
-        run: python -m unittest discover -s tests -p 'test_openai_agent.py' -v
-      - name: Offline seventh JUDGE and A/B shadow ledger tests
-        run: python -m unittest discover -s tests -p 'test_shadow_judge.py' -v
-      - name: Offline free stream and one-second screen tests
-        run: python -m unittest discover -s tests -p 'test_chain_stream.py' -v
+      - name: Validate responsive dashboard JavaScript
+        run: node scripts/check_macd_dashboard.cjs
+      - name: Compile MA MACD server
+        run: python -m compileall -q macd_radar run.py
+      - name: MACD and MA/divergence offline tests
+        run: python -m unittest discover -s macd_radar/tests -p 'test_*.py' -v
+      - name: Confirm production entrypoint imports only new radar
+        run: python -c "import run; import macd_radar.app; assert run.main is macd_radar.app.main"
       - name: Verify formatting
         run: git diff --check

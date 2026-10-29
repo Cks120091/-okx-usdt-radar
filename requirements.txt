@@ -1,2 +1,2 @@
-# WebSocket client is only used for read-only, fee-free live token events.
-websocket-client==1.8.0
+# MA × MACD radar only uses Python 3.12 standard library.
+# No Solana, WebSocket, paid services, or trading dependencies.
