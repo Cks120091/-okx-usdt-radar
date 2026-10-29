@@ -27,9 +27,12 @@ TIMEFRAMES = {"15m": 900, "1H": 3600, "4H": 14400, "1D": 86400}
 # actual accumulated USDT trade turnover. Converting at latest trade price
 # is a snapshot estimate; borderline markets may differ from exact turnover.
 MIN_24H_TURNOVER_USDT_EST = 1_500_000.0
-# OKX public instruments: "1" = cryptocurrency, "3" = stocks.
-# Treat empty/unrecognized categories as NOT crypto (fail closed).
+# OKX instruments: 1=crypto, 3=stocks, 4=commodities.
+# Only the official spot-gold contract XAU-USDT-SWAP from category 4
+# is explicitly allowed. All other commodities are excluded.
 CRYPTO_INST_CATEGORY = "1"
+GOLD_INST_CATEGORY = "4"
+GOLD_USDT_SWAP_INST_ID = "XAU-USDT-SWAP"
 INSTRUMENT_CACHE_SECONDS = 300
 _CACHE = {}
 _LOCK = threading.Lock()
@@ -88,23 +91,31 @@ def eligible_usdt_swaps(tickers, minimum=MIN_24H_TURNOVER_USDT_EST):
     return eligible
 
 
-def crypto_usdt_swap_ids(instruments):
-    """Allow only live/known-crypto USDT perpetuals.
+def eligible_asset_usdt_swap_ids(instruments):
+    """Allow live crypto + EXACTLY ONE gold USDT perpetual.
 
-    This is the exchange-provided ASSET CLASS rather than a brittle ticker
-    blacklist. It removes stock perps, equity indices and all other non-crypto
-    TradFi asset classes; missing category means not eligible.
+    Normal crypto is allowed only with exchange instCategory=1.
+    Gold is XAU-USDT-SWAP with instCategory=4, confirmed by OKX
+    exchange API documentation and its 2026-04-22 reclassification log.
+    Stocks/indices, silver, crude oil, forex and unknown classifications
+    fail closed. Category 4 alone never qualifies a contract.
     """
     return frozenset(
         item["instId"] for item in instruments
         if item.get("instType") == "SWAP"
         and item.get("instId", "").endswith("-USDT-SWAP")
-        and str(item.get("instCategory", "")) == CRYPTO_INST_CATEGORY
+        and (
+            str(item.get("instCategory", "")) == CRYPTO_INST_CATEGORY
+            or (
+                str(item.get("instCategory", "")) == GOLD_INST_CATEGORY
+                and item["instId"] == GOLD_USDT_SWAP_INST_ID
+            )
+        )
         and item.get("state", "live") == "live"
     )
 
 
-def active_crypto_usdt_swap_ids():
+def active_eligible_asset_usdt_swap_ids():
     """Cache positive exchange metadata for five minutes to limit API load."""
     global _INSTRUMENT_CACHE
     now = time.monotonic()
@@ -113,21 +124,28 @@ def active_crypto_usdt_swap_ids():
             return _INSTRUMENT_CACHE[1]
         instruments = okx_get("/api/v5/public/instruments", instType="SWAP")
         # On category metadata outage, do NOT fall back to scanning all SWAPs.
-        crypto_ids = crypto_usdt_swap_ids(instruments)
-        if not crypto_ids:
-            raise RuntimeError("OKX 合約類別查詢無有效加密貨幣標的，已停止掃描以防誤納股票合約")
-        _INSTRUMENT_CACHE = (time.monotonic(), crypto_ids)
-        return crypto_ids
+        eligible_ids = eligible_asset_usdt_swap_ids(instruments)
+        if not eligible_ids:
+            raise RuntimeError("OKX 合約類別查詢無有效加密貨幣／黃金標的，已停止掃描以防誤納股票合約")
+        _INSTRUMENT_CACHE = (time.monotonic(), eligible_ids)
+        return eligible_ids
 
 
 def ranked_usdt_swaps(limit: int):
-    # Only crypto assets from official SWAP metadata can reach the volume
-    # eligibility gate or subsequent candlestick scanner.
-    valid_ids = active_crypto_usdt_swap_ids()
+    # Exchange asset-category allowlist executes BEFORE volume and K candles.
+    valid_ids = active_eligible_asset_usdt_swap_ids()
     items = okx_get("/api/v5/market/tickers", instType="SWAP")
-    return eligible_usdt_swaps(
+    ranked = eligible_usdt_swaps(
         item for item in items if item.get("instId") in valid_ids
-    )[:limit]
+    )
+    selected = ranked[:limit]
+    # Keep one slot for active, above-threshold gold, even when crypto volume
+    # dominates the top-N. This does NOT bypass the 1.5M USDT volume gate.
+    gold = next((row for row in ranked if row["instId"] == GOLD_USDT_SWAP_INST_ID), None)
+    if gold is not None and gold not in selected and limit > 0:
+        selected = ranked[:limit-1] + [gold]
+        selected.sort(key=lambda row: row["turnover_24h_usdt_est"], reverse=True)
+    return selected
 
 
 def scan_one(ticker, timeframe):
@@ -179,14 +197,14 @@ def do_scan(timeframe, limit):
     signals.sort(key=lambda r: (r["rank_priority"], -r["normalized_histogram"]))
     return {
         "mode": "READ_ONLY", "timeframe": timeframe, "requested": len(rows),
-        "asset_filter": "OKX instCategory=1 crypto only; exclude stocks/indices/non-crypto and unknowns",
+        "asset_filter": "OKX category=1 crypto plus category=4 XAU-USDT-SWAP gold only; exclude stocks/indices/other commodities/forex",
         "turnover_24h_min_usdt_est": MIN_24H_TURNOVER_USDT_EST,
         "turnover_basis": "SWAP 24h underlying/base volume × latest price; estimate only",
-        "universe": "OKX crypto-only USDT-margined perpetuals with estimated 24h turnover >= 1,500,000 USDT",
+        "universe": "OKX crypto plus XAU gold USDT perpetual; estimated 24h turnover >= 1,500,000 USDT",
         "count": len(signals), "items": signals, "errors": errors[:12],
         "scanned_at": datetime.now(timezone.utc).isoformat(),
         "seconds": round(time.monotonic() - start, 2),
-        "note": "僅掃描OKX instCategory=1加密貨幣USDT永續，排除股票/股指/其他傳統金融合約，且24h估算成交額>=150萬USDT；估算非精確成交額。MA與MACD實際同向交叉，先後不限且無固定5根截止；兩者仍有效才算確認；其他僅觀察。4MA暫用SMA。"
+        "note": "掃描OKX類別1加密貨幣及類別4的XAU-USDT-SWAP黃金永續；排除股票/股指/白銀/原油/外匯，24h估算成交額>=150萬USDT；估算非精確成交額。MA與MACD實際同向交叉，先後不限且無固定5根截止；兩者仍有效才算確認；其他僅觀察。4MA暫用SMA。"
     }
 
 
