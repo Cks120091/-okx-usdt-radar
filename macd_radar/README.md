@@ -73,3 +73,13 @@ Data source: OKX public, unauthenticated `/api/v5/market/tickers?instType=SWAP` 
 ### Test and release status
 - Offline unit test file `macd_radar/tests/test_technical.py` added for MA order, MA slope, zero-cross distinction, regular bearish divergence and delayed pivot confirmation. **The tests have been committed but not executed in a connected test environment yet.**
 - Compare DOGE and ETH charts with matching OKX contract/timeframe and the TradingView custom 4MA source before calling visual parity.
+
+
+## 嚴格雙確認模式（2026-10-29）
+
+- **正式交易訊號必須兩項都成立**：① MA5／MA10／MA20 同向完整排列、MA20 連續向同方向傾斜，新形成完整結構；② MACD(12,26,9) 主線穿越 Signal(9) 訊號線，同方向新金叉／新死叉。這裡的 MACD 交叉不是 EMA12／EMA26 交叉（零軸），零軸狀態仍單獨呈現。
+- 兩事件可以**先後發生**，暫定最近 **5 根已收盤 K 線**內完成；不要求同一根。完成當根需兩者當下維持同向，否則不觸發。
+- 最新一根已收盤 K 線剛完成第二條件才是 `正式雙確認做多／做空`。若雙條件過去已成立，本輪只標示延續狀態，不當作新訊號重複推播。
+- 頁面預設顯示「正式雙確認」；單一 MACD 交叉、背離、均線交叉只放進「觀察池」，不標示正式交易訊號。
+- 現有前端按鈕不是全天候後台推播，Render Free 服務可能閒置，仍須另行實作背景監控及通知。
+- MA 平均線暫用 SMA，尚未核對 TradingView 的自訂 4MA 指標來源；此規則是研究起始版本，未完成市場真實報價及勝率驗證。
