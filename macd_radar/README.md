@@ -93,11 +93,14 @@ Data source: OKX public, unauthenticated `/api/v5/market/tickers?instType=SWAP` 
 - 這是成交活躍度篩選，不等於訂單簿深度，也不能代替滑價評估；避免用它當作勝率指標。
 - 離線測試涵蓋臨界值、低於門檻、非 USDT 合約、缺失／NaN 資料，以及未達標時**不觸發 K 線掃描**。
 
-## 僅掃描加密貨幣合約（2026-10-29）
+## 掃描標的：加密貨幣＋黃金（2026-10-29）
 
 - 在任何成交額、K 線、MA、MACD 或背離分析**之前**，先查 OKX 唯讀公開 API `/api/v5/public/instruments?instType=SWAP`。
-- 只接受 `instType=SWAP`、`instId` 結尾 `-USDT-SWAP`、`instCategory="1"`（Crypto）且 `state=live` 的標的。用交易所官方資產分類排除股票（如 AAPL／NVDA／TSLA）、股票指數及其他非加密資產（黃金、外匯、商品、債券等），**不是依賴硬編碼股票名稱黑名單**。
-- `instCategory` 不明或缺失一律不掃；如果整份標的資料無有效加密貨幣，或查詢失敗，掃描會明確報錯並停止，**不會為了顯示訊號而退回掃描所有合約**。
-- 官方合約分類清單在服務端快取 5 分鐘，降低 OKX API 負載。合約清單可能在快取有效期內變動。
-- 原本的「估算 24h 成交額 >= 150 萬 USDT」門檻、前20／40達標合約上限、MA × MACD 雙重確認、K 線收盤規則均保持不變。
-- 排除 TradFi 是使用者要求的商品範圍調整，不是增加交易策略條件；若需要個別商品例外，應另行討論。
+- **一般加密貨幣**：要求 `instType=SWAP`、`instId` 結尾 `-USDT-SWAP`、`instCategory="1"`（Crypto）且 `state=live`。
+- **黃金唯一特例**：`XAU-USDT-SWAP` 且 `instCategory="4"`（Commodities），同時 `state=live`；不是整個類別 4 都開放。OKX 已於 2026-04-22 將 `XAU-USDT-SWAP` 重新歸類為大宗商品；2026-01-15 已將舊 `XAUT-USDT-SWAP` 更名為 `XAU-USDT-SWAP`。
+- 股票（AAPL、NVDA、TSLA）、股指、白銀（XAG）、原油（CL/BZ）、外匯、債券及分類缺失／不明合約均不納入；不依賴股票代號黑名單。
+- **黃金同樣需要估算 24 小時成交額 ≥ 1,500,000 USDT**。達標、交易中時保留前 20／40 個掃描名額的其中一席；不會突破掃描上限，不會放寬成交額門檻。未達標時也不保留。
+- 官方分類清單快取 5 分鐘。若官方分類查詢失敗、找不到任何有效標的，則停止掃描，不會退回掃描全部 USDT 永續。
+- MA × MACD 雙重確認、K 線已收盤確認及背離規則均完全不變；此修改只影響可掃描標的範圍。
+
+參考：OKX [API 變更紀錄](https://www.okx.com/docs-v5/log_en/)（2026-04-22 分類及 2026-01-15 黃金合約更名）。
