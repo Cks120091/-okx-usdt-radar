@@ -50,7 +50,8 @@ class Test24hTurnoverGate(unittest.TestCase):
             self.ticker("B-USDT-SWAP", 1_499_999, 1),
             self.ticker("C-USDT-SWAP", 2_000_000, 1),
         ]
-        with patch("macd_radar.app.okx_get", return_value=rows):
+        with patch("macd_radar.app.okx_get", return_value=rows), \
+             patch("macd_radar.app.active_crypto_usdt_swap_ids", return_value={"A-USDT-SWAP", "B-USDT-SWAP", "C-USDT-SWAP"}):
             top = ranked_usdt_swaps(1)
             self.assertEqual(len(top), 1)
             self.assertEqual(top[0]["instId"], "C-USDT-SWAP")
@@ -69,6 +70,7 @@ class Test24hTurnoverGate(unittest.TestCase):
                 "turnover_24h_usdt_est": ticker["turnover_24h_usdt_est"],
             }
         with patch("macd_radar.app.okx_get", return_value=tickers), \
+             patch("macd_radar.app.active_crypto_usdt_swap_ids", return_value={"BTC-USDT-SWAP", "SOL-USDT-SWAP"}), \
              patch("macd_radar.app.scan_one", side_effect=scan_stub) as scanner:
             result = do_scan("15m", 40)
         self.assertEqual(result["requested"], 1)
