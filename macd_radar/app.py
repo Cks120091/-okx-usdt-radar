@@ -17,6 +17,7 @@ from urllib.request import Request, urlopen
 
 from .core import calculate
 from .technical import combined_analysis
+from .dual import dual_confirm
 
 API_BASE = "https://www.okx.com"
 TIMEFRAMES = {"15m": 900, "1H": 3600, "4H": 14400, "1D": 86400}
@@ -66,20 +67,21 @@ def scan_one(ticker, timeframe):
     lows = [confirmed[t][1] for t in times]
     metrics = calculate(closes).as_dict()
     technical = combined_analysis(closes, highs, lows, times, ma_type="SMA")
+    dual = dual_confirm(closes, ma_type="SMA")
     bar_start = times[-1]
     bar_end = bar_start + 1000 * TIMEFRAMES[timeframe]
     priority = (
-        0 if technical["ma"]["structure_trigger"] != "無新結構確認" and metrics["event"] != "無新交叉" else
-        1 if technical["ma"]["structure_trigger"] != "無新結構確認" else
-        2 if metrics["event"] != "無新交叉" else
-        3 if technical["divergences"] else
-        4 if metrics["phase"] in ("金叉預備", "死叉預備") else 5
+        0 if dual["is_new"] else
+        1 if dual["confirmed"] else
+        2 if technical["ma"]["structure_trigger"] != "無新結構確認" else
+        3 if metrics["event"] != "無新交叉" else
+        4 if technical["divergences"] else 5
     )
     return {
         "instId": inst, "last": safe_number(ticker.get("last")),
         "confirmed_close": closes[-1],
         "confirmed_bar_start_ms": bar_start, "confirmed_bar_end_ms": bar_end,
-        "rank_priority": priority, **metrics, **technical,
+        "rank_priority": priority, **metrics, **technical, "dual": dual,
     }
 
 
@@ -101,7 +103,7 @@ def do_scan(timeframe, limit):
         "count": len(signals), "items": signals, "errors": errors[:12],
         "scanned_at": datetime.now(timezone.utc).isoformat(),
         "seconds": round(time.monotonic() - start, 2),
-        "note": "僅依已收盤K線確認交叉及樞紐背離；4MA暫以SMA計算，待核對原TradingView腳本；候選不代表勝率或交易許可。"
+        "note": "嚴格雙確認：MA完整結構新成立與MACD訊號線同向交叉，最近5根已收盤K線內先後確認；其他條件僅觀察。4MA暫用SMA，需核對TradingView腳本。"
     }
 
 
