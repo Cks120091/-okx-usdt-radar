@@ -16,6 +16,7 @@ from urllib.parse import parse_qs, urlencode, urlsplit
 from urllib.request import Request, urlopen
 
 from .core import calculate
+from .technical import combined_analysis
 
 API_BASE = "https://www.okx.com"
 TIMEFRAMES = {"15m": 900, "1H": 3600, "4H": 14400, "1D": 86400}
@@ -56,21 +57,29 @@ def scan_one(ticker, timeframe):
     confirmed = {}
     for row in candles:
         if len(row) >= 9 and str(row[8]) == "1" and safe_number(row[4]) > 0:
-            confirmed[int(row[0])] = float(row[4])
-    if len(confirmed) < 90:
-        raise ValueError("不足 90 根已收盤 K 線")
+            confirmed[int(row[0])] = (float(row[2]), float(row[3]), float(row[4]))
+    if len(confirmed) < 100:
+        raise ValueError("不足 100 根已收盤 K 線")
     times = sorted(confirmed)
-    closes = [confirmed[t] for t in times]
+    closes = [confirmed[t][2] for t in times]
+    highs = [confirmed[t][0] for t in times]
+    lows = [confirmed[t][1] for t in times]
     metrics = calculate(closes).as_dict()
+    technical = combined_analysis(closes, highs, lows, times, ma_type="SMA")
     bar_start = times[-1]
     bar_end = bar_start + 1000 * TIMEFRAMES[timeframe]
-    priority = (0 if metrics["event"] != "無新交叉" else
-                1 if metrics["phase"] in ("金叉預備", "死叉預備") else 2)
+    priority = (
+        0 if technical["ma"]["structure_trigger"] != "無新結構確認" and metrics["event"] != "無新交叉" else
+        1 if technical["ma"]["structure_trigger"] != "無新結構確認" else
+        2 if metrics["event"] != "無新交叉" else
+        3 if technical["divergences"] else
+        4 if metrics["phase"] in ("金叉預備", "死叉預備") else 5
+    )
     return {
         "instId": inst, "last": safe_number(ticker.get("last")),
         "confirmed_close": closes[-1],
         "confirmed_bar_start_ms": bar_start, "confirmed_bar_end_ms": bar_end,
-        "rank_priority": priority, **metrics,
+        "rank_priority": priority, **metrics, **technical,
     }
 
 
@@ -92,7 +101,7 @@ def do_scan(timeframe, limit):
         "count": len(signals), "items": signals, "errors": errors[:12],
         "scanned_at": datetime.now(timezone.utc).isoformat(),
         "seconds": round(time.monotonic() - start, 2),
-        "note": "僅依已收盤 K 線確認 MACD；預備訊號不是正式交叉；動能不代表勝率。"
+        "note": "僅依已收盤K線確認交叉及樞紐背離；4MA暫以SMA計算，待核對原TradingView腳本；候選不代表勝率或交易許可。"
     }
 
 
