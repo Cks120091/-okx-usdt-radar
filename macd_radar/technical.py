@@ -53,6 +53,16 @@ def ma_structure(closes: Sequence[float], ma_type: str = "SMA") -> dict:
     elif a[-2] >= b[-2] and a[-1] < b[-1]:
         cross = "MA5下穿MA10"
 
+    def recent_cross(first: list, second: list, name: str) -> str:
+        # Only the most recent completed cross over a bounded 12-bar window;
+        # "already above/below" is not mislabeled as a new crossing.
+        for i in range(len(first)-1, max(0, len(first)-13), -1):
+            if first[i-1] <= second[i-1] and first[i] > second[i]:
+                return f"{name}上穿20（{len(first)-1-i}根前）"
+            if first[i-1] >= second[i-1] and first[i] < second[i]:
+                return f"{name}下穿20（{len(first)-1-i}根前）"
+        return "近12根無穿越20"
+
     phase = check(-1)
     prev_phase = check(-2)
     trigger = ("空方結構新成立" if phase == "空方完整排列" and prev_phase != phase
@@ -61,7 +71,10 @@ def ma_structure(closes: Sequence[float], ma_type: str = "SMA") -> dict:
     return {
         "ma_type": ma_type, "ma5": a[-1], "ma10": b[-1], "ma20": c[-1],
         "ma90": d[-1], "ma20_slope_2bars": (c[-1] - c[-3]) / c[-3],
-        "cross_5_10": cross, "structure": phase, "structure_trigger": trigger,
+        "cross_5_10": cross,
+        "ma5_vs20_recent": recent_cross(a, c, "MA5"),
+        "ma10_vs20_recent": recent_cross(b, c, "MA10"),
+        "structure": phase, "structure_trigger": trigger,
         "ma90_position": "價格高於MA90" if closes[-1] > d[-1] else "價格低於MA90",
     }
 
@@ -143,12 +156,13 @@ def combined_analysis(closes: Sequence[float], highs: Sequence[float],
         zero_cross = "EMA12上穿EMA26（MACD上穿零軸）"
     elif macd[-2] >= 0 > macd[-1]:
         zero_cross = "EMA12下穿EMA26（MACD下穿零軸）"
+    ma = ma_structure(closes, ma_type)
     return {
-        "ma": ma_structure(closes, ma_type),
+        "ma": ma,
         "ema12_26_cross": zero_cross,
         "divergences": detect_divergences(highs, lows, macd, timestamps),
         "confluence": (
-            "均線空方結構+MACD零軸下方" if ma_structure(closes, ma_type)["structure"] == "空方完整排列" and macd[-1] < 0
+            "均線空方結構+MACD零軸下方" if ma["structure"] == "空方完整排列" and macd[-1] < 0
             else "均線多方結構+MACD零軸上方" if ma_structure(closes, ma_type)["structure"] == "多方完整排列" and macd[-1] > 0
             else "條件未共振"
         )
