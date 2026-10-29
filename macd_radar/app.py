@@ -158,7 +158,11 @@ class Handler(BaseHTTPRequestHandler):
             self.send_json({"error": str(exc)[:180], "items": [], "timeframe": tf}, status=502)
 
 
-if __name__ == "__main__":
+def main() -> None:
     port = int(os.getenv("PORT", "8000"))
-    print(f"MACD read-only radar: http://localhost:{port}")
+    print(f"MA × MACD read-only radar: http://localhost:{port}", flush=True)
     ThreadingHTTPServer(("0.0.0.0", port), Handler).serve_forever()
+
+
+if __name__ == "__main__":
+    main()
