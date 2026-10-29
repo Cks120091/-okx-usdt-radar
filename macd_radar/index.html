@@ -53,6 +53,7 @@ function card(s){
  '<div class="prices"><div><small>目前成交價</small><strong>'+fmt(s.last)+'</strong></div><div><small>最近已收盤 K 收盤價</small><strong>'+fmt(s.confirmed_close)+'</strong></div></div>'+
  '<div class="values"><div><small>MACD</small><b>'+fmt(s.macd)+'</b></div><div><small>Signal</small><b>'+fmt(s.signal)+'</b></div><div><small>Histogram</small><b>'+fmt(s.histogram)+'</b></div></div>'+
  '<div class="values ma-values"><div><small>MA5</small><b>'+fmt(s.ma.ma5)+'</b></div><div><small>MA10</small><b>'+fmt(s.ma.ma10)+'</b></div><div><small>MA20</small><b>'+fmt(s.ma.ma20)+'</b></div><div><small>MA90</small><b>'+fmt(s.ma.ma90)+'</b></div></div>'+
+ signalRow('MA5/20：'+s.ma.ma5_vs20_recent+' · MA10/20：'+s.ma.ma10_vs20_recent,'')+
  signalRow('均線：'+s.ma.structure+' · '+s.ma.cross_5_10, s.ma.structure.includes('空方')?'negative':s.ma.structure.includes('多方')?'positive':'caution')+
  signalRow('結構事件：'+s.ma.structure_trigger+' · '+s.ma.ma90_position, s.ma.structure_trigger==='無新結構確認'?'':'caution')+
  signalRow('MACD：'+s.event+' · '+s.ema12_26_cross,s.event==='死叉'?'negative':s.event==='金叉'?'positive':'')+
