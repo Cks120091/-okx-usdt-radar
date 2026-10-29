@@ -36,7 +36,7 @@ select,input{background:#101b2b;border:1px solid var(--edge);border-radius:12px;
 </head>
 <body>
 <main>
-<header class="top"><div><div class="eyebrow">NEW GENERATION / OKX PERPETUAL</div><h1>MA × MACD 雷達 <span style="color:var(--aqua)">·</span></h1><p class="sub">均線結構 · MACD 交叉 · 樞紐背離</p></div><div class="readonly">● 僅分析｜不下單</div></header>
+<header class="top"><div><div class="eyebrow">NEW GENERATION / OKX PERPETUAL</div><h1>MA × MACD 雷達 <span style="color:var(--aqua)">·</span></h1><p class="sub">僅加密貨幣永續 · 均線結構 · MACD 交叉</p></div><div class="readonly">● 僅分析｜不下單</div></header>
 <div class="control">
  <div class="tabs" aria-label="時間週期"><button data-tf="15m" class="active">15m</button><button data-tf="1H">1H</button><button data-tf="4H">4H</button><button data-tf="1D">1D</button></div>
  <select id="limit" aria-label="掃描數量"><option value="20">達標前 20 個合約</option><option value="40">達標前 40 個合約</option></select>
@@ -46,13 +46,13 @@ select,input{background:#101b2b;border:1px solid var(--edge);border-radius:12px;
 <div class="mode-tabs" aria-label="訊號分類">
 <button id="dualMode" class="active" aria-pressed="true">✅ 正式雙確認</button>
 <button id="watchMode" aria-pressed="false">◉ 觀察池（未雙確認）</button></div>
-<div class="status" id="status">只掃描估算 24h 成交額 ≥ 150 萬 USDT 的永續合約，準備查詢已收盤 K 線…</div>
+<div class="status" id="status">只掃描加密貨幣永續 · 24h估算成交額 ≥ 150 萬 USDT，準備掃描…</div>
 <section class="metrics"><div class="metric"><span>最新雙確認</span><b id="dualCount" style="color:var(--aqua)">—</b></div><div class="metric"><span>MACD金叉（僅觀察）</span><b id="gold" style="color:var(--aqua)">—</b></div><div class="metric"><span>MACD死叉（僅觀察）</span><b id="death" style="color:var(--rose)">—</b></div><div class="metric"><span>交叉預備</span><b id="watch" style="color:var(--gold)">—</b></div><div class="metric"><span>均線多方完整</span><b id="maBull" style="color:var(--aqua)">—</b></div><div class="metric"><span>均線空方完整</span><b id="maBear" style="color:var(--rose)">—</b></div><div class="metric"><span>背離候選</span><b id="divCount" style="color:var(--gold)">—</b></div><div class="metric"><span>已分析合約</span><b id="total">—</b></div></section>
 <div id="cards" class="list"></div>
 <details class="diagnostics" id="infoDetails">
  <summary>ⓘ 規則說明與掃描診斷 <span class="diag-count" id="diagIndicator" hidden></span></summary>
  <div id="errors" class="error"></div>
- <div class="info">只掃描估算 24h 成交額 <strong>≥ 1,500,000 USDT</strong> 的 OKX USDT 永續；成交額由 24h 標的幣成交量 × 最新價估算，與逐筆成交額會有差異。先過濾達標合約，再取前20／40個掃描。正式雙確認規則：MA5/10、MA5/20、MA10/20都完成同向穿越，形成同向完整排列且MA20斜率同向，MACD(12,26,9)主線同向穿越Signal訊號線，兩者<strong>不分先後、不限同一根K線</strong>，都必須實際交叉且目前維持同向；第二個條件剛確認時才算新訊號，不會每分鐘重複宣告。未雙確認的一律是觀察，不是正式訊號。參數：MACD 12／26／9 · Close · EMA／EMA；4MA 5／10／20／90（暫以 SMA 計算，原 TradingView 自訂指標平均線類型尚待核對）。<b>只有交易所確認已收盤的 K 線才觸發正式交叉</b>。金叉預備／死叉預備與背離候選屬觀察，不是下單訊號。均線完整排列要求 MA5／MA10 同處 MA20 一側且 MA20 連續兩根已收盤 K 線朝同方向；EMA12 與 EMA26 的零軸交叉不同於 MACD 與 Signal 的金叉／死叉。背離由已確認的價格轉折點與對應 MACD 值偵測，大小分類為暫定研究標準，無法保證反轉。現價與訊號 K 收盤價分開顯示，避免把歷史觸發價當作現在進場價。本頁開啟時每 60 秒自動重新查詢，尚未部署 24 小時背景監控。交易有風險，MACD 動能與排序並非勝率。</div>
+ <div class="info">掃描範圍只接受 OKX 官方合約資料 <strong>instCategory=1（Crypto）</strong> 的加密貨幣 USDT 永續，排除股票、股指、其他傳統金融資產與分類不明的合約。分類資料無法取得時停止掃描，不將所有 USDT 永續誤當加密幣。只掃描估算 24h 成交額 <strong>≥ 1,500,000 USDT</strong> 的 OKX USDT 永續；成交額由 24h 標的幣成交量 × 最新價估算，與逐筆成交額會有差異。先過濾達標合約，再取前20／40個掃描。正式雙確認規則：MA5/10、MA5/20、MA10/20都完成同向穿越，形成同向完整排列且MA20斜率同向，MACD(12,26,9)主線同向穿越Signal訊號線，兩者<strong>不分先後、不限同一根K線</strong>，都必須實際交叉且目前維持同向；第二個條件剛確認時才算新訊號，不會每分鐘重複宣告。未雙確認的一律是觀察，不是正式訊號。參數：MACD 12／26／9 · Close · EMA／EMA；4MA 5／10／20／90（暫以 SMA 計算，原 TradingView 自訂指標平均線類型尚待核對）。<b>只有交易所確認已收盤的 K 線才觸發正式交叉</b>。金叉預備／死叉預備與背離候選屬觀察，不是下單訊號。均線完整排列要求 MA5／MA10 同處 MA20 一側且 MA20 連續兩根已收盤 K 線朝同方向；EMA12 與 EMA26 的零軸交叉不同於 MACD 與 Signal 的金叉／死叉。背離由已確認的價格轉折點與對應 MACD 值偵測，大小分類為暫定研究標準，無法保證反轉。現價與訊號 K 收盤價分開顯示，避免把歷史觸發價當作現在進場價。本頁開啟時每 60 秒自動重新查詢，尚未部署 24 小時背景監控。交易有風險，MACD 動能與排序並非勝率。</div>
 </details>
 </main>
 <script>
@@ -105,7 +105,7 @@ async function scan(){
   if(!response.ok)throw Error(data.error||"API 無法取得資料");
   if(data.timeframe!==activeTf)return;
   snapshot=data.items||[];draw();
-  el("status").textContent="更新 "+time(Date.parse(data.scanned_at))+" · 已分析 "+data.count+"/"+data.requested+" 個達標合約";
+  el("status").textContent="更新 "+time(Date.parse(data.scanned_at))+" · 僅加密貨幣 · 已分析 "+data.count+"/"+data.requested+" 個達標合約";
   var issues=data.errors||[];
   el("errors").textContent=issues.length?"以下合約無法完成掃描："+issues.join("；"):"";
   el("diagIndicator").hidden=!issues.length;
