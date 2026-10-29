@@ -39,7 +39,7 @@ select,input{background:#101b2b;border:1px solid var(--edge);border-radius:12px;
 <div class="status" id="status">只掃描估算 24h 成交額 ≥ 150 萬 USDT 的永續合約，準備查詢已收盤 K 線…</div>
 <section class="metrics"><div class="metric"><span>最新雙確認</span><b id="dualCount" style="color:var(--aqua)">—</b></div><div class="metric"><span>MACD金叉（僅觀察）</span><b id="gold" style="color:var(--aqua)">—</b></div><div class="metric"><span>MACD死叉（僅觀察）</span><b id="death" style="color:var(--rose)">—</b></div><div class="metric"><span>交叉預備</span><b id="watch" style="color:var(--gold)">—</b></div><div class="metric"><span>均線多方完整</span><b id="maBull" style="color:var(--aqua)">—</b></div><div class="metric"><span>均線空方完整</span><b id="maBear" style="color:var(--rose)">—</b></div><div class="metric"><span>背離候選</span><b id="divCount" style="color:var(--gold)">—</b></div><div class="metric"><span>已分析合約</span><b id="total">—</b></div></section>
 <div id="cards" class="list"></div><div id="errors" class="error"></div>
-<div class="info">只掃描估算 24h 成交額 <strong>≥ 1,500,000 USDT</strong> 的 OKX USDT 永續；成交額由 24h 標的幣成交量 × 最新價估算，與逐筆成交額會有差異。先過濾達標合約，再取前20／40個掃描。正式雙確認規則：MA5/10/20形成同向完整排列且MA20斜率同向，MACD(12,26,9)主線同向穿越Signal訊號線，兩者在<strong>最近5根已收盤K線</strong>內先後完成，且目前仍同向；第二個條件剛確認時才算新訊號，不會每分鐘重複宣告。未雙確認的一律是觀察，不是正式訊號。參數：MACD 12／26／9 · Close · EMA／EMA；4MA 5／10／20／90（暫以 SMA 計算，原 TradingView 自訂指標平均線類型尚待核對）。<b>只有交易所確認已收盤的 K 線才觸發正式交叉</b>。金叉預備／死叉預備與背離候選屬觀察，不是下單訊號。均線完整排列要求 MA5／MA10 同處 MA20 一側且 MA20 連續兩根已收盤 K 線朝同方向；EMA12 與 EMA26 的零軸交叉不同於 MACD 與 Signal 的金叉／死叉。背離由已確認的價格轉折點與對應 MACD 值偵測，大小分類為暫定研究標準，無法保證反轉。現價與訊號 K 收盤價分開顯示，避免把歷史觸發價當作現在進場價。本頁開啟時每 60 秒自動重新查詢，尚未部署 24 小時背景監控。交易有風險，MACD 動能與排序並非勝率。</div>
+<div class="info">只掃描估算 24h 成交額 <strong>≥ 1,500,000 USDT</strong> 的 OKX USDT 永續；成交額由 24h 標的幣成交量 × 最新價估算，與逐筆成交額會有差異。先過濾達標合約，再取前20／40個掃描。正式雙確認規則：MA5/10、MA5/20、MA10/20都完成同向穿越，形成同向完整排列且MA20斜率同向，MACD(12,26,9)主線同向穿越Signal訊號線，兩者<strong>不分先後、不限同一根K線</strong>，都必須實際交叉且目前維持同向；第二個條件剛確認時才算新訊號，不會每分鐘重複宣告。未雙確認的一律是觀察，不是正式訊號。參數：MACD 12／26／9 · Close · EMA／EMA；4MA 5／10／20／90（暫以 SMA 計算，原 TradingView 自訂指標平均線類型尚待核對）。<b>只有交易所確認已收盤的 K 線才觸發正式交叉</b>。金叉預備／死叉預備與背離候選屬觀察，不是下單訊號。均線完整排列要求 MA5／MA10 同處 MA20 一側且 MA20 連續兩根已收盤 K 線朝同方向；EMA12 與 EMA26 的零軸交叉不同於 MACD 與 Signal 的金叉／死叉。背離由已確認的價格轉折點與對應 MACD 值偵測，大小分類為暫定研究標準，無法保證反轉。現價與訊號 K 收盤價分開顯示，避免把歷史觸發價當作現在進場價。本頁開啟時每 60 秒自動重新查詢，尚未部署 24 小時背景監控。交易有風險，MACD 動能與排序並非勝率。</div>
 </main>
 <script>
 "use strict";
@@ -48,7 +48,7 @@ var el=id=>document.getElementById(id);
 function escapeHtml(x){return String(x).replace(/[&<>"']/g,function(c){return {"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;"}[c]})}
 function fmt(x){x=Number(x);if(!Number.isFinite(x))return "—";if(x===0)return "0";if(Math.abs(x)<0.00001)return x.toExponential(3);if(Math.abs(x)<1)return x.toFixed(6).replace(/0+$/,"").replace(/\.$/,"");return x.toLocaleString("en-US",{maximumFractionDigits:x<100?4:2})}
 function time(ms){return new Date(ms).toLocaleString("zh-TW",{timeZone:"Asia/Taipei",month:"2-digit",day:"2-digit",hour:"2-digit",minute:"2-digit",hour12:false})}
-function state(s){if(s.dual&&s.dual.is_new)return [s.dual.trigger,s.dual.direction==="多"?"long":"short"];if(s.dual&&s.dual.confirmed)return ["雙確認已過期｜觀察","watch"];if(s.phase!=="方向維持")return ["觀察："+s.phase,"watch"];return ["觀察："+s.side+"維持","watch"]}
+function state(s){if(s.dual&&s.dual.is_new)return [s.dual.trigger,s.dual.direction==="多"?"long":"short"];if(s.dual&&s.dual.confirmed)return ["雙確認維持｜非最新訊號","watch"];if(s.phase!=="方向維持")return ["觀察："+s.phase,"watch"];return ["觀察："+s.side+"維持","watch"]}
 function signalRow(txt,style){return '<div class="signal-line '+style+'">'+escapeHtml(txt)+'</div>'}
 function card(s){
  var v=state(s),x=document.createElement("article");x.className="card";
@@ -62,6 +62,7 @@ function card(s){
  signalRow('結構事件：'+s.ma.structure_trigger+' · '+s.ma.ma90_position, s.ma.structure_trigger==='無新結構確認'?'':'caution')+
  signalRow('MACD：'+s.event+' · '+s.ema12_26_cross,s.event==='死叉'?'negative':s.event==='金叉'?'positive':'')+
  signalRow('雙確認：'+(s.dual?s.dual.state:'資料不足')+' · '+(s.dual?s.dual.reasons.join('；'):'尚無資料'),s.dual&&s.dual.is_new?s.dual.direction==='多'?'positive':'negative':'caution')+
+ (s.dual&&s.dual.confirmed?signalRow('MA確認距今 '+s.dual.ma_confirm_bars_ago+' 根 · MACD確認距今 '+s.dual.macd_confirm_bars_ago+' 根 · 相隔 '+s.dual.event_age_bars+' 根',''):'')+
  signalRow('共振（背景）：'+s.confluence,s.confluence.includes('空方')?'negative':s.confluence.includes('多方')?'positive':'')+
  (s.divergences||[]).map(function(d){return signalRow(d.level+' · '+d.pattern+' · 波峰/谷間隔 '+d.pivot_gap_bars+' 根 · 已確認 '+d.confirmed_bars_ago+' 根', 'caution')}).join('')+
  '<div class="foot">訊號 K 完結時間（台灣）：'+escapeHtml(time(s.confirmed_bar_end_ms))+'</div>';return x
