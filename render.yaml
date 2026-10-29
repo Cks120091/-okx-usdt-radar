@@ -10,4 +10,4 @@ services:
     autoDeployTrigger: commit
     envVars:
       - key: RADAR_RELEASE
-        value: radar-safety-ui-refine-20260908
+        value: ma-macd-rebuild-20261029
