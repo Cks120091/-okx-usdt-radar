@@ -44,3 +44,32 @@ Data source: OKX public, unauthenticated `/api/v5/market/tickers?instType=SWAP` 
 2. Confirm active OKX REST connectivity and data freshness from intended hosting region.
 3. Compare several candles and crossover timings against TradingView.
 4. Test browser UI on iPhone; only then consider separate staging deployment.
+
+## New MA × MACD research rules (2026-10-29 user chart feedback)
+
+**This changes only the isolated feature branch. No production deployment.**
+
+### MA (5/10/20/90)
+- The supplied image only reveals the four lengths, not whether the custom `4MA` script uses SMA or EMA. **SMA is a clearly provisional research default until chart parity is verified**. The implementation supports `ma_type="EMA"` as an alternative.
+- MA5 crossing MA10 (fresh up/down) is recorded separately.
+- Actual MA5 and MA10 crossings of MA20 are tracked up to 12 previously closed candles. Neither crossing needs to occur on the same bar.
+- Full bearish structure = MA5 < MA10 < MA20 and MA20 strictly descending across three closed readings. Full bullish = inverse. Full structure first appearance is distinct from a persistent structure.
+- MA90 is context-only: current last close above/below MA90; NOT an entry condition.
+
+### Two different "12/26 crosses"
+- `EMA12 - EMA26` crossing zero is the **EMA12 vs EMA26 crossover**.
+- `MACD(12,26)` crossing `signal EMA9` is the **MACD signal crossover**. These two are not interchangeable.
+- Crosses are based on confirmed closed candles. Intrabar changes cannot create formal alerts.
+
+### Divergence / high-low pivot comparison
+- Compare PRICE high/low swing pivots with the MACD-line values at the **same** confirmed bars.
+- Regular bearish divergence: price higher high, MACD lower high; regular bullish: price lower low, MACD higher low.
+- A pivot is accepted only after two closed candles on its right; no access to future unknown data.
+- Candidate is shown only when the second pivot is no older than 12 bars, and pivot separation 3–40 bars. Price change >= 0.3% and MACD difference >= 8% of max absolute MACD pivot magnitude are provisional noise filters.
+- Provisional **major** candidate: pivot separation >=12 bars AND price move >=1.2%. Otherwise **minor** candidate; these are mechanical scopes, **not** subjective or validated strength/win probabilities.
+- Does not yet identify hidden divergences, nested fractal divergence across higher timeframes, or "failed divergence" outcomes; these require separate research.
+- Divergence may be a caution against an ongoing move, not a sufficient entry by itself.
+
+### Test and release status
+- Offline unit test file `macd_radar/tests/test_technical.py` added for MA order, MA slope, zero-cross distinction, regular bearish divergence and delayed pivot confirmation. **The tests have been committed but not executed in a connected test environment yet.**
+- Compare DOGE and ETH charts with matching OKX contract/timeframe and the TradingView custom 4MA source before calling visual parity.
