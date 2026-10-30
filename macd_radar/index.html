@@ -107,6 +107,10 @@ async function scan(){
   snapshot=data.items||[];draw();
   el("status").textContent="更新 "+time(Date.parse(data.scanned_at))+" · 加密貨幣＋黃金 · 已分析 "+data.count+"/"+data.requested+" 個達標合約";
   var issues=data.errors||[];
+  // Stale K data directly threatens the validity of a trade signal.
+  // Show one short, visible safety warning; leave the full detail collapsed.
+  var goldStale=issues.some(function(x){return x.startsWith("XAU-USDT-SWAP:")&&x.includes("行情資料落後")});
+  if(goldStale)el("status").textContent+=" · ⚠ 黃金K線延遲，暫停黃金訊號";
   el("errors").textContent=issues.length?"以下合約無法完成掃描："+issues.join("；"):"";
   el("diagIndicator").hidden=!issues.length;
   el("diagIndicator").textContent=issues.length?"資料異常 "+issues.length:"";

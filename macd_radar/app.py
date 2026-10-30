@@ -22,6 +22,10 @@ from .dual import dual_confirm
 
 API_BASE = "https://www.okx.com"
 TIMEFRAMES = {"15m": 900, "1H": 3600, "4H": 14400, "1D": 86400}
+# Allow 2m exchange-finalization/network delay before calling a bar stale.
+# Freshness is based on the *last confirmed K close time*, NOT the ticker
+# timestamp or the wall-clock time when the API scan was requested.
+CANDLE_FRESHNESS_GRACE_MS = 2 * 60 * 1000
 # USDT-denominated, *estimated* trailing 24h traded notional.
 # OKX's derivative SWAP volCcy24h reports base-currency quantity, not
 # actual accumulated USDT trade turnover. Converting at latest trade price
@@ -148,6 +152,33 @@ def ranked_usdt_swaps(limit: int):
     return selected
 
 
+def validate_confirmed_bar_freshness(bar_end_ms: int, timeframe: str, now_ms: int | None = None) -> dict:
+    """Refuse outdated/future K data even when OKX marks a candle confirm=1.
+
+    At any moment the latest completed candle should have ended within
+    one full bar length plus a 2-minute API-finalization grace. During market
+    pauses (e.g. some commodity contracts), old K bars are NOT signals.
+    """
+    if timeframe not in TIMEFRAMES:
+        raise ValueError("未知 K 線週期")
+    current_ms = int(time.time() * 1000) if now_ms is None else int(now_ms)
+    age_ms = current_ms - int(bar_end_ms)
+    if age_ms < -CANDLE_FRESHNESS_GRACE_MS:
+        raise ValueError("K 線時間超前伺服器時鐘：拒絕產生訊號")
+    allowed_ms = TIMEFRAMES[timeframe] * 1000 + CANDLE_FRESHNESS_GRACE_MS
+    if age_ms > allowed_ms:
+        age_min = round(age_ms / 60000, 1)
+        raise ValueError(
+            f"行情資料落後：最新已收盤 K 線是 {age_min} 分鐘前（{timeframe}）；"
+            "禁止產生正式雙確認，請核對 OKX 市場資料與合約來源"
+        )
+    return {
+        "bar_age_seconds": max(0, round(age_ms / 1000, 1)),
+        "freshness_max_seconds": round(allowed_ms / 1000, 1),
+        "fresh": True,
+    }
+
+
 def scan_one(ticker, timeframe):
     inst = ticker["instId"]
     candles = okx_get("/api/v5/market/candles", instId=inst, bar=timeframe, limit=300)
@@ -158,6 +189,8 @@ def scan_one(ticker, timeframe):
     if len(confirmed) < 100:
         raise ValueError("不足 100 根已收盤 K 線")
     times = sorted(confirmed)
+    last_bar_end = times[-1] + 1000 * TIMEFRAMES[timeframe]
+    freshness = validate_confirmed_bar_freshness(last_bar_end, timeframe)
     closes = [confirmed[t][2] for t in times]
     highs = [confirmed[t][0] for t in times]
     lows = [confirmed[t][1] for t in times]
@@ -165,7 +198,7 @@ def scan_one(ticker, timeframe):
     technical = combined_analysis(closes, highs, lows, times, ma_type="SMA")
     dual = dual_confirm(closes, ma_type="SMA")
     bar_start = times[-1]
-    bar_end = bar_start + 1000 * TIMEFRAMES[timeframe]
+    bar_end = last_bar_end
     priority = (
         0 if dual["is_new"] else
         1 if dual["confirmed"] else
@@ -178,6 +211,7 @@ def scan_one(ticker, timeframe):
         "turnover_24h_usdt_est": ticker["turnover_24h_usdt_est"],
         "confirmed_close": closes[-1],
         "confirmed_bar_start_ms": bar_start, "confirmed_bar_end_ms": bar_end,
+        "data_quality": freshness,
         "rank_priority": priority, **metrics, **technical, "dual": dual,
     }
 
